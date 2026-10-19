@@ -66,7 +66,7 @@ class Rendered:
 
 
 class RenderError(Exception):
-    """`kind` is unavailable, timeout, file, not_public (`detail` is the host) or failed."""
+    """`kind` is unavailable (`detail` is the reason), timeout, file, redirected or failed."""
 
     def __init__(self, kind: str, detail: str = ""):
         super().__init__(kind, detail)
@@ -207,31 +207,33 @@ class BrowserRuntime:
         self._cancel_idle()
         self._in_flight += 1
         try:
-            browser = await self.ensure()
+            browser, proxy = await self.ensure(), self._proxy
             async with self._slots:
-                return await self._render(browser, url)
+                return await self._render(browser, proxy, url)
         finally:
             self._in_flight -= 1
             if not self._in_flight and self._browser is not None:
                 self._idle = asyncio.get_running_loop().call_later(self._idle_s, self._start_idle_close)
 
-    async def _render(self, browser, url: str) -> Rendered:
-        api, proxy = self._api, self._proxy
-        refusals = proxy.refusals
-        context = await browser.new_context(
-            accept_downloads=False, service_workers="block", java_script_enabled=True, bypass_csp=False,
-            ignore_https_errors=False, user_agent=self._ua)
+    async def _render(self, browser, proxy: Proxy, url: str) -> Rendered:
+        api, context, navigating = self._api, None, False
         try:
+            context = await browser.new_context(
+                accept_downloads=False, service_workers="block", java_script_enabled=True, bypass_csp=False,
+                ignore_https_errors=False, user_agent=self._ua)
             await context.route("**/*", _cost_route)
             await context.add_init_script(_INIT)
             page = await context.new_page()
+            refusals, navigating = proxy.refusals, True
             response = await page.goto(url, wait_until="load", timeout=NAV_TIMEOUT_S * 1000)
+            navigating = False
             if response and "application/pdf" in response.headers.get("content-type", ""):
                 raise RenderError("file")
             await page.wait_for_timeout(500)
-            capped, text = await page.evaluate(_TEXT, FETCH_MAX_BODY_BYTES)
-            if not (isinstance(capped, bool) and isinstance(text, str)):
+            got = await page.evaluate(_TEXT, FETCH_MAX_BODY_BYTES)
+            if not (isinstance(got, list) and len(got) == 2 and isinstance(got[0], bool) and isinstance(got[1], str)):
                 raise RenderError("failed")
+            capped, text = got
             text = re.sub(r"\n\s*\n\s*\n+", "\n\n", re.sub(r"[ \t]+", " ", text[:FETCH_MAX_BODY_BYTES])).strip()
             return Rendered(page.url, response.status if response else 200, text, capped)
         except api.TimeoutError:
@@ -239,13 +241,12 @@ class BrowserRuntime:
         except api.Error as e:
             if "Download is starting" in str(e):
                 raise RenderError("file") from None
-            log.info("browser_fetch navigation failed: %s", _first_line(e)[:200])
-            if proxy.refusals > refusals:
-                raise RenderError("not_public", proxy.refused[-1].removesuffix(" not public").rpartition(":")[0]) from None
-            raise RenderError("failed") from None
+            log.info("browser_fetch render failed: %s", _first_line(e)[:200])
+            raise RenderError("redirected" if navigating and proxy.refusals > refusals else "failed") from None
         finally:
-            with contextlib.suppress(Exception):
-                await context.close()
+            if context is not None:
+                with contextlib.suppress(Exception):
+                    await context.close()
 
     def _cancel_idle(self) -> None:
         if self._idle is not None:
@@ -286,6 +287,7 @@ _NOT_PUBLIC = ("browser_fetch: {host} is not a public address; browser_fetch rea
 _NO_RETRY = "Do not retry this URL; use the search snippet or another source."
 _HTTP_FAILED = f"browser_fetch failed: HTTP {{status}}. {_NO_RETRY}"
 _FAILED = f"browser_fetch failed: the page could not be loaded. {_NO_RETRY}"
+_REDIRECTED = f"browser_fetch: that page redirected to a non-public address; browser_fetch reaches public sites only. {_NO_RETRY}"
 _TIMED_OUT = f"browser_fetch: the page did not finish loading in {NAV_TIMEOUT_S} s. Do not retry; use the search snippet."
 _FILE = "browser_fetch: that URL is a file, not a page. Use the search snippet, or find an HTML version."
 _EMPTY = ("[rendered text is under 80 characters — the page is empty or blocking the browser; do NOT retry. "
@@ -328,7 +330,7 @@ class BrowserFetchTool(Tool):
             page = await self._runtime.render(url)
         except RenderError as e:
             return self.err({"timeout": _TIMED_OUT, "file": _FILE, "unavailable": _NOT_AVAILABLE.format(reason=e.detail),
-                             "not_public": _NOT_PUBLIC.format(host=e.detail)}.get(e.kind) or _FAILED)
+                             "redirected": _REDIRECTED}.get(e.kind) or _FAILED)
         if page.status >= 400:
             return self.err(_HTTP_FAILED.format(status=page.status))
         if len(page.text.strip()) < 80:

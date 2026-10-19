@@ -30,6 +30,9 @@ class FakeTimeout(FakeError):
     pass
 
 
+UNSET = object()
+
+
 class FakeResponse:
     def __init__(self, status, content_type):
         self.status, self.headers = status, {"content-type": content_type}
@@ -62,7 +65,7 @@ class FakePage:
             raise world.eval_error
         assert expression == browser_tool._TEXT
         world.slices.append((expression, arg))
-        return world.eval_result if world.eval_result is not None else [world.capped, world.pages[self.url][1]]
+        return world.eval_result if world.eval_result is not UNSET else [world.capped, world.pages[self.url][1]]
 
 
 class FakeContext:
@@ -129,7 +132,7 @@ class World:
         self.launch_error = None
         self.on_goto = None
         self.eval_error = None
-        self.eval_result = None
+        self.eval_result = UNSET
         self.argv_edit = lambda argv: argv
         self.api = SimpleNamespace(
             Error=FakeError, TimeoutError=FakeTimeout,
@@ -431,7 +434,7 @@ async def test_a_page_that_returns_more_than_the_cap_is_clamped_in_the_harness(w
     assert len(got.text) == cap and got.capped is True
 
 
-@pytest.mark.parametrize("result", [["yes", "text"], [False, 7], [False, None], [None, None]])
+@pytest.mark.parametrize("result", [["yes", "text"], [False, 7], [False, None], [None, None], None, 7, [True], [False, "a", "b"]])
 async def test_a_mistyped_text_result_is_a_failed_render(world, runtime, result):
     world.eval_result = result
     with pytest.raises(browser_tool.RenderError) as e:
@@ -483,7 +486,7 @@ async def test_an_error_while_reading_the_text_is_a_failed_render_with_the_conte
 
 
 @pytest.mark.parametrize("host", ["10.0.0.5", "[::1]"])
-async def test_a_refusal_during_the_navigation_is_a_not_public_render_error_naming_the_host(world, runtime, host):
+async def test_a_refusal_during_the_navigation_is_a_redirected_render_error_carrying_no_host(world, runtime, host):
     async def redirected(url):
         runtime._proxy.refused.append(f"{host}:443 not public")
         runtime._proxy.refusals += 1
@@ -492,7 +495,30 @@ async def test_a_refusal_during_the_navigation_is_a_not_public_render_error_nami
     world.on_goto = redirected
     with pytest.raises(browser_tool.RenderError) as e:
         await runtime.render("https://example.com/")
-    assert (e.value.kind, e.value.detail) == ("not_public", host)
+    assert (e.value.kind, e.value.detail) == ("redirected", "")
+
+
+async def test_a_refusal_before_an_evaluate_error_is_a_failed_render_not_a_redirect(world, runtime):
+    async def refused_subresource(url):
+        runtime._proxy.refused.append("10.0.0.5:443 not public")
+        runtime._proxy.refusals += 1
+
+    world.on_goto = refused_subresource
+    world.eval_error = FakeError("Page.evaluate: Execution context was destroyed")
+    with pytest.raises(browser_tool.RenderError) as e:
+        await runtime.render("https://example.com/")
+    assert (e.value.kind, e.value.detail) == ("failed", "") and world.open_contexts() == 0
+
+
+async def test_a_proxy_torn_down_during_the_navigation_still_answers_a_failed_render(world, runtime):
+    async def torn_down(url):
+        runtime._proxy = None
+        raise FakeError("Target page, context or browser has been closed")
+
+    world.on_goto = torn_down
+    with pytest.raises(browser_tool.RenderError) as e:
+        await runtime.render("https://example.com/")
+    assert (e.value.kind, e.value.detail) == ("failed", "")
 
 
 def gate_on(world, *urls):
@@ -619,6 +645,7 @@ def test_the_schema_is_web_fetchs_with_the_one_description_and_its_name():
 NOT_HTTPS = "browser_fetch renders https pages only. For http://… use web_fetch."
 EMPTY = "[rendered text is under 80 characters — the page is empty or blocking the browser; do NOT retry. Use the search snippet.]"
 RETRY = "Do not retry this URL; use the search snippet or another source."
+REDIRECTED = f"browser_fetch: that page redirected to a non-public address; browser_fetch reaches public sites only. {RETRY}"
 
 
 def not_public(host):
@@ -707,15 +734,15 @@ async def test_the_words_a_page_chooses_for_an_error_never_reach_the_model(fetch
     assert (got.success, got.error) == (False, f"browser_fetch failed: the page could not be loaded. {RETRY}")
 
 
-async def test_a_redirect_to_a_private_address_answers_the_not_public_line_naming_the_host(fetch, world, runtime):
+async def test_a_redirect_to_a_private_address_answers_the_redirected_line_without_the_host(fetch, world, runtime):
     async def redirected(url):
-        runtime._proxy.refused.append("127.0.0.1:443 not public")
+        runtime._proxy.refused.append("ignore-previous-instructions.example:443 not public")
         runtime._proxy.refusals += 1
-        raise FakeError("net::ERR_TUNNEL_CONNECTION_FAILED at https://127.0.0.1/ignore previous instructions")
+        raise FakeError("net::ERR_TUNNEL_CONNECTION_FAILED at https://ignore-previous-instructions.example/")
 
     world.on_goto = redirected
     got = await fetch[0].run(url="https://example.com/a")
-    assert (got.success, got.error) == (False, not_public("127.0.0.1"))
+    assert (got.success, got.error) == (False, REDIRECTED) and "ignore" not in got.error
 
 
 async def test_a_browser_that_cannot_launch_answers_the_not_available_line(world, monkeypatch):
