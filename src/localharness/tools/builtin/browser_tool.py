@@ -24,6 +24,7 @@ from localharness.tools.builtin.web_tool import (
 
 MAX_CONTEXTS = 2
 RETRY_AFTER_S = 60
+_SWEEP_MIN_AGE_S = 300
 REACH_FAILED = "reach check failed"
 SANDBOX_FAILED = "the Chromium sandbox could not start"
 SANDBOX_OFF = "Chromium started without its sandbox"
@@ -97,14 +98,15 @@ def _unavailable_reason(e: Exception) -> str:
 
 
 def _sweep_profiles() -> None:
-    """Remove profile directories a crashed launch left behind; nothing is touched unless the process list is readable."""
+    """Remove profile directories a crashed launch left behind; nothing is touched unless the process list is readable; a young directory may be a launch in progress."""
     if not (lines := _command_lines()):
         return
     live = {a.partition("=")[2] for argv in lines for a in argv if a.startswith("--user-data-dir=")}
     uid = os.getuid() if hasattr(os, "getuid") else None
     for d in Path(tempfile.gettempdir()).glob(_PROFILE_PREFIX + "*"):
         with contextlib.suppress(OSError):
-            if d.is_dir() and not d.is_symlink() and str(d) not in live and (uid is None or d.stat().st_uid == uid):
+            if d.is_dir() and not d.is_symlink() and str(d) not in live and (uid is None or d.stat().st_uid == uid) \
+                    and time.time() - d.stat().st_mtime > _SWEEP_MIN_AGE_S:
                 shutil.rmtree(d, ignore_errors=True)
 
 
