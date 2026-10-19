@@ -176,7 +176,8 @@ async def test_the_right_user_with_a_wrong_password_gets_407(proxy, connect):
 
 
 @pytest.mark.parametrize("target", [
-    "example.com", "user@example.com:443", "example.com:0", "example.com:70000", "exa mple.com:443"])
+    "example.com", "user@example.com:443", "example.com:0", "example.com:70000", "exa mple.com:443",
+    "a" * 254 + ":443", "[" + "a" * 46 + "]:443"])
 async def test_an_authority_that_is_not_host_and_port_gets_400_and_close(target, proxy, connect):
     reader, _ = await connect(f"CONNECT {target} HTTP/1.1\r\n{auth(proxy)}\r\n")
     assert (await head(reader)).startswith("HTTP/1.1 400")
