@@ -242,6 +242,41 @@ async def test_the_allowlist_admits_a_host_by_name(monkeypatch):
     assert [u.host for u in hop.pinned] == ["10.0.0.5"]
 
 
+async def test_allow_private_false_refuses_an_allowlisted_address(monkeypatch):
+    netguard.set_private_allowlist(["10.0.0.0/8"])
+    assert (await netguard.check("https://10.1.2.3/")).url.host == "10.1.2.3"
+    with pytest.raises(netguard.Refused, match="not a public address"):
+        await netguard.check("https://10.1.2.3/", allow_private=False)
+
+
+async def test_allow_private_false_refuses_an_allowlisted_name(monkeypatch):
+    _dns(monkeypatch, {"wiki.lan": ["192.168.1.5"]})
+    netguard.set_private_allowlist(["wiki.lan"])
+    assert [u.host for u in (await netguard.check("https://wiki.lan/")).pinned] == ["192.168.1.5"]
+    with pytest.raises(netguard.Refused, match="not a public address"):
+        await netguard.check("https://wiki.lan/", allow_private=False)
+
+
+async def test_never_addresses_are_refused_with_either_setting():
+    netguard.set_private_allowlist(["224.0.0.0/4", "0.0.0.0/8"])
+    for raw in ("http://224.0.0.1/", "http://0.0.0.1/"):
+        for kwargs in ({}, {"allow_private": False}):
+            with pytest.raises(netguard.Refused, match="multicast, unspecified or reserved"):
+                await netguard.check(raw, **kwargs)
+
+
+async def test_allow_private_is_keyword_only():
+    with pytest.raises(TypeError):
+        await netguard.check("https://x.test/", False)
+
+
+async def test_web_fetch_still_reaches_an_allowlisted_private_address(monkeypatch):
+    netguard.set_private_allowlist(["10.0.0.0/8"])
+    _serve(monkeypatch, lambda request: httpx.Response(200, headers={"content-type": "text/plain"}, text="hello"))
+    result = await _fetch("http://10.1.2.3/")
+    assert result.success and "hello" in result.output
+
+
 async def test_an_allowlisted_network_admits_only_itself(monkeypatch):
     _dns(monkeypatch, {"intranet.example": ["10.0.0.5"]})
     netguard.set_private_allowlist(["192.168.0.0/16", "other.example"])
