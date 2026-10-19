@@ -10,6 +10,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from functools import partial
 
+import httpx
+
 from localharness.tools.builtin import netguard
 
 NAV_TIMEOUT_S = 30
@@ -17,6 +19,7 @@ TUNNEL_MAX_BYTES = 32_000_000
 TUNNEL_MAX_S = NAV_TIMEOUT_S + 20
 _CHUNK = 65536
 _AUTHORITY = re.compile(r"(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+):([0-9]{1,5})")
+_STREAM_ERRORS = (asyncio.TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, OSError)
 _open_connection = asyncio.open_connection  # the tests' transport seam
 
 
@@ -26,6 +29,7 @@ class Proxy:
     username: str
     password: str = field(repr=False)
     refused: deque[str] = field(default_factory=lambda: deque(maxlen=64))
+    upstream: str | None = field(default=None, repr=False)
     _server: asyncio.Server | None = field(default=None, repr=False)
     _writers: set[asyncio.StreamWriter] = field(default_factory=set, repr=False)
 
@@ -37,7 +41,7 @@ class Proxy:
 
 
 async def serve(upstream: str | None) -> Proxy:
-    proxy = Proxy(0, secrets.token_urlsafe(16), secrets.token_urlsafe(16))
+    proxy = Proxy(0, secrets.token_urlsafe(16), secrets.token_urlsafe(16), upstream=upstream)
     proxy._server = await asyncio.start_server(partial(_handle, proxy), "127.0.0.1", 0)
     proxy.port = proxy._server.sockets[0].getsockname()[1]
     return proxy
@@ -68,6 +72,23 @@ async def _dial(hops, port: int):
         except OSError:
             continue
     return None
+
+
+async def _via(upstream: str, authority: str):
+    """A tunnel to `authority` through another proxy, or None when it does not answer 200."""
+    url = httpx.URL(upstream)
+    tls = url.scheme == "https"
+    reader, writer = await asyncio.wait_for(
+        _open_connection(url.host, url.port or (443 if tls else 80), **({"ssl": True} if tls else {})), NAV_TIMEOUT_S)
+    lines = [f"CONNECT {authority} HTTP/1.1", f"Host: {authority}"]
+    if url.userinfo:
+        lines.append("Proxy-Authorization: Basic " + base64.b64encode(f"{url.username}:{url.password}".encode()).decode())
+    writer.write(("\r\n".join(lines) + "\r\n\r\n").encode())
+    answer = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), NAV_TIMEOUT_S)
+    if answer.split(b" ", 2)[1:2] != [b"200"]:
+        writer.close()
+        return None
+    return reader, writer
 
 
 async def _pump(src: asyncio.StreamReader, dst: asyncio.StreamWriter, limit: int) -> None:
@@ -118,10 +139,14 @@ async def _one(proxy: Proxy, reader: asyncio.StreamReader, writer: asyncio.Strea
     except netguard.Refused:
         proxy.refused.append(f"{authority} not public")
         return await _reply(writer, "403 Forbidden", keep=True)
-    upstream = await _dial(hop.pinned, port)
-    if upstream is None:
+    chain = proxy.upstream or hop.proxy
+    try:
+        tunnel = await (_via(chain, authority) if chain else _dial(hop.pinned, port))
+    except _STREAM_ERRORS:
+        tunnel = None
+    if tunnel is None:
         return await _reply(writer, "502 Bad Gateway")
-    up_reader, up_writer = upstream
+    up_reader, up_writer = tunnel
     proxy._writers.add(up_writer)
     try:
         writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -138,7 +163,7 @@ async def _handle(proxy: Proxy, reader: asyncio.StreamReader, writer: asyncio.St
     try:
         while await _one(proxy, reader, writer):
             pass
-    except (asyncio.TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, OSError):
+    except _STREAM_ERRORS:
         pass
     finally:
         proxy._writers.discard(writer)

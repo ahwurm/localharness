@@ -179,7 +179,8 @@ def test_every_start_server_call_in_src_passes_runtime():
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
-            named = (isinstance(func, ast.Attribute) and func.attr == "start_server") or (
+            named = (isinstance(func, ast.Attribute) and func.attr == "start_server"
+                     and not (isinstance(func.value, ast.Name) and func.value.id == "asyncio")) or (
                 isinstance(func, ast.Name) and func.id == "start_server")
             if named:
                 calls.append((f"{path.relative_to(src)}:{node.lineno}", node.lineno,
