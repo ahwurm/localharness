@@ -606,8 +606,8 @@ extra_endpoints:
 | Environment | `child_environment` over the allowlisted base; the key as `STRATA_API_KEY` when keyed; `STRATA_SKIP_SHA256`, `STRATA_PREBUILT_URL`, `STRATA_SOURCE`, `STRATA_EXECV` and `HF_ENDPOINT` join the blocklist |
 | Identity | `LaunchIdentity(exe_names={"python*"}, port=<port>, argv_contains=("<engine_dir>/serve/server.py", "--engine", "strata", "--config", "<copy>"))`; the copy path is per port; the engine child (`engine/strata --serve`) is never an identity |
 | Readiness | `wait_ready` treats a refused connection as loading (the socket opens only after the engine's `READY`, `server.py:843, 6918`) and polls `GET /health` until 200 with `"loaded": true` and `"service": "strata"` (`server.py:5337–5341`); liveness is the verified parent; the bound is Strata's own 900 s (`STRATA_ENGINE_READY_S`, `server.py:268`) plus a minute; a parent that exits is a failure with the log tail |
-| Served window | the row's `probe`: `/v1/models` `data[0].meta.n_ctx` with the key (`server.py:5369–5386`), else `/health` `max_context`; trained from the GGUF header through `resolve_gguf_path` |
-| Retry | one, on a load death: the copy's `--max-context` halved, never below the floor; remembered through `confirm_launch` as for llama.cpp (spec 20 §6.4), with `context` the only dimension; a second death ends with the log tail and `Strata could not load <name> twice; its low-RAM setup (setup.sh --low-ram) or the llama.cpp preset may.` |
+| Served window | the row's `probe`: the served model's `meta.n_ctx` in `/v1/models` with the key (`server.py:5369–5386`), else `/health` `max_context`; trained is `meta.n_ctx_train` when Strata reports it, else the GGUF header the launch's plan read |
+| Retry | one, when the parent exits during the load (a timeout is not retried): a `--max-context` the config sets is halved, never below the floor, and not retried when the half is under it; a record's pinned `context` is never halved and relaunches once at the same window. The recorded files are re-checked before the relaunch. A halved retry that serves is remembered through `confirm_launch` as for llama.cpp (spec 20 §6.4), with `context` the only dimension; a second death ends with the log tail and `Strata could not load <name> twice; its low-RAM setup (setup.sh --low-ram) or the llama.cpp preset may.` |
 | Stop | SIGTERM to the parent, a wait for its exit (the engine's `QUIT` frees the pinned RAM, `server.py:6944–6965`), then SIGKILL to the group after the grace; before every signal the pid is re-proven from `/proc` (exe and argv against the identity, start time against the pidfile), never taken from the pidfile alone; the engine child is never signalled first, since the server restarts a dead engine |
 | Logs | the parent's stdout and stderr into the harness's server log, the engine's stderr into the copy's `log`; `log_tail` reads both, redacted at the channel boundary |
 | `--script` | a here-document that writes the copy, then `cd <engine_dir> && exec .venv/bin/python serve/server.py --engine strata --config <copy> --port <port> --host 127.0.0.1`, the key as a `STRATA_API_KEY=<key>` placeholder |
@@ -668,10 +668,12 @@ git clone https://github.com/Niko1221/Strata ~/src/Strata && cd ~/src/Strata && 
 ```
 
 An install is sensed by `plan_entries` at every listing, at `autosense.strata_dir` when set, else at `~/Strata` or
-`~/src/Strata`; it is an install only when `serve/server.py` and `.venv/bin/python` are regular files, `engine/strata`
-is a regular executable, the directory and those files are owned by the user and not group- or world-writable,
-and a `strata-*.json` there names in `--native` a file the library knows; each check is an `lstat` or
-`open_regular`, and nothing in the directory runs to decide it.
+`~/src/Strata`; it is an install only when `serve/server.py` is a regular file, `engine/strata` is a regular executable, the
+directory and those files are owned by the user and not group- or world-writable, `.venv/bin/python` is a regular
+executable or a symlink (a venv's interpreter is a link to the system's) whose target is a regular executable
+owned by the user or root and not group- or world-writable, and a `strata-*.json` there names in `--native` a file the
+library knows; each check is an `lstat`, a `stat` of the interpreter's target or `open_regular`, and nothing in
+the directory runs to decide it. `serve/server.py` and `engine/strata` stay regular files, never links.
 A sensed install adds `· Strata available` to the Flash-Next entry; picking `/model <entry>-strata` then runs spec
 20 §11's one question (`Set it up and switch?`), which shows the record and adopts it with its `launch` entries.
 
@@ -828,14 +830,15 @@ A sensed install adds `· Strata available` to the Flash-Next entry; picking `/m
   7. The real `fixed_tokens` of the root and the `web-researcher`, and their floors, written into §8.1.
   8. Strata install, run by the owner from `doctor`'s command; the next `/model` shows `· Strata available`.
   9. `/model Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-strata`: set up, launched, `/health` `loaded`, the window line
-     names Strata, the served window at least the floor, a turn and a delegated turn run; decode recorded beside
-     llama.cpp's 23.8 t/s.
+     reads `window: 65,536 · Strata · experts pinned in RAM (40.0 GiB) · one request at a time`, the served window
+     at least the floor, a turn and a delegated turn run; decode recorded beside llama.cpp's 23.8 t/s.
   10. `localharness start` on the Strata record: attaches when it serves, launches and waits when it does not.
-  11. Strata → llama.cpp 27B → Strata: each stop verified, `MemAvailable` back within 2 GiB after Strata stops, a
-     delegated turn after each.
+  11. Strata → llama.cpp 27B → Strata: each stop verified, `MemAvailable` back within 2 GiB after Strata stops with
+     no `engine/strata` process left behind, a delegated turn after each.
   12. The response field names for reasoning and tool calls from one `--debug` body, written into §11.6.
 
-  Rows for the next live run (0.19.2), each checking what §7.1, §7.2, §7.5, §10 and §16 now state:
+  The next live run (0.19.2) carries rows 8–12 above, none yet measured, and these: rows 13–17 each check what
+  §7.1, §7.2, §7.5, §10 and §16 now state, and row 18 checks what §11.2 states.
 
   13. The gemma Q4_K_M GGUF set up and launched with `llm.service` stopped: the launch line's window equals the
       plan's (152,832 at 30.2 GiB free with no `-np`, §16), `nvidia-smi` shows the process resident, and a turn runs.
@@ -848,6 +851,8 @@ A sensed install adds `· Strata available` to the Flash-Next entry; picking `/m
   16. The gemma bf16 `not offered` line, and `/model` on its name printing §10.4's sentence and stopping nothing.
   17. Any launch whose window line carries the spill clause, checked against `nvidia-smi` and decode speed; and a
       launch under the autostart unit, which never carries the clause (§7.5), read by hand against `nvidia-smi`.
+  18. During a Strata load, kill the engine child (`engine/strata`) under its living parent: read whether the launch
+      times out after the bound instead of exiting, since the retry (§11.2) fires only on the parent's exit.
 
 ## 16. Open questions and recorded decisions
 
