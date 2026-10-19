@@ -23,7 +23,7 @@ LocalHarness is a model-agnostic hierarchical agent harness for local LLMs. It p
 - A provider layer that speaks to vLLM, Ollama, llama.cpp and LM Studio over the OpenAI-compatible wire, and that can also launch, size, swap and stop a local model server itself, including through a systemd user unit at login
 - A YAML configuration system with a trust model: the machine-level config, a trusted workspace layer, per-agent files and a written overrides file, with a fixed list of settings only the machine level may set
 - A CLI (`localharness init`, `start`, `model`, `doctor`, ...) with an interactive terminal REPL, an Agent Client Protocol adapter for Zed, and bounded helper agents the model can delegate to
-- A plugin system: the bundled features (`image`, `mobile`, `memory`, `dispatch`, `autoresearch`) are plugins behind one API that a third-party plugin uses too, and core never imports them
+- A plugin system: the bundled features (`image`, `mobile`, `memory`, `dispatch`, `autoresearch`, `browser`) are plugins behind one API that a third-party plugin uses too, and core never imports them
 - A benchmark runner with a training corpus and a sealed holdout
 
 The harness is the product. The LLM is interchangeable.
@@ -85,6 +85,8 @@ Core components are organized into five layers. The intent is that a component i
 │  dispatch      dispatch/ (adapters/discord.py)                          │
 │  autoresearch  autoresearch/, cli/autoresearch_cmd.py, experiment_cmd.py│
 │                propose_cmd.py, report_cmd.py                            │
+│  browser       tools/builtin/browser_plugin.py, browser_tool.py,        │
+│                browser_proxy.py                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -129,6 +131,7 @@ A plugin is a feature that ships with LocalHarness but sits outside core: it can
 | `memory` | memory (the one occupant of core's memory slot) | `memory/`, `tools/builtin/memory_tools.py`, `cli/memory_cmd.py`, `cli/memory_cli.py` |
 | `dispatch` | channel | `dispatch/`, with `dispatch/adapters/discord.py` the first adapter |
 | `autoresearch` | dev | `autoresearch/`, `cli/autoresearch_cmd.py`, `cli/experiment_cmd.py`, `cli/propose_cmd.py`, `cli/report_cmd.py` |
+| `browser` | tools, off by default, needs the `browser` extra | `tools/builtin/browser_plugin.py`, `tools/builtin/browser_tool.py`, `tools/builtin/browser_proxy.py` |
 
 ---
 
