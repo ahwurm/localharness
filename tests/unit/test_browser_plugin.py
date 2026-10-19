@@ -719,3 +719,176 @@ async def test_bound_copies_share_one_browser_and_keep_their_own_store(fetch, wo
     again = await one.run(url="https://example.com/a")
     assert again.metadata["fetch_id"] == "pg-2"
     assert not (await WebPageQueryTool(s2).run(fetch_id="pg-2", pattern="needle")).success
+
+
+# --- the plugin: manifest, settings, the binary check, configure, tools, doctor, the download -----------------
+
+import importlib.metadata  # noqa: E402
+import importlib.util  # noqa: E402
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from pydantic import ValidationError  # noqa: E402
+
+from localharness.config.plugin_sections import global_only_paths  # noqa: E402
+from localharness.plugins.api import Check, PluginContext, PluginManifest, PluginPaths, plugin_summary  # noqa: E402
+from localharness.tools.builtin import browser_plugin  # noqa: E402
+from localharness.tools.builtin.browser_plugin import (  # noqa: E402
+    BROWSER_AGENT_PROMPT, BROWSER_SETUP_HELP, BrowserConfig, BrowserPlugin)
+
+
+def plugin_ctx(tmp_path: Path, **cfg) -> PluginContext:
+    return PluginContext(
+        bus=None, tools=None, hooks=None, config=BrowserConfig(**cfg), agent_config=None,
+        paths=PluginPaths(global_config_dir=tmp_path / "cfg", workspace=None, state_dir=tmp_path / "state"), llm=None)
+
+
+@pytest.fixture
+def cache(monkeypatch, tmp_path):
+    """A Playwright cache of its own, the package found and its distribution at 1.64.0."""
+    root = tmp_path / "ms-playwright"
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(root))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    find_spec, version = importlib.util.find_spec, importlib.metadata.version
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: object() if name == "playwright" else find_spec(name, *a))
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "1.64.0" if name == "playwright" else version(name))
+    return root
+
+
+def install_shell(root: Path, revision: int = 1248) -> str:
+    (root / f"chromium_headless_shell-{revision}").mkdir(parents=True)
+    return f"chromium_headless_shell-{revision}"
+
+
+def test_the_manifest_is_every_field_of_the_declaration_and_frozen():
+    m = BrowserPlugin.manifest
+    assert m == PluginManifest(
+        name="browser", version="0.1.0", kind="tools", enabled_by_default=False, requires_extra="browser",
+        setup_action="Download Playwright's headless Chromium now? About 100 MB from Playwright's CDN; "
+                     "it runs as a program on this machine (sandboxed by default).",
+        setup_help=BROWSER_SETUP_HELP, agent_prompt=BROWSER_AGENT_PROMPT,
+        next_steps="browser_fetch (pages that need JavaScript) works once Chromium is downloaded and "
+                   "`localharness doctor` shows every browser row passing; `localharness plugins enable "
+                   "browser` does the download.")
+    assert BrowserPlugin.ConfigModel is BrowserConfig and m.setup == ()
+    assert plugin_summary(BrowserPlugin) == "reads JavaScript-rendered pages through a sandboxed headless Chromium"
+    with pytest.raises(ValidationError):
+        m.name = "other"
+
+
+def test_the_help_runs_as_printed_and_the_prompt_has_no_placeholder():
+    assert f"{sys.executable} -m playwright install --only-shell" in BROWSER_SETUP_HELP
+    assert f"{sys.executable} -m playwright install-deps chromium" in BROWSER_SETUP_HELP
+    assert "{" not in BROWSER_AGENT_PROMPT and "browser.sandbox: false" in BROWSER_AGENT_PROMPT
+
+
+def test_the_program_and_the_sandbox_are_machine_level_only():
+    assert global_only_paths(BrowserConfig) == {"executable_path", "sandbox"}
+
+
+def test_settings_defaults_and_bounds():
+    c = BrowserConfig()
+    assert (c.idle_close_s, c.executable_path, c.sandbox) == (120, "", True)
+    for bad in ({"idle_close_s": 0}, {"idle_close_s": 3601}, {"foo": 1}):
+        with pytest.raises(ValidationError):
+            BrowserConfig(**bad)
+    assert BrowserConfig(idle_close_s=1).idle_close_s == 1 and BrowserConfig(idle_close_s=3600).idle_close_s == 3600
+
+
+def test_importing_the_plugin_imports_neither_playwright_nor_the_tool_nor_the_proxy():
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "import sys, localharness.tools.builtin.browser_plugin; "
+         "print(*('playwright' in sys.modules, 'httpx' in sys.modules, "
+         "'localharness.tools.builtin.browser_tool' in sys.modules, "
+         "'localharness.tools.builtin.browser_proxy' in sys.modules))"],
+        capture_output=True, text=True, check=True).stdout.split()
+    assert out == ["False"] * 4
+
+
+async def test_configure_is_ready_with_the_package_and_never_uses_the_driver(cache, world, tmp_path, monkeypatch):
+    class Untouchable:
+        def __getattr__(self, name):
+            raise AssertionError(f"the driver was used: {name}")
+
+    monkeypatch.setattr(browser_tool, "_API", Untouchable())
+    assert await BrowserPlugin().configure(plugin_ctx(tmp_path)) == "ready"
+    assert world.launches == []
+
+
+async def test_configure_names_the_extra_when_the_package_cannot_be_found(monkeypatch, tmp_path):
+    find_spec = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: None if name == "playwright" else find_spec(name, *a))
+    with pytest.raises(ImportError, match=r"localharness\[browser\]"):
+        await BrowserPlugin().configure(plugin_ctx(tmp_path))
+
+
+async def test_no_tool_is_offered_without_the_binary(cache, tmp_path):
+    assert await BrowserPlugin().tools(plugin_ctx(tmp_path)) == []
+
+
+async def test_without_the_binary_one_row_fails_and_the_two_launch_rows_skip(cache, world, tmp_path):
+    package, binary, launch, sandbox = await BrowserPlugin().doctor(plugin_ctx(tmp_path))
+    assert package == Check(name="browser-package", status="pass", detail="playwright 1.64.0")
+    assert (binary.name, binary.status) == ("browser-binary", "fail")
+    assert str(cache) in binary.detail and "chromium_headless_shell-*" in binary.detail
+    assert binary.hint == "run `localharness plugins enable browser` to download it"
+    assert launch == Check(name="browser-launch", status="skip", detail="needs the binary")
+    assert sandbox == Check(name="browser-sandbox", status="skip", detail="needs the binary")
+    assert world.launches == [] and world.contexts == []
+
+
+async def test_a_missing_distribution_is_the_one_failing_package_row(cache, monkeypatch, tmp_path):
+    def missing(name):
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", missing)
+    package, *_ = await BrowserPlugin().doctor(plugin_ctx(tmp_path))
+    assert (package.name, package.status) == ("browser-package", "fail")
+    assert "localharness[browser]" in package.hint and "other extras" in package.hint
+
+
+@pytest.mark.parametrize("executable", ["", "missing"])
+async def test_an_executable_that_is_not_a_file_is_not_the_binary(cache, tmp_path, executable):
+    path = str(tmp_path / executable) if executable else ""
+    _, binary, *_ = await BrowserPlugin().doctor(plugin_ctx(tmp_path, executable_path=path))
+    assert binary.status == "fail" and (path in binary.detail if path else str(cache) in binary.detail)
+
+
+async def test_an_executable_that_is_a_file_decides_alone(cache, tmp_path):
+    install_shell(cache)
+    chrome = tmp_path / "chrome"
+    chrome.write_text("")
+    _, binary, *_ = await BrowserPlugin().doctor(plugin_ctx(tmp_path, executable_path=str(chrome)))
+    assert (binary.status, binary.detail) == ("pass", str(chrome))
+    _, binary, *_ = await BrowserPlugin().doctor(plugin_ctx(tmp_path, executable_path=str(tmp_path / "nope")))
+    assert binary.status == "fail"
+
+
+async def test_the_newest_headless_shell_folder_is_the_binary(cache, tmp_path):
+    for revision in (999, 1248, 1100):
+        install_shell(cache, revision)
+    (cache / "chromium-1500").mkdir()
+    (cache / "chromium_headless_shell-9999").write_text("a file, not a folder")
+    _, binary, *_ = await BrowserPlugin().doctor(plugin_ctx(tmp_path))
+    assert (binary.status, binary.detail) == ("pass", "chromium_headless_shell-1248")
+
+
+@pytest.mark.parametrize("platform,parts", [("linux", (".cache",)), ("darwin", ("Library", "Caches"))])
+def test_the_default_cache_root_is_the_platforms(monkeypatch, tmp_path, platform, parts):
+    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert browser_plugin._cache_root() == tmp_path.joinpath(*parts, "ms-playwright")
+
+
+def test_linux_reads_xdg_cache_home_and_a_zero_path_means_the_package_folder(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    assert browser_plugin._cache_root() == tmp_path / "xdg" / "ms-playwright"
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "0")
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: SimpleNamespace(origin=str(tmp_path / "pw" / "__init__.py")))
+    assert browser_plugin._cache_root() == tmp_path / "pw" / "driver" / "package" / ".local-browsers"
