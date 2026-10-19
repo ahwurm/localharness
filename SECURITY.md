@@ -595,7 +595,8 @@ next start on a terminal and a touch does not. The model keys are an entry kind 
 harness also derives flags at launch from the model file and the machine's `autosense` settings:
 `kv_cache_type`, `draft_mtp` and `draft_p_min` pick among closed values; `-c`, `--cache-ram`,
 `--max-model-len` and `--fit-ctx` are numbers computed from the model file's header and tensor table,
-the checkpoint's `config.json` and the machine's memory, bounded by the trained window and the harness
+the checkpoint's `config.json` and the machine's memory, and so is a Strata retry's
+halved `--max-context` (the config's window halved), all bounded by the trained window and the harness
 floor. Those settings and the derived flags are not part of the record, and a record field set to a
 value pins it. A model you switch yourself with `/model` on a terminal
 (or in Zed), or with `localharness model` typed at a terminal, is re-recorded as you set it and
@@ -1032,14 +1033,17 @@ The files the harness creates there are owner-only (0600) from their first byte 
 that mode, never written first and changed after: `config.yaml` and its backups
 (`config.yaml.bak-<stamp>` from the security-defaults update, `config.yaml.before-init-<stamp>`
 from `init --force`), `overrides.yaml`, `grants.yaml`, `trusted_workspaces.yaml`, `project_records.yaml` (and its
-`project_records.yaml.lock`), `overrides.yaml.lock`, `model-library.json`, the phone token,
+`project_records.yaml.lock`), `overrides.yaml.lock`, `model-library.json`, `server-floor.json`
+(the window floor cached for start's first launch), the phone token,
 the push key and the push subscriptions, `audit.jsonl`, each agent's `bus-events.jsonl`, session
 logs, the phone session's `sessions/asleep.json` while it sleeps, `history.jsonl`, `memory.db`
 (and its `-wal` and `-shm` files), `MEMORY.md`, `compact.md` and
 `memory.log`, `.repl_history`, the speed ledger, the live-session files, `vllm/serve.log`,
 `vllm/server.pid`, `vllm/launch.lock` (empty, never read), `vllm/unit-target` and the boot marker
 `vllm/boot-attempt` (each written through the no-follow atomic writer inside the `vllm/` folder, which is
-not a protected path), agent files written by `agent create`, by a start (the root agent) or by the
+not a protected path), `strata/<port>.json` and `strata/<port>.log` (the copy of a Strata config a
+launch hands the server and its engine log, written without following links inside the protected,
+owner-only `strata/` folder), agent files written by `agent create`, by a start (the root agent) or by the
 in-session creation workflow, autoresearch's archive, run journals and budget file, and
 `plugins/README.md`. Each model response's row in `history.jsonl` records the model name, the
 server-reported prompt and completion token counts and the call's duration (numbers and a name,
@@ -1370,6 +1374,23 @@ harness started: the pidfile records its start time and port, and the process mu
 launch the harness expects, so a process id since reused by another program is never signalled (see
 [Who may start, switch or stop a launched server](#who-may-start-switch-or-stop-a-launched-server)).
 
+A launch that keeps a model's experts in RAM (llama.cpp placing them there, or Strata) is priced
+against `/proc/meminfo`: the experts must fit in `MemAvailable` beside the system's reserve
+(`autosense.unified_reserve_ratio` of `MemTotal`, and at least 10 GB for Strata). A `/proc/meminfo`
+that cannot be read refuses both launches rather than assuming room, and free VRAM that cannot be
+read leaves the window not computed, as before.
+
+**A Hugging Face snapshot is a launch input.** A vLLM binary launch of a repo id the Hugging Face
+cache holds runs the files in that cache, so the harness walks every entry of the snapshot with
+`lstat`, at the listing and again at the launch: a link that leaves that repo's `blobs/` folder, or
+an entry that is neither a regular file, a folder nor such a link, makes the snapshot unlisted.
+`config.json` and `tokenizer_config.json` are read under a size cap with `json.loads` only, and an
+`auto_map` in either makes the checkpoint `not offered: needs trust_remote_code`; the harness never
+passes `--trust-remote-code`. The launch puts the verified snapshot's directory on the command line,
+not the repo id, with `HF_HUB_OFFLINE=1`. A repo id the cache does not hold launches by its id as
+before; a cache that cannot be read, or a cached repo that is no loadable vLLM checkpoint, is a
+refusal, never an unverified launch by repo id.
+
 **Strata.** Strata (`runtime: strata`, `provider_type: strata`) is a third-party engine, a Python
 server over a C++/CUDA engine, set up by its own installer, which the harness never runs: the
 installer can use privilege escalation and fetches its engine from the project's `latest` release,
@@ -1478,6 +1499,13 @@ session leader of its own, and for a launch through the autostart unit the unit'
 `MainPID`. A pid that fails is named and never signalled:
 `pidfile names pid 4242 (<exe>), which is not a harness launch — not signalled; stop it, or
 remove <pidfile>`. Every stop passes the identity it expects; a stop without one signals nothing.
+A stop is SIGTERM to the process group (to Strata's parent alone, since its server restarts a dead
+engine child), a wait for it to exit, and after the grace SIGKILL to the group, each signal preceded
+by that proof read again from `/proc` (executable and arguments against the launch, start time
+against the pidfile). The pidfile and the config copy under `strata/` are claims the agent can
+write, never proof. The sentence `/model` prints about a systemd unit that holds the port and is not
+the harness's own, and every refusal, are read-only: the only signals are a stop's, to a process
+that passed that proof.
 **What this does NOT cover:** a server of yours started with `setsid` on the record's port with
 the record's own binary, named by a pidfile the agent planted, passes every one of those tests and
 would be stopped by an explicit swap. A llama.cpp binary that is a wrapper script passes the
@@ -1499,9 +1527,16 @@ the other model keys, so a changed parser or speculation setting asks at the nex
 `start`. The flags the harness derives itself are not part of the record: `kv_cache_type`,
 `draft_mtp` and `draft_p_min` pick among closed values, while `-c`, `--cache-ram`, `--max-model-len`
 and `--fit-ctx` are numbers computed from the model file's header and tensor table, the checkpoint's
-`config.json` and the machine's memory, bounded by the trained window and the harness floor, and a
-record field set to a value pins each. A hostile tensor table can mis-price within those bounds: one
-optimistic `-c` for the person's own file, an OOM or a spilled layer at load, never an escalation.
+`config.json` and the machine's memory, as is a Strata retry's halved `--max-context`, bounded by the
+trained window and the harness floor, and a record field set to a value pins each. The floor is built
+on the reply reserve, so it never lowers it, and its cache, `server-floor.json`, only raises the live
+figure: a planted or stale value can refuse a launch you see, never let a smaller window through.
+A hostile tensor table can mis-price within those bounds. The reader caps counts, names and dimensions
+and refuses offsets that run backwards or leave the file, and names chosen to shrink the GPU price are
+held to cross-checks (attention layers against `block_count` and the attention interval, experts only
+with `expert_count`, the input tables at most half the file). What remains is one optimistic `-c` for
+the person's own file: an OOM or a spilled layer at load, which the one halved retry and the
+floor-bounded backstop end, never an escalation.
 
 ### Autostart: the harness's own user unit
 
