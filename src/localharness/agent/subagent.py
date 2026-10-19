@@ -1107,15 +1107,15 @@ async def dispatch_web_subagent(
     from localharness.tools.registry import ToolRegistry
 
     # config_override (when present) is the built-in base with an agents/web-researcher.yaml
-    # overlay already applied by the runner (the real budget knob); the structural web toolset
-    # stays WEB_TOOLS regardless — the overlay tunes AgentConfig fields (budget/role/…), not tools.
+    # overlay already applied by the runner (the real budget knob); it tunes AgentConfig fields
+    # (budget/role/…), not tools.
     # IN-56: without a config_override (a direct caller: tests) the builder's own rung is used and no
     # dispatch seam runs, so no share and no fallback/labels. `_run_agent` always passes the seam's
     # copy, so this branch is never taken in a session or the bench.
     child_config = config_override or build_web_researcher_config(
         agent_name, budget=_children_budget(children_budget).for_name("web-researcher"))
 
-    # Web-only registry: builtins {web_search, web_fetch, web_page_query} — no write/bash.
+    # Web-only registry: WEB_TOOLS plus any bundled web tool — no write/bash.
     child_registry = ToolRegistry.from_allowed(builtin_toolset("web-researcher", base_registry), base_registry=base_registry)
     # Non-leaf web-researcher: inject its own (fresh, depth+1) `agent` tool so it can spawn a
     # nested search-verifier. Registered global so the running child resolves it (same invariant

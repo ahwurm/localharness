@@ -110,7 +110,7 @@ async def _get_hop(hop: "netguard.Hop") -> tuple[Optional[str], list[bytes], boo
 _DEFAULT_STORE: Any = None
 
 
-def _get_default_store() -> Any:
+def get_default_store() -> Any:
     """Shared fallback ContentStore for bare-constructed web tools (no per-agent store bound). Lazy
     so importing web_tool never imports agent.context at module load (cycle-proof)."""
     global _DEFAULT_STORE
@@ -123,7 +123,7 @@ def _get_default_store() -> Any:
 def _reset_page_store() -> None:
     """Test/seam hook: clear the shared default store's pages and pg-N sequence. (Per-agent stores
     are reset via their own ContentStore.reset().)"""
-    _get_default_store().reset()
+    get_default_store().reset()
 
 
 def _html_to_text(html: str) -> str:
@@ -235,7 +235,7 @@ class WebFetchTool(Tool):
 
     def __init__(self, store: Any = None) -> None:
         # Per-agent ContentStore (bound via bind_agent_store_tools); bare tools share the default.
-        self._store = store if store is not None else _get_default_store()
+        self._store = store if store is not None else get_default_store()
 
     def info(self) -> ToolSchema:
         return ToolSchema(
@@ -412,7 +412,7 @@ class WebPageQueryTool(Tool):
 
     def __init__(self, store: Any = None, result_cap: Callable[[], int] | None = None) -> None:
         # Same per-agent ContentStore the paired web_fetch wrote to (bound together per agent).
-        self._store = store if store is not None else _get_default_store()
+        self._store = store if store is not None else get_default_store()
         # The registry's live result cap (a closure over the registry the tool is registered in);
         # None = no registry wired, the fixed budget applies.
         self._result_cap = result_cap
