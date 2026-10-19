@@ -33,11 +33,15 @@ class Proxy:
     upstream: str | None = field(default=None, repr=False)
     _server: asyncio.Server | None = field(default=None, repr=False)
     _writers: set[asyncio.StreamWriter] = field(default_factory=set, repr=False)
+    _tasks: set[asyncio.Task] = field(default_factory=set, repr=False)
 
     async def close(self) -> None:
         self._server.close()
+        for t in list(self._tasks):
+            t.cancel()
         for w in list(self._writers):
             w.close()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
         await self._server.wait_closed()
 
 
@@ -162,11 +166,13 @@ async def _one(proxy: Proxy, reader: asyncio.StreamReader, writer: asyncio.Strea
 
 async def _handle(proxy: Proxy, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     proxy._writers.add(writer)
+    proxy._tasks.add(task := asyncio.current_task())
     try:
         while await _one(proxy, reader, writer):
             pass
     except _STREAM_ERRORS:
         pass
     finally:
+        proxy._tasks.discard(task)
         proxy._writers.discard(writer)
         writer.close()
