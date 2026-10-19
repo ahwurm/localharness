@@ -210,6 +210,7 @@ async def test_d_restart_resnapshots_path_references(tmp_path, bus, mock_llm_cli
     (tmp_path / "voice.md").write_text(VOICE + "Prefer the active voice.")
 
     reloaded, notice = TaskState.load(state.path, workspace=str(tmp_path))
+    reloaded.resume()
     assert notice is None and [r.handle for r in reloaded.current.references] == [None] * 3
     llm2 = scripted(mock_llm_client, "Picking up where we left off.")
     seen = capture(llm2)
