@@ -252,6 +252,18 @@ _DESCRIPTION = (
     "Same start_index and fetch_id; search the full page with web_page_query.")
 _CAPPED = (f"[rendered text capped at {FETCH_MAX_BODY_BYTES} characters — the rest of this page was not read; "
            "the retained text is a PREFIX, not the full page]")
+_NOT_HTTPS = "browser_fetch renders https pages only. For http://… use web_fetch."
+_NOT_PUBLIC = ("browser_fetch: {host} is not a public address; browser_fetch reaches public sites only. "
+               "Do not retry this host; use the search snippet or another source.")
+_NO_RETRY = "Do not retry this URL; use the search snippet or another source."
+_HTTP_FAILED = f"browser_fetch failed: HTTP {{status}}. {_NO_RETRY}"
+_FAILED = f"browser_fetch failed: {{detail}}. {_NO_RETRY}"
+_TIMED_OUT = f"browser_fetch: the page did not finish loading in {NAV_TIMEOUT_S} s. Do not retry; use the search snippet."
+_FILE = "browser_fetch: that URL is a file, not a page. Use the search snippet, or find an HTML version."
+_EMPTY = ("[rendered text is under 80 characters — the page is empty or blocking the browser; do NOT retry. "
+          "Use the search snippet.]")
+_NOT_AVAILABLE = ("browser_fetch is not available on this machine ({reason}); use the search snippet or another source. "
+                  "The person can run `localharness doctor`.")
 
 
 class BrowserFetchTool(Tool):
@@ -272,7 +284,22 @@ class BrowserFetchTool(Tool):
         return BrowserFetchTool(self._runtime, store)
 
     async def _execute(self, url: str, max_chars: int = FETCH_DEFAULT_CHARS, start_index: int = 0) -> ToolResult:
-        await netguard.check(url, allow_private=False)
-        page = await self._runtime.render(url)
+        if not url.lower().startswith("https://"):
+            return self.err(_NOT_HTTPS, error_type="validation_error")
+        try:
+            await netguard.check(url, allow_private=False)
+        except netguard.NotPublic as exc:
+            return self.err(_NOT_PUBLIC.format(host=exc.host), error_type="validation_error")
+        except netguard.Refused as exc:
+            return self.err(str(exc), error_type="validation_error")
+        try:
+            page = await self._runtime.render(url)
+        except RenderError as e:
+            return self.err({"timeout": _TIMED_OUT, "file": _FILE, "unavailable": _NOT_AVAILABLE.format(reason=e.detail)}
+                            .get(e.kind) or _FAILED.format(detail=e.detail))
+        if page.status >= 400:
+            return self.err(_HTTP_FAILED.format(status=page.status))
+        if len(page.text.strip()) < 80:
+            return self.ok(f"{UNTRUSTED_BANNER}URL: {page.url}\n\n{_EMPTY}", url=page.url)
         text = page.text + (f"\n{_CAPPED}" if page.capped else "")
         return retain_window(self._store, text, page.url, start_index, max_chars, refetch="browser_fetch")
