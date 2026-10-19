@@ -8,14 +8,14 @@
 
 **Run AI agents on the models you already run locally.**
 
-LocalHarness is an open-source agent harness for local LLMs. It does not serve models: it connects to one you already serve over an OpenAI-compatible API (vLLM, llama.cpp, Ollama or LM Studio) and gives it agents, defined in YAML, with tools, a permission gate in front of every tool call, and helper agents that each work in a fresh context with only the tools they are allowed. A small core runs the agent loop; memory, the phone app, Discord, image generation and the self-improvement loop are plugins that you turn on or off with one command.
+LocalHarness is an open-source agent harness for local LLMs. It does not serve models: it connects to one you already serve over an OpenAI-compatible API (vLLM, llama.cpp, Ollama or LM Studio) and gives it agents, defined in YAML, with tools, a permission gate in front of every tool call, and helper agents that each work in a fresh context with only the tools they are allowed. A small core runs the agent loop; memory, the phone app, Discord, image generation, the self-improvement loop and a headless browser for JavaScript-rendered pages are plugins that you turn on or off with one command.
 
 ![LocalHarness: init detects your local model, start drops you into a ready agent, and it researches a question live with web search and multi-step tool calls](assets/demo.gif)
 
-## A small core, five plugins
+## A small core, six plugins
 
 - **Core** owns the agent loop, the built-in tools (read, write, edit, glob, grep, bash, python, web search and fetch, delegation to helper agents), MCP servers, config, the permission gate, the bench and the CLI. With a vision model it also takes pictures: drop a screenshot onto the terminal or `/image <path>`, paste one into Zed or the phone page, or attach one on Discord.
-- **Plugins** add tools, commands, slash commands, `doctor` checks, settings and chat channels through one plugin API. The five that ship with LocalHarness use the same API as a plugin you write yourself. Turning one off removes what it adds; turning off memory or autoresearch leaves their files on disk (the memories, the experiment archive).
+- **Plugins** add tools, commands, slash commands, `doctor` checks, settings and chat channels through one plugin API. The six that ship with LocalHarness use the same API as a plugin you write yourself. Turning one off removes what it adds; turning off memory or autoresearch leaves their files on disk (the memories, the experiment archive).
 
 ## Quick start
 
@@ -96,6 +96,7 @@ Each plugin has its own page:
 - **memory**: per-agent SQLite memory recalled into each turn, with idle consolidation. [Page](docs/plugins/memory.md) · [site](https://localharness.dev/plugins/memory/) · [Docs](docs/specs/05-memory.md)
 - **dispatch**: `localharness start --channel discord` drives a session from allowlisted Discord messages. [Page](docs/plugins/dispatch.md) · [site](https://localharness.dev/plugins/dispatch/) · [Docs](docs/specs/11-channels.md#the-dispatch-plugin-chat-platforms-discord-today)
 - **autoresearch**: propose one harness change, run it through a statistical gate, adopt or reject it. [Page](docs/plugins/autoresearch.md) · [site](https://localharness.dev/plugins/autoresearch/) · [Docs](docs/specs/09-hooks-plugins.md#the-bundled-plugins)
+- **browser**: `browser_fetch` for the web researcher and the search verifier, a JavaScript-rendered https page read through a sandboxed headless Chromium that reaches only public addresses. [Page](docs/plugins/browser.md) · [Security](SECURITY.md#what-a-web-fetch-may-reach)
 
 A plugin you install is found in two places, both on your machine and never in a project: a Python package with a `localharness.plugins` entry point in the same environment as LocalHarness, or a folder `~/.localharness/plugins/<name>/`. It stays off, with none of its code imported, until `localharness plugins enable <name>`, which only your machine-level config can do.
 
