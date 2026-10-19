@@ -367,6 +367,15 @@ def test_the_window_report_type_start_builds_is_the_one_the_lines_read():
     assert report.attached and report.mode == "not-computed" and report.fits is None
 
 
+def test_an_attach_to_an_engine_config_record_computes_no_llamacpp_fit(monkeypatch):
+    monkeypatch.setattr(autosense, "compute_fit", lambda *a, **k: pytest.fail("priced as llama.cpp"))
+    srv = type("S", (), {"runtime": "strata", "model": "/m.gguf", "context": 4096, "extra_args": None})()
+    report, undo = start_cmd._attach_window_report(
+        type("H", (), {"server": srv, "autosense": AutosenseConfig()})(), "strata", 65536, 262144,
+        harness_launched=True)
+    assert undo is None and report.mode == "not-computed" and report.fits is None and report.served == 65536
+
+
 # ------------------------------------------------------------------------------- the launching start
 
 
@@ -554,6 +563,16 @@ async def test_a_vllm_launch_omits_the_server_env_clause(tmp_path, monkeypatch):
     assert "launch environment dropped VLLM_X" in line
     assert "set server.env" not in line
     assert last_dropped_env(w.ledger, "vllm") == ["VLLM_X"]
+
+
+async def test_a_strata_launch_omits_the_server_env_clause(tmp_path, monkeypatch):
+    w = World(tmp_path, monkeypatch)
+    w.config(binary=None, runtime="strata", engine_dir=str(tmp_path / "Strata"), engine_config="c.json",
+             served_name="qwen")
+    Launching(w, None, dropped=("STRATA_X",))
+    line = _summary(await w.start())
+    assert "launch environment dropped STRATA_X" in line
+    assert "set server.env" not in line
 
 
 async def test_an_attaching_start_never_reports_dropped_environment(world):

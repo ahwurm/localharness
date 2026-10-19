@@ -39,7 +39,7 @@ from localharness.core.private_files import touch_private
 from localharness.core.which import which_outside_cwd
 from localharness.plugins.channels import (OWN_COMMAND, accepted_channels, channel_names,
                                            plugin_channel_names)
-from localharness.provider.runtimes import RUNTIMES, row_of
+from localharness.provider.runtimes import RUNTIMES, has_engine_config, row_of
 
 if TYPE_CHECKING:
     from localharness.provider.lifecycle import ServerRecovery
@@ -1174,7 +1174,7 @@ def _attach_window_report(harness: Any, provider_type: str, served: int | None, 
     fits = free = total = weights = None
     undo: str | None = None
     mode = "not-computed"
-    if srv is not None and _gguf(srv.runtime) and srv.model:
+    if srv is not None and _gguf(srv.runtime) and srv.model and not has_engine_config(srv.runtime):
         fi = _auto.compute_fit(srv, harness.autosense, attached_served=served, as_launched=True)
         fits, weights = fi.fits, fi.weights
         if fi.memory is not None:
@@ -2482,7 +2482,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             if _names:
                 _pending_warnings.append(
                     f"launch environment dropped {', '.join(_names)}"
-                    + (" — set server.env: for what llama-server should see" if _gguf(_runtime) else ""))
+                    + (" — set server.env: for what llama-server should see" if "env" in RUNTIMES[_runtime].record_fields else ""))
             try:
                 record_dropped_env(_ledger, _runtime, _names)
             except OSError:
