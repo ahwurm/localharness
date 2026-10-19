@@ -589,7 +589,7 @@ extra_endpoints:
 - `engine_dir` and `engine_config` join the `launch` keys (thirteen with them); the config file's bytes are one
   `launch` entry (`lifecycle.engine_config`), as spec 16 §8 records `server.config_ini`; and the code that runs is
   fingerprinted too: the SHA-256 of `serve/server.py` and of `engine/strata` are `launch` entries
-  (`lifecycle.strata_code`), re-hashed at launch only when a file's `(size, mtime_ns, inode)` differs from the
+  (`lifecycle.strata_code`), re-hashed at launch only when a file's `(size, mtime_ns, inode, ctime_ns)` differs from the
   recorded triple. A changed file is withheld like any machine-file edit and asked about at the next terminal
   `start`. The rest of the tree (`serve.*` modules, the venv's site-packages, `~/.config/strata/settings.json`)
   is a named residual (§13).

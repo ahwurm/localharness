@@ -588,7 +588,7 @@ entry's `lifecycle:`, the record a start checks holds thirteen launch keys: `bin
 `local_models`, `config_ini`, `engine_dir` and `engine_config`, each by name and per file, so a change to any of them asks at the
 next start on a terminal. For a Strata record the record also holds the SHA-256 of its config file
 (`lifecycle.engine_config`) and of `serve/server.py` and `engine/strata` (`lifecycle.strata_code`), each
-re-hashed only when the file's size, modification time or inode moved, so a changed engine asks at the
+re-hashed only when the file's size, modification time, inode or change time moved, so a changed engine asks at the
 next start on a terminal and a touch does not. The model keys are an entry kind of their own, `launch_model`: `model`,
 `mmproj`, `served_name`, `context`, `cache_type_k`, `cache_type_v`, `cache_ram`, `speculative`,
 `reasoning_parser` and `tool_call_parser`, because a changed model is not a changed command. The
@@ -1427,7 +1427,7 @@ dropped from the environment it inherits; and nothing of Strata is put on the ha
 its `serve.*` modules, its venv's site-packages, `~/.config/strata/settings.json` and, when
 `.venv/bin/python` is a link, the target it points to, which sits outside the install and is checked
 for owner and mode only. A writer into a user-owned install who leaves the hashed files alone is
-not asked about, and one who keeps a hashed file's size, inode and modification time is not re-hashed.
+not asked about, and one who keeps a hashed file's size, inode, modification and change time is not re-hashed.
 The model's bytes and the other files the config names (`--pack`, `--ple-gguf`, `--expert-profile`)
 are fingerprinted by path, not content, as for llama.cpp, and the header values that fill `sampling`
 are not validated. Swift's shards are not hash-checked by Strata, and its installer takes the engine

@@ -109,6 +109,21 @@ def test_a_replaced_file_with_equal_size_and_mtime_is_rehashed(g, engine, monkey
     assert changed["name"] == CODE and changed["shown"].endswith("(engine/strata)")
 
 
+def test_an_in_place_rewrite_with_the_mtime_restored_is_rehashed(g, engine):
+    target = engine / "engine" / "strata"
+    target.write_bytes(b"AAAA")
+    held = {e["sha256"] for e in _record(g) if e.get("sha256")}
+    old = target.stat()
+
+    with open(target, "r+b") as fh:
+        fh.write(b"BBBB")
+    os.utime(target, ns=(old.st_atime_ns, old.st_mtime_ns))
+    assert target.stat().st_mtime_ns == old.st_mtime_ns and target.stat().st_ino == old.st_ino
+
+    (changed,) = _uncovered(g)
+    assert changed["name"] == CODE and changed["sha256"] not in held
+
+
 def test_a_changed_config_is_an_uncovered_engine_config_entry(g, engine):
     _record(g)
     (engine / CONFIG_NAME).write_text('{"model_name": "other"}', encoding="utf-8")
