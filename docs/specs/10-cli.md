@@ -591,7 +591,21 @@ Options:
   --setup             Choose which of the models found on this machine to set up as presets.
 ```
 
-With no argument it lists the available models. `localharness model <name>` switches to a preset
+With no argument it lists what this box can switch to now, in the lines `model_ops.plan_entries` builds and
+`entry_lines` renders (spec 22 §10), the same lines the REPL's `/model` prints:
+
+- a group per runtime and host, headed by who owns the server (`· the harness`, `· autostart`, `· <unit> (yours)`),
+  its served models `(serving)`, the active one `● [active]`, a measured decode rate as `[129.5 t/s measured]`;
+- the models the box could launch, numbered, each with the runtime, the plan's window (`vLLM · 100,864`),
+  `· experts in RAM` where the plan places them there, `(not set up)` for a file or checkpoint that is not yet a
+  record, and `· Strata available: /model <name>-strata` on a Flash-Next entry whose Strata install was found;
+- while a server the harness did not launch holds the primary's port, the entries it could launch are not
+  numbered and sit under `available once <who> is stopped`; for a unit of the person's, the sentence that the
+  harness lists models but never stops it is printed once and again only when the unit or what it serves changes;
+- one `not offered: <name> — <reason>` line per model that cannot run here, and a note per skipped endpoint.
+
+Only an entry that can be switched to now is numbered; typing the name of one that cannot prints its reason and
+launches nothing. `localharness model <name>` switches to a preset
 by the same name rules as `start --preset`, and what it does depends on what can be done at once:
 
 - When the harness's own autostart unit is active, a machine record exists, `LOCALHARNESS_COMMIT`
@@ -1345,6 +1359,10 @@ A line starting with `/` is a REPL command, not a task. The list is defined once
 (today `/memory`, from the `memory` plugin) join that table when the session starts and leave it
 when the session ends, after core's rows; spec 09 ("Commands, slash commands and doctor") covers
 how a plugin declares one.
+
+**`/model` lists what this box can switch to now and `/model <name|number>` switches.** The list is the one
+`localharness model` prints (above), built by `plan_entries`; nothing numbered is refused when picked, and a model
+that is not yet a record is set up on the way after one question (`Set it up and switch?`).
 
 **`/plugins` switches a plugin in this session, on the terminal only.** A bare `/plugins` lists
 every plugin and marks the ones running in this session. `/plugins enable <name>` and

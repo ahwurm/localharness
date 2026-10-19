@@ -674,7 +674,7 @@ executable or a symlink (a venv's interpreter is a link to the system's) whose t
 owned by the user or root and not group- or world-writable, and a `strata-*.json` there names in `--native` a file the
 library knows; each check is an `lstat`, a `stat` of the interpreter's target or `open_regular`, and nothing in
 the directory runs to decide it. `serve/server.py` and `engine/strata` stay regular files, never links.
-A sensed install adds `· Strata available` to the Flash-Next entry; picking `/model <entry>-strata` then runs spec
+A sensed install adds `· Strata available: /model <entry>-strata` to the Flash-Next entry; picking that then runs spec
 20 §11's one question (`Set it up and switch?`), which shows the record and adopts it with its `launch` entries.
 
 ### 11.6 What is not known

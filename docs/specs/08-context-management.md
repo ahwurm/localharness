@@ -211,6 +211,11 @@ class ContextManager:
 
     Created once per agent session. Holds the token counter and compaction
     pipeline for that agent. Not shared between agents.
+
+    max_context_tokens is the full served window. The root's is a construction
+    argument, refit when `/model` swaps the server; a child's is the root's live
+    value read at the moment the child is spawned (spec 22 §9), not a number
+    fixed when the delegation runner was built.
     """
 
     def __init__(
@@ -344,6 +349,13 @@ def clamp_response_tokens(max_context_tokens: int, configured_max_tokens: int) -
     Applied where the window is known: start's session LLMConfig, the /model swap refit, and
     bench matrix entries with a pinned num_ctx. A no-op on normal windows, where the reserve
     already IS the 4,096 default."""
+
+
+def harness_floor(fixed_tokens: int, max_response_tokens: int | None = None) -> int:
+    """The smallest window, in 256-token steps, from which every larger window holds the
+    fixed prompt (system prompt and tool schemas) at the compaction target. It sits beside
+    response_reserve and is built on it, so it never lowers the reserve and never subtracts
+    it twice; response_reserve stays the one place output room is held back (spec 22 §8)."""
 ```
 
 ### Error Types
