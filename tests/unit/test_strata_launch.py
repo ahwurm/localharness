@@ -297,6 +297,18 @@ async def test_a_health_answer_from_another_service_keeps_the_wait_going(monkeyp
         await server.wait_ready(BASE, poll_seconds=0.01, timeout_seconds=0.05, runtime="strata", ready=strata.health_ready)
 
 
+@pytest.mark.parametrize("status", [401, 403])
+async def test_a_keyed_models_refusal_after_loaded_is_a_death_not_a_wait(monkeypatch, status):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"loaded": True, "service": "strata"})
+        return httpx.Response(status)
+
+    monkeypatch.setattr(server, "_TRANSPORT", httpx.MockTransport(handler))
+    with pytest.raises(RuntimeError, match="Strata refused the key"):
+        await server.wait_ready(BASE, poll_seconds=0, timeout_seconds=30, runtime="strata", ready=strata.health_ready)
+
+
 def private_log(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.parent.chmod(0o700)

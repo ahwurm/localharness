@@ -400,6 +400,8 @@ async def health_ready(client: httpx.AsyncClient, base_url: str, headers: dict[s
     if not (isinstance(body, dict) and body.get("loaded") is True and body.get("service") == "strata"):
         return None
     models = await client.get(f"{root}/models", timeout=3.0, **({"headers": headers} if headers else {}))
+    if models.status_code in (401, 403):
+        raise RuntimeError("Strata refused the key")
     try:
         data = models.json().get("data", []) if models.status_code == 200 else None
     except (ValueError, AttributeError):
