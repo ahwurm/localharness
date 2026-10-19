@@ -145,9 +145,9 @@ async def _one(proxy: Proxy, reader: asyncio.StreamReader, writer: asyncio.Strea
     authority, port = parts[1], int(match[2])
     try:
         hop = await netguard.check(f"https://{authority}/", allow_private=False)
-    except netguard.Refused:
+    except netguard.Refused as e:
         proxy.refused.append(f"{authority} not public")
-        proxy.refusals += 1
+        proxy.refusals += isinstance(e, netguard.NotPublic)
         return await _reply(writer, "403 Forbidden", keep=True)
     chain = proxy.upstream or hop.proxy
     try:

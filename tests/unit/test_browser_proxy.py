@@ -387,3 +387,11 @@ async def test_an_upstream_that_does_not_answer_200_gets_the_client_502(
     up = await start_upstream(status=403)
     monkeypatch.setenv("https_proxy", f"http://127.0.0.1:{up.port}")
     assert (await refusal(proxy, connect, "example.com:443")).startswith("HTTP/1.1 502")
+
+
+async def test_only_an_address_verdict_counts_toward_the_redirect_sentence(proxy, connect, dialled, monkeypatch):
+    _dns(monkeypatch, {})
+    assert (await refusal(proxy, connect, "nowhere.invalid:443")).startswith("HTTP/1.1 403")
+    assert (proxy.refused[-1], proxy.refusals) == ("nowhere.invalid:443 not public", 0)
+    assert (await refusal(proxy, connect, "10.0.0.1:443")).startswith("HTTP/1.1 403")
+    assert (proxy.refusals, dialled) == (1, [])
