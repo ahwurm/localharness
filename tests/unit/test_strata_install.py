@@ -193,7 +193,8 @@ def test_flash_next_quant_names_the_swift_shard(tmp_path):
 def test_a_renamed_shard_or_another_architecture_is_not_flash_next(tmp_path):
     shard1, _ = flash_next(tmp_path)
     renamed = shard1.with_name("renamed.gguf")
-    renamed.write_bytes(shard1.read_bytes()[:1 << 16])
+    with shard1.open("rb") as f:
+        renamed.write_bytes(f.read(1 << 16))
     assert flash_next_quant(renamed) is None
     other = write_gguf(tmp_path / shard1.name.replace("IQ3_XXS", "Q4_K"), {"general.architecture": "qwen35"})
     assert flash_next_quant(other) is None
