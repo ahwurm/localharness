@@ -583,8 +583,8 @@ extra_endpoints:
 ```
 
 - The interpreter is derived, `<engine_dir>/.venv/bin/python`, never a field: Strata's venv is its own.
-- The host is 127.0.0.1 always: `bind_all` and `extra_args` are refused for `runtime: strata` by the row's
-  `record_fields`, since the engine's arguments live in the config file and Strata's API has had no outside audit
+- The host is 127.0.0.1 always: `bind_all` and `extra_args` are refused by the record's validator, the
+  llama.cpp-only fields by the row's `record_fields`, since the engine's arguments live in the config file and Strata's API has had no outside audit
   (Strata's `SECURITY.md:67`).
 - `engine_dir` and `engine_config` join the `launch` keys (thirteen with them); the config file's bytes are one
   `launch` entry (`lifecycle.engine_config`), as spec 16 §8 records `server.config_ini`; and the code that runs is
