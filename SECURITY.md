@@ -136,9 +136,9 @@ deny patterns remain the mechanism that stops specific actions.
 
 A plugin is code that adds tools, commands, checks or settings to the harness. One trust model
 covers every plugin; where a plugin that ships with LocalHarness and one you install yourself are
-treated differently, it says so below. (Five features ship as plugins: image generation, off until you
-turn it on, and the phone app `mobile`, memory, Discord (`dispatch`) and autoresearch, each on by
-default; everything else that comes with LocalHarness is built into its core, including the bench
+treated differently, it says so below. (Six features ship as plugins: image generation and the browser
+(`browser`), each off until you turn it on, and the phone app `mobile`, memory, Discord (`dispatch`)
+and autoresearch, each on by default; everything else that comes with LocalHarness is built into its core, including the bench
 and its sealed holdout.) A plugin that ships with LocalHarness may own core settings under their old
 names (`autoresearch` owns `proposer:` and `sentinel:`); a plugin you install that tries to is
 refused at load.
@@ -529,10 +529,11 @@ protected paths and the irreversible operations still ask there, and `~/.ssh` an
 exactly the things a boundary-less session is most likely to reach.
 
 **Two things deliberately never ask, and both are a judgment you should check against your own
-threat model.** Network reads (`web_fetch`, `web_search`, `web_page_query`) are silent: seven in ten
+threat model.** Network reads (`web_fetch`, `web_search`, `web_page_query`, and `browser_fetch` with the browser plugin on) are silent: seven in ten
 real tool calls are web fetches, and a prompt per host would fire in a third of all sessions. Set
-`permissions.ask.network_hosts: true` for a per-host prompt. What keeps a silent fetch off your own
-network is a rule rather than a question: `web_fetch` reaches only public addresses (see
+`permissions.ask.network_hosts: true` for a per-host prompt (for `browser_fetch`, once per page: the
+hosts a page loads from are not asked about). What keeps a silent fetch off your own
+network is a rule rather than a question: `web_fetch` and `browser_fetch` reach only public addresses (see
 [What a web fetch may reach](#what-a-web-fetch-may-reach)). Data carried out to a public host is
 handled structurally instead — the agents that ship with LocalHarness and read the web hold no tool
 that reads your files or changes your machine (see the prompt-injection section below). Edits
@@ -1145,9 +1146,10 @@ you.
 it actually fetches attacker-controlled text is treated as it says, and turning on a plugin you
 installed yourself is you vouching for what its tools declare (see [Plugins](#plugins)). The warning
 at start is the only place a stripped plugin tool is named; `localharness doctor` does not show it.
-And a plugin tool that ingests is kept apart from the host tools, but it is not marked as untrusted
-where you read its output: the terminal's "web results — UNTRUSTED, treated as data only" note and
-the phone's untrusted label cover the three built-in web tools only.
+And a plugin tool that ingests is kept apart from the host tools, and the phone's permission prompt
+labels it untrusted from what it declares, but the terminal does not mark it where you read its output:
+the terminal's "web results — UNTRUSTED, treated as data only" note covers the three built-in web tools only
+(a `browser_fetch` result still opens with the untrusted banner the model reads).
 
 Memory is split the same way, and one part of it is trusted. What `memory_search` and `memory_get`
 return is marked untrusted, like web content: a recalled fact is fenced as data. What the
@@ -1259,8 +1261,8 @@ redirect, which `web_fetch` follows itself, at most 5 — must be a public inter
 Loopback, private networks, link-local and cloud-metadata addresses (`169.254.169.254`), CGNAT and
 tailnet addresses (`100.64.0.0/10`), multicast, and the IPv6 forms of all of these are refused,
 however the address is spelled: `2130706433`, `0x7f000001`, `127.1`, `localhost` and
-`[::ffff:7f00:1]` are judged by what they resolve to. Only http and https are fetched, and a URL
-with a user name or password in it is refused. A refusal is one line to the model, naming the
+`[::ffff:7f00:1]` are judged by what they resolve to. Only http and https are fetched
+(`browser_fetch` opens https only), and a URL with a user name or password in it is refused. A refusal is one line to the model, naming the
 setting below; nobody is asked anything.
 
 Without a proxy, the request goes only to an address that was checked: the URL carries the checked
@@ -1283,8 +1285,8 @@ fetching public pages is the tool's purpose. The defence there is structural and
 the agents: the agents that ship with LocalHarness never hold web ingestion together with tools
 that read your files or change your machine, and the capability floor keeps any agent from holding
 web ingestion with host-mutating tools, but an agent you define with both `web_fetch` and `read` can
-put what it read into a URL. `bash_exec` and `python_exec` reach any address — the guard is on
-`web_fetch` alone — and a fetcher script the agent writes for itself is gated as an unconfirmed
+put what it read into a URL. `bash_exec` and `python_exec` reach any address —
+the guard is on `web_fetch` and `browser_fetch` alone — and a fetcher script the agent writes for itself is gated as an unconfirmed
 shell command until you confirm it (see the approval gate, on what the agent may change about its
 own setup). The
 guard resolves names on this machine, so a setup where only a proxy can resolve names cannot fetch
@@ -1293,6 +1295,45 @@ proxy resolves the name again: a DNS answer that changes between the two lookups
 proxy resolves differently (split-horizon DNS), reaches whatever the proxy can reach. And a pattern
 with no regex syntax is searched inside the session itself, which on a hostile page holds it for
 up to about a second and a half (about, on a 4 MB page).
+
+**The browser.** With the `browser` plugin on, `browser_fetch` opens an https page in a headless
+Chromium, and every request the page makes — the page itself, each redirect, every script, `fetch`
+and WebSocket (`ws:` and `wss:`) — leaves through a proxy the plugin runs on `127.0.0.1` for the life
+of that browser, with a user name and password made new at every launch. The proxy accepts only
+`CONNECT`, judges each one by the rule above with public addresses only, and opens the connection to
+the address it checked itself, never a fresh lookup. QUIC is off and WebRTC may not send UDP the
+proxy cannot see; `data:` and `blob:` URLs are made inside the page and reach no address. Every
+launch proves this before any page — a navigation to a loopback port must be refused by the proxy
+while a listener on that port sees nothing, and Chromium's command line must carry the proxy, the
+loopback rule and the three flags — or `browser_fetch` stays off and `doctor` says why. The private
+allowlist is not honoured here: `org.web_fetch_allow_private` admits a private service to
+`web_fetch`, which sends one GET with no origin, while a page has an origin and runs code, so
+admitting the address would let a public page rebind its own name to that service after loading,
+read its answers as same-origin and send it `POST`s. A refusal is one line to the model and names
+no setting. Chromium runs sandboxed, and where the sandbox cannot start (Ubuntu 23.10 and later
+restrict unprivileged user namespaces for a program without an AppArmor profile) the launch fails
+and the machine-level `browser.sandbox: false` is the way to accept an unsandboxed renderer, one
+whose bugs reach your user account below the tool declarations. With
+`permissions.ask.network_hosts: true` the first `browser_fetch` from a host asks as a `web_fetch`
+would, once per page, and the hosts the page then loads from are not asked about. And data out is
+wider than `web_fetch`'s one GET: a rendered page can send requests by any verb to many public
+hosts and read their answers in page code, carrying what the model put in the URL and what the page
+itself holds. The agents that hold `browser_fetch` (the web researcher and the search verifier, or
+an agent you give it) hold no tool that reads your files or changes your machine, the capability
+floor keeps it that way, and not honouring the allowlist keeps this to public hosts.
+
+**What this does NOT cover for the browser.** Behind an environment proxy the plugin's proxy hands
+each `CONNECT` to that proxy after the same check, and the upstream resolves the name again, the
+residual `web_fetch` names above. The WebRTC flag's value (`disable_non_proxied_udp`) is read from
+Chromium's policy list, not from the switch's own code, so the launch check catches a flag Chromium
+refuses and only the live reach test, run on the Playwright release the `browser` extra's floor
+names before that floor is raised, catches one it silently ignores — a newer Playwright 1.x
+launches with the same checks but has not been through that test. Chromium is downloaded by
+Playwright's own installer from Playwright's servers over https after you say yes, and the harness
+checks no signature of its own. Chromium is a program with its own bugs, and the sandbox and
+`playwright install` keeping it current are what stand against them. And with two pages loading at once,
+a private-address request one page makes while the other page's own load fails can make that failure
+read as a redirect to a non-public address — both lines are fixed text that end in the same action.
 
 ## Securing the endpoint
 
