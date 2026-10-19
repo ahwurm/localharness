@@ -67,9 +67,13 @@ def bind_agent_store_tools(registry: ToolRegistry, store: Any) -> None:
     from localharness.tools.builtin.chunk_tool import ChunkTool
     from localharness.tools.builtin.load_document_tool import LoadDocumentTool
     from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
+    from localharness.tools.base import StoreBound
     from localharness.tools.builtin.web_tool import WebFetchTool, WebPageQueryTool
     for tool in (WebFetchTool(store),
                  WebPageQueryTool(store, result_cap=lambda: registry.result_size_cap_chars),
                  ToolResultGetTool(store),
                  ChunkTool(store), LoadDocumentTool(store)):
         registry.rebind_global(tool)
+    for tool in registry.global_tools():
+        if isinstance(tool, StoreBound):
+            registry.rebind_global(tool.bound_to(store))

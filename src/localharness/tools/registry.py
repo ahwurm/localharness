@@ -8,7 +8,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ValidationError, create_model
 from pydantic.fields import FieldInfo
 
-from localharness.tools.base import Tool, ToolProtocol, ToolResult, ToolSchema, ToolVetoed
+from localharness.tools.base import StoreBound, Tool, ToolProtocol, ToolResult, ToolSchema, ToolVetoed
 from localharness.tools.capabilities import (
     IngestViaExecError,
     assert_no_coresidence,
@@ -91,6 +91,12 @@ class ContributedTool:
     def info(self) -> ToolSchema:
         return self._inner.info().model_copy(
             update={**self._overrides, "source_plugin": self._source_plugin})
+
+    def bound_to(self, store: Any) -> ToolProtocol:
+        # explicit, not left to __getattr__: a protocol check reads the class and never reaches it
+        if isinstance(self._inner, StoreBound):
+            return ContributedTool(self._inner.bound_to(store), self._source_plugin, self._overrides)
+        return self
 
     async def run(self, **kwargs: Any) -> ToolResult:
         try:
@@ -294,6 +300,9 @@ class ToolRegistry:
         (`mcp:TOOL`, `plugin:PLUGIN.TOOL`) resolves to its bare TOOL, as from_allowed resolves it."""
         tool = self._find_tool_by_name(name) or self._find_tool_by_name(_bare_name(name))
         return tool.info() if tool is not None else None
+
+    def global_tools(self) -> list[ToolProtocol]:
+        return list(self._tools["global"].values())
 
     def global_schemas(self) -> list[ToolSchema]:
         """Every global-scope tool's live schema — what the root capability floor reads."""
