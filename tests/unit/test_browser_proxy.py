@@ -389,6 +389,12 @@ async def test_an_upstream_that_does_not_answer_200_gets_the_client_502(
     assert (await refusal(proxy, connect, "example.com:443")).startswith("HTTP/1.1 502")
 
 
+async def test_a_malformed_environment_proxy_address_gets_the_client_502(proxy, connect, monkeypatch):
+    monkeypatch.setenv("https_proxy", "http://127.0.0.1:notaport")
+    assert (await refusal(proxy, connect, "example.com:443")).startswith("HTTP/1.1 502")
+    assert list(proxy.refused) == []
+
+
 async def test_only_an_address_verdict_counts_toward_the_redirect_sentence(proxy, connect, dialled, monkeypatch):
     _dns(monkeypatch, {})
     assert (await refusal(proxy, connect, "nowhere.invalid:443")).startswith("HTTP/1.1 403")

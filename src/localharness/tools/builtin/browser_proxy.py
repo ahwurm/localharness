@@ -19,7 +19,7 @@ TUNNEL_MAX_BYTES = 32_000_000
 TUNNEL_MAX_S = NAV_TIMEOUT_S + 20
 _CHUNK = 65536
 _AUTHORITY = re.compile(r"(\[[0-9A-Fa-f:.]{2,45}\]|[A-Za-z0-9.-]{1,253}):([0-9]{1,5})")
-_STREAM_ERRORS = (asyncio.TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, OSError)
+_STREAM_ERRORS = (asyncio.TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, OSError, httpx.InvalidURL)
 _open_connection = asyncio.open_connection  # the tests' transport seam
 
 
