@@ -15,6 +15,7 @@ Design:
 from __future__ import annotations
 
 import difflib
+import functools
 import inspect
 import logging
 import os
@@ -139,8 +140,6 @@ WEB_RESEARCHER_ROLE = WEB_RESEARCHER_ROLE_BASE
 
 # Blind claim-verifier grandchild (P3): re-fetches the source itself, grounds in the full page via
 # web_page_query, checks entity + recency, emits a strict JSON verdict. Leaf (never delegates).
-SEARCH_VERIFIER_TOOLS: list[str] = ["web_search", "web_fetch", "web_page_query"]
-
 SEARCH_VERIFIER_ROLE = (
     "You are a BLIND search-verifier. You are given exactly a claim, the entity it is supposedly "
     "about, and a source_url — nothing else (you cannot see the researcher's notes or page store, by "
@@ -554,9 +553,9 @@ def builtin_role_floors(base_registry: Any, counter: Any, llm: Any,
                         children_budget: ChildrenBudgetConfig | None) -> dict[str, int]:
     from localharness.tools.registry import ToolRegistry
     floors = {}
-    for name in ("explore", "web-researcher", "search-verifier"):
+    for name in ("explore", *_WEB_ROLES):
         cfg = builtin_base_config(name, children_budget)
-        registry = ToolRegistry.from_allowed(_BUILTIN_TOOLSETS[name], base_registry=base_registry)
+        registry = ToolRegistry.from_allowed(builtin_toolset(name, base_registry), base_registry=base_registry)
         floors[name] = role_floor(cfg, _schemas(cfg, registry), counter=counter, llm=llm,
                                   max_response_tokens=None)
     return floors
@@ -771,26 +770,55 @@ def _config_child_allowed(agent_config: Any) -> list[str]:
     return [t for t in add if t not in deny and t.split(".")[-1].split(":")[-1] not in {"agent", "task"}]
 
 
-# Builtin dispatch toolsets keyed by sanitized agent name — used ONLY by the grant-target safety
-# gate (assert_grant_target_safe) so a grant to a host-dangerous target is refused. As of v0.5.3
-# every default builtin is quarantined-or-read-only (bash/write/edit-holding roles live in
-# examples/agents/ as opt-in config children, resolved via their yaml allowlist).
-_BUILTIN_TOOLSETS: dict[str, list[str]] = {
+_STATIC_TOOLSETS: dict[str, list[str]] = {
     "explore": EXPLORE_TOOLS,
-    "web-researcher": WEB_TOOLS,
-    "search-verifier": SEARCH_VERIFIER_TOOLS,
-    "cruncher": CRUNCHER_TOOLS,                 # no host-dangerous => a valid grant target
+    "cruncher": CRUNCHER_TOOLS,
     "chunk-summarizer": CHUNK_SUMMARIZER_TOOLS,
 }
+_WEB_ROLES = ("web-researcher", "search-verifier")
 
 
-def _resolve_target_toolset(name: str, load_agent: Callable[[str], Any] | None) -> list[str]:
+def is_web_group(schema: Any) -> bool:
+    return schema.group == "web"
+
+
+def is_bundled(tool: Any) -> bool:
+    from localharness.plugins.builtin import bundled_plugins
+    from localharness.tools.registry import ContributedTool
+    return (isinstance(tool, ContributedTool)
+            and tool.info().source_plugin in {c.manifest.name for c in bundled_plugins()})
+
+
+@functools.cache
+def _warn_host_dangerous(name: str) -> None:
+    log.warning("web tool %r declares host: dangerous; left out of the web roles", name)
+
+
+def builtin_toolset(name: str, base: Any) -> list[str] | None:
+    if name in _STATIC_TOOLSETS:
+        return list(_STATIC_TOOLSETS[name])
+    if name not in _WEB_ROLES:
+        return None
+    from localharness.tools.capabilities import ingests_untrusted, is_host_dangerous
+    added: list[str] = []
+    for tool in base.global_tools():
+        schema = tool.info()
+        if schema.name in WEB_TOOLS or not (is_web_group(schema) and ingests_untrusted(schema)):
+            continue
+        if is_host_dangerous(schema):
+            _warn_host_dangerous(schema.name)
+        elif is_bundled(tool):
+            added.append(schema.name)
+    return [*WEB_TOOLS, *added]
+
+
+def _resolve_target_toolset(name: str, load_agent: Callable[[str], Any] | None, base: Any) -> list[str]:
     """Best-effort resolve a delegation target's toolset for the grant-target safety gate. Builtins
-    use their module constant; a config child uses its yaml allowlist. Unknown → [] (dispatch then
+    use `builtin_toolset`; a config child uses its yaml allowlist. Unknown → [] (dispatch then
     raises its own clear unknown-agent error). Conservative by omission is safe here: the gate only
     REFUSES on a positive host-dangerous match, and an unknown name can't be granted to anyway."""
-    if name in _BUILTIN_TOOLSETS:
-        return list(_BUILTIN_TOOLSETS[name])
+    if (toolset := builtin_toolset(name, base)) is not None:
+        return toolset
     # Phase 33.1: the root agent is 'orchestrator' — never loadable as a delegation child
     if load_agent is not None and name != "orchestrator":
         try:
@@ -1088,7 +1116,7 @@ async def dispatch_web_subagent(
         agent_name, budget=_children_budget(children_budget).for_name("web-researcher"))
 
     # Web-only registry: builtins {web_search, web_fetch, web_page_query} — no write/bash.
-    child_registry = ToolRegistry.from_allowed(WEB_TOOLS, base_registry=base_registry)
+    child_registry = ToolRegistry.from_allowed(builtin_toolset("web-researcher", base_registry), base_registry=base_registry)
     # Non-leaf web-researcher: inject its own (fresh, depth+1) `agent` tool so it can spawn a
     # nested search-verifier. Registered global so the running child resolves it (same invariant
     # as start_cmd's global agent-tool registration).
@@ -1299,7 +1327,7 @@ async def dispatch_search_verifier_subagent(
     child_config = config_override or build_search_verifier_config(
         agent_name, budget=_children_budget(children_budget).for_name("search-verifier"))
     # Read-only web subset — no write/bash/spawn, and (by contract) no `agent` tool: leaf.
-    child_registry = ToolRegistry.from_allowed(SEARCH_VERIFIER_TOOLS, base_registry=base_registry)
+    child_registry = ToolRegistry.from_allowed(builtin_toolset("search-verifier", base_registry), base_registry=base_registry)
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
 
     _kill, _compact = _child_runtime_paths(child_config, config_dir, state_dir=state_dir)
@@ -2004,7 +2032,7 @@ def make_explore_agent_runner(
                 # child's allowlist (bare, mcp:TOOL, plugin:PLUGIN.TOOL). A name the base registry
                 # cannot resolve is skipped: from_allowed skips it too, so the child cannot hold it.
                 assert_grant_target_safe(
-                    [s for n in _resolve_target_toolset(name, load_agent)
+                    [s for n in _resolve_target_toolset(name, load_agent, base_registry)
                      if (s := base_registry.schema_of(n)) is not None],
                     agent_id=name,
                 )
