@@ -559,3 +559,163 @@ def test_the_schema_is_web_fetchs_with_the_one_description_and_its_name():
     assert schema.name == "browser_fetch" and isinstance(tool, StoreBound)
     assert (schema.group, schema.estimated_tokens, schema.destructive) == (web.group, web.estimated_tokens, False)
     assert tool.timeout_s == browser_tool.NAV_TIMEOUT_S + 20
+
+
+NOT_HTTPS = "browser_fetch renders https pages only. For http://… use web_fetch."
+EMPTY = "[rendered text is under 80 characters — the page is empty or blocking the browser; do NOT retry. Use the search snippet.]"
+RETRY = "Do not retry this URL; use the search snippet or another source."
+
+
+def not_public(host):
+    return (f"browser_fetch: {host} is not a public address; browser_fetch reaches public sites only. "
+            "Do not retry this host; use the search snippet or another source.")
+
+
+async def refused(tool, world, url, line, error_type="validation_error"):
+    got = await tool.run(url=url)
+    assert (got.success, got.error, got.error_type) == (False, line, error_type)
+    assert world.launches == []
+
+
+@pytest.mark.parametrize("url", ["http://example.com/", "ftp://example.com/", "", "example.com/a"])
+async def test_a_url_that_is_not_https_is_refused_before_any_browser_work(fetch, world, url):
+    await refused(fetch[0], world, url, NOT_HTTPS)
+
+
+@pytest.mark.parametrize("url, host", [
+    ("https://127.0.0.1/", "127.0.0.1"), ("https://10.0.0.1/", "10.0.0.1"), ("https://169.254.169.254/", "169.254.169.254"),
+    ("https://100.64.0.1/", "100.64.0.1"), ("https://[::1]/", "::1"), ("https://224.0.0.1/", "224.0.0.1"),
+])
+async def test_a_non_public_address_is_refused_in_one_line_naming_the_host(fetch, world, url, host):
+    await refused(fetch[0], world, url, not_public(host))
+
+
+async def test_a_name_resolving_to_a_private_address_is_refused_with_the_name(fetch, world, monkeypatch):
+    public_web(monkeypatch, "10.0.0.5")
+    await refused(fetch[0], world, "https://intranet.example/", not_public("intranet.example"))
+
+
+async def test_the_private_allowlist_is_not_honoured_by_the_browser(fetch, world, monkeypatch):
+    monkeypatch.setattr("localharness.tools.builtin.netguard._ALLOW_PRIVATE", ("10.0.0.0/8",))
+    await refused(fetch[0], world, "https://10.0.0.5/", not_public("10.0.0.5"))
+
+
+@pytest.mark.parametrize("url, line", [
+    ("https://user:pw@example.com/", "refused: a URL with a user name or password in it is not fetched"),
+    ("https://", "refused: the URL names no host"),
+    ("https://address.example/", "refused: could not resolve address.example"),
+    ("https://[address]/", "refused: 'https://[address]/' is not a valid URL"),
+])
+async def test_any_other_refusal_answers_netguards_own_line_whatever_words_the_url_holds(fetch, world, monkeypatch, url, line):
+    monkeypatch.setattr("localharness.tools.builtin.netguard._resolve", lambda h, p: _fail())
+    await refused(fetch[0], world, url, line)
+
+
+async def _fail():
+    raise OSError("no such host")
+
+
+@pytest.mark.parametrize("status", [404, 503])
+async def test_an_http_error_status_answers_the_status_line(fetch, world, status):
+    world.pages["https://example.com/a"] = (status, PAGE, "text/html")
+    got = await fetch[0].run(url="https://example.com/a")
+    assert (got.success, got.error) == (False, f"browser_fetch failed: HTTP {status}. {RETRY}")
+
+
+@pytest.mark.parametrize("error, line", [
+    (FakeTimeout("Timeout 30000ms exceeded"), "browser_fetch: the page did not finish loading in 30 s. Do not retry; use the search snippet."),
+    (FakeError("Download is starting"), "browser_fetch: that URL is a file, not a page. Use the search snippet, or find an HTML version."),
+    (FakeError("net::ERR_TUNNEL_CONNECTION_FAILED at https://example.com/a"),
+     f"browser_fetch failed: net::ERR_TUNNEL_CONNECTION_FAILED at https://example.com/a. {RETRY}"),
+])
+async def test_a_navigation_failure_answers_its_one_line(fetch, world, error, line):
+    async def boom(url):
+        raise error
+
+    world.on_goto = boom
+    got = await fetch[0].run(url="https://example.com/a")
+    assert (got.success, got.error) == (False, line)
+
+
+async def test_a_browser_that_cannot_launch_answers_the_not_available_line(world, monkeypatch):
+    public_web(monkeypatch)
+    world.canary = "direct"
+    runtime = BrowserRuntime(config())
+    got = await BrowserFetchTool(runtime, ContentStore()).run(url="https://example.com/")
+    assert (got.success, got.error) == (False, "browser_fetch is not available on this machine (reach check failed); "
+                                              "use the search snippet or another source. The person can run `localharness doctor`.")
+    await runtime.close()
+
+
+async def test_a_page_under_80_characters_answers_the_empty_line_and_retains_nothing(fetch, world):
+    tool, store = fetch
+    world.pages["https://example.com/a"] = (200, "x" * 60, "text/html")
+    got = await tool.run(url="https://example.com/a")
+    assert got.success and got.output == UNTRUSTED_BANNER + "URL: https://example.com/a\n\n" + EMPTY
+    assert got.metadata == {"url": "https://example.com/a"}
+    world.pages["https://example.com/a"] = (200, PAGE, "text/html")
+    assert (await tool.run(url="https://example.com/a")).metadata["fetch_id"] == "pg-1"
+
+
+async def test_a_text_cut_in_the_page_ends_with_the_capped_sentence_before_it_is_retained(fetch, world):
+    world.capped = True
+    got = await fetch[0].run(url="https://example.com/a", max_chars=20000)
+    end = (f"[rendered text capped at {browser_tool.FETCH_MAX_BODY_BYTES} characters — the rest of this page was not read; "
+           "the retained text is a PREFIX, not the full page]")
+    assert got.output.endswith(PAGE + "\n" + end + f"\n\n[chars 0-{len(PAGE) + 1 + len(end)} of {len(PAGE) + 1 + len(end)} | "
+                               'fetch_id=pg-1 | web_page_query("pg-1", pattern) to search the full retained page]')
+
+
+async def test_the_https_test_ignores_case(fetch, world):
+    world.pages["HTTPS://example.com/a"] = world.pages["https://example.com/a"]
+    got = await fetch[0].run(url="HTTPS://example.com/a")
+    assert got.success and got.metadata["fetch_id"] == "pg-1"
+
+
+async def test_no_line_names_the_allowlist_and_only_the_not_https_line_names_web_fetch(fetch, world, monkeypatch):
+    tool, _ = fetch
+    lines = [(await tool.run(url=u)).error for u in
+             ("http://example.com/", "https://127.0.0.1/", "https://[::1]/", "https://224.0.0.1/", "https://user:pw@example.com/", "https://")]
+    for status in (404, 503):
+        world.pages["https://example.com/a"] = (status, PAGE, "text/html")
+        lines.append((await tool.run(url="https://example.com/a")).error)
+    for error in (FakeTimeout("t"), FakeError("Download is starting"), FakeError("net::ERR_FAILED")):
+        async def boom(url, error=error):
+            raise error
+
+        world.on_goto = boom
+        lines.append((await tool.run(url="https://example.com/a")).error)
+    assert all(lines) and not any("allow_private" in line for line in lines)
+    assert [line for line in lines if "web_fetch" in line] == [NOT_HTTPS]
+
+
+async def test_the_same_url_twice_gives_two_fetch_ids_with_equal_windows(fetch):
+    tool, store = fetch
+    one, two = await tool.run(url="https://example.com/a"), await tool.run(url="https://example.com/a")
+    assert (one.metadata["fetch_id"], two.metadata["fetch_id"]) == ("pg-1", "pg-2")
+    assert one.output.split("\n\n[chars")[0] == two.output.split("\n\n[chars")[0]
+    for fid in ("pg-1", "pg-2"):
+        assert (await WebPageQueryTool(store).run(fetch_id=fid, pattern="needle")).success
+
+
+async def test_two_concurrent_calls_on_one_bound_copy_get_distinct_fetch_ids(fetch):
+    tool, store = fetch
+    a, b = await asyncio.gather(tool.run(url="https://example.com/a"), tool.run(url="https://example.com/a"))
+    assert {a.metadata["fetch_id"], b.metadata["fetch_id"]} == {"pg-1", "pg-2"}
+
+
+async def test_info_is_stable_and_never_touches_the_runtime(world, runtime):
+    tool = BrowserFetchTool(runtime, ContentStore())
+    assert tool.info() == tool.info() and world.launches == [] and runtime._browser is None
+
+
+async def test_bound_copies_share_one_browser_and_keep_their_own_store(fetch, world):
+    tool, _ = fetch
+    world.pages["https://example.com/b"] = (200, "z" * 100, "text/html")
+    s1, s2 = ContentStore(), ContentStore()
+    one, two = tool.bound_to(s1), tool.bound_to(s2)
+    a, b = await asyncio.gather(one.run(url="https://example.com/a"), two.run(url="https://example.com/b"))
+    assert (a.metadata["fetch_id"], b.metadata["fetch_id"]) == ("pg-1", "pg-1") and len(world.launches) == 1
+    again = await one.run(url="https://example.com/a")
+    assert again.metadata["fetch_id"] == "pg-2"
+    assert not (await WebPageQueryTool(s2).run(fetch_id="pg-2", pattern="needle")).success

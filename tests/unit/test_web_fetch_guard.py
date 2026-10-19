@@ -649,3 +649,27 @@ async def test_a_lookup_that_times_out_or_answers_nothing_is_refused(monkeypatch
     assert await _refusal("https://example.com/") == "refused: could not resolve example.com"
     _dns(monkeypatch, {"example.com": []})
     assert await _refusal("https://example.com/") == "refused: could not resolve example.com"
+
+
+# --- the address verdicts carry the host they judged ---
+
+@pytest.mark.parametrize("raw, host, text", [
+    ("https://127.0.0.1/", "127.0.0.1", "refused: 127.0.0.1 is " + PRIVATE),
+    ("https://224.0.0.1/", "224.0.0.1", "refused: 224.0.0.1 is a multicast, unspecified or reserved address"),
+    ("https://intranet.example/", "intranet.example", "refused: intranet.example resolves to 10.0.0.5, which is " + PRIVATE),
+])
+async def test_an_address_verdict_is_a_not_public_refusal_naming_its_host(monkeypatch, raw, host, text):
+    _dns(monkeypatch, {"intranet.example": ["10.0.0.5"]})
+    with pytest.raises(netguard.NotPublic) as exc:
+        await netguard.check(raw)
+    assert isinstance(exc.value, netguard.Refused) and exc.value.host == host and str(exc.value) == text
+
+
+@pytest.mark.parametrize("raw", [
+    "https://user:pw@example.com/", "https://", "https://[address]/", "https://address.example/", "ftp://example.com/",
+])
+async def test_every_other_refusal_is_a_plain_refusal(monkeypatch, raw):
+    _dns(monkeypatch, {})
+    with pytest.raises(netguard.Refused) as exc:
+        await netguard.check(raw)
+    assert not isinstance(exc.value, netguard.NotPublic)
