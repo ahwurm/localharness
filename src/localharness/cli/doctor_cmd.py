@@ -462,14 +462,16 @@ def _window_part(plan) -> str | None:
     report = plan.report
     if report is None:
         return None
+    row = RUNTIMES[report.runtime]
     if report.mode == "fit":
-        return f"--max-model-len {report.asked} (fit)" if RUNTIMES[report.runtime].checkpoint else f"-c {report.asked} (fit)"
+        flag = "--max-model-len" if row.checkpoint else "--max-context" if "engine_config" in row.record_fields else "-c"
+        return f"{flag} {report.asked} (fit)"
     if report.mode == "not-computed":
         return "-c not computed"
     if report.mode == "fit-by-server":
         return "-c left to llama-server --fit"
     if report.mode == "record":
-        return f"-c {report.asked} (the record)"
+        return f"{'--max-context' if 'engine_config' in row.record_fields else '-c'} {report.asked} (the record)"
     return "-c from extra_args"
 
 
@@ -492,7 +494,7 @@ def _figures(plan) -> str | None:
     else:
         parts.append(f"dense {gib(split.gpu)} GiB")
         if split.experts:
-            where = {"experts in RAM": " in RAM", "gpu": " on the GPU"}.get(placed.where if placed else None, "")
+            where = {"experts in RAM": " in RAM", "strata": " in RAM", "gpu": " on the GPU"}.get(placed.where if placed else None, "")
             parts.append(f"experts {gib(split.experts)} GiB{where}")
         if split.input:
             parts.append(f"token tables {gib(split.input)} GiB read through mmap")
