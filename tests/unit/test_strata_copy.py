@@ -294,7 +294,7 @@ def test_a_hard_link_planted_at_the_log_is_replaced_and_its_other_name_untouched
     assert victim.read_text("utf-8") == "keep" and stat.S_IMODE(log.stat().st_mode) == 0o600
 
 
-def test_a_directory_planted_at_the_log_is_replaced_and_an_existing_log_keeps_its_bytes(tmp_path):
+def test_a_directory_planted_at_the_log_is_replaced_and_an_existing_log_is_emptied_and_closed(tmp_path):
     log = strata.log_path(tmp_path, 8083)
     log.mkdir(parents=True)
     (log / "x").write_text("x", "utf-8")
@@ -303,7 +303,7 @@ def test_a_directory_planted_at_the_log_is_replaced_and_an_existing_log_keeps_it
     log.write_text("earlier output", "utf-8")
     log.chmod(0o644)
     strata.write_copy(tmp_path, 8083, COPY)
-    assert log.read_text("utf-8") == "earlier output" and stat.S_IMODE(log.stat().st_mode) == 0o600
+    assert log.read_text("utf-8") == "" and stat.S_IMODE(log.stat().st_mode) == 0o600
 
 
 def test_the_copy_is_private_byte_identical_across_writes_and_leaves_no_temporary(tmp_path):
