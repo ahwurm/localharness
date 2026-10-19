@@ -58,8 +58,9 @@ class FakePage:
             return UA
         if world.eval_error:
             raise world.eval_error
+        assert expression == browser_tool._TEXT
         world.slices.append((expression, arg))
-        return [world.capped, world.pages[self.url][1]]
+        return world.eval_result if world.eval_result is not None else [world.capped, world.pages[self.url][1]]
 
 
 class FakeContext:
@@ -70,7 +71,11 @@ class FakeContext:
         self.browser.world.events.append(("route", pattern))
         self.routes.append((pattern, handler))
 
+    async def add_init_script(self, script):
+        self.browser.world.events.append(("init", script))
+
     async def new_page(self):
+        self.browser.world.events.append(("new_page", ""))
         return FakePage(self)
 
     async def close(self):
@@ -122,6 +127,7 @@ class World:
         self.launch_error = None
         self.on_goto = None
         self.eval_error = None
+        self.eval_result = None
         self.argv_edit = lambda argv: argv
         self.api = SimpleNamespace(
             Error=FakeError, TimeoutError=FakeTimeout,
@@ -361,12 +367,12 @@ async def test_a_render_opens_one_context_with_the_exact_options_and_routes_befo
     assert context.options == {
         "accept_downloads": False, "service_workers": "block", "java_script_enabled": True, "bypass_csp": False,
         "ignore_https_errors": False, "user_agent": f"{UA} LocalHarness/{__version__} (+https://localharness.dev)"}
-    assert [e for e in world.events if e[1] == "**/*" or e[1] == "https://example.com/"] == [
-        ("route", "**/*"), ("goto", "https://example.com/")]
+    assert [e for e in world.events if e[1] in ("**/*", browser_tool._INIT, "", "https://example.com/")][-4:] == [
+        ("route", "**/*"), ("init", browser_tool._INIT), ("new_page", ""), ("goto", "https://example.com/")]
     assert world.gotos[-1] == {"url": "https://example.com/", "wait_until": "load", "timeout": 30000}
     assert world.waits == [500]
-    assert world.slices == [(browser_tool._SLICE, browser_tool.FETCH_MAX_BODY_BYTES)]
-    assert "innerText" in browser_tool._SLICE and "0xD800" in browser_tool._SLICE
+    assert world.slices == [(browser_tool._TEXT, browser_tool.FETCH_MAX_BODY_BYTES)]
+    assert "innerText" in browser_tool._INIT and "0xD800" in browser_tool._INIT and "__lh_text" in browser_tool._TEXT
 
 
 class FakeRoute:
@@ -395,6 +401,21 @@ async def test_only_image_media_and_font_requests_are_aborted(world, runtime, ki
 async def test_whitespace_is_collapsed_the_way_web_fetch_does_and_an_empty_body_is_empty(world, runtime, text, expected):
     world.pages["https://example.com/"] = (200, text, "text/html")
     assert (await runtime.render("https://example.com/")).text == expected
+
+
+async def test_a_page_that_returns_more_than_the_cap_is_clamped_in_the_harness(world, runtime):
+    cap = browser_tool.FETCH_MAX_BODY_BYTES
+    world.eval_result = [True, "x" * (cap + 5000)]
+    got = await runtime.render("https://example.com/")
+    assert len(got.text) == cap and got.capped is True
+
+
+@pytest.mark.parametrize("result", [["yes", "text"], [False, 7], [False, None], [None, None]])
+async def test_a_mistyped_text_result_is_a_failed_render(world, runtime, result):
+    world.eval_result = result
+    with pytest.raises(browser_tool.RenderError) as e:
+        await runtime.render("https://example.com/")
+    assert (e.value.kind, e.value.detail) == ("failed", "") and world.open_contexts() == 0
 
 
 async def test_the_pages_capped_flag_comes_back(world, runtime):
