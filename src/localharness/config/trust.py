@@ -648,10 +648,7 @@ def _strata_entry(file: str, name: str, rel: str, path: Path, recorded: list[dic
 
 
 def strata_entries(global_dir: Path, file: str, prefix: str, mapping: Any) -> list[dict]:
-    """A Strata record's `launch` entries: its config bytes (`engine_config`) and `STRATA_CODE_FILES`
-    (`strata_code`), each hashed, never run. A file whose `(size, mtime_ns, inode, ctime_ns)` equals the recorded
-    one is not re-hashed, and one re-hashed to the recorded digest keeps its recorded entry, so a touch
-    asks nothing; a file that is not a regular file reads `unreadable`."""
+    """A Strata record's hashed `launch` entries (`engine_config`, `strata_code`); a touch keeps the recorded entry, a non-regular file reads `unreadable`."""
     if not isinstance(mapping, dict):
         return []
     root, config = mapping.get("engine_dir"), mapping.get("engine_config")

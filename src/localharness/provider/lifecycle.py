@@ -58,6 +58,7 @@ log = logging.getLogger(__name__)
 if TYPE_CHECKING:  # annotations only: autosense imports nothing from here, but the dataclass stays import-light
     from localharness.config.models import AutosenseConfig
     from localharness.provider.autosense import WindowReport
+    from localharness.provider import strata
     from localharness.provider.procfs import ProcRecord
 
 
@@ -428,7 +429,7 @@ class Sensed:
     snapshot: str | None = None
     snapshot_refusal: str | None = None
     first_build: bool = False
-    engine: Any = None
+    engine: "strata.EngineConfig | None" = None
     engine_refusal: str | None = None
 
 
