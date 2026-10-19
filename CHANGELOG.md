@@ -4,6 +4,22 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.19.3] — 2026-10-19
+
+A working record left by a previous session no longer follows you into the next one.
+
+### Changed
+- **A previous session's working record is paused.** At session start the record on disk is loaded
+  paused: it is out of the model's context, and a turn is not written into it, until the model
+  resumes it through the task tool (`show` lists it as `paused since <date>`, `resume` brings it
+  back, and starting new work replaces it). A bare "hello" gets no record and no rewritten "latest
+  human request". The system prompt says to look for a paused record only when the person asks what
+  work is here or to pick it up.
+
+### Known limitations
+- The pause is a session gate, not a relevance gate: nothing ages a record out, and the model
+  decides when to look. 0.19.2's known limitations stand; the live rows wait for the owner's run.
+
 ## [0.19.2] — 2026-10-18
 
 `/model` lists launches, not names: every entry is priced by the planner, says its runtime, where
