@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -268,6 +269,11 @@ def price(spec: ManagedServerConfig, sensed: "lifecycle.Sensed", tuned: Any, aut
     return _auto.Price(report, window, None, window) if mode == "fit" else _auto.Price(report, None, None, None)
 
 
+def _escaped(spec: ManagedServerConfig) -> str:
+    name = spec.served_name or Path(os.path.expanduser(str(spec.model))).name
+    return "".join(c if c.isprintable() else f"\\x{ord(c):02x}" if ord(c) < 0x100 else f"\\u{ord(c):04x}" for c in name)
+
+
 def launch_context(plan: "lifecycle.LaunchPlan | None", spec: ManagedServerConfig) -> int | None:
     planned = plan.serve_kwargs.get("context") if plan is not None else None
     return planned if planned is not None else spec.context
@@ -409,20 +415,56 @@ class StrataStrategy:
         unconfirmed = await asyncio.to_thread(verify_recorded, config_dir, spec, peer, engine)
         if unconfirmed is not None:
             raise server.LaunchRefused(unconfirmed)
+
+        async def prepare(chosen: "lifecycle.LaunchPlan | None") -> None:
+            copy = copy_of(engine, spec, context=launch_context(chosen, spec), port=spec.port, config_dir=config_dir)
+            try:
+                await asyncio.to_thread(write_copy, config_dir, spec.port, copy)
+            except OSError as exc:
+                raise RuntimeError(f"could not prepare {copy_file}: {exc.strerror or exc}") from exc
+
+        def launch(argv_: list[str]) -> tuple[int, list[str]]:
+            names: list[str] = []
+            pid_ = server.start_server(
+                config_dir, argv_, runtime=spec.runtime, dropped_out=names, cwd=str(_root(spec)), port=spec.port,
+                **server.key_kwargs(api_key))
+            return pid_, names
+
+        async def ready() -> list[str]:
+            return await server.wait_ready(
+                base_url, config_dir=config_dir, timeout_seconds=min(timeout_seconds, READY_SECONDS), on_poll=on_poll,
+                runtime=spec.runtime, ready=health_ready, engine_log=log_path(config_dir, spec.port),
+                **server.key_kwargs(api_key))
+
+        def stop() -> Any:
+            return asyncio.to_thread(
+                server.stop_server, config_dir, launch="binary", expect=identity(spec, config_dir), parent_first=True)
+
         lifecycle._say_plan(on_plan, plan)
-        copy = copy_of(engine, spec, context=launch_context(plan, spec), port=spec.port, config_dir=config_dir)
+        await prepare(plan)
+        pid, dropped = launch(cmd)
         try:
-            await asyncio.to_thread(write_copy, config_dir, spec.port, copy)
-        except OSError as exc:
-            raise RuntimeError(f"could not prepare {copy_file}: {exc.strerror or exc}") from exc
-        dropped: list[str] = []
-        pid = server.start_server(
-            config_dir, cmd, runtime=spec.runtime, dropped_out=dropped, cwd=str(_root(spec)), port=spec.port,
-            **server.key_kwargs(api_key))
-        served = await server.wait_ready(
-            base_url, config_dir=config_dir, timeout_seconds=min(timeout_seconds, READY_SECONDS), on_poll=on_poll,
-            runtime=spec.runtime, ready=health_ready, engine_log=log_path(config_dir, spec.port),
-            **server.key_kwargs(api_key))
+            served = await ready()
+        except RuntimeError as died:
+            retry = plan.retry() if plan is not None else None
+            if retry is None and plan is not None and plan.report is not None and plan.report.mode == "record":
+                retry = plan
+            if retry is None:
+                raise
+            try:
+                await stop()
+            except RuntimeError:
+                raise died from None
+            lifecycle._say_plan(on_plan, retry)
+            await prepare(retry)
+            pid, dropped = launch(list(retry.argv))
+            try:
+                served = await ready()
+            except RuntimeError as second:
+                with contextlib.suppress(RuntimeError):
+                    await stop()
+                raise RuntimeError(STRATA_TWICE.format(name=_escaped(spec)) + "\n" + str(second)) from None
+            plan = retry
         report = plan.report if plan is not None else None
         if report is not None:
             from localharness.agent.context import probe_window
