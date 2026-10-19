@@ -121,6 +121,16 @@ def roots(spec: ManagedServerConfig) -> tuple[str, ...]:
             os.path.dirname(os.path.realpath(os.path.expanduser(str(spec.model)))))
 
 
+def shared_folder(spec: ManagedServerConfig) -> str | None:
+    """The model's folder when it is `/`, the home directory or writable by everyone, else None."""
+    folder = roots(spec)[2]
+    try:
+        open_to_all = bool(os.stat(folder).st_mode & 0o002)
+    except OSError:
+        open_to_all = False
+    return folder if open_to_all or folder in (os.sep, os.path.realpath(os.path.expanduser("~"))) else None
+
+
 def inside(path: str, allowed: tuple[str, ...]) -> bool:
     try:
         return any(os.path.commonpath([path, root]) == root for root in allowed)
@@ -219,6 +229,9 @@ def sense(spec: ManagedServerConfig) -> tuple[EngineConfig | None, str | None]:
     outside = _paths(args, spec)
     if outside:
         offences.append(f"names {', '.join(_shown(p) for p in outside)} outside the Strata install, its data and the model folder")
+    shared = shared_folder(spec)
+    if shared:
+        offences.append(f"has its model in {_shown(shared, 200)}, which is the root, your home or open to every user")
     bad = _bad_keys(data, args)
     if bad:
         offences.append(f"has a bad value for {', '.join(bad)}")

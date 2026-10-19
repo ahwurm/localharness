@@ -95,6 +95,18 @@ def test_a_sibling_whose_name_only_starts_with_the_root_is_outside(tmp_path):
         assert sensed(tmp_path, extra=("--pack", token))[0][1] == refusal(OUTSIDE.format(token))
 
 
+def test_a_model_folder_that_is_shared_is_refused_naming_it(tmp_path, monkeypatch):
+    models = tmp_path / "models"
+    sensed(tmp_path)
+    SHARED = "has its model in {}, which is the root, your home or open to every user"
+    models.chmod(0o777)
+    assert sensed(tmp_path)[0][1] == refusal(SHARED.format(models))
+    models.chmod(0o755)
+    assert sensed(tmp_path)[0][1] is None
+    monkeypatch.setenv("HOME", str(models))
+    assert sensed(tmp_path)[0][1] == refusal(SHARED.format(models))
+
+
 def test_a_nul_byte_in_an_argument_refuses_with_the_config_sentence(tmp_path):
     spec, _ = build(tmp_path)
     for extra in (("--pack", "/x\x00y"), ("--ple-gguf=a\x00",)):
