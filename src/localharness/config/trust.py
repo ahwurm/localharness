@@ -632,7 +632,7 @@ def _strata_entry(file: str, name: str, rel: str, path: Path, recorded: list[dic
         st = None
     if st is None or not stat.S_ISREG(st.st_mode):
         return {"file": file, "kind": LAUNCH_KIND, "name": name, "shown": f"unreadable ({rel})"}
-    triple = [st.st_size, st.st_mtime_ns, st.st_ino]
+    triple = [st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns]
     old = next((e for e in sorted(recorded, key=lambda e: e.get("file") != file)
                 if e.get("kind") == LAUNCH_KIND and e.get("name") == name and "stat" in e
                 and str(e.get("shown", "")).endswith(f"({rel})")), None)
@@ -649,7 +649,7 @@ def _strata_entry(file: str, name: str, rel: str, path: Path, recorded: list[dic
 
 def strata_entries(global_dir: Path, file: str, prefix: str, mapping: Any) -> list[dict]:
     """A Strata record's `launch` entries: its config bytes (`engine_config`) and `STRATA_CODE_FILES`
-    (`strata_code`), each hashed, never run. A file whose `(size, mtime_ns, inode)` equals the recorded
+    (`strata_code`), each hashed, never run. A file whose `(size, mtime_ns, inode, ctime_ns)` equals the recorded
     one is not re-hashed, and one re-hashed to the recorded digest keeps its recorded entry, so a touch
     asks nothing; a file that is not a regular file reads `unreadable`."""
     if not isinstance(mapping, dict):
