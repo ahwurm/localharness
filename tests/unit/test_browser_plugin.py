@@ -1293,3 +1293,50 @@ async def test_with_the_plugin_off_nothing_moves(home, cache, world, tmp_path, m
     subagent.builtin_role_floors(base, None, None, None)
     assert [names for names in seen if "web_fetch" in names] == [THREE, THREE]
     assert world.launches == []
+
+
+# --- the phone labels it from its declaration ---------------------------------------------------------------
+
+from localharness.channels.mobile.channel import MobileChannel  # noqa: E402
+from localharness.core.bus import EventBus  # noqa: E402
+from localharness.tools.registry import ToolRegistry  # noqa: E402
+
+
+def framed(registry, name):
+    channel = MobileChannel(bus=EventBus(), config={})
+    channel._tool_registry = registry
+    return channel._ask_frame("r1", SimpleNamespace(tool_name=name, klass="network")).untrusted_ingest
+
+
+async def test_the_phone_labels_the_plugins_tool_untrusted_from_its_declaration(cache, world, tmp_path):
+    base = await base_with(cache, tmp_path)
+    assert framed(base, "browser_fetch") is True and framed(base, "plugin:browser.browser_fetch") is True
+    assert framed(base, "bash_exec") is False and framed(base, "") is False
+
+
+async def test_with_nothing_registered_the_name_set_decides():
+    empty = ToolRegistry()
+    assert (framed(empty, "web_fetch"), framed(empty, "bash_exec"), framed(empty, "")) == (True, False, False)
+    assert framed(None, "web_fetch") is True and framed(None, "browser_fetch") is False
+
+
+async def test_when_the_registry_answers_its_declaration_decides_over_the_name_set():
+    from tests.unit.test_capabilities import _FakeWebTool
+
+    registry = ToolRegistry()
+    await registry.register(_FakeWebTool("web_search", ingest="none"), scope="global")
+    assert framed(registry, "web_search") is False
+
+
+async def test_the_same_request_framed_twice_is_labelled_the_same(cache, world, tmp_path):
+    base = await base_with(cache, tmp_path)
+    assert framed(base, "browser_fetch") == framed(base, "browser_fetch") is True
+
+
+async def test_after_the_session_ends_the_label_falls_back_to_the_name_set(cache, world, tmp_path):
+    channel = MobileChannel(bus=EventBus(), config={})
+    channel._tool_registry = await base_with(cache, tmp_path)
+    request = SimpleNamespace(tool_name="browser_fetch", klass="network")
+    assert channel._ask_frame("r1", request).untrusted_ingest is True
+    channel.reset_session()
+    assert channel._ask_frame("r1", request).untrusted_ingest is False
