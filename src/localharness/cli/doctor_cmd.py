@@ -107,7 +107,7 @@ def _doctor_fit(
     falls back to the header's `context_length` when the probe did not report it. Reads one header
     and the memory probe; writes nothing (doctor never records the ledger, D-09, D-26)."""
     server = harness.server
-    if server is None or not RUNTIMES[server.runtime].gguf or not server.model:
+    if server is None or not RUNTIMES[server.runtime].gguf or has_engine_config(server.runtime) or not server.model:
         return None, trained
     from localharness.provider import autosense as _auto
 

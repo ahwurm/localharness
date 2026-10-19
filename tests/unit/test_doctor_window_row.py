@@ -16,7 +16,9 @@ import pytest
 from typer.testing import CliRunner
 
 from localharness.agent.context import WindowProbe, response_reserve
+from localharness.cli import doctor_cmd
 from localharness.cli.app import app
+from localharness.provider import autosense
 from localharness.provider.autosense import FreeMemory
 from localharness.provider.speed_stats import default_speed_stats_path
 from tests.unit.gguf_support import write_gguf
@@ -418,3 +420,10 @@ def test_the_row_prices_the_derived_kv_type_and_the_draft_share(tmp_path, mock_h
     with _probe(65536, 262144), _memory(6.0):
         result = _doctor(tmp_path)
     assert _row(result.output) == ("65,536", "262,144", f"{expected:,}")
+
+
+def test_an_engine_config_record_has_no_llamacpp_fit(monkeypatch):
+    monkeypatch.setattr(autosense, "compute_fit", lambda *a, **k: pytest.fail("priced as llama.cpp"))
+    server = type("S", (), {"runtime": "strata", "model": "/m.gguf"})()
+    harness = type("H", (), {"server": server, "autosense": None})()
+    assert doctor_cmd._doctor_fit(harness, 65536, 262144) == (None, 262144)
