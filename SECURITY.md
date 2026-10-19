@@ -1415,7 +1415,7 @@ retry after a load death.
 What the copy allows: Strata is not pointed at the config in its install but at a copy in the
 protected `strata/` folder of the config directory, built from the recorded bytes through an
 allowlist of keys, flags and paths (under the install, Strata's data folder beside it, or the
-model's folder). Any other key or flag, a repeated `--max-context`, `--native` or `--kv`, a URL, or a
+model's folder, which may not be `/`, your home or open to every user). Any other key or flag, a repeated `--max-context`, `--native` or `--kv`, a URL, or a
 path outside those refuses the launch and names it. The copy's `sampling` is filled from the model
 file's header when the config sets none.
 
