@@ -230,7 +230,8 @@ global config, a project's whole `proposer:` section is ignored. These are all o
 - `server` (the whole section: what the harness launches, with which arguments and on which
   address)
 - `autosense` (the whole section: the memory margins a launched server's window and prompt cache
-  are sized by, and the folders searched for model files)
+  are sized by, the folders searched for model files, and `strata_dir`, the install of Strata the
+  harness may launch, which selects a program the harness runs)
 - `effort_budget` (the whole section: the share of a reply's output headroom each reasoning level
   may spend)
 - `terminal.keys` (the whole section: which keys send a line into a running turn and which break the line)
@@ -1368,6 +1369,36 @@ the one key variable. The dropped names are logged, never their values. Stopping
 harness started: the pidfile records its start time and port, and the process must still be the
 launch the harness expects, so a process id since reused by another program is never signalled (see
 [Who may start, switch or stop a launched server](#who-may-start-switch-or-stop-a-launched-server)).
+
+**Strata.** Strata (`runtime: strata`, `provider_type: strata`) is a third-party engine, a Python
+server over a C++/CUDA engine, set up by its own installer, which the harness never runs: the
+installer can use privilege escalation and fetches its engine from the project's `latest` release,
+so `localharness doctor` prints the command for you to run yourself. The harness launches it only
+from a record you confirmed, on 127.0.0.1 only (`bind_all` and `extra_args` are refused for it).
+At every listing and every launch `engine_dir` is checked again, and nothing in it runs to decide
+that: the directory, its `serve`, `engine`, `.venv` and `.venv/bin` folders and its config files are
+owned by you and not group- or world-writable; `serve/server.py` and `engine/strata` are regular
+files, owned and closed the same way; and `.venv/bin/python` is either a regular
+file or a symlink whose target is a regular executable owned by the user or root and not group- or
+world-writable (a venv's interpreter is a link to the system's). `serve/server.py`, `engine/strata`
+and the config file must still hash to the recorded values (see "What the record holds of a
+launch"). Strata is not pointed at the config in its install: it is handed a copy in the protected
+`strata/` folder of the config directory, built from the recorded bytes through an allowlist of
+keys, flags and paths (under the install, Strata's data folder beside it, or the model's folder),
+and any other key or flag, or a path outside those, refuses the launch and names it. The server
+gets the key only as `STRATA_API_KEY` in its environment, never on its command line;
+`STRATA_SKIP_SHA256`, `STRATA_PREBUILT_URL`, `STRATA_SOURCE`, `STRATA_EXECV` and `HF_ENDPOINT` are
+dropped from the environment it inherits; and nothing of Strata is put on the harness's `PATH`.
+
+**What this does NOT cover for Strata.** The rest of its tree, its `serve.*` modules, its venv's
+site-packages and `~/.config/strata/settings.json`, runs unfingerprinted, so a writer into a
+user-owned install who leaves the hashed files alone is not asked about, and one who keeps a hashed
+file's size, inode and modification time is not re-hashed. Its installer takes the engine release
+from `latest` and checks it only against a size and SHA-256 published by the same origin: integrity
+against transport, not origin. Swift's shards are not hash-checked by Strata, and the record
+fingerprints the model's path, not its bytes, as for llama.cpp. The copy's `log` path is made
+owner-only by the harness just before the launch; a same-user process that swaps it between that
+check and Strata's open is a race the harness does not close.
 
 **What this does NOT cover.** As vLLM's source reads, its key guards the `/v1/` routes only, so
 its `/tokenize` answers without a key, and the harness's token counter and doctor's tokenizer
