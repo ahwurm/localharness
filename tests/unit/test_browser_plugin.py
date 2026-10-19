@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
 import re
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -329,12 +331,14 @@ async def test_the_user_agent_keeps_chromiums_own_string_and_appends_the_token(w
     assert ua == f"{UA} LocalHarness/{__version__} (+https://localharness.dev)" and "HeadlessChrome" in ua
 
 
-async def test_only_unowned_real_stale_profile_directories_are_removed_before_the_launch(
+async def test_only_unowned_real_old_profile_directories_are_removed_before_the_launch(
         world, tmp_path, runtime, monkeypatch):
-    live, stale = (tmp_path / f"playwright_chromiumdev_profile-{n}" for n in ("live", "stale"))
+    live, stale, fresh = (tmp_path / f"playwright_chromiumdev_profile-{n}" for n in ("live", "stale", "fresh"))
     other, target = tmp_path / "unrelated-dir", tmp_path / "link-target"
-    for d in (live, stale, target, other):
+    for d in (live, stale, fresh, target, other):
         d.mkdir()
+    old = time.time() - 600
+    os.utime(stale, (old, old))
     link = tmp_path / "playwright_chromiumdev_profile-link"
     link.symlink_to(target, target_is_directory=True)
     plain_file = tmp_path / "playwright_chromiumdev_profile-file"
@@ -349,7 +353,7 @@ async def test_only_unowned_real_stale_profile_directories_are_removed_before_th
     monkeypatch.setattr(browser_tool, "_command_lines", lines)
     await runtime.render("https://example.com/")
     assert not stale.exists() and seen[0] is True
-    assert live.exists() and other.exists() and plain_file.exists() and link.is_symlink() and target.exists()
+    assert fresh.exists() and live.exists() and other.exists() and plain_file.exists() and link.is_symlink() and target.exists()
 
 
 async def test_nothing_is_swept_when_the_running_processes_cannot_be_read(world, tmp_path, monkeypatch):
