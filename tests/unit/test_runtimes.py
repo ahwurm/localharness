@@ -127,7 +127,7 @@ def test_the_site_answers_each_row_carries():
     assert [r.exposed_by_default for r in RUNTIMES.values()] == [False, True, False, False, False]
     assert [r.window_note for r in RUNTIMES.values()] == [None, None, " · Ollama decides the window", "", None]
     assert vllm.facts() is tuning.MODEL_TYPE_PARSERS and llama.facts is None
-    assert dict(strata.facts()) == {} and strata.price is None and not strata.derived_args
+    assert dict(strata.facts()) == {} and callable(strata.price) and not strata.derived_args
     assert list(lms.derived_args) == ["--gpu"] and not ollama.derived_args
 
 

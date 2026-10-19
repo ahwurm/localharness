@@ -46,10 +46,10 @@ def _probe(name: str) -> Callable[..., Any]:
     return probe
 
 
-def _price(name: str) -> Callable[..., Any]:
+def _price(name: str, module: str = "autosense") -> Callable[..., Any]:
     def price(spec: Any, sensed: Any, tuned: Any, autosense: Any, floor: int | None = None) -> Any:
-        from localharness.provider import autosense as _auto
-        return getattr(_auto, name)(spec, sensed, tuned, autosense, floor)
+        return getattr(importlib.import_module(f"localharness.provider.{module}"), name)(
+            spec, sensed, tuned, autosense, floor)
     return price
 
 
@@ -104,7 +104,7 @@ RUNTIMES: Mapping[str, Runtime] = MappingProxyType({
     "strata": Runtime(
         name="Strata", strategy=_strategy("StrataStrategy", "strata"),
         unit_servable=lambda spec: True, label=lambda spec: "Strata",
-        key_env="STRATA_API_KEY", probe=_probe("_probe_strata"), price=None,
+        key_env="STRATA_API_KEY", probe=_probe("_probe_strata"), price=_price("price", "strata"),
         argv=_argv("argv", "strata"), facts=_no_parsers,
         record_fields=("mmproj", "served_name", "engine_dir", "engine_config"),
         gguf=True, checkpoint=False, path_binary=None, exposed_by_default=False,

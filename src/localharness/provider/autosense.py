@@ -385,7 +385,7 @@ class Placement:
     """Where a model's weights live and the window that leaves; `refusal` is the one sentence when nothing holds it."""
 
     fits: int | None
-    where: str | None  # "gpu", "experts in RAM", "vllm" or None when nothing was priced
+    where: str | None  # "gpu", "experts in RAM", "vllm", "strata" or None when nothing was priced
     gpu_bytes: int
     mmproj: int
     experts_ram: int
@@ -395,6 +395,7 @@ class Placement:
     cache_ram: int | None
     refusal: str | None
     swa_bytes: int = 0
+    parallel: int = 1
 
 
 def _window(room: float, kv: float, trained: int, swa: float = 0.0, cap: int | None = None) -> int:
@@ -950,7 +951,12 @@ def _placement_line(r: WindowReport) -> str | None:
     """The launch line for a priced fit: the window, where the weights live and the GPU's share of it."""
     p = r.placement
     window = r.served if r.verified and r.served else r.asked
-    if r.attached or r.mode != "fit" or p is None or p.where is None or not window or p.kv_per_token is None:
+    if r.attached or p is None or not window:
+        return None
+    if p.where == "strata":
+        return (f"window: {window:,} · Strata · experts pinned in RAM ({gib(p.experts_ram)} GiB)"
+                + (" · one request at a time" if p.parallel < 2 else ""))
+    if r.mode != "fit" or p.where is None or p.kv_per_token is None:
         return None
     share = gib(p.gpu_bytes + p.kv_per_token * window + p.swa_bytes)
     if p.where == "vllm":
@@ -1013,7 +1019,8 @@ def window_lines(report: WindowReport, ratios: Any, undo: str | None = None) -> 
     if not r.verified:
         line += " (not verified)"
     if r.retried and r.asked:
-        line += f" (after one retry at -c {r.asked:,})"
+        flag = "--max-context" if r.placement is not None and r.placement.where == "strata" else "-c"
+        line += f" (after one retry at {flag} {r.asked:,})"
     if (spill := spilled_bytes(r)) is not None:
         line += SPILL_CLAUSE.format(gib=gib(spill))
     if r.attached and undo in _UNDO:

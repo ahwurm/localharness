@@ -39,6 +39,10 @@ NATIVE_MISMATCH = ("{name}'s Strata config serves another file than its model: p
 CONFIG_REFUSAL = "{name}'s Strata config {what} — the harness launches Strata only with the keys, flags and paths it checks."
 UNCONFIRMED = "{name} cannot run here: its record has changes you have not confirmed"
 NOT_AN_INSTALL = "{name} cannot run here: its Strata install at {engine_dir} no longer passes the owner and mode checks."
+STRATA_HEADROOM = 10 * 10**9
+STRATA_TWICE = "Strata could not load {name} twice; its low-RAM setup (setup.sh --low-ram) or the llama.cpp preset may."
+NO_WINDOW = ("{name}'s Strata config sets no --max-context — re-run Strata's setup with --context, "
+             "or set context: on the record.")
 COPY_DELIMITER = "STRATA_COPY"
 DATA_DIR_NAME = "Strata-data"
 EFFORT_VALUES = ("none", "low", "medium", "high")
@@ -223,6 +227,45 @@ def verify_recorded(config_dir: Path, spec: ManagedServerConfig, peer: str | Non
             trust.LAUNCH_KIND, prefix + "engine_config", engine.sha256) in held:
         return None
     return UNCONFIRMED.format(name=name)
+
+
+def price(spec: ManagedServerConfig, sensed: "lifecycle.Sensed", tuned: Any, autosense: Any,
+          floor: int | None = None) -> "_auto.Price":
+    """The window and the three refusals a Strata launch prices itself by: RAM for the experts, GPU for the rest, the floor."""
+    name, header, split, mem, meminfo = _auto._label(spec), sensed.header, sensed.split, sensed.memory, sensed.meminfo
+    args = list(sensed.engine.data.get("args", []))
+    configured = _value(args, "--max-context")
+    if spec.context is not None:
+        window, where, mode = spec.context, "context:", "record"
+    elif configured is not None:
+        window, where, mode = int(configured), f"--max-context in {spec.engine_config}", "fit"
+    else:
+        return _auto.Price(None, None, None, None, NO_WINDOW.format(name=name))
+    experts = split.experts if split else sensed.weights or 0
+    if meminfo is None:
+        return _auto.Price(None, None, None, None, _auto.RAM_UNKNOWN_REFUSAL.format(name=name, need=_auto.gib(experts)))
+    headroom = max(STRATA_HEADROOM, autosense.unified_reserve_ratio * meminfo["MemTotal"])
+    if experts + headroom > meminfo["MemAvailable"]:
+        return _auto.Price(None, None, None, None, _auto.RAM_REFUSAL.format(
+            name=name, need=_auto.gib(experts), free=_auto.gib(max(0, meminfo["MemAvailable"] - headroom))))
+    gpu = (split.gpu if split else 0) + sensed.mmproj
+    kv = _auto.kv_bytes_per_token(header, *[_value(args, "--kv")] * 2, split)
+    free = mem.free_bytes if mem else None
+    if free is not None and kv is not None and gpu + kv * window > free:
+        return _auto.Price(None, None, None, None, _auto.VRAM_REFUSAL.format(
+            name=name, need=_auto.gib(gpu + kv * window), window=f" for {_auto.window_phrase(window)}", free=_auto.gib(free),
+            remedy=_auto.VRAM_REMEDY))
+    if floor and window < floor:
+        return _auto.Price(None, None, None, None, _auto.CONTEXT_FLOOR_REFUSAL.format(
+            name=name, window=_auto.window_phrase(window), where=where, floor=floor))
+    placement = _auto.Placement(
+        window, "strata", gpu, sensed.mmproj, experts, kv, free or 0, free or 0, None, None,
+        parallel=sensed.engine.data.get("parallel", 1))
+    report = _auto.WindowReport(
+        served=None, trained=header.get("context_length"), fits=window, free_bytes=free,
+        total_bytes=mem.total_bytes if mem else None, weights_bytes=sensed.weights, asked=window, mode=mode,
+        verified=False, runtime="strata", placement=placement, floor=floor)
+    return _auto.Price(report, window, None, window) if mode == "fit" else _auto.Price(report, None, None, None)
 
 
 def launch_context(plan: "lifecycle.LaunchPlan | None", spec: ManagedServerConfig) -> int | None:
