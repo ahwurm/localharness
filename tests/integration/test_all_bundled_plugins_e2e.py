@@ -25,7 +25,7 @@ from localharness.cli.app import app
 from tests.dispatch_support import isolate_discord_env
 
 BUNDLED = {"image", "mobile", "memory", "dispatch", "autoresearch", "browser"}
-ON_BY_DEFAULT = ["mobile", "memory", "dispatch", "autoresearch"]  # image is off by default
+ON_BY_DEFAULT = ["mobile", "memory", "dispatch", "autoresearch"]
 runner = CliRunner()
 
 
@@ -51,7 +51,7 @@ def test_this_file_never_patches_the_bundled_list():
 
 
 @pytest.mark.plugin("autoresearch")  # asserts autoresearch's default ON state
-def test_plugins_list_shows_all_five(components_home):
+def test_plugins_list_shows_every_bundled_plugin(components_home):
     rows = {r["name"]: r for r in json.loads(_run("plugins", "list", "--json").stdout)}
     assert BUNDLED <= set(rows), sorted(rows)
     assert rows["autoresearch"]["state_kind"] == "on", rows["autoresearch"]
@@ -62,13 +62,13 @@ def test_components_list_has_an_enabled_row_for_each(components_home):
     assert {f"{n}.enabled" for n in BUNDLED} <= paths, sorted(p for p in paths if p.endswith(".enabled"))
 
 
-def test_the_loader_partitions_all_five(components_home):
+def test_the_loader_partitions_every_bundled_plugin(components_home):
     from localharness.cli.components_cmd import _build_loader
     assert BUNDLED <= _build_loader().plugin_names()
 
 
 @pytest.mark.plugin("autoresearch")  # asserts autoresearch's default ON state
-def test_the_resolve_plan_has_all_five_bundled(components_home):
+def test_the_resolve_plan_marks_every_bundled_plugin_bundled(components_home):
     from localharness.cli.components_cmd import _build_loader
     from localharness.plugins.resolve import resolve
     entries = resolve(_build_loader()).plan.entries
@@ -76,7 +76,7 @@ def test_the_resolve_plan_has_all_five_bundled(components_home):
     assert {e.name: e.state for e in entries}["autoresearch"] == "on"
 
 
-def test_channel_validation_reads_the_five_manifests(monkeypatch):
+def test_channel_validation_reads_every_bundled_manifest(monkeypatch):
     from localharness.plugins import builtin
     from localharness.plugins.channels import channel_names
     seen: list[tuple] = []
@@ -88,14 +88,14 @@ def test_channel_validation_reads_the_five_manifests(monkeypatch):
 
 
 @pytest.mark.plugin("autoresearch")  # asserts autoresearch's default ON state
-def test_doctor_plugins_line_lists_the_on_four(components_home, all_extras):
+def test_doctor_plugins_line_lists_the_plugins_on_by_default(components_home, all_extras):
     out = _run("doctor", ok=False).output  # exit 1 here = the unreachable test provider, not a plugin
     line = next(ln for ln in out.splitlines() if ln.startswith("✓ Plugins: "))
     assert line.removeprefix("✓ Plugins: ").split(", ") == ON_BY_DEFAULT, line
     assert "image: off — turn on: localharness plugins enable image" in out, out
 
 
-async def test_the_start_banner_lists_the_on_four(tmp_path, monkeypatch, all_extras):
+async def test_the_start_banner_lists_the_plugins_on_by_default(tmp_path, monkeypatch, all_extras):
     from localharness.cli.start_cmd import _start_async
     from tests.integration.test_workspace_cli_surface_e2e import _offline_provider
     from tests.unit.test_start_cmd import _capture_start_console, _stub_start_boundaries
