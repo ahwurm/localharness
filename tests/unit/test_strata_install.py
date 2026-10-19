@@ -126,6 +126,13 @@ def test_a_config_that_is_not_utf8_is_skipped(tmp_path):
     assert _sense(engine, shard1).configs == ((CONFIG_NAME, _real(shard1)),)
 
 
+def test_a_config_whose_native_has_a_nul_byte_is_skipped(tmp_path):
+    engine, shard1, _ = _setup(tmp_path)
+    (engine / "strata-a.json").write_text(json.dumps(strata_config(str(shard1) + "\x00")))
+    (engine / "strata-a.json").chmod(0o644)
+    assert _sense(engine, shard1).configs == ((CONFIG_NAME, _real(shard1)),)
+
+
 def test_configs_are_listed_in_name_order_and_only_those_naming_a_known_file(tmp_path):
     engine, shard1, models = _setup(tmp_path)
     for name, model in (("strata-z.json", shard1), ("strata-a.json", shard1), ("strata-m.json", models / "x.gguf")):

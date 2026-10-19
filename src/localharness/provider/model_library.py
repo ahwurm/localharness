@@ -478,7 +478,10 @@ def _native_of(root: Path, config: Path) -> str | None:
         return None
     i = args.index("--native")
     value = args[i + 1] if i + 1 < len(args) else None
-    return os.path.realpath(os.path.join(root, os.path.expanduser(value))) if isinstance(value, str) and value else None
+    try:
+        return os.path.realpath(os.path.join(root, os.path.expanduser(value))) if isinstance(value, str) and value else None
+    except ValueError:
+        return None
 
 
 def _install_at(root: Path, known: Collection[str]) -> StrataInstall | None:
