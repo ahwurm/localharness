@@ -50,6 +50,7 @@ VENV_PYTHON = ".venv/bin/python"
 SERVE_PY = "serve/server.py"
 SINGLE_FLAGS = ("--max-context", "--native", "--kv")
 SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
+EXPANDED = re.compile(r"[$`%]")
 DATA_DIR_NAME = "Strata-data"
 EFFORT_VALUES = ("none", "low", "medium", "high")
 SAMPLING_KEYS = (
@@ -136,10 +137,14 @@ def _number(token: str) -> bool:
 
 
 def _paths(args: list[str], spec: ManagedServerConfig) -> list[str]:
-    values = [t.partition("=")[2] if is_flag(t) else t for t in args]
-    like = [v for v in values if (("/" in v or v[:1] in ("~", ".")) and not _number(v))]
     allowed = roots(spec)
-    return [v for v in like if SCHEME.match(v) or not inside(os.path.realpath(_root(spec) / os.path.expanduser(v)), allowed)]
+
+    def outside(part: str) -> bool:
+        like = ("/" in part or part[:1] in ("~", ".")) and not _number(part)
+        return like and bool(SCHEME.match(part) or not inside(os.path.realpath(_root(spec) / os.path.expanduser(part)), allowed))
+
+    values = [t.partition("=")[2] if is_flag(t) else t for t in args]
+    return [v for v in values if EXPANDED.search(v) or any(outside(p) for p in (re.split(r"[=,:]", v) if "=" in v else [v]))]
 
 
 def _max_contexts(args: list[str]) -> list[str | None]:

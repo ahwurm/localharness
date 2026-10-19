@@ -81,6 +81,15 @@ def test_a_path_outside_the_roots_refuses_naming_it(tmp_path, token):
     assert why == refusal(OUTSIDE.format(token))
 
 
+@pytest.mark.parametrize("token", ["ngram=/etc/passwd", "a=x,/etc/passwd", "k=v:/etc/passwd", "$HOME/x", "`id`", "%USERPROFILE%/x"])
+def test_a_value_that_expands_or_hides_a_path_after_a_separator_is_outside(tmp_path, token):
+    assert sensed(tmp_path, extra=("--pack", token))[0][1] == refusal(OUTSIDE.format(token))
+
+
+def test_a_separated_value_whose_paths_sit_in_the_roots_passes(tmp_path):
+    assert sensed(tmp_path, extra=("--pack", f"ngram=mtp/rt,{tmp_path}/Strata-data/x"))[0][1] is None
+
+
 def test_a_sibling_whose_name_only_starts_with_the_root_is_outside(tmp_path):
     for token in ("../Strata-evil/x", "../Strata-dataX/x", "../models-evil/x"):
         assert sensed(tmp_path, extra=("--pack", token))[0][1] == refusal(OUTSIDE.format(token))
