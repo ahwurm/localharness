@@ -52,6 +52,8 @@ class FakePage:
         world = self.context.browser.world
         if expression == "navigator.userAgent":
             return UA
+        if world.eval_error:
+            raise world.eval_error
         world.slices.append((expression, arg))
         return [world.capped, world.pages[self.url][1]]
 
@@ -115,6 +117,7 @@ class World:
         self.canary = "proxy"
         self.launch_error = None
         self.on_goto = None
+        self.eval_error = None
         self.argv_edit = lambda argv: argv
         self.api = SimpleNamespace(
             Error=FakeError, TimeoutError=FakeTimeout,
@@ -334,3 +337,182 @@ async def test_nothing_is_swept_when_the_running_processes_cannot_be_read(world,
 def test_the_real_command_lines_include_this_process():
     mine = browser_tool.Path("/proc/self/cmdline").read_bytes().decode().split("\0")[0]
     assert any(argv[:1] == [mine] for argv in browser_tool._command_lines())
+
+
+async def until(predicate, seconds=2.0):
+    for _ in range(int(seconds / 0.01)):
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition not reached")
+
+
+def tool_contexts(world):
+    return [c for c in world.contexts if c.options]
+
+
+async def test_a_render_opens_one_context_with_the_exact_options_and_routes_before_it_navigates(world, runtime):
+    await runtime.render("https://example.com/")
+    (context,) = tool_contexts(world)
+    assert context.options == {
+        "accept_downloads": False, "service_workers": "block", "java_script_enabled": True, "bypass_csp": False,
+        "ignore_https_errors": False, "user_agent": f"{UA} LocalHarness/{__version__} (+https://localharness.dev)"}
+    assert [e for e in world.events if e[1] == "**/*" or e[1] == "https://example.com/"] == [
+        ("route", "**/*"), ("goto", "https://example.com/")]
+    assert world.gotos[-1] == {"url": "https://example.com/", "wait_until": "load", "timeout": 30000}
+    assert world.waits == [500]
+    assert world.slices == [(browser_tool._SLICE, browser_tool.FETCH_MAX_BODY_BYTES)]
+    assert "innerText" in browser_tool._SLICE and "0xD800" in browser_tool._SLICE
+
+
+class FakeRoute:
+    def __init__(self, resource_type):
+        self.request, self.did = SimpleNamespace(resource_type=resource_type), None
+
+    async def abort(self):
+        self.did = "abort"
+
+    async def continue_(self):
+        self.did = "continue"
+
+
+@pytest.mark.parametrize("kind,did", [
+    ("image", "abort"), ("media", "abort"), ("font", "abort"), ("document", "continue"), ("script", "continue"),
+    ("stylesheet", "continue"), ("xhr", "continue"), ("fetch", "continue"), ("websocket", "continue")])
+async def test_only_image_media_and_font_requests_are_aborted(world, runtime, kind, did):
+    await runtime.render("https://example.com/")
+    ((pattern, handler),) = tool_contexts(world)[0].routes
+    route = FakeRoute(kind)
+    await handler(route)
+    assert pattern == "**/*" and route.did == did
+
+
+@pytest.mark.parametrize("text,expected", [("a  b\t\tc\n\n\n\nd", "a b c\n\nd"), ("  \n padded \n", "padded"), ("", "")])
+async def test_whitespace_is_collapsed_the_way_web_fetch_does_and_an_empty_body_is_empty(world, runtime, text, expected):
+    world.pages["https://example.com/"] = (200, text, "text/html")
+    assert (await runtime.render("https://example.com/")).text == expected
+
+
+async def test_the_pages_capped_flag_comes_back(world, runtime):
+    world.capped = True
+    assert (await runtime.render("https://example.com/")).capped is True
+
+
+async def test_an_http_error_status_is_returned_for_the_tool_to_judge(world, runtime):
+    world.pages["https://example.com/"] = (404, "gone", "text/html")
+    assert (await runtime.render("https://example.com/")).status == 404
+
+
+@pytest.mark.parametrize("make,kind,detail", [
+    (lambda: FakeTimeout("Page.goto: Timeout 30000ms exceeded."), "timeout", ""),
+    (lambda: FakeError("Page.goto: Download is starting"), "file", ""),
+    (lambda: FakeError("net::ERR_TUNNEL_CONNECTION_FAILED at https://x/\ncall log"), "failed",
+     "net::ERR_TUNNEL_CONNECTION_FAILED at https://x/"),
+    (lambda: FakeError("Page.goto: net::ERR_NAME_NOT_RESOLVED at https://x/\ncall log"), "failed",
+     "net::ERR_NAME_NOT_RESOLVED at https://x/")])
+async def test_a_navigation_error_becomes_one_kind_and_the_context_is_closed(world, runtime, make, kind, detail):
+    async def fail(url):
+        raise make()
+
+    world.on_goto = fail
+    with pytest.raises(browser_tool.RenderError) as e:
+        await runtime.render("https://example.com/")
+    assert (e.value.kind, e.value.detail) == (kind, detail)
+    assert len(tool_contexts(world)) == 1 and world.open_contexts() == 0
+
+
+async def test_a_pdf_response_is_a_file_and_every_outcome_closes_its_context(world, runtime):
+    world.pages["https://example.com/doc.pdf"] = (200, "", "application/pdf; charset=binary")
+    with pytest.raises(browser_tool.RenderError) as e:
+        await runtime.render("https://example.com/doc.pdf")
+    assert e.value.kind == "file" and world.open_contexts() == 0
+    await runtime.render("https://example.com/")
+    assert len(tool_contexts(world)) == 2 and world.open_contexts() == 0
+
+
+async def test_an_error_while_reading_the_text_is_a_failed_render_with_the_context_closed(world, runtime):
+    world.eval_error = FakeError("Page.evaluate: Execution context was destroyed")
+    with pytest.raises(browser_tool.RenderError) as e:
+        await runtime.render("https://example.com/")
+    assert (e.value.kind, e.value.detail) == ("failed", "Execution context was destroyed")
+    assert world.open_contexts() == 0
+
+
+def gate_on(world, *urls):
+    gates = {u: asyncio.Event() for u in urls}
+
+    async def wait(url):
+        if url in gates:
+            await gates[url].wait()
+
+    world.on_goto = wait
+    for u in urls:
+        world.pages[u] = (200, u, "text/html")
+    return gates
+
+
+async def test_two_renders_at_once_use_two_contexts_and_a_third_waits_for_one_to_close(world, runtime):
+    await runtime.ensure()
+    gates = gate_on(world, *(f"https://example.com/{i}" for i in range(3)))
+    tasks = [asyncio.create_task(runtime.render(u)) for u in gates]
+    await until(lambda: len(tool_contexts(world)) == 2)
+    await asyncio.sleep(0.05)
+    assert len(tool_contexts(world)) == 2 and world.open_contexts() == 2
+    gates["https://example.com/0"].set()
+    await until(lambda: len(tool_contexts(world)) == 3)
+    for g in gates.values():
+        g.set()
+    results = await asyncio.gather(*tasks)
+    assert [r.text for r in results] == list(gates)
+    assert len({id(c) for c in tool_contexts(world)}) == 3 and world.open_contexts() == 0
+
+
+async def test_two_first_renders_started_together_launch_once(world, runtime):
+    a, b = await asyncio.gather(runtime.render("https://example.com/"), runtime.render("https://example.com/"))
+    assert a == b and len(world.launches) == 1
+
+
+async def test_ensure_twice_launches_once_and_close_twice_is_a_no_op(world, runtime):
+    first = await runtime.ensure()
+    assert await runtime.ensure() is first and len(world.launches) == 1
+    await runtime.close()
+    await runtime.close()
+    assert world.stopped == 1 and first.closed
+
+
+async def test_a_disconnected_browser_is_relaunched_by_the_next_render(world, runtime):
+    await runtime.render("https://example.com/")
+    world.browsers[0].connected = False
+    await runtime.render("https://example.com/")
+    assert len(world.launches) == 2 and world.browsers[0].closed
+
+
+async def test_the_browser_closes_after_the_idle_time_and_the_next_render_launches_again(world, runtime):
+    runtime._idle_s = 0.05
+    await runtime.render("https://example.com/")
+    await until(lambda: world.browsers[0].closed, 1)
+    assert world.stopped == 1
+    await runtime.render("https://example.com/")
+    assert len(world.launches) == 2
+
+
+async def test_a_render_in_flight_holds_off_the_idle_close(world, runtime):
+    runtime._idle_s = 0.05
+    await runtime.render("https://example.com/")
+    gates = gate_on(world, "https://example.com/slow")
+    task = asyncio.create_task(runtime.render("https://example.com/slow"))
+    await until(lambda: len(tool_contexts(world)) == 2)
+    await asyncio.sleep(0.2)
+    assert not world.browsers[0].closed
+    gates["https://example.com/slow"].set()
+    assert (await task).text == "https://example.com/slow"
+    await until(lambda: world.browsers[0].closed, 1)
+    assert len(world.launches) == 1
+
+
+async def test_close_cancels_a_pending_idle_close(world, runtime):
+    runtime._idle_s = 0.05
+    await runtime.render("https://example.com/")
+    await runtime.close()
+    await asyncio.sleep(0.15)
+    assert world.stopped == 1
