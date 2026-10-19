@@ -4,6 +4,114 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.19.2] — 2026-10-18
+
+`/model` lists launches, not names: every entry is priced by the planner, says its runtime, where
+its weights sit and its window, and a file that is not yet a record is set up on the way after one
+question. The dense 27B no longer dies at its trained window: a compute reserve sits beside the 10%
+margin, and a launch that would leave layers on the CPU says so on its line. A sliding-window model
+(the gemma 4) is priced by the KV its layers hold, not by the full-attention figure that refused it.
+Strata, the pinned-experts engine for Flash-Next, is the runtime table's fifth row: a person's
+install beside the shards is sensed, fingerprinted and launched through the same keyed, loopback,
+verified-stop path as the others, with its config copied through an allowlist. The security docs
+and the specs say all of it. Spec 22 §10-§13, §16.
+
+### Added
+- **`/model` as launch plans (spec 22 §10).** One builder (`plan_entries`) makes the list the REPL,
+  `localharness model` and the picker show: numbered entries are only what this box can switch to
+  now, each `<runtime> · experts in RAM · <window>` as the planner prices it (`vLLM · 100,864`,
+  `llama.cpp · experts in RAM · 262,144`); a file or checkpoint that is not yet a record is listed
+  `(not set up)` and set up when picked (`Set it up and switch?` once, the record shown first); what
+  cannot launch is a `not offered: <name> — <reason>` line, with the planner's refusal as the reason
+  (the gemma 4 at its full-attention price was one; it is now offered at its sliding-window window).
+  A serving endpoint's extra registry names are no longer pickable. A model under a unit of your
+  own is said once, when it changes: `<name> is served by <unit> (pid N) …`.
+- **Hugging Face snapshots resolved by contents.** A cached repo is listed by what its snapshot
+  holds (a vLLM checkpoint, a GGUF set, or neither), walked with `lstat` under the repo's `blobs/`;
+  `config.json` and `tokenizer_config.json` are read under a cap with `json.loads` only; an
+  `auto_map` in either is `not offered: needs trust_remote_code` (the harness never passes
+  `--trust-remote-code`); the launch passes the verified snapshot directory with `HF_HUB_OFFLINE=1`.
+- **The compute reserve and the spill clause (spec 22 §7.4, §7.5).** `autosense.compute_reserve`
+  (3.0 GiB, machine-level) is held back beside the 10% margin, measured on 0.19.1's live morning
+  where the dense 27B's projector buffer failed at its trained window: the Swift 27B at 30.2 GiB free
+  now plans 209,920 where 0.19.1 planned 262,144 and died at load. A llama.cpp launch with no
+  hand `-ngl` reads the GPU after its window probe; layers the server kept on the CPU end the
+  launch line ` — N GiB of layers on the CPU, decode will be slow` (the 10 GiB class and up).
+  Every refusal names a remedy in the community's order: a q8_0 KV cache, MTP off, a smaller quant.
+- **Sliding-window KV pricing (spec 22 §7.1).** A model whose attention alternates full and
+  sliding layers (the gemma 4) is priced per layer kind; the gemma 4 31B Q4_K_M plans 152,832 on the box's card where the full-attention figure refused it
+  (183,552 with `-np 1`). vLLM's sliding layers are priced the same way.
+- **The vLLM first-use build line.** A vLLM launch whose kernels are not yet built for the card
+  says so on its launch line and runs the build under `MAX_JOBS` set to half the CPUs unless the record sets it (0.19.1's
+  live morning froze the desktop building on every core).
+- **Strata (spec 22 §11).** `runtime: strata` is the table's fifth row. A record names the install
+  (`engine_dir`) and one of its configs (`engine_config`); the harness senses the install beside
+  your shards (`autosense.strata_dir`, machine-level, else `~/Strata` or `~/src/Strata`), lists
+  `· Strata available: /model <name>-strata` on the Flash-Next entry, sets the record up with the
+  same one question beside the llama.cpp preset, prices the launch (the experts pinned in RAM with
+  Strata's 10 GB headroom beside the system reserve; the dense layers, projector and KV at the
+  config's `--kv` on the GPU; the window from the record's `context:` or the config's
+  `--max-context`, never below the floor), launches `<engine_dir>/.venv/bin/python serve/server.py
+  --engine strata --config <copy> --port <port> --host 127.0.0.1` from the install with the key only
+  as `STRATA_API_KEY`, waits on `/health` `loaded`, and says `window: 65,536 · Strata · experts
+  pinned in RAM (40.0 GiB) · one request at a time`. A load death relaunches once (a config window
+  halved, never under the floor; a record's pinned `context` at the same window) after re-checking
+  the recorded files; a second death says `Strata could not load <name> twice; its low-RAM setup
+  (setup.sh --low-ram) or the llama.cpp preset may.` with the engine log's tail. `/effort` maps onto
+  Strata's `reasoning_effort` (`max` sent as `high`); `model --script` prints the launch as a
+  here-document that writes the same copy; the autostart unit's `serve` runs it from the install;
+  `doctor` has a `Strata:` row and prints the project's install command for you to run yourself
+  (the harness never runs Strata's installer).
+- `doctor`'s `Tuning:` row ends `serving now: mtp on/off` read from the live process; a swap's
+  receipt names a retry recorded during it; `confirm_launch` stamps where a checkpoint was served.
+
+### Changed
+- The remembered launch date prints as the local calendar date. The resume clause (`your last
+  /model choice`) rides the launch line and is gone from the attach. `start` senses first and
+  probes capabilities only when the selected record's address answers. The library ranks models by
+  the larger window, then the fewer GPU-resident bytes. The catalogue has 249 models.
+- The engine-config dispatch is one predicate on the runtime row (`has_engine_config`); specs 08,
+  10, 13, 16, 19, 20 and 22 are amended at spec 22 §12's places to what shipped.
+
+### Security
+- **Strata runs only what you confirmed.** `serve/server.py`, `engine/strata` and the config are
+  fingerprinted (SHA-256, re-hashed when a file's size, inode, modification time or change time
+  moves) under thirteen launch keys (`engine_dir`, `engine_config` added) and re-checked at every
+  launch and before the one retry; the install's directories and files are owner- and mode-checked
+  (`.venv/bin/python` a regular executable, or a symlink whose target is owned by the user or root
+  and not group- or world-writable); the config reaches Strata only as a copy built through an
+  allowlist of keys, flags and paths (under the install, its data folder or the model's folder,
+  which may not be `/`, your home or world-writable; values with `$`, backticks, `%`, a NUL byte or
+  a URL scheme refused; a repeated `--max-context`, `--native` or `--kv` refused; `--max-context` at
+  most nine digits and at least 1) into the protected `strata/` folder (the twelfth protected
+  entry); `STRATA_SKIP_SHA256`, `STRATA_PREBUILT_URL`, `STRATA_SOURCE`, `STRATA_EXECV` and
+  `HF_ENDPOINT` are dropped from its environment; `engine_dir` and `strata_dir` must be absolute;
+  the stop is proven from `/proc` before every signal and signals the parent first. SECURITY.md's
+  Strata entry names what runs, what is checked, what is hashed, what the copy allows, what the
+  environment loses, and what stays open (the rest of Strata's tree, the interpreter's link target,
+  the `latest` engine release checked only against a same-origin size and SHA-256, Swift's shards
+  unhashed, the copy and the model folder's links between the harness's check and Strata's open).
+- The HF snapshot walk, the `auto_map` refusal and `HF_HUB_OFFLINE=1` are stated; `MAX_JOBS` is
+  capped; the tensor-table cross-checks and the one halved retry bound the one optimistic window.
+
+### Known limitations
+- **No live row ran for 0.19.2.** 0.19.1's live run on the reference box (2026-10-17) is the last
+  measured one; the figures above (the gemma 4's 152,832 and 183,552, Flash-Next's 40.0 GiB of experts,
+  the Strata launch line) come from the unit suite's fixtures copied from that box, not from a launch.
+  Spec 22 §15's rows 8-12 and 18 (Strata: the listing, the set-up question, the launch and its line,
+  `start` on the record, the stop with no engine child left, a dead engine under a living parent) and
+  13-17 (the dense 27B at its trained window under the compute reserve, the gemma GGUF launch, the
+  NVFP4 vLLM set-up under `MAX_JOBS`, the spill clause, the foreign unit) wait for the owner's run:
+  there is no Strata install on the box, and a swap would have stopped the server a person was using.
+- `swap_refusal` prices a Strata target's RAM before the incumbent stops, so a pinned-RAM
+  incumbent (a second Strata, a `--no-mmap` launch) can draw a RAM refusal that stopping it would
+  have cleared; the refusal stops nothing and names the incumbent.
+- The unit path and the reconnect loop show no engine log on a Strata death. A pinned `context:`
+  record relaunches once at the same window on a load death. `/effort show` prints the level as
+  set (`max` is sent to Strata as `high`). Strata's own API has had no outside audit.
+- The floor counts the system prompt and tool schemas; the vLLM reference rows still download the
+  whole repository, unpinned. One harness-launched server per config dir.
+
 ## [0.19.1] — 2026-10-17
 
 A launch is priced from the model's own tensor table, a model that fits nowhere is refused in one
