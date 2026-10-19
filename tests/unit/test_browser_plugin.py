@@ -607,7 +607,9 @@ def test_the_schema_is_web_fetchs_with_the_one_description_and_its_name():
     tool = BrowserFetchTool(object(), ContentStore())
     schema, web = tool.info(), WebFetchTool(ContentStore()).info()
     assert schema.description == DESCRIPTION
-    assert schema.parameters == web.parameters
+    assert schema.parameters["properties"]["url"] == {"type": "string", "description": "The https URL to render."}
+    assert {**schema.parameters["properties"], "url": None} == {**web.parameters["properties"], "url": None}
+    assert {**schema.parameters, "properties": None} == {**web.parameters, "properties": None}
     assert list(schema.parameters["properties"]) == list(web.parameters["properties"])
     assert schema.name == "browser_fetch" and isinstance(tool, StoreBound)
     assert (schema.group, schema.estimated_tokens, schema.destructive) == (web.group, web.estimated_tokens, False)
