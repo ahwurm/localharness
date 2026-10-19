@@ -757,7 +757,7 @@ def cache(monkeypatch, tmp_path):
 
 
 def install_shell(root: Path, revision: int = 1248) -> str:
-    (root / f"chromium_headless_shell-{revision}").mkdir(parents=True)
+    (root / f"chromium_headless_shell-{revision}").mkdir(parents=True, exist_ok=True)
     return f"chromium_headless_shell-{revision}"
 
 
@@ -1111,3 +1111,185 @@ def test_enabling_asks_for_the_download_once_runs_it_and_proves_the_launch(home,
     for text in ("browser-binary", "Checking it now:", "browser-launch: reach check ok", BrowserPlugin.manifest.next_steps):
         assert text in result.output, text
     assert overrides(home) == {"browser": {"enabled": True}}
+
+
+def no_download(monkeypatch, cache):
+    install = FakeInstall(cache)
+    monkeypatch.setattr(subprocess, "run", install)
+    return install
+
+
+def test_without_the_extra_the_enable_is_written_and_nothing_is_downloaded(home, terminal, cache, monkeypatch):
+    monkeypatch.setitem(resolve_mod.resolve.__kwdefaults__, "extra_installed", lambda e: False)
+    install = no_download(monkeypatch, cache)
+    result = enable(home)
+
+    assert result.exit_code == 0, result.output
+    assert overrides(home) == {"browser": {"enabled": True}}
+    assert "browser is missing its install extra — install `localharness[browser]` to use it" in result.output
+    assert terminal == [] and install.calls == [] and "Checking it now:" not in result.output
+    assert BrowserPlugin.manifest.next_steps in result.output
+
+
+def test_with_chromium_and_every_row_passing_it_asks_nothing(home, terminal, cache, monkeypatch):
+    install_shell(cache)
+    install = no_download(monkeypatch, cache)
+    result = enable(home)
+
+    assert result.exit_code == 0, result.output
+    assert terminal == [] and install.calls == []
+    assert "browser-launch: reach check ok" in result.output
+
+
+def test_a_projects_enable_downloads_nothing(tmp_path, monkeypatch, fake_home, cache, world, terminal):
+    from tests.unit.test_doctor_layer_report import _layout
+
+    layout = _layout(tmp_path, monkeypatch, fake_home)
+    monkeypatch.setitem(resolve_mod.resolve.__kwdefaults__, "extra_installed", lambda e: True)
+    install = no_download(monkeypatch, cache)
+    result = cli.invoke(app, ["plugins", "enable", "browser", "--workspace"])
+
+    assert result.exit_code == 0, result.output
+    assert yaml.safe_load((layout.ws_dir / "overrides.yaml").read_text(encoding="utf-8")) == {"browser": {"enabled": True}}
+    assert terminal == [] and install.calls == []
+
+
+def test_without_a_terminal_it_downloads_nothing_and_says_where_to_answer(home, cache, monkeypatch):
+    monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: False)
+    monkeypatch.setattr(plugins_cmd.typer, "confirm", lambda *a, **k: pytest.fail("asked without a terminal"))
+    install = no_download(monkeypatch, cache)
+    result = enable(home)
+
+    assert result.exit_code == 0, result.output
+    assert install.calls == [] and f"{NO_TERMINAL} {QUESTION}" in " ".join(result.output.split())
+    assert overrides(home) == {"browser": {"enabled": True}}
+
+
+def test_a_session_asks_for_the_download_only_while_the_binary_row_fails(home, terminal, cache, monkeypatch):
+    install = no_download(monkeypatch, cache)
+    outcome = plugins_cmd.session_step(("enable", "browser"), str(home))
+    assert not outcome.stopped and terminal == [QUESTION] and len(install.calls) == 1
+
+    terminal.clear()
+    plugins_cmd.session_step(("enable", "browser"), str(home))
+    assert terminal == [] and len(install.calls) == 1
+
+
+def test_doctor_with_the_plugin_on_and_no_chromium_says_why_in_four_rows(home, cache):
+    (home / "overrides.yaml").write_text("browser:\n  enabled: true\n", encoding="utf-8")
+    cache.mkdir()
+    out = cli.invoke(app, ["doctor", "--config-dir", str(home)], env={"COLUMNS": "400"}).output
+    lines = out.splitlines()
+
+    assert any("browser-package" in ln for ln in lines)
+    at = next(i for i, ln in enumerate(lines) if "browser-binary" in ln)
+    assert "localharness plugins enable browser" in lines[at + 1]
+    assert sum("needs the binary" in ln for ln in lines) == 2
+
+
+# --- which agents hold it ----------------------------------------------------------------------------------
+
+THREE = ["web_search", "web_fetch", "web_page_query"]
+WEB_ROLES = ("web-researcher", "search-verifier")
+
+
+async def base_with(cache, tmp_path, *, browser=True):
+    from tests.unit.test_capabilities import _builtin_registry
+
+    install_shell(cache)
+    base = await _builtin_registry()
+    if browser:
+        for tool in await BrowserPlugin().tools(plugin_ctx(tmp_path)):
+            await base.register(tool, scope="global", source_plugin="browser")
+    return base
+
+
+async def test_both_web_roles_hold_the_tool_after_the_three_and_explore_does_not(cache, world, tmp_path):
+    from localharness.agent.subagent import _STATIC_TOOLSETS, builtin_toolset
+
+    base = await base_with(cache, tmp_path)
+    assert [builtin_toolset(r, base) for r in WEB_ROLES] == [[*THREE, "browser_fetch"]] * 2
+    assert all("browser_fetch" not in builtin_toolset(n, base) for n in _STATIC_TOOLSETS)
+
+
+async def test_the_floors_of_the_web_roles_price_four_schemas_and_three_without_it(cache, world, tmp_path, monkeypatch):
+    from localharness.agent import subagent
+
+    seen: list[list[str]] = []
+    monkeypatch.setattr(subagent, "role_floor", lambda cfg, schemas, **kw: seen.append([s.name for s in schemas]) or 0)
+    for browser, want in ((True, [*THREE, "browser_fetch"]), (False, THREE)):
+        seen.clear()
+        subagent.builtin_role_floors(await base_with(cache, tmp_path, browser=browser), None, None, None)
+        assert [names for names in seen if "web_fetch" in names] == [want, want]
+
+
+async def test_the_root_is_denied_the_tool_and_its_schema_names_the_plugin(cache, world, tmp_path):
+    from localharness.config.models import ToolConfig
+    from localharness.tools.capabilities import apply_root_capability_floor
+
+    base = await base_with(cache, tmp_path)
+    schemas = {s.name: s for s in base.global_schemas()}
+    assert "browser_fetch" in apply_root_capability_floor(ToolConfig(), schemas.values())
+    schema = schemas["browser_fetch"]
+    assert schema.source_plugin == "browser" and "ingest" in schema.model_fields_set and schema.ingest == "untrusted"
+
+
+async def test_every_builtin_toolset_stays_clean_with_the_real_tool(cache, world, tmp_path):
+    from localharness.agent import subagent
+    from localharness.tools.capabilities import assert_no_coresidence, is_host_dangerous
+
+    base = await base_with(cache, tmp_path)
+    for name in [*subagent._STATIC_TOOLSETS, *subagent._WEB_ROLES]:
+        schemas = [base.schema_of(n) for n in subagent.builtin_toolset(name, base)]
+        assert None not in schemas and not any(is_host_dangerous(s) for s in schemas)
+        assert_no_coresidence(schemas, agent_id=name)
+
+
+async def test_a_fetch_id_is_found_in_its_own_child_and_not_in_another(cache, world, tmp_path, monkeypatch):
+    from localharness.agent.subagent import builtin_toolset, is_bundled
+    from localharness.tools.builtin import bind_agent_store_tools
+    from localharness.tools.registry import ContributedTool, ToolRegistry
+
+    public_web(monkeypatch)
+    world.pages["https://example.com/a"] = (200, PAGE, "text/html")
+    base = await base_with(cache, tmp_path)
+
+    def child():
+        reg = ToolRegistry.from_allowed(builtin_toolset("web-researcher", base), base_registry=base)
+        store = ContentStore()
+        bind_agent_store_tools(reg, store)
+        return reg
+
+    a, b = child(), child()
+    got = await a._find_tool_by_name("browser_fetch").run(url="https://example.com/a")
+    assert got.metadata["fetch_id"] == "pg-1"
+    assert (await a._find_tool_by_name("web_page_query").run(fetch_id="pg-1", pattern="needle")).success
+    assert not (await b._find_tool_by_name("web_page_query").run(fetch_id="pg-1", pattern="needle")).success
+    entry = a._find_tool_by_name("browser_fetch")
+    assert isinstance(entry, ContributedTool) and is_bundled(entry) and entry.info().source_plugin == "browser"
+    await entry._runtime.close()
+
+
+async def test_with_the_plugin_off_nothing_moves(home, cache, world, tmp_path, monkeypatch):
+    from localharness.agent import subagent
+    from localharness.agent.subagent import builtin_toolset
+    from localharness.config.loader import ConfigLoader
+    from localharness.core.bus import EventBus
+    from localharness.plugins.lifecycle import start_plugins
+    from localharness.tools.builtin import register_builtin_tools
+    from localharness.tools.registry import ToolRegistry
+
+    install_shell(cache)
+    resolution = resolve_mod.resolve(ConfigLoader(config_dir=home))
+    assert resolution.plan.entry("browser").state == "off"
+    base = ToolRegistry()
+    await register_builtin_tools(base)
+    await start_plugins(resolution, bus=EventBus(), registry=base, hooks=None, llm=None,
+                        paths=PluginPaths(global_config_dir=home, workspace=None, state_dir=tmp_path))
+    assert not base.has("browser_fetch")
+    assert [builtin_toolset(r, base) for r in WEB_ROLES] == [THREE, THREE]
+    seen: list[list[str]] = []
+    monkeypatch.setattr(subagent, "role_floor", lambda cfg, schemas, **kw: seen.append([s.name for s in schemas]) or 0)
+    subagent.builtin_role_floors(base, None, None, None)
+    assert [names for names in seen if "web_fetch" in names] == [THREE, THREE]
+    assert world.launches == []
