@@ -101,6 +101,7 @@ async def test_correction_aside_checkpoint_and_restart_from_disk(tmp_path, bus, 
 
     # Restart: a new loop and model, the record read back from disk.
     reloaded, notice = TaskState.load(path, workspace=str(tmp_path))
+    reloaded.resume()
     assert notice is None and reloaded.notes == []  # outline untouched since the last save
     llm2 = scripted(mock_llm_client, "Next is the draft, when you say so.")
     seen2 = capture(llm2)
@@ -116,8 +117,10 @@ async def test_correction_aside_checkpoint_and_restart_from_disk(tmp_path, bus, 
 
     outline.write_text(FIVE + "6. Extra\n")
     changed, _ = TaskState.load(path, workspace=str(tmp_path))
+    changed.resume()
     assert "outline changed since last session" in changed.notes
     assert "outline changed since last session" in changed.packet()
 
     elsewhere, notice = TaskState.load(path, workspace=str(tmp_path / "other"))
+    elsewhere.resume()
     assert elsewhere.current is None and notice is None and path.exists()
