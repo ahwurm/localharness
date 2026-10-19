@@ -50,10 +50,10 @@ def test_the_manifest():
     assert AutoresearchPlugin.__doc__.splitlines()[0] == "experiment loop"
 
 
-def test_registered_as_the_last_bundled_plugin():
-    """The cut appends exactly one class: autoresearch is the fifth and last entry."""
-    assert builtin.BUILTIN_PLUGINS[-1] is AutoresearchPlugin
-    assert builtin.BUILTIN_PLUGINS.count(AutoresearchPlugin) == 1 and len(builtin.BUILTIN_PLUGINS) == 5
+def test_registered_as_the_fifth_bundled_plugin():
+    """Autoresearch is the fifth entry, once, with browser after it."""
+    assert builtin.BUILTIN_PLUGINS[4] is AutoresearchPlugin
+    assert builtin.BUILTIN_PLUGINS.count(AutoresearchPlugin) == 1 and len(builtin.BUILTIN_PLUGINS) == 6
 
 
 def test_configure_is_ready_and_start_stop_do_nothing():
