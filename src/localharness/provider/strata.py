@@ -401,7 +401,7 @@ async def health_ready(client: httpx.AsyncClient, base_url: str, headers: dict[s
         return None
     models = await client.get(f"{root}/models", timeout=3.0, **({"headers": headers} if headers else {}))
     if models.status_code in (401, 403):
-        raise RuntimeError("Strata refused the key")
+        raise server.LaunchRefused("Strata refused the key")
     try:
         data = models.json().get("data", []) if models.status_code == 200 else None
     except (ValueError, AttributeError):
@@ -483,6 +483,8 @@ class StrataStrategy:
         try:
             served = await ready()
         except RuntimeError as died:
+            if isinstance(died, server.LaunchRefused):
+                raise
             retry = plan.retry() if plan is not None else None
             if retry is None and plan is not None and plan.report is not None and plan.report.mode == "record":
                 retry = plan

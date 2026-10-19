@@ -268,6 +268,13 @@ async def test_a_window_whose_half_equals_the_floor_retries_at_it_and_one_whose_
     assert len(popen) == launches
 
 
+async def test_a_refused_key_is_not_relaunched(world, sensing, popen, monkeypatch):
+    deaths = Deaths(world, monkeypatch, popen, server.LaunchRefused("Strata refused the key"), [NAME])
+    with pytest.raises(server.LaunchRefused, match="Strata refused the key"):
+        await world.activate(autosense=SENSED)
+    assert len(popen) == 1 and deaths.stops == []
+
+
 async def test_a_launch_with_no_plan_is_never_retried(world, popen, monkeypatch):
     deaths = Deaths(world, monkeypatch, popen, death("first death"), [NAME])
     with pytest.raises(RuntimeError, match="first death"):
