@@ -113,7 +113,7 @@ async def test_core_boots_and_works_with_every_plugin_off(tmp_path, monkeypatch)
     resolution, result = out["resolution"], out["lifecycle"]
 
     # Discovery really ran: the installed example plugin is known, and everything is off.
-    assert set(resolution.enabled) == {"image", "mobile", "memory", "dispatch", "autoresearch", "example"}, dict(resolution.enabled)
+    assert set(resolution.enabled) == {"image", "mobile", "memory", "dispatch", "autoresearch", "browser", "example"}, dict(resolution.enabled)
     assert not any(resolution.enabled.values()), dict(resolution.enabled)
     from localharness.plugins.channels import accepted_channels
     assert {e.name: e.state for e in resolution.plan.entries}["dispatch"] == "off"

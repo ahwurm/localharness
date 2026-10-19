@@ -255,6 +255,8 @@ global config, a project's whole `proposer:` section is ignored. These are all o
 - `dispatch.discord.allow`
 - `dispatch.discord.channels`
 - `mobile.public_url`
+- `browser.executable_path` (the Chromium the browser plugin starts)
+- `browser.sandbox` (whether that Chromium runs sandboxed)
 - `permissions.ask.read_only_signatures`
 - `permissions.ask.dropped_commands`
 - `permissions.ask.wrapper_commands`

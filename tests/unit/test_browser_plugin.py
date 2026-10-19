@@ -1054,3 +1054,60 @@ def test_a_download_that_leaves_no_folder_names_where_it_looked(cache, monkeypat
 def test_a_ctrl_c_during_the_download_propagates(cache, monkeypatch, tmp_path):
     with pytest.raises(KeyboardInterrupt):
         download(monkeypatch, tmp_path, FakeInstall(cache, raises=KeyboardInterrupt()))
+
+
+# --- enabling it end to end ---------------------------------------------------------------------------------
+
+import yaml  # noqa: E402
+from rich.console import Console  # noqa: E402
+from typer.testing import CliRunner  # noqa: E402
+
+from localharness.cli import plugins_cmd  # noqa: E402
+from localharness.cli.app import app  # noqa: E402
+from localharness.plugins import resolve as resolve_mod  # noqa: E402
+
+QUESTION = ("Download Playwright's headless Chromium now? About 100 MB from Playwright's CDN; "
+            "it runs as a program on this machine (sandboxed by default).")
+NO_TERMINAL = "next step — run `localharness plugins enable browser` on a terminal to answer:"
+cli = CliRunner()
+
+
+@pytest.fixture
+def home(tmp_path, monkeypatch, cache, world):
+    g = tmp_path / "g"
+    g.mkdir()
+    (g / "config.yaml").write_text(yaml.safe_dump({
+        "version": "1", "provider": {"provider_type": "vllm", "base_url": "http://127.0.0.1:9/v1",
+                                     "default_model": "m", "available_models": ["m"]}}), encoding="utf-8")
+    monkeypatch.setenv("COLUMNS", "400")
+    monkeypatch.setattr(plugins_cmd, "console", Console(width=400))
+    monkeypatch.setitem(resolve_mod.resolve.__kwdefaults__, "extra_installed", lambda e: True)
+    return g
+
+
+@pytest.fixture
+def terminal(monkeypatch):
+    asked: list[str] = []
+    monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: True)
+    monkeypatch.setattr(plugins_cmd.typer, "confirm", lambda text, **kw: asked.append(text) or True)
+    return asked
+
+
+def enable(home, *flags):
+    return cli.invoke(app, ["plugins", "enable", "browser", "--config-dir", str(home), *flags])
+
+
+def overrides(home):
+    return yaml.safe_load((home / "overrides.yaml").read_text(encoding="utf-8"))
+
+
+def test_enabling_asks_for_the_download_once_runs_it_and_proves_the_launch(home, terminal, cache, monkeypatch):
+    install = FakeInstall(cache)
+    monkeypatch.setattr(subprocess, "run", install)
+    result = enable(home)
+
+    assert result.exit_code == 0, result.output
+    assert terminal == [QUESTION] and len(install.calls) == 1
+    for text in ("browser-binary", "Checking it now:", "browser-launch: reach check ok", BrowserPlugin.manifest.next_steps):
+        assert text in result.output, text
+    assert overrides(home) == {"browser": {"enabled": True}}
