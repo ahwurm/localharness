@@ -562,7 +562,7 @@ def _tuning_rows(cfg_path: Path, harness: HarnessConfig) -> list[str]:
 STRATA_COMMAND = ("git clone https://github.com/Niko1221/Strata ~/src/Strata && cd ~/src/Strata && ./setup.sh --yes --no-start "
                   "--family swift --model {quant} --gguf-dir {gguf_dir} --context 65536 --vision no --no-browser")
 STRATA_ABSENT_ROW = "Strata: not installed — {command}"
-STRATA_FOUND_ROW = "Strata: {engine_dir} · {configs}"
+STRATA_FOUND_ROW = "Strata: {engine_dir} · {configs} — /model names the entry to pick"
 
 
 def _strata_row(cfg_path: Path, harness: HarnessConfig) -> str | None:
