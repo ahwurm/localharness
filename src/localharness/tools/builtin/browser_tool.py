@@ -14,8 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from localharness import __version__
+from localharness.tools.base import Tool, ToolResult, ToolSchema
+from localharness.tools.builtin import netguard
 from localharness.tools.builtin.browser_proxy import NAV_TIMEOUT_S, Proxy, serve
-from localharness.tools.builtin.web_tool import FETCH_MAX_BODY_BYTES
+from localharness.tools.builtin.web_tool import (
+    FETCH_DEFAULT_CHARS, FETCH_MAX_BODY_BYTES, UNTRUSTED_BANNER, WebFetchTool, _get_default_store, retain_window)
 
 MAX_CONTEXTS = 2
 REACH_FAILED = "reach check failed"
@@ -240,3 +243,36 @@ class BrowserRuntime:
             if handle is not None:
                 with contextlib.suppress(Exception):
                     await getattr(handle, stop)()
+
+
+_DESCRIPTION = (
+    "Like web_fetch, but runs the page's JavaScript first (slow, up to 30 s). If web_fetch returned "
+    "\"low extractable text\" for an https URL, call this once with the same URL — web_fetch's "
+    "\"do NOT re-fetch\" means do not call web_fetch again, not this tool. Otherwise use web_fetch. "
+    "Same start_index and fetch_id; search the full page with web_page_query.")
+_CAPPED = (f"[rendered text capped at {FETCH_MAX_BODY_BYTES} characters — the rest of this page was not read; "
+           "the retained text is a PREFIX, not the full page]")
+
+
+class BrowserFetchTool(Tool):
+    timeout_s = NAV_TIMEOUT_S + 20
+
+    def __init__(self, runtime: BrowserRuntime, store: Any = None) -> None:
+        self._runtime = runtime
+        self._store = store if store is not None else _get_default_store()
+
+    def info(self) -> ToolSchema:
+        return ToolSchema(
+            name="browser_fetch", group="web",
+            gate_family="network", ingest="untrusted", host="safe", result_origin="untrusted",
+            description=_DESCRIPTION, parameters=WebFetchTool(store=self._store).info().parameters,
+            destructive=False, estimated_tokens=FETCH_DEFAULT_CHARS // 4)
+
+    def bound_to(self, store: Any) -> "BrowserFetchTool":
+        return BrowserFetchTool(self._runtime, store)
+
+    async def _execute(self, url: str, max_chars: int = FETCH_DEFAULT_CHARS, start_index: int = 0) -> ToolResult:
+        await netguard.check(url, allow_private=False)
+        page = await self._runtime.render(url)
+        text = page.text + (f"\n{_CAPPED}" if page.capped else "")
+        return retain_window(self._store, text, page.url, start_index, max_chars, refetch="browser_fetch")

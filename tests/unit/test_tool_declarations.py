@@ -187,6 +187,17 @@ async def test_the_display_web_set_is_exactly_the_declared_ingest_set():
     assert WEB_INGEST_TOOLS == {name for name, s in schemas.items() if s.ingest == "untrusted"}
 
 
+async def test_browser_fetch_declares_like_web_fetch_and_stays_out_of_the_display_set():
+    from localharness.tools.builtin.browser_tool import BrowserFetchTool
+    from localharness.tools.builtin.web_tool import WEB_INGEST_TOOLS
+
+    schema = BrowserFetchTool(object()).info()
+    assert set(DECLARATION) <= schema.model_fields_set
+    assert tuple(getattr(schema, f) for f in DECLARATION) == ("network", "untrusted", "safe", "untrusted")
+    assert schema.group == "web"
+    assert WEB_INGEST_TOOLS == {"web_search", "web_fetch", "web_page_query"}
+
+
 # ------------------------------------------- the gate reads the declaration (reader one of three)
 
 @pytest.mark.parametrize("family", sorted(GATE_FAMILIES))
