@@ -494,3 +494,26 @@ def test_description_tells_the_model_to_declare_checks_first(tmp_path):
     state, _ = tool_for(tmp_path)
     assert ("Declare a check before you run its command so the run binds as evidence."
             in TaskTool(state).info().description)
+
+
+async def test_a_paused_record_is_shown_and_resumed_only_through_the_tool(tmp_path):
+    state, tool = tool_for(tmp_path)
+    await start(tool)
+    loaded, _ = TaskState.load(state.path, str(tmp_path))
+    tool = TaskTool(loaded)
+    assert loaded.packet() == ""
+    shown = await tool.run(action="show")
+    assert shown.success and "paused since" in shown.output
+    refused(await tool.run(action="update", next_action="x"), "or resume the paused one")
+    resumed = await tool.run(action="resume")
+    assert resumed.success and "Resumed task" in resumed.output and loaded.packet() != ""
+    refused(await tool.run(action="resume"), "No paused task to resume")
+
+
+async def test_starting_new_work_replaces_a_paused_record(tmp_path):
+    state, tool = tool_for(tmp_path)
+    await start(tool)
+    old_id = state.current.id
+    loaded, _ = TaskState.load(state.path, str(tmp_path))
+    second = await TaskTool(loaded).run(action="start", objective="Something else", assignment="New piece")
+    assert f"Replaced paused task {old_id}" in second.output and loaded.packet() != "" and not loaded.paused

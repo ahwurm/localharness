@@ -69,6 +69,7 @@ def test_human_turns_are_numbered_and_cited(tmp_path):
     assert [t["n"] for t in state.current.human_turns] == list(range(7, 31))  # absolute, bounded 24
     assert state.cite(6) is None and state.cite(30)["text"] == "more 26"
     loaded, _ = TaskState.load(state.path, workspace=str(tmp_path))
+    loaded.resume()
     loaded.observe_human("after restart")
     assert loaded.current.human_turns[-1] == {"n": 31, "text": "after restart"}
 
@@ -139,10 +140,12 @@ def test_reconcile_notes_changed_and_missing_artifacts(tmp_path):
     assert ctx.outcomes()["lint"] == "passed"
     state.save()
     loaded, _ = TaskState.load(state.path, workspace=str(tmp_path))
+    loaded.resume()
     assert loaded.notes == []
     outline.write_text("# Two")
     notes.unlink()
     loaded, _ = TaskState.load(state.path, workspace=str(tmp_path))
+    loaded.resume()
     assert "outline changed since last session" in loaded.notes
     assert "notes removed since last session" in loaded.notes
     assert loaded.current.context.outcomes()["lint"] == "stale"
@@ -152,6 +155,7 @@ def test_reconcile_notes_changed_and_missing_artifacts(tmp_path):
     data["artifact_revisions"] = {"notes": None}
     state.path.write_text(json.dumps(data))
     again, _ = TaskState.load(state.path, workspace=str(tmp_path))
+    again.resume()
     assert again.notes == []
 
 
@@ -387,6 +391,7 @@ def test_artifact_revisions_and_run_facts_in_packet(tmp_path):
     assert len(rec.artifact_history["draft"]) == 16 and rec.artifact_history_dropped["draft"] == 7
     assert "Artifacts: draft: rev 23" in state.packet()  # numbering survives the cap
     loaded, _ = TaskState.load(state.path, workspace=str(tmp_path))
+    loaded.resume()
     assert "Artifacts: draft: rev 23" in loaded.packet()
 
 
@@ -575,3 +580,16 @@ def test_finalize_with_unintegrated_delegation_keeps_record_live(tmp_path):
     state.current.delegations[0].integrated = "used it"
     assert state.finalize("Done.") == "Done."
     assert state.status == "complete"
+
+
+def test_a_record_loaded_from_disk_is_paused_until_resumed(tmp_path):
+    state = started(tmp_path, "write the report")
+    loaded, notice = TaskState.load(state.path, str(tmp_path))
+    assert notice is None and loaded.paused and loaded.status == "paused"
+    assert loaded.packet() == ""
+    loaded.observe_human("hello")
+    assert loaded.current.context.latest_human == "write the report"
+    assert len(loaded.current.human_turns) == 1 and len(loaded.recent_turns) == 2
+    assert "paused since" in loaded.show()
+    assert loaded.resume() and not loaded.paused and loaded.status != "paused" and loaded.packet() != ""
+    assert loaded.resume() is False
