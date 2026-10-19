@@ -342,7 +342,7 @@ def _own_log(fd: int, directory: Path, name: str) -> None:
         shutil.rmtree(directory / name)
     elif not stat.S_ISREG(mode) or links > 1:
         os.unlink(name, dir_fd=fd)
-    with open(name, "ab", opener=private_files.nofollow_opener(fd)) as fh:
+    with open(name, "wb", opener=private_files.nofollow_opener(fd)) as fh:
         os.fchmod(fh.fileno(), private_files.PRIVATE_FILE_MODE)
 
 
