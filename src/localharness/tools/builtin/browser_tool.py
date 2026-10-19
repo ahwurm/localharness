@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from localharness.tools.builtin.web_tool import (
     FETCH_DEFAULT_CHARS, FETCH_MAX_BODY_BYTES, UNTRUSTED_BANNER, WebFetchTool, _get_default_store, retain_window)
 
 MAX_CONTEXTS = 2
+RETRY_AFTER_S = 60
 REACH_FAILED = "reach check failed"
 SANDBOX_FAILED = "the Chromium sandbox could not start"
 SANDBOX_OFF = "Chromium started without its sandbox"
@@ -51,6 +53,7 @@ _INIT = """(() => {
 _TEXT = "n => window.__lh_text(n)"
 _API: Any = None  # the tests' stand-in for playwright.async_api
 log = logging.getLogger(__name__)
+_now = time.monotonic  # the tests' clock
 
 
 @dataclass(frozen=True)
@@ -115,6 +118,7 @@ class BrowserRuntime:
         self._idle_s = config.idle_close_s
         self._lock = asyncio.Lock()
         self.unavailable: str | None = None
+        self._retry_at: float | None = None
         self._slots = asyncio.Semaphore(MAX_CONTEXTS)
         self._in_flight = 0
         self._idle: asyncio.TimerHandle | None = None
@@ -127,6 +131,8 @@ class BrowserRuntime:
 
     async def ensure(self):
         async with self._lock:
+            if self._retry_at is not None and _now() >= self._retry_at:
+                self.unavailable = self._retry_at = None
             if self.unavailable:
                 raise RenderError("unavailable", self.unavailable)
             if self._browser is not None and self._browser.is_connected():
@@ -139,6 +145,8 @@ class BrowserRuntime:
                 if not isinstance(e, Exception):
                     raise
                 self.unavailable = e.detail if isinstance(e, RenderError) else _unavailable_reason(e)
+                if self.unavailable not in (REACH_FAILED, SANDBOX_OFF):
+                    self._retry_at = _now() + RETRY_AFTER_S
                 raise RenderError("unavailable", self.unavailable) from None
             return self._browser
 

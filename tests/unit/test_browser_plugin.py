@@ -279,6 +279,23 @@ async def test_a_launch_error_becomes_the_reason_a_person_can_act_on(world, runt
     assert world.launches == []
 
 
+async def test_a_transient_launch_error_is_retried_after_a_minute_and_a_reach_failure_never(world, runtime, monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(browser_tool, "_now", lambda: now[0])
+    world.launch_error = FakeError("boom")
+    assert await unavailable(runtime) == "launch failed: boom"
+    world.launch_error = None
+    now[0] += 59
+    assert await unavailable(runtime) == "launch failed: boom" and world.launches == []
+    now[0] += 1
+    assert (await runtime.render("https://example.com/")).text == "hello world" and len(world.launches) == 1
+    await runtime.close()
+    world.canary = "direct"
+    assert await unavailable(runtime) == "reach check failed"
+    now[0] += 10_000
+    assert await unavailable(runtime) == "reach check failed" and len(world.launches) == 2
+
+
 async def test_an_unknown_launch_error_is_cut_at_200_characters(world, runtime):
     world.launch_error = FakeError("x" * 500)
     assert await unavailable(runtime) == "launch failed: " + "x" * 200
