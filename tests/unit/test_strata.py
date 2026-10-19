@@ -99,6 +99,15 @@ def test_a_strata_engine_config_outside_engine_dir_is_refused(config):
         ManagedServerConfig(**_bare(engine_config=config))
 
 
+def test_a_relative_engine_dir_or_strata_dir_is_refused():
+    with pytest.raises(ValidationError, match=r"engine_dir must be an absolute path \(~ allowed\)"):
+        ManagedServerConfig(**_bare(engine_dir="Strata"))
+    assert ManagedServerConfig(**_bare(engine_dir="~/Strata")).engine_dir == "~/Strata"
+    with pytest.raises(ValidationError, match=r"strata_dir must be an absolute path \(~ allowed\)"):
+        AutosenseConfig(strata_dir="Strata")
+    assert AutosenseConfig(strata_dir="~/Strata").strata_dir == "~/Strata"
+
+
 def test_a_strata_record_takes_no_llamacpp_only_field():
     with pytest.raises(ValidationError, match=r"cache_type_k is llama.cpp-only \(runtime: llamacpp\)"):
         ManagedServerConfig(**_bare(cache_type_k="q8_0"))

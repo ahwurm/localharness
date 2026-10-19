@@ -2374,6 +2374,8 @@ class ManagedServerConfig(BaseModel):
         if missing:
             listed = missing[0] if len(missing) == 1 else f"{', '.join(missing[:-1])} and {missing[-1]}"
             raise ValueError(f"runtime={self.runtime} requires {listed}")
+        if not os.path.isabs(os.path.expanduser(self.engine_dir)):
+            raise ValueError("engine_dir must be an absolute path (~ allowed)")
         config = PurePath(self.engine_config)
         if config.is_absolute() or ".." in config.parts:
             raise ValueError("engine_config must be a path inside engine_dir")
@@ -2645,6 +2647,8 @@ class AutosenseConfig(BaseModel):
     def _strata_dir_clean(cls, v: Optional[str]) -> Optional[str]:
         if v is not None and (not v.strip() or "\x00" in v or "\n" in v or "\r" in v):
             raise ValueError("strata_dir must be a non-empty single line with no NUL byte")
+        if v is not None and not os.path.isabs(os.path.expanduser(v)):
+            raise ValueError("strata_dir must be an absolute path (~ allowed)")
         return v
 
     @field_validator("kv_cache_type")
