@@ -1,12 +1,12 @@
-"""CORE-03 at Phase 50 — every real reader of the bundled plugin list sees all five.
+"""Every real reader of the bundled plugin list sees every bundled plugin.
 
 `BUILTIN_PLUGINS` is the one list of what ships. This module drives each reader on its real code
 path, with `BUILTIN_PLUGINS` NOT patched (a test below reads this file's own source to hold that):
 `plugins list`, `components list` (`<name>.enabled` rows), the loader's plugin-name set (the set that
 partitions `<name>:` keys out of the config), the resolver's plan, `--channel` validation (spied: it
-iterated the five bundled manifests), doctor's `Plugins:` line and the start banner's `Plugins:` line.
+iterated every bundled manifest), doctor's `Plugins:` line and the start banner's `Plugins:` line.
 
-The doctor/banner checks pin every install extra as installed (49's `extra_installed` kwdefault) so
+The doctor/banner checks pin every install extra as installed (the `extra_installed` kwdefault) so
 dispatch reads ON whether or not discord.py is in this venv; image is off by default, so it is
 asserted by state, not by presence in the ON line.
 
@@ -24,7 +24,7 @@ from typer.testing import CliRunner
 from localharness.cli.app import app
 from tests.dispatch_support import isolate_discord_env
 
-FIVE = {"image", "mobile", "memory", "dispatch", "autoresearch"}
+BUNDLED = {"image", "mobile", "memory", "dispatch", "autoresearch", "browser"}
 ON_BY_DEFAULT = ["mobile", "memory", "dispatch", "autoresearch"]  # image is off by default
 runner = CliRunner()
 
@@ -53,18 +53,18 @@ def test_this_file_never_patches_the_bundled_list():
 @pytest.mark.plugin("autoresearch")  # asserts autoresearch's default ON state
 def test_plugins_list_shows_all_five(components_home):
     rows = {r["name"]: r for r in json.loads(_run("plugins", "list", "--json").stdout)}
-    assert FIVE <= set(rows), sorted(rows)
+    assert BUNDLED <= set(rows), sorted(rows)
     assert rows["autoresearch"]["state_kind"] == "on", rows["autoresearch"]
 
 
 def test_components_list_has_an_enabled_row_for_each(components_home):
     paths = {r["path"] for r in json.loads(_run("components", "list", "--json").stdout)}
-    assert {f"{n}.enabled" for n in FIVE} <= paths, sorted(p for p in paths if p.endswith(".enabled"))
+    assert {f"{n}.enabled" for n in BUNDLED} <= paths, sorted(p for p in paths if p.endswith(".enabled"))
 
 
 def test_the_loader_partitions_all_five(components_home):
     from localharness.cli.components_cmd import _build_loader
-    assert FIVE <= _build_loader().plugin_names()
+    assert BUNDLED <= _build_loader().plugin_names()
 
 
 @pytest.mark.plugin("autoresearch")  # asserts autoresearch's default ON state
@@ -72,7 +72,7 @@ def test_the_resolve_plan_has_all_five_bundled(components_home):
     from localharness.cli.components_cmd import _build_loader
     from localharness.plugins.resolve import resolve
     entries = resolve(_build_loader()).plan.entries
-    assert {e.name for e in entries if e.bundled} == FIVE, [(e.name, e.bundled) for e in entries]
+    assert {e.name for e in entries if e.bundled} == BUNDLED, [(e.name, e.bundled) for e in entries]
     assert {e.name: e.state for e in entries}["autoresearch"] == "on"
 
 
@@ -83,7 +83,7 @@ def test_channel_validation_reads_the_five_manifests(monkeypatch):
     real = builtin.bundled_plugins
     monkeypatch.setattr(builtin, "bundled_plugins", lambda: seen.append(out := real()) or out)
     names = channel_names()
-    assert len(seen) == 1 and {c.manifest.name for c in seen[0]} == FIVE, seen
+    assert len(seen) == 1 and {c.manifest.name for c in seen[0]} == BUNDLED, seen
     assert {"terminal", "acp", "discord"} <= names, names
 
 
@@ -107,4 +107,4 @@ async def test_the_start_banner_lists_the_on_four(tmp_path, monkeypatch, all_ext
     lines = [p.split("Plugins: ")[1].split("[/]")[0] for p in printed if "Plugins:" in p]
     assert len(lines) == 1, printed
     on = lines[0].split(", ")
-    assert [n for n in on if n in FIVE] == ON_BY_DEFAULT, lines  # + any installed third-party plugin
+    assert [n for n in on if n in BUNDLED] == ON_BY_DEFAULT, lines  # + any installed third-party plugin
