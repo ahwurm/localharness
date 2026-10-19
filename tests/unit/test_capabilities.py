@@ -295,8 +295,8 @@ async def test_every_builtin_toolset_is_clean(monkeypatch, with_bundled_web):
 async def test_the_display_families_label_exactly_the_tools_that_declare_ingest():
     """The terminal's 'UNTRUSTED, treated as data' group and the phone's `untrusted_ingest` label
     name exactly the builtins that DECLARE ingest: untrusted. They are display sets: the floor never
-    reads them. (A PLUGIN tool that ingests is floor-protected but not grouped or labelled — a named
-    display residual.)"""
+    reads them. (A PLUGIN tool that ingests is floor-protected and the phone labels it from its
+    declaration; the terminal does not group it — a named display residual.)"""
     from types import SimpleNamespace
 
     from localharness.channels.terminal import _BURST_GROUPS, _UNTRUSTED_NOTE

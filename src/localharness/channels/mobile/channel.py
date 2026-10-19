@@ -1212,10 +1212,12 @@ class MobileChannel(ChannelAdapter):
 
     def _ask_frame(self, request_id: str, request: Any) -> BlockingAsk:
         from localharness.tools.builtin.web_tool import WEB_INGEST_TOOLS
+        from localharness.tools.capabilities import ingests_untrusted
 
         klass = getattr(request, "klass", "")
         grantable = bool(getattr(request, "grantable", False))
         tool_name = getattr(request, "tool_name", "") or ""
+        schema = self._tool_registry.schema_of(tool_name) if self._tool_registry is not None else None
         return BlockingAsk(
             session_id=self.session_id,
             request_id=request_id,
@@ -1230,7 +1232,7 @@ class MobileChannel(ChannelAdapter):
             call_id=getattr(request, "call_id", None),
             options_legend=getattr(request, "options_legend", None),
             options=self.ask_options(klass, grantable),
-            untrusted_ingest=tool_name in WEB_INGEST_TOOLS,
+            untrusted_ingest=ingests_untrusted(schema) if schema is not None else tool_name in WEB_INGEST_TOOLS,
         )
 
     def open_asks(self) -> list[dict[str, Any]]:
