@@ -58,7 +58,7 @@ async def proxy(monkeypatch, dialled):
     public_web(monkeypatch, PUBLIC)
     p = await browser_proxy.serve(None)
     yield p
-    await p.close()
+    await asyncio.wait_for(p.close(), 5)
 
 
 @pytest.fixture
@@ -273,13 +273,36 @@ async def test_close_closes_every_open_tunnel(monkeypatch, dialled):
     writer.close()
 
 
+async def test_close_does_not_wait_for_a_handler_still_dialling(monkeypatch):
+    public_web(monkeypatch, PUBLIC)
+    dialling, cancelled = asyncio.Event(), []
+
+    async def hang(host, port, **kwargs):
+        dialling.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    monkeypatch.setattr(browser_proxy, "_open_connection", hang)
+    p = await browser_proxy.serve(None)
+    _, writer = await asyncio.open_connection("127.0.0.1", p.port)
+    writer.write(connect_request(p, "example.com:443").encode())
+    await asyncio.wait_for(dialling.wait(), 5)
+    await asyncio.wait_for(p.close(), 5)
+    assert cancelled == [True]
+    writer.close()
+
+
 @pytest.fixture
 async def start_upstream():
     """A fake upstream proxy on loopback: records each request head, answers `status`, then echoes."""
-    servers, heads = [], []
+    servers, heads, writers = [], [], []
 
     async def start(status: int = 200):
         async def handler(reader, writer):
+            writers.append(writer)
             heads.append((await reader.readuntil(b"\r\n\r\n")).decode())
             writer.write(f"HTTP/1.1 {status} Whatever\r\n\r\n".encode())
             await writer.drain()
@@ -293,6 +316,8 @@ async def start_upstream():
         return SimpleNamespace(port=server.sockets[0].getsockname()[1], heads=heads)
 
     yield start
+    for w in writers:
+        w.close()
     for s in servers:
         s.close()
         await s.wait_closed()
