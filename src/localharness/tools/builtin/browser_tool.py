@@ -319,7 +319,7 @@ class BrowserFetchTool(Tool):
         except netguard.NotPublic as exc:
             return self.err(_NOT_PUBLIC.format(host=exc.host), error_type="validation_error")
         except netguard.Refused as exc:
-            return self.err(str(exc), error_type="validation_error")
+            return self.err(f"{exc} {_NO_RETRY}", error_type="validation_error")
         try:
             page = await self._runtime.render(url)
         except RenderError as e:
