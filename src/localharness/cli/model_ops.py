@@ -991,7 +991,7 @@ class PlanEntry:
     path: str | None = None
     setup: Any = None
     others: tuple[str, ...] = ()
-    strata: bool = False
+    strata: str = ""
     twins: tuple[ServingRecord, ...] = ()
 
 
@@ -1054,7 +1054,7 @@ class Entries:
             return entry
         rest = tuple(t for t in entry.twins if t is not twin)
         return replace(entry, name=twin.name, record=twin, endpoint=twin.peer, others=(entry.name, *(t.name for t in rest)),
-                       twins=(entry.record, *rest), window=None, where=None, refusal=None, rate=None, strata=False)
+                       twins=(entry.record, *rest), window=None, where=None, refusal=None, rate=None, strata="")
 
 
 def _runtime_label(provider_type: Any) -> str:
@@ -1216,7 +1216,7 @@ def _strata_pass(entries: list[PlanEntry], *, auto: Any, has_strata: set[str], t
             taken.add(name)
             preset = StrataPreset(name, install.engine_dir, configs[file], _strata_source(e, name), file)
             strata.append(PlanEntry(name, "setup", "strata", setup=preset))
-            out.append(replace(e, strata=True))
+            out.append(replace(e, strata=name))
         else:
             out.append(e)
             reason = "refused" if e.refusal else e.where
@@ -1352,7 +1352,7 @@ def not_offered_reason(sentence: str, name: str) -> str:
     return text.split(" — ")[0].rstrip(".")
 
 
-STRATA_AVAILABLE = " · Strata available"
+STRATA_AVAILABLE = " · Strata available: /model {name}"
 STRATA_OFFER = "Strata is built for this model; localharness doctor shows how to install it beside your shards."
 
 
@@ -1371,7 +1371,7 @@ def entry_lines(entries: Entries) -> list[str]:
                 detail += " · experts in RAM" if e.where == "experts in RAM" else ""
                 detail += f" · {e.window:,}" if e.window is not None else ""
                 detail += " (not set up)" if e.kind == "setup" else ""
-                detail += STRATA_AVAILABLE if e.strata else ""
+                detail += STRATA_AVAILABLE.format(name=vt(e.strata)) if e.strata else ""
             if group.numbered:
                 n += 1
                 lead = f"  {n}. "
@@ -1380,7 +1380,7 @@ def entry_lines(entries: Entries) -> list[str]:
             lines.append(f"{lead}{vt(e.name)}  {detail}" + (f"  [{e.rate}]" if e.rate else ""))
     for e in sorted(entries.not_offered, key=lambda e: e.name):
         lines.append(f"  not offered: {vt(e.name)} — {vt(not_offered_reason(e.refusal or '', e.name))}"
-                     + (STRATA_AVAILABLE if e.strata else ""))
+                     + (STRATA_AVAILABLE.format(name=vt(e.strata)) if e.strata else ""))
     lines.extend(f"  · {vt(note)}" for note in entries.notes)
     return lines
 

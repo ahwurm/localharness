@@ -47,7 +47,7 @@ def test_a_sensed_install_marks_the_entry_and_makes_the_strata_set_up_pickable(t
 
     entries = entries_of(world, SERVING)
 
-    assert line_of(entries).endswith(f"{NAME}  llama.cpp · experts in RAM · 262,144 · Strata available")
+    assert line_of(entries).endswith(f"{NAME}  llama.cpp · experts in RAM · 262,144 · Strata available: /model {NAME}-strata")
     picked = entries.pick(f"{NAME}-strata")
     assert (picked.kind, picked.runtime, picked.name) == ("setup", "strata", f"{NAME}-strata")
     assert (picked.setup.config, picked.setup.real, picked.setup.record.name) == (CONFIG_NAME, str(shard1), NAME)
@@ -62,7 +62,7 @@ def test_localharness_model_prints_the_suffix(tmp_path, monkeypatch):
     result = runner.invoke(app, ["model", "--config-dir", str(world.g)])
 
     assert result.exit_code == 0, result.output
-    assert any(line.endswith(" · Strata available") and NAME in line for line in result.output.splitlines())
+    assert any(line.endswith(f" · Strata available: /model {NAME}-strata") and NAME in line for line in result.output.splitlines())
 
 
 def memory(monkeypatch, available_gib: float) -> None:
@@ -130,7 +130,7 @@ def test_a_refused_entry_with_an_install_says_available_on_its_not_offered_line(
     entries = entries_of(world, SERVING)
 
     assert model_ops.entry_lines(entries)[-1].startswith(f"  not offered: {NAME} — ")
-    assert model_ops.entry_lines(entries)[-1].endswith(" · Strata available")
+    assert model_ops.entry_lines(entries)[-1].endswith(f" · Strata available: /model {NAME}-strata")
     assert entries.pick(f"{NAME}-strata").runtime == "strata" and dict(entries.offers) == {}
 
 
@@ -249,7 +249,7 @@ def test_an_escape_byte_in_a_record_name_is_shown_escaped_in_the_suffix_line(tmp
     lines = model_ops.entry_lines(entries_of(world, SERVING))
 
     assert not any("\x1b" in line for line in lines)
-    assert any("bad\\x1b[2Jname" in line and line.endswith(" · Strata available") for line in lines)
+    assert any("bad\\x1b[2Jname" in line and " · Strata available: /model " in line and "\\x1b" in line.split("/model ")[1] for line in lines)
 
 
 def lines_in_a_world_without_the_family(tmp_path, monkeypatch, *, with_install: bool) -> list[str]:
@@ -277,11 +277,11 @@ def test_the_suffix_goes_when_the_install_does(tmp_path, monkeypatch):
     world, shard1 = flash_world(tmp_path, monkeypatch)
     engine = install(world, shard1)
 
-    assert line_of(entries_of(world, SERVING)).endswith(" · Strata available")
+    assert line_of(entries_of(world, SERVING)).endswith(f" · Strata available: /model {NAME}-strata")
     shutil.rmtree(engine)
     gone = entries_of(world, SERVING)
 
-    assert not line_of(gone).endswith(" · Strata available") and gone.strata == ()
+    assert "Strata available" not in line_of(gone) and gone.strata == ()
     assert dict(gone.offers) == {NAME: "experts in RAM"}
 
 

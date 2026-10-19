@@ -83,7 +83,7 @@ def test_a_sensed_install_names_its_directory_and_each_config_with_the_file_it_s
     world, models = _world(tmp_path, monkeypatch)
     strata_tree(world.home / "src", model=models / SHARD1)
 
-    assert _rows(_doctor(world)) == [f"Strata: ~/src/Strata · {CONFIG_NAME} serves {SHARD1}"]
+    assert _rows(_doctor(world)) == [f"Strata: ~/src/Strata · {CONFIG_NAME} serves {SHARD1} — /model names the entry to pick"]
 
 
 def test_no_flash_next_file_and_no_install_prints_no_strata_row(tmp_path, monkeypatch, mock_httpx):
