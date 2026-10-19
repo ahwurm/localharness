@@ -6,8 +6,11 @@ from __future__ import annotations
 import pytest
 
 from localharness.agent.context import ContentStore
+from localharness.tools.base import StoreBound, ToolResult, ToolSchema
 from localharness.tools.builtin import bind_agent_store_tools, register_builtin_tools
-from localharness.tools.registry import ToolRegistry
+from localharness.tools.builtin.generate_image_tool import GenerateImageTool
+from localharness.tools.registry import ContributedTool, ToolRegistry
+from tests.unit.test_image_plugin import _ctx
 
 
 @pytest.mark.asyncio
@@ -157,3 +160,72 @@ async def test_tool_result_get_reads_granted_parent_handle():
     assert ok.success and ok.output == "granted parent body"   # the capability
     denied = await tool.run(id=secret_h)
     assert not denied.success and denied.error_type == "not_found"  # ungranted stays invisible
+
+
+class _FakeFetch:
+    def __init__(self, store=None, raises=False):
+        self.store, self.raises = store, raises
+
+    def info(self):
+        return ToolSchema(name="fake_fetch", description="d", parameters={}, group="web",
+                          gate_family="network", ingest="untrusted", host="safe",
+                          result_origin="untrusted")
+
+    async def run(self, **kwargs):
+        if self.raises:
+            raise RuntimeError("boom")
+        return ToolResult(output="ok")
+
+    def bound_to(self, store):
+        return _FakeFetch(store, self.raises)
+
+
+async def _base_with_fake(**fake):
+    base = ToolRegistry()
+    await register_builtin_tools(base)
+    await base.register(_FakeFetch(**fake), source_plugin="image", overrides={"gate_family": None})
+    return base
+
+
+@pytest.mark.asyncio
+async def test_a_store_bound_plugin_tool_is_rebound_per_child_and_keeps_its_wrapper():
+    base = await _base_with_fake(raises=True)
+    original = base._tools["global"]["fake_fetch"]
+    a, b = (ToolRegistry.from_allowed(["web_fetch", "fake_fetch"], base_registry=base) for _ in range(2))
+    sa, sb = ContentStore(), ContentStore()
+    bind_agent_store_tools(a, sa)
+    bind_agent_store_tools(b, sb)
+    for child, store in ((a, sa), (b, sb)):
+        entry = child._tools["global"]["fake_fetch"]
+        assert isinstance(entry, ContributedTool) and entry._inner.store is store
+        assert entry.info().source_plugin == "image" and entry.info().gate_family is None
+        out = await entry.run()
+        assert not out.success and "plugin 'image'" in out.error
+    assert base._tools["global"]["fake_fetch"] is original and original._inner.store is None
+    s2 = ContentStore()
+    bind_agent_store_tools(a, s2)
+    entry = a._tools["global"]["fake_fetch"]
+    assert entry._inner.store is s2 and not isinstance(entry._inner, ContributedTool)
+    assert entry is not b._tools["global"]["fake_fetch"]
+
+
+@pytest.mark.asyncio
+async def test_a_wrapped_tool_without_bound_to_passes_through_unchanged(tmp_path):
+    base = ToolRegistry()
+    await register_builtin_tools(base)
+    tool = GenerateImageTool(_ctx(tmp_path, comfyui_url="http://comfy.test"))
+    await base.register(tool, source_plugin="image")
+    child = ToolRegistry.from_allowed(["web_fetch", "generate_image"], base_registry=base)
+    before = child._tools["global"]["generate_image"]
+    assert isinstance(before, StoreBound) and before.bound_to(ContentStore()) is before
+    bind_agent_store_tools(child, ContentStore())
+    assert child._tools["global"]["generate_image"] is before
+
+
+@pytest.mark.asyncio
+async def test_global_tools_keep_registration_order_through_binding():
+    base = await _base_with_fake()
+    names = [t.info().name for t in base.global_tools()]
+    assert names[-1] == "fake_fetch" and names == list(base._tools["global"])
+    bind_agent_store_tools(base, ContentStore())
+    assert [t.info().name for t in base.global_tools()] == names
