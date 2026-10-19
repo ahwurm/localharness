@@ -156,12 +156,12 @@ async def test_resolve_target_toolset_flags_builtin_danger():
     """The grant-safety resolver sees clean builtins (explore) and host-dangerous config
     children (yaml allowlist), so the gate can decide — by each name's DECLARATION."""
     reg = await _builtin_registry()
-    explore = [reg.schema_of(n) for n in subagent._resolve_target_toolset("explore", None)]
+    explore = [reg.schema_of(n) for n in subagent._resolve_target_toolset("explore", None, reg)]
     assert explore and None not in explore
     assert not any(is_host_dangerous(s) for s in explore)
 
     cfg = AgentConfig(name="danger-cfg", role="r", tools=ToolConfig(add=["bash_exec", "read"]))
-    assert "bash_exec" in subagent._resolve_target_toolset("danger-cfg", lambda n: cfg)
+    assert "bash_exec" in subagent._resolve_target_toolset("danger-cfg", lambda n: cfg, reg)
     assert is_host_dangerous(reg.schema_of("bash_exec"))
 
 
