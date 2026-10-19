@@ -47,11 +47,11 @@ def mock_httpx(monkeypatch):
     return mock
 
 
-def _world(tmp_path, monkeypatch, directory: str = "models/gguf/flashnext"):
+def _world(tmp_path, monkeypatch, directory: str = "models/gguf/flashnext", spelled: str | None = None):
     home = tmp_path / "home"
     shard = home / directory / SHARD1
     world = serve_world(tmp_path, monkeypatch, peers=[{**llama_peer("flash", 8082), "lifecycle": {
-        **llama_peer("flash", 8082)["lifecycle"], "model": str(shard)}}])
+        **llama_peer("flash", 8082)["lifecycle"], "model": spelled or str(shard)}}])
     (home / directory).mkdir(parents=True)
     flash_next(home / directory)
     world.rerecord()
@@ -81,6 +81,13 @@ def test_a_known_flash_next_file_and_no_install_prints_the_clone_and_setup_comma
 
 def test_a_sensed_install_names_its_directory_and_each_config_with_the_file_it_serves(tmp_path, monkeypatch, mock_httpx):
     world, models = _world(tmp_path, monkeypatch)
+    strata_tree(world.home / "src", model=models / SHARD1)
+
+    assert _rows(_doctor(world)) == [f"Strata: ~/src/Strata · {CONFIG_NAME} serves {SHARD1} — /model names the entry to pick"]
+
+
+def test_a_record_that_spells_its_model_with_a_tilde_still_finds_the_install(tmp_path, monkeypatch, mock_httpx):
+    world, models = _world(tmp_path, monkeypatch, spelled=f"~/models/gguf/flashnext/{SHARD1}")
     strata_tree(world.home / "src", model=models / SHARD1)
 
     assert _rows(_doctor(world)) == [f"Strata: ~/src/Strata · {CONFIG_NAME} serves {SHARD1} — /model names the entry to pick"]
