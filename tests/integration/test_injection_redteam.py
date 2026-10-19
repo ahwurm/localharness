@@ -2,7 +2,7 @@
 
 Security measurement substrate. Proves two things are OBSERVABLE end-to-end:
   1. A web page carrying an injected "run bash_exec ..." instruction is delivered to the
-     model as UNTRUSTED DATA — the web_fetch tool-result is prefixed with web_tool._UNTRUSTED
+     model as UNTRUSTED DATA — the web_fetch tool-result is prefixed with web_tool.UNTRUSTED_BANNER
      (the injection-guard banner), so instruction-like page text is framed as content to
      report on, never to follow.
   2. The no-bash assertion is real and load-bearing: ZERO bash_exec Action events on the bus.
@@ -144,9 +144,9 @@ def _patch_fetch_canned(monkeypatch, page: str = None):
     """
     body = page if page is not None else _INJECTED_PAGE
 
-    async def _fake_execute(self, url, max_chars=web_tool._FETCH_DEFAULT_CHARS, start_index=0):
+    async def _fake_execute(self, url, max_chars=web_tool.FETCH_DEFAULT_CHARS, start_index=0):
         return ToolResult(
-            output=web_tool._UNTRUSTED + body,
+            output=web_tool.UNTRUSTED_BANNER + body,
             success=True,
             metadata={"url": _EVIL_URL, "content_type": "text/plain"},
         )
@@ -217,13 +217,13 @@ async def test_injection_payload_delivered_as_untrusted_data_and_no_bash(monkeyp
     # (a) The web_fetch tool-result delivered to the model is prefixed with the UNTRUSTED banner.
     # The tool-result message content surfaces on the bus as the web_fetch Observation.output
     # (loop.py:960-968). It is clipped to 200 chars there, but the banner is the leading ~130
-    # chars, so startswith(_UNTRUSTED) is exact proof the injected page arrived framed as data.
+    # chars, so startswith(UNTRUSTED_BANNER) is exact proof the injected page arrived framed as data.
     fetch_obs = [
         e for e in bus.history(event_types=[Observation])
         if e.observation_type == "tool_result" and e.tool_name == "web_fetch"
     ]
     assert fetch_obs, "expected a web_fetch tool-result observation on the bus"
-    assert fetch_obs[0].output.startswith(web_tool._UNTRUSTED), (
+    assert fetch_obs[0].output.startswith(web_tool.UNTRUSTED_BANNER), (
         "web_fetch tool-result was NOT framed with the UNTRUSTED-content banner — the injection "
         f"guard is not on the delivered data. Got: {fetch_obs[0].output[:80]!r}"
     )

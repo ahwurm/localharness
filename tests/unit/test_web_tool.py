@@ -74,7 +74,7 @@ async def test_web_fetch_untrusted_banner_on_body(monkeypatch):
     _fake_httpx(monkeypatch, text="A legitimate article body. " * 20, content_type="text/plain")
     result = await WebFetchTool().run(url="https://example.test/page")
     assert result.success is True
-    assert result.output.startswith(web_tool._UNTRUSTED)
+    assert result.output.startswith(web_tool.UNTRUSTED_BANNER)
 
 
 # --- JS-salvage (HTML only) ---------------------------------------------------
@@ -87,7 +87,7 @@ async def test_web_fetch_js_salvage_rescues_title(monkeypatch):
     assert result.success is True
     assert "low extractable text" in result.output
     assert "QNT hits new high" in result.output
-    assert result.output.startswith(web_tool._UNTRUSTED)
+    assert result.output.startswith(web_tool.UNTRUSTED_BANNER)
 
 
 @pytest.mark.asyncio
@@ -97,7 +97,7 @@ async def test_web_fetch_short_plaintext_is_not_js_salvaged(monkeypatch):
     result = await WebFetchTool().run(url="https://example.test/api")
     assert result.success is True
     assert "low extractable text" not in result.output
-    assert result.output.startswith(web_tool._UNTRUSTED + "ok")  # body shown, then the fetch_id tail
+    assert result.output.startswith(web_tool.UNTRUSTED_BANNER + "ok")  # body shown, then the fetch_id tail
 
 
 # --- search backends ----------------------------------------------------------
@@ -113,7 +113,7 @@ async def test_web_search_ddgs_default_with_banner(monkeypatch):
     monkeypatch.setitem(sys.modules, "ddgs", fake_ddgs)
     result = await WebSearchTool().run(query="qnt")
     assert result.success is True
-    assert result.output.startswith(web_tool._UNTRUSTED)
+    assert result.output.startswith(web_tool.UNTRUSTED_BANNER)
     assert "https://a.test" in result.output
 
 
@@ -125,7 +125,7 @@ async def test_web_search_searxng_when_env_set(monkeypatch):
     ]}, content_type="application/json")
     result = await WebSearchTool().run(query="qnt")
     assert result.success is True
-    assert result.output.startswith(web_tool._UNTRUSTED)
+    assert result.output.startswith(web_tool.UNTRUSTED_BANNER)
     assert "https://sx.test/1" in result.output
     assert "sx snippet" in result.output
 
@@ -161,7 +161,7 @@ async def test_web_page_query_surfaces_content_past_the_inline_cap(monkeypatch):
     q = await WebPageQueryTool().run(fetch_id=fid, pattern="S&P 500")
     assert q.success is True
     assert needle in q.output, "web_page_query must surface past-cap content losslessly"
-    assert q.output.startswith(web_tool._UNTRUSTED)
+    assert q.output.startswith(web_tool.UNTRUSTED_BANNER)
 
 
 @pytest.mark.asyncio

@@ -1217,12 +1217,12 @@ def _fake_httpx_client(monkeypatch, page_text: str):
 async def test_web_fetch_short_page_no_clip(monkeypatch):
     from localharness.tools.builtin.web_tool import WebFetchTool
 
-    from localharness.tools.builtin.web_tool import _UNTRUSTED
+    from localharness.tools.builtin.web_tool import UNTRUSTED_BANNER
 
     _fake_httpx_client(monkeypatch, "short page")
     result = await WebFetchTool().run(url="https://example.test/page")
     assert result.success is True
-    assert result.output.startswith(_UNTRUSTED + "short page")
+    assert result.output.startswith(UNTRUSTED_BANNER + "short page")
     assert "fetch_id=" in result.output  # full page retained + queryable even when fully shown
     assert not result.truncated
 

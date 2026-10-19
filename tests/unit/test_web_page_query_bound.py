@@ -104,7 +104,7 @@ async def test_a_regex_returns_the_spans_the_in_process_loop_returned(monkeypatc
     assert result.success, result.error
     expected = "\n\n…\n\n".join(f"[chars {s}-{e} of {len(text)}]\n{text[s:e]}"
                                 for s, e in _old_spans(pattern, text, window))
-    assert result.output == web_tool._UNTRUSTED + expected
+    assert result.output == web_tool.UNTRUSTED_BANNER + expected
     assert len(started) == 1, "a regex runs in the child"
 
 
