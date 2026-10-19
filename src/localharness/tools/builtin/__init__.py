@@ -64,10 +64,10 @@ def bind_agent_store_tools(registry: ToolRegistry, store: Any) -> None:
     OWN ContentStore (per-agent isolation; closes the latent tool_result_get root-store leak). Only
     rebinds tools the agent ALREADY has — never adds a withheld capability. Call after from_allowed
     (a child) or after registering builtins (the root)."""
+    from localharness.tools.base import StoreBound
     from localharness.tools.builtin.chunk_tool import ChunkTool
     from localharness.tools.builtin.load_document_tool import LoadDocumentTool
     from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
-    from localharness.tools.base import StoreBound
     from localharness.tools.builtin.web_tool import WebFetchTool, WebPageQueryTool
     for tool in (WebFetchTool(store),
                  WebPageQueryTool(store, result_cap=lambda: registry.result_size_cap_chars),
@@ -75,5 +75,5 @@ def bind_agent_store_tools(registry: ToolRegistry, store: Any) -> None:
                  ChunkTool(store), LoadDocumentTool(store)):
         registry.rebind_global(tool)
     for tool in registry.global_tools():
-        if isinstance(tool, StoreBound):
-            registry.rebind_global(tool.bound_to(store))
+        if isinstance(tool, StoreBound) and (bound := tool.bound_to(store)) is not tool:
+            registry.rebind_global(bound)
