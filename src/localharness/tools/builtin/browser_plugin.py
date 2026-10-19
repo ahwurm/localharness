@@ -8,6 +8,7 @@ from __future__ import annotations
 import importlib.metadata
 import importlib.util
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -50,6 +51,9 @@ BROWSER_AGENT_PROMPT = (
     "browser-launch and browser-sandbox all passing.")
 
 _DOWNLOAD_HINT = "run `localharness plugins enable browser` to download it"
+_SANDBOX_HINT = ("add an AppArmor profile for the downloaded headless shell (Ubuntu 23.10 and later restrict "
+                 "unprivileged user namespaces), or accept the residual with browser.sandbox: false in the "
+                 "machine-level config")
 _INSTALL_HINT = ("uv tool install 'localharness[browser]', naming the other extras you use too "
                  "(a reinstall keeps only the extras it names)")
 
@@ -98,6 +102,39 @@ def _package_row() -> Check:
                      hint=_INSTALL_HINT)
 
 
+async def _launch_rows(cfg: BrowserConfig) -> list[Check]:
+    """The launch and sandbox rows, from one real launch on a runtime of their own, closed again."""
+    from localharness.tools.builtin.browser_tool import (
+        MISSING_LIBS, NOT_INSTALLED, REACH_FAILED, SANDBOX_FAILED, SANDBOX_OFF, BrowserRuntime, RenderError)
+
+    runtime, reason = BrowserRuntime(cfg), None
+    try:
+        await runtime.ensure()
+    except RenderError as e:
+        reason = e.detail
+    finally:
+        await runtime.close()
+    if reason is None:
+        return [Check(name="browser-launch", status="pass", detail="reach check ok"),
+                Check(name="browser-sandbox", status="pass") if cfg.sandbox else
+                Check(name="browser-sandbox", status="warn",
+                      detail="off: browser.sandbox is false in the machine-level config, so Chromium runs unsandboxed")]
+    if reason in (SANDBOX_FAILED, SANDBOX_OFF):
+        return [Check(name="browser-launch", status="skip", detail="needs the sandbox"),
+                Check(name="browser-sandbox", status="fail", detail=reason, hint=_SANDBOX_HINT)]
+    detail, hint = {
+        MISSING_LIBS: ("Host system is missing dependencies to run browsers",
+                       f"sudo {sys.executable} -m playwright install-deps chromium (apt only), "
+                       "or set browser.executable_path to a system Chromium"),
+        NOT_INSTALLED: (reason, _DOWNLOAD_HINT),
+        REACH_FAILED: (reason, "browser_fetch stays off until a launch passes; this Chromium did not go "
+                               "through its checking proxy"),
+    }.get(reason, (reason, "this is Chromium's own error; set browser.executable_path to another Chromium, "
+                           "or run `localharness doctor` again"))
+    return [Check(name="browser-launch", status="fail", detail=detail, hint=hint),
+            Check(name="browser-sandbox", status="skip", detail="needs a working launch")]
+
+
 class BrowserPlugin(Plugin):
     """reads JavaScript-rendered pages through a sandboxed headless Chromium"""
 
@@ -120,13 +157,36 @@ class BrowserPlugin(Plugin):
         return "ready"
 
     async def tools(self, ctx: PluginContext) -> list[ToolProtocol]:
-        return []
+        """Nothing without Chromium: a tool that cannot work never reaches a prompt or the model's budget."""
+        if _binary(ctx.config) is None:
+            return []
+        from localharness.tools.builtin.browser_tool import BrowserFetchTool, BrowserRuntime
+
+        self._runtime = BrowserRuntime(ctx.config)
+        return [BrowserFetchTool(self._runtime)]
+
+    async def stop(self, ctx: PluginContext) -> None:
+        if self._runtime is not None:
+            await self._runtime.close()
 
     async def doctor(self, ctx: PluginContext) -> list[Check]:
         rows = [_package_row()]
         if (label := _binary(ctx.config)) is not None:
-            return [*rows, Check(name="browser-binary", status="pass", detail=label)]
+            return [*rows, Check(name="browser-binary", status="pass", detail=label), *await _launch_rows(ctx.config)]
         return [*rows,
                 Check(name="browser-binary", status="fail", detail=_missing(ctx.config), hint=_DOWNLOAD_HINT),
                 Check(name="browser-launch", status="skip", detail="needs the binary"),
                 Check(name="browser-sandbox", status="skip", detail="needs the binary")]
+
+    def setup_action(self, ctx: PluginContext) -> list[Check]:
+        """Playwright's own installer, its progress on this terminal."""
+        done = subprocess.run([sys.executable, "-m", "playwright", "install", "--only-shell"],
+                              stderr=subprocess.PIPE, text=True)
+        hint = "the download is Playwright's own; check the network, then run `localharness plugins enable browser` again"
+        if done.returncode:
+            last = next((line.strip() for line in reversed(done.stderr.splitlines()) if line.strip()),
+                        f"the download exited with code {done.returncode}")
+            return [Check(name="browser-binary", status="fail", detail=last, hint=hint)]
+        if (label := _binary(ctx.config)) is None:
+            return [Check(name="browser-binary", status="fail", detail=_missing(ctx.config), hint=hint)]
+        return [Check(name="browser-binary", status="pass", detail=f"{label} installed")]
