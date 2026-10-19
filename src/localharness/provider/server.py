@@ -1214,8 +1214,6 @@ def stop_server(config_dir: Path, launch: str = "binary", timeout_seconds: float
                 expect: procfs.LaunchIdentity | None, parent_first: bool = False) -> bool:
     """SIGTERM the process group (the parent alone with `parent_first`), SIGKILL the group on timeout. Docker: also stop by name.
 
-    The pid is re-proven from `/proc` before the SIGKILL as before the SIGTERM; a mismatch raises and kills nothing.
-
     `expect` is required (D-27): nothing is signalled unless the pidfile's live process matches it
     (`procfs.identity_mismatch`); `expect=None` never authorises a signal. A mismatch raises
     `NOT_A_LAUNCH_LINE` and leaves the pidfile; the docker name-based stop runs only after that verdict
@@ -1386,10 +1384,7 @@ async def wait_ready(
     `serve` process (not yet the server) for a moment before the exec: the unit, not the pidfile, decides
     death, and the identity proof moves into the poll. Unset, nothing changes.
 
-    `ready` replaces the `/models` GET: awaited each poll, a list of ids ends the wait, None keeps
-    polling, and a connection error reads as still loading.
-
-    `engine_log` is a second log a death or a timeout quotes after serve.log's tail.
+    `ready` replaces the `/models` GET (ids end the wait, None keeps polling); `engine_log` is quoted after serve.log's tail on a death or timeout.
     """
     label = _row(runtime).name
     start = time.monotonic()
@@ -1461,9 +1456,7 @@ def log_reference(config_dir: Path, what: str) -> str:
 
 
 def scrubbed_tail(config_dir: Path, *, secrets: Iterable[Any] = (), lines: int = 15, engine_log: Path | None = None) -> str:
-    """The log's tail as an error may quote it: `Bearer` tokens, llama-server's `api_keys:` line, the
-    key(s) in `secrets` and URL credentials all masked (D-22, SEC-04), then `engine_log`'s tail the same way.
-    The only reader of `log_tail`."""
+    """The log's tail as an error may quote it: `Bearer` tokens, llama-server's `api_keys:` line, the key(s) in `secrets` and URL credentials masked, then `engine_log`'s tail the same way. The only reader of `log_tail`."""
     held = [raw for raw in map(_raw_key, secrets) if raw]
 
     def scrubbed(log: Path | None) -> str:

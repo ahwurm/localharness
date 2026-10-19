@@ -1014,8 +1014,7 @@ class EntryGroup:
 
 @dataclass(frozen=True)
 class Entries:
-    """The list: groups in display order, the entries said with their reason, notes, and the foreign-unit sentence with its (unit, served) key when the unit holds the primary's port (the sentence only when it changed since it was last printed).
-    ``strata`` are the unlisted ``-strata`` set-ups an install makes pickable; ``offers`` maps a Flash-Next entry with no Strata to why it would hear of it."""
+    """The list: groups in display order, notes, the foreign-unit sentence with its key, the unlisted `-strata` set-ups, and why a Flash-Next entry with no Strata would hear of it."""
     groups: tuple[EntryGroup, ...]
     not_offered: tuple[PlanEntry, ...] = ()
     notes: tuple[str, ...] = ()
