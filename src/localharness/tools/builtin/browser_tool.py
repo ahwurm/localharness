@@ -32,14 +32,23 @@ _LAUNCH_ERRORS = (("Host system is missing dependencies", MISSING_LIBS), ("No us
 _PROFILE_PREFIX = "playwright_chromiumdev_profile-"
 _ARGS = ("--disable-quic", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp", "--disable-breakpad")
 _SKIPPED_TYPES = frozenset({"image", "media", "font"})
-# Counts UTF-16 code units, so a cut can leave a lone high surrogate, which would not survive the driver pipe.
-_SLICE = """n => {
-  const t = document.body ? document.body.innerText : '';
-  let s = t.slice(0, n);
-  const c = s.charCodeAt(s.length - 1);
-  if (c >= 0xD800 && c <= 0xDBFF) s = s.slice(0, -1);
-  return [t.length > n, s];
-}"""
+# Runs before any page script, so the natives are taken before the page can replace them. Counts UTF-16 code units,
+# so a cut can leave a lone high surrogate, which would not survive the driver pipe.
+_INIT = """(() => {
+  const apply = Reflect.apply;
+  const text = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'innerText').get;
+  const body = Object.getOwnPropertyDescriptor(Document.prototype, 'body').get;
+  const slice = String.prototype.slice, charCodeAt = String.prototype.charCodeAt;
+  Object.defineProperty(window, '__lh_text', {value: n => {
+    const b = apply(body, document, []);
+    const t = b ? apply(text, b, []) : '';
+    let s = apply(slice, t, [0, n]);
+    const c = apply(charCodeAt, s, [s.length - 1]);
+    if (c >= 0xD800 && c <= 0xDBFF) s = apply(slice, s, [0, -1]);
+    return [t.length > n, s];
+  }, writable: false, configurable: false, enumerable: false});
+})()"""
+_TEXT = "n => window.__lh_text(n)"
 _API: Any = None  # the tests' stand-in for playwright.async_api
 log = logging.getLogger(__name__)
 
@@ -204,13 +213,16 @@ class BrowserRuntime:
             ignore_https_errors=False, user_agent=self._ua)
         try:
             await context.route("**/*", _cost_route)
+            await context.add_init_script(_INIT)
             page = await context.new_page()
             response = await page.goto(url, wait_until="load", timeout=NAV_TIMEOUT_S * 1000)
             if response and "application/pdf" in response.headers.get("content-type", ""):
                 raise RenderError("file")
             await page.wait_for_timeout(500)
-            capped, text = await page.evaluate(_SLICE, FETCH_MAX_BODY_BYTES)
-            text = re.sub(r"\n\s*\n\s*\n+", "\n\n", re.sub(r"[ \t]+", " ", text)).strip()
+            capped, text = await page.evaluate(_TEXT, FETCH_MAX_BODY_BYTES)
+            if not (isinstance(capped, bool) and isinstance(text, str)):
+                raise RenderError("failed")
+            text = re.sub(r"\n\s*\n\s*\n+", "\n\n", re.sub(r"[ \t]+", " ", text[:FETCH_MAX_BODY_BYTES])).strip()
             return Rendered(page.url, response.status if response else 200, text, capped)
         except api.TimeoutError:
             raise RenderError("timeout") from None
