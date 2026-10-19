@@ -151,7 +151,8 @@ def test_a_value_of_the_wrong_type_refuses_naming_its_key(tmp_path, over, named)
 
 
 @pytest.mark.parametrize("extra", [("--max-context", "65k"), ("--max-context=1e3",), ("--max-context",),
-                                   ("--max-context", "²"), ("--max-context", "1234567890"),
+                                   ("--max-context", "²"), ("--max-context", "1234567890"), ("--max-context", "0"),
+                                   ("--max-context=000",),
                                    ("--max-context", "9" * 30)])
 def test_a_max_context_that_is_not_decimal_digits_refuses_naming_the_flag(tmp_path, extra):
     spec, _ = build(tmp_path, args=[])
@@ -159,6 +160,23 @@ def test_a_max_context_that_is_not_decimal_digits_refuses_naming_the_flag(tmp_pa
     config["args"] = [t for t in config["args"] if t not in ("--max-context", "65536")] + list(extra)
     (tmp_path / "Strata" / CONFIG_NAME).write_text(json.dumps(config), "utf-8")
     assert strata.sense(spec)[1] == refusal("has a bad value for --max-context")
+
+
+def _with_kv(tmp_path, *kv):
+    spec, _ = build(tmp_path, args=[])
+    config = strata_config(spec.model)
+    config["args"] = [t for t in config["args"] if t not in ("--kv", "q8_0")] + list(kv)
+    (tmp_path / "Strata" / CONFIG_NAME).write_text(json.dumps(config), "utf-8")
+    return strata.sense(spec)[1]
+
+
+@pytest.mark.parametrize("kv,named", [(("--kv", "fp8"), "--kv fp8"), (("--kv=q9",), "--kv q9"), (("--kv",), "--kv")])
+def test_an_unknown_or_missing_kv_value_refuses_naming_the_flag(tmp_path, kv, named):
+    assert _with_kv(tmp_path, *kv) == refusal(f"has a bad value for {named}")
+
+
+def test_a_known_kv_type_passes(tmp_path):
+    assert _with_kv(tmp_path, "--kv", "Q4_0") is None
 
 
 @pytest.mark.parametrize("flag,extra", [

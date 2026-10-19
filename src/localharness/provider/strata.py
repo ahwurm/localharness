@@ -157,9 +157,9 @@ def _paths(args: list[str], spec: ManagedServerConfig) -> list[str]:
     return [v for v in values if EXPANDED.search(v) or any(outside(p) for p in (re.split(r"[=,:]", v) if "=" in v else [v]))]
 
 
-def _max_contexts(args: list[str]) -> list[str | None]:
+def _flag_values(args: list[str], flag: str) -> list[str | None]:
     return [t.partition("=")[2] if "=" in t else (args[i + 1] if i + 1 < len(args) else None)
-            for i, t in enumerate(args) if t.partition("=")[0] == "--max-context"]
+            for i, t in enumerate(args) if t.partition("=")[0] == flag]
 
 
 def _count(value: Any, least: int) -> bool:
@@ -174,8 +174,9 @@ def _bad_keys(data: Mapping[str, Any], args: list[str]) -> list[str]:
         "sampling": lambda v: isinstance(v, dict) and all(
             isinstance(x, (int, float, str)) and not isinstance(x, bool) for x in v.values())}
     bad = [k for k in sorted(checks) if k in data and not checks[k](data[k])]
-    if any(v is None or not re.fullmatch(r"[0-9]{1,9}", v) for v in _max_contexts(args)):
+    if any(v is None or not re.fullmatch(r"[0-9]{1,9}", v) or int(v) < 1 for v in _flag_values(args, "--max-context")):
         bad.append("--max-context")
+    bad += [f"--kv {_shown(v or '')}".strip() for v in _flag_values(args, "--kv") if v is None or v.lower() not in _auto.KV_BYTES]
     return bad
 
 
