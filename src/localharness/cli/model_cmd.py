@@ -26,7 +26,7 @@ from localharness.cli.workspace import MachineTrust, decide_machine_trust, local
 from localharness.config import session_presence, trust
 from localharness.config.loader import ConfigLoader
 from localharness.config.paths import global_config_dir, resolve_config_dir
-from localharness.provider import lifecycle, procfs, server, speed_stats, tuning
+from localharness.provider import lifecycle, procfs, server, speed_stats, strata, tuning
 from localharness.provider.runtimes import RUNTIMES
 from localharness.provider.units import read_target
 
@@ -35,8 +35,8 @@ err_console = Console(stderr=True)
 
 
 SCRIPT_ALONE_LINE = "--script takes a preset name or --all, nothing else"
-SCRIPT_NOTHING_LINE = "nothing to render — no record launches a server (llama.cpp or vLLM)"
-SCRIPT_KIND_LINE = "{name} is {kind} — --script renders llama.cpp and vLLM launches"
+SCRIPT_NOTHING_LINE = "nothing to render — no record launches a server (llama.cpp, vLLM or Strata)"
+SCRIPT_KIND_LINE = "{name} is {kind} — --script renders llama.cpp, vLLM and Strata launches"
 SCRIPT_SKIP_LINE = "# {name}: {why}"
 SETUP_TERMINAL_LINE = "--setup asks which models to set up — run it from a terminal: localharness model --setup"
 SETUP_NO_CONFIG_LINE = "no config yet — localharness start sets one up"
@@ -454,12 +454,19 @@ def _script_decision(record, harness) -> "tuple[bool, server.LaunchDecision]":
 
 def _script_text(record, harness, cfg: Path, keyed: bool, decision, *, memory, function: str | None = None) -> str:
     spec, peer = record.spec, record.peer
+    sensed = lifecycle.sense_launch(spec, cfg, harness.autosense, unit=None, memory=memory)
     plan = lifecycle.plan_launch(
-        spec, lifecycle.sense_launch(spec, cfg, harness.autosense, unit=None, memory=memory), decision,
-        autosense=harness.autosense, api_key_held=keyed, floor=lifecycle.cached_floor(cfg))
+        spec, sensed, decision, autosense=harness.autosense, api_key_held=keyed, floor=lifecycle.cached_floor(cfg))
+    key_placeholder = "provider.api_key" if peer is None else f"extra_endpoints.{peer.name}.api_key"
+    if "engine_config" in RUNTIMES[spec.runtime].record_fields:
+        copy = strata.copy_of(
+            sensed.engine, spec, context=strata.launch_context(plan, spec), port=spec.port, config_dir=cfg)
+        return strata.render_script(
+            plan, spec, strata.copy_text(copy), strata.copy_path(cfg, spec.port), name=record.name,
+            version=resolved_version(), key_placeholder=key_placeholder, visible=visible_text, function=function)
     return tuning.render_script(
         plan, spec, name=record.name, version=resolved_version(), visible=visible_text, function=function,
-        key_placeholder="provider.api_key" if peer is None else f"extra_endpoints.{peer.name}.api_key",
+        key_placeholder=key_placeholder,
         home_shown="" if plan.config_ini_home is None else shown_path(plan.config_ini_home))
 
 
