@@ -101,6 +101,10 @@ class BrowserRuntime:
         self._idle_s = config.idle_close_s
         self._lock = asyncio.Lock()
         self.unavailable: str | None = None
+        self._slots = asyncio.Semaphore(MAX_CONTEXTS)
+        self._in_flight = 0
+        self._idle: asyncio.TimerHandle | None = None
+        self._idle_task: asyncio.Task | None = None
         self._api: Any = None
         self._proxy: Proxy | None = None
         self._pw: Any = None
@@ -176,7 +180,19 @@ class BrowserRuntime:
         self._ua = f"{ua} LocalHarness/{__version__} (+https://localharness.dev)"
 
     async def render(self, url: str) -> Rendered:
-        browser = await self.ensure()
+        self._cancel_idle()
+        self._in_flight += 1
+        try:
+            browser = await self.ensure()
+            async with self._slots:
+                return await self._render(browser, url)
+        finally:
+            self._in_flight -= 1
+            if not self._in_flight and self._browser is not None:
+                self._idle = asyncio.get_running_loop().call_later(self._idle_s, self._start_idle_close)
+
+    async def _render(self, browser, url: str) -> Rendered:
+        api = self._api
         context = await browser.new_context(
             accept_downloads=False, service_workers="block", java_script_enabled=True, bypass_csp=False,
             ignore_https_errors=False, user_agent=self._ua)
@@ -184,14 +200,37 @@ class BrowserRuntime:
             await context.route("**/*", _cost_route)
             page = await context.new_page()
             response = await page.goto(url, wait_until="load", timeout=NAV_TIMEOUT_S * 1000)
+            if response and "application/pdf" in response.headers.get("content-type", ""):
+                raise RenderError("file")
             await page.wait_for_timeout(500)
             capped, text = await page.evaluate(_SLICE, FETCH_MAX_BODY_BYTES)
             text = re.sub(r"\n\s*\n\s*\n+", "\n\n", re.sub(r"[ \t]+", " ", text)).strip()
             return Rendered(page.url, response.status if response else 200, text, capped)
+        except api.TimeoutError:
+            raise RenderError("timeout") from None
+        except api.Error as e:
+            if "Download is starting" in str(e):
+                raise RenderError("file") from None
+            raise RenderError("failed", _first_line(e)) from None
         finally:
-            await context.close()
+            with contextlib.suppress(Exception):
+                await context.close()
+
+    def _cancel_idle(self) -> None:
+        if self._idle is not None:
+            self._idle.cancel()
+            self._idle = None
+
+    def _start_idle_close(self) -> None:
+        self._idle_task = asyncio.ensure_future(self._close_if_idle())
+
+    async def _close_if_idle(self) -> None:
+        async with self._lock:
+            if not self._in_flight:
+                await self._teardown()
 
     async def close(self) -> None:
+        self._cancel_idle()
         async with self._lock:
             await self._teardown()
 
