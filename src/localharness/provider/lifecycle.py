@@ -1697,7 +1697,7 @@ class UnitStrategy:
                 from localharness.agent.context import probe_window
 
                 model_id = served[0] if served else spec.served_name
-                probe = await asyncio.to_thread(probe_window, base_url, model_id, "llamacpp", api_key=api_key)
+                probe = await asyncio.to_thread(probe_window, base_url, model_id, spec.runtime, api_key=api_key)
                 report = dataclasses.replace(
                     report, served=probe.served, trained=probe.trained or report.trained,
                     verified=probe.served is not None)

@@ -126,6 +126,15 @@ def test_activate_sequence_writes_the_target_restarts_the_unit_and_waits_for_the
     assert caller_holds_lock is False
 
 
+def test_the_window_probe_is_the_records_runtime_row(world):
+    world.ready()
+    asked = world.probe()
+    serving = world.serve_on_restart(world.primary)
+    run_activate(world, world.primary)
+    serving.join()
+    assert [a[2] for a in asked] == [world.primary.runtime]
+
+
 def test_a_peer_is_recorded_under_its_own_name(world):
     world.ready()
     world.http(served="flash-next")
