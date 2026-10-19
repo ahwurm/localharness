@@ -573,7 +573,7 @@ def _strata_row(cfg_path: Path, harness: HarnessConfig) -> str | None:
 
     real = os.path.realpath
     known = tuple(dict.fromkeys(
-        [real(r.spec.model) for r in model_ops.serving_records(harness) if r.spec is not None and r.spec.model]
+        [real(os.path.expanduser(str(r.spec.model))) for r in model_ops.serving_records(harness) if r.spec is not None and r.spec.model]
         + [s.real for s in library.listing(cfg_path).shown if s.model is not None]))
     if install := strata_install(strata_roots(harness.autosense), known):
         configs = "; ".join(f"{visible_text(name)} serves {visible_text(os.path.basename(file))}" for name, file in install.configs)
