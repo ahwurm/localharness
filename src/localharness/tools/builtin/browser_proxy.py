@@ -88,8 +88,12 @@ async def _via(upstream: str, authority: str):
     lines = [f"CONNECT {authority} HTTP/1.1", f"Host: {authority}"]
     if url.userinfo:
         lines.append("Proxy-Authorization: Basic " + base64.b64encode(f"{url.username}:{url.password}".encode()).decode())
-    writer.write(("\r\n".join(lines) + "\r\n\r\n").encode())
-    answer = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), NAV_TIMEOUT_S)
+    try:
+        writer.write(("\r\n".join(lines) + "\r\n\r\n").encode())
+        answer = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), NAV_TIMEOUT_S)
+    except BaseException:
+        writer.close()
+        raise
     if answer.split(b" ", 2)[1:2] != [b"200"]:
         writer.close()
         return None

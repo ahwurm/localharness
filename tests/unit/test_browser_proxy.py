@@ -295,6 +295,23 @@ async def test_close_does_not_wait_for_a_handler_still_dialling(monkeypatch):
     writer.close()
 
 
+@pytest.mark.parametrize("answer", [b"", b"x" * 100_000])
+async def test_an_upstream_that_ends_or_overruns_the_handshake_is_closed(monkeypatch, answer):
+    reader = asyncio.StreamReader(limit=1000)
+    reader.feed_data(answer)
+    reader.feed_eof()
+    closed = []
+    writer = SimpleNamespace(write=lambda data: None, close=lambda: closed.append(True))
+
+    async def open_connection(host, port, **kwargs):
+        return reader, writer
+
+    monkeypatch.setattr(browser_proxy, "_open_connection", open_connection)
+    with pytest.raises(browser_proxy._STREAM_ERRORS):
+        await browser_proxy._via("http://127.0.0.1:3128", "example.com:443")
+    assert closed == [True]
+
+
 @pytest.fixture
 async def start_upstream():
     """A fake upstream proxy on loopback: records each request head, answers `status`, then echoes."""
