@@ -86,6 +86,15 @@ def test_a_sibling_whose_name_only_starts_with_the_root_is_outside(tmp_path):
         assert sensed(tmp_path, extra=("--pack", token))[0][1] == refusal(OUTSIDE.format(token))
 
 
+def test_a_nul_byte_in_an_argument_refuses_with_the_config_sentence(tmp_path):
+    spec, _ = build(tmp_path)
+    for extra in (("--pack", "/x\x00y"), ("--ple-gguf=a\x00",)):
+        assert sensed(tmp_path, extra=extra)[0][1] == refusal("has a NUL byte in an argument")
+    config = strata_config(str(spec.model) + "\x00")
+    (tmp_path / "Strata" / CONFIG_NAME).write_text(json.dumps(config), "utf-8")
+    assert strata.sense(spec)[1] == refusal("has a NUL byte in an argument")
+
+
 def test_a_symlink_leading_out_of_the_install_is_outside(tmp_path):
     outside = tmp_path / "elsewhere"
     outside.mkdir()

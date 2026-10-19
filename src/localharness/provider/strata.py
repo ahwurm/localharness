@@ -194,6 +194,8 @@ def sense(spec: ManagedServerConfig) -> tuple[EngineConfig | None, str | None]:
     args = data.get("args", []) if isinstance(data, dict) else None
     if not isinstance(args, list) or not all(isinstance(t, str) for t in args):
         return refuse("is not a JSON object with a list of string arguments")
+    if any("\x00" in t for t in args):
+        return refuse("has a NUL byte in an argument")
     repeated = [f for f in SINGLE_FLAGS if sum(t.partition("=")[0] == f for t in args) > 1]
     if repeated:
         return refuse(f"repeats {', '.join(repeated)}")
