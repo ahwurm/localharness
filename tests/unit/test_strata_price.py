@@ -1,3 +1,4 @@
+# ruff: noqa: F811  (the fixtures are imported by name, then taken as parameters)
 """A Strata record is priced against its RAM headroom, the GPU and the floor before anything stops."""
 from __future__ import annotations
 
@@ -7,11 +8,15 @@ from pathlib import Path
 
 import pytest
 
+from localharness.agent import context as agent_context
+from localharness.agent.context import WindowProbe
 from localharness.config.models import AutosenseConfig
-from localharness.provider import autosense, lifecycle, server, strata
+from localharness.provider import autosense, lifecycle, server, speed_stats, strata
 from localharness.provider.autosense import window_lines
+from tests.unit.launch_support import popen  # noqa: F401
 from tests.unit.strata_fixture import flash_next, strata_config, strata_record, strata_tree
 from tests.unit.test_plan_launch_floor import _world
+from tests.unit.test_strata_activate import SENSED, make_world, max_context, sensing, world  # noqa: F401
 
 AUTO = AutosenseConfig()
 
@@ -175,3 +180,168 @@ def test_the_argv_and_the_copy_gain_no_flag_and_differ_from_the_config_only_in_t
     assert list(plan.argv) == strata.argv(spec, config_copy=str(strata.copy_path(tmp_path, spec.port)))
     at = config.index("--max-context")
     assert copy["args"] == [*config[:at + 1], "32768", *config[at + 2:]]
+
+
+class Deaths:
+    """The wait is scripted (an exception is a death or a timeout, a list the served ids), the stop is recorded, the probe answers the copy's window."""
+
+    def __init__(self, world, monkeypatch, *script):
+        self.world, self.script, self.copies, self.stops, self.stop_error = world, list(script), [], [], None
+
+        async def wait_ready(base_url, **kw):
+            self.copies.append(world.copy)
+            step = self.script.pop(0)
+            if isinstance(step, BaseException):
+                raise step
+            return step
+
+        def stop_server(config_dir, **kw):
+            self.stops.append(kw)
+            if self.stop_error is not None:
+                raise self.stop_error
+
+        monkeypatch.setattr(server, "wait_ready", wait_ready)
+        monkeypatch.setattr(server, "stop_server", stop_server)
+        monkeypatch.setattr(agent_context, "probe_window", lambda *a, **kw: WindowProbe(int(max_context(world.copy)), 262144))
+
+    @property
+    def windows(self) -> list[str]:
+        return [max_context(copy) for copy in self.copies]
+
+    def ledger(self):
+        return speed_stats.last_retry(speed_stats.default_speed_stats_path(self.world.config_dir), lifecycle.record_key(self.world.spec))
+
+
+def death(text: str = "Strata died during startup") -> RuntimeError:
+    return RuntimeError(text)
+
+
+async def test_a_config_window_that_dies_is_relaunched_once_at_half_and_the_retry_is_remembered(world, sensing, popen, monkeypatch):
+    deaths = Deaths(world, monkeypatch, death(), [NAME])
+    live = await world.activate(autosense=SENSED)
+    assert len(popen) == 2 and deaths.windows == ["65536", "32768"]
+    assert popen[0]["cmd"] == popen[1]["cmd"]
+    assert [(stop["launch"], stop["parent_first"], stop["expect"].port) for stop in deaths.stops] == [("binary", True, 8083)]
+    record = deaths.ledger()
+    assert record.full_fit == 65536 and record.dropped == ()
+    assert window_lines(live.window, SENSED)[0].endswith(" (after one retry at --max-context 32,768)")
+
+
+async def test_the_copy_of_the_retry_differs_from_the_first_only_in_the_window(world, sensing, popen, monkeypatch):
+    deaths = Deaths(world, monkeypatch, death(), [NAME])
+    await world.activate(autosense=SENSED)
+    first, second = deaths.copies
+    assert {**first, "args": None} == {**second, "args": None}
+    assert [(a, b) for a, b in zip(first["args"], second["args"], strict=True) if a != b] == [("65536", "32768")]
+
+
+@pytest.mark.parametrize("floor,launches", [(32768, 2), (32769, 1)])
+async def test_a_window_whose_half_equals_the_floor_retries_at_it_and_one_whose_half_is_below_is_not_retried(
+        world, sensing, popen, monkeypatch, floor, launches):
+    deaths = Deaths(world, monkeypatch, death("first death"), [NAME])
+    if launches == 2:
+        await world.activate(autosense=SENSED, floor=floor)
+        assert deaths.windows == ["65536", "32768"]
+    else:
+        with pytest.raises(RuntimeError, match="first death"):
+            await world.activate(autosense=SENSED, floor=floor)
+        assert deaths.stops == []
+    assert len(popen) == launches
+
+
+async def test_a_launch_with_no_plan_is_never_retried(world, popen, monkeypatch):
+    deaths = Deaths(world, monkeypatch, death("first death"), [NAME])
+    with pytest.raises(RuntimeError, match="first death"):
+        await world.activate(autosense=None)
+    assert len(popen) == 1 and deaths.stops == []
+
+
+async def test_two_deaths_end_with_the_community_remedy_then_the_second_log_tail(world, sensing, popen, monkeypatch):
+    deaths = Deaths(world, monkeypatch, death("first\nlog one"), death("second death\nlog tail two\nsee serve.log"))
+    with pytest.raises(RuntimeError) as dead:
+        await world.activate(autosense=SENSED)
+    text = str(dead.value)
+    assert text.startswith(strata.STRATA_TWICE.format(name=NAME) + "\n")
+    assert text.endswith("second death\nlog tail two\nsee serve.log") and "log one" not in text
+    assert len(popen) == 2 and len(deaths.stops) == 2 and deaths.ledger() is None
+
+
+async def test_the_name_in_the_second_death_sentence_shows_a_control_character_escaped(world, sensing, popen, monkeypatch):
+    Deaths(world, monkeypatch, death(), death())
+    world.spec = world.spec.model_copy(update={"served_name": "bad\x1b[31mname"})
+    with pytest.raises(RuntimeError) as dead:
+        await world.activate(autosense=SENSED)
+    assert str(dead.value).startswith("Strata could not load bad\\x1b[31mname twice;") and "\x1b" not in str(dead.value)
+
+
+async def test_a_second_death_whose_stop_fails_still_ends_with_the_twice_sentence(world, sensing, popen, monkeypatch):
+    deaths = Deaths(world, monkeypatch, death(), death("second"))
+    stops = deaths.stops
+
+    def stop_once(config_dir, **kw):
+        stops.append(kw)
+        if len(stops) == 2:
+            raise RuntimeError("pid survived")
+
+    monkeypatch.setattr(server, "stop_server", stop_once)
+    with pytest.raises(RuntimeError, match="twice"):
+        await world.activate(autosense=SENSED)
+
+
+async def test_the_next_launch_after_a_remembered_retry_plans_the_halved_window_directly(world, sensing, popen, monkeypatch):
+    Deaths(world, monkeypatch, death(), [NAME], [NAME])
+    await world.activate(autosense=SENSED)
+    sensed = lifecycle.sense_launch(world.spec, world.config_dir, SENSED)
+    plan = lifecycle.plan_launch(world.spec, sensed, server.launch_decision(world.spec, False), autosense=SENSED, api_key_held=False)
+    assert (plan.shape, plan.cause, plan.serve_kwargs["context"]) == ("retry", "remembered", 32768)
+    await world.activate(autosense=SENSED)
+    assert max_context(world.copy) == "32768" and len(popen) == 3
+
+
+async def test_a_full_shape_that_serves_clears_the_remembered_record_and_the_ledger_is_written_once(world, sensing, popen, monkeypatch):
+    deaths = Deaths(world, monkeypatch, death(), [NAME], [NAME])
+    written = []
+    real = speed_stats.record_retry
+    monkeypatch.setattr(speed_stats, "record_retry", lambda *a, **kw: (written.append(1), real(*a, **kw))[1])
+    await world.activate(autosense=SENSED)
+    assert len(written) == 1 and deaths.ledger() is not None
+    world.spec = world.spec.model_copy(update={"context": 65536})
+    await world.activate(autosense=SENSED)
+    assert deaths.ledger() is None and len(written) == 1
+
+
+async def test_a_pinned_context_that_dies_is_relaunched_once_at_the_same_window_and_remembers_nothing(world, sensing, popen, monkeypatch):
+    world.spec = world.spec.model_copy(update={"context": 32768})
+    deaths = Deaths(world, monkeypatch, death(), [NAME])
+    await world.activate(autosense=SENSED)
+    assert len(popen) == 2 and deaths.windows == ["32768", "32768"] and deaths.ledger() is None
+
+
+async def test_a_pinned_context_that_dies_twice_ends_with_the_twice_sentence(world, sensing, popen, monkeypatch):
+    world.spec = world.spec.model_copy(update={"context": 32768})
+    Deaths(world, monkeypatch, death(), death("second"))
+    with pytest.raises(RuntimeError, match="^Strata could not load swift-1.5-iq3_xxs twice;"):
+        await world.activate(autosense=SENSED)
+    assert len(popen) == 2
+
+
+async def test_a_timeout_is_raised_at_once_with_one_launch(world, sensing, popen, monkeypatch):
+    deaths = Deaths(world, monkeypatch, TimeoutError("slow"))
+    with pytest.raises(TimeoutError):
+        await world.activate(autosense=SENSED)
+    assert len(popen) == 1 and deaths.stops == []
+
+
+async def test_a_parent_that_stays_alive_while_the_wait_times_out_is_a_timeout_not_a_retry(world, sensing, popen):
+    world.health["loaded"] = False
+    with pytest.raises(TimeoutError):
+        await world.activate(autosense=SENSED, timeout_seconds=0.05)
+    assert len(popen) == 1
+
+
+async def test_a_pid_that_survives_the_stop_ends_the_retry_with_the_first_deaths_message(world, sensing, popen, monkeypatch):
+    deaths = Deaths(world, monkeypatch, death("first death\nits log"), [NAME])
+    deaths.stop_error = RuntimeError("pid 4242 survived SIGKILL")
+    with pytest.raises(RuntimeError) as dead:
+        await world.activate(autosense=SENSED)
+    assert str(dead.value) == "first death\nits log" and len(popen) == 1
