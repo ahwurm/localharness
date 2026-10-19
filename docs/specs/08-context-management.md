@@ -212,10 +212,8 @@ class ContextManager:
     Created once per agent session. Holds the token counter and compaction
     pipeline for that agent. Not shared between agents.
 
-    max_context_tokens is the full served window. The root's is a construction
-    argument, refit when `/model` swaps the server; a child's is the root's live
-    value read at the moment the child is spawned (spec 22 §9), not a number
-    fixed when the delegation runner was built.
+    max_context_tokens is the full served window, refit when `/model` swaps the
+    server; a child takes the root's live value at its spawn.
     """
 
     def __init__(
@@ -353,10 +351,11 @@ def clamp_response_tokens(max_context_tokens: int, configured_max_tokens: int) -
 
 def harness_floor(fixed_tokens: int, max_response_tokens: int | None = None) -> int:
     """The smallest window, in 256-token steps, from which every larger window holds the
-    fixed prompt (system prompt and tool schemas) at the compaction target. It sits beside
-    response_reserve and is built on it, so it never lowers the reserve and never subtracts
-    it twice; response_reserve stays the one place output room is held back (spec 22 §8)."""
+    fixed prompt at the compaction target; built on response_reserve."""
 ```
+
+A child's window is read from the root's live value at its spawn (spec 22 §9). `harness_floor` sits beside
+`response_reserve`, never lowers it, and leaves it the one place output room is held back (spec 22 §8.1).
 
 ### Error Types
 

@@ -129,9 +129,9 @@ conditions.
 | Site | Change |
 |---|---|
 | `cli/start_cmd.py` | passes `describe_agent=lambda n: describe_agent_for_schema(n, card_registry, workspace)`; the helper is module-level and unit-tested, and reads the registry by key (`AgentCardRegistry.get`), not by scan. |
-| `cli/start_cmd.py` (`make_explore_agent_runner(`) | the runner is built with `window=lambda: ctx_mgr.max_context_tokens`, the root's live window, in place of the resolved int; each child's `ContextManager` takes the value at its spawn, so a `/model` refit reaches the next child (spec 22 §9). The nested runner gets the same callable and the bench runner passes `lambda: effective_max_context_tokens`. |
-| `agent/subagent.py:1434` (nested) | none: its delegatees are built-ins, covered by the table. |
-| `bench/runner.py:598` | none: bench agents are built-ins, covered by the table. Bench prompts therefore change by the reordered description only, which is the point of the bench. |
+| `cli/start_cmd.py` (`make_explore_agent_runner(`) | the runner is built with `window=lambda: ctx_mgr.max_context_tokens` in place of the resolved int (spec 22 §9); each child's `ContextManager` takes the value at its spawn. |
+| `agent/subagent.py:1434` (nested) | no description change: its delegatees are built-ins, covered by the table; it takes the same `window` callable. |
+| `bench/runner.py:598` | no description change: bench agents are built-ins, covered by the table; it passes `lambda: effective_max_context_tokens`. Bench prompts therefore change by the reordered description only, which is the point of the bench. |
 
 ## 4. Tests
 

@@ -465,7 +465,8 @@ The library resolves an HF snapshot by its contents (`provider/model_library.py`
 | `modules.json`, `config_sentence_transformers.json`, a `*_Pooling/` directory, or no text-generation architecture | none | — |
 
 An entry that is not yet a record shows `(not set up)`; choosing it runs spec 20 §11's one question for a person
-(`Set it up and switch?`), and off a terminal says `localharness model --setup sets it up`.
+(`Set it up and switch?`), and where no person at this machine can answer it prints
+`<name> is not set up — localharness model --setup sets it up`.
 
 ### 10.2 The lines
 
@@ -511,6 +512,11 @@ With it stopped, the second group is `▸ this box can launch`, its entries are 
   `attached_served` rule), against the card's total otherwise.
 - `/model <name>` typed for an unnumbered entry prints its reason (the foreign-unit sentence, or the `not offered`
   reason as a sentence) and launches nothing.
+- An entry's parts print in this order: `<runtime> · experts in RAM · <window> (not set up)`, then, on a Flash-Next
+  entry or its `not offered:` line whose Strata install was found (§11.5), ` · Strata available: /model
+  <name>-strata`, then the measured rate in brackets.
+- Naming an entry that has a Strata offer (§11.5) prints `Strata is built for this model; localharness doctor shows
+  how to install it beside your shards.` once per change of its reason.
 
 ### 10.3 The foreign-unit sentence
 
@@ -607,8 +613,8 @@ extra_endpoints:
 | Identity | `LaunchIdentity(exe_names={"python*"}, port=<port>, argv_contains=("<engine_dir>/serve/server.py", "--engine", "strata", "--config", "<copy>"))`; the copy path is per port; the engine child (`engine/strata --serve`) is never an identity |
 | Readiness | `wait_ready` treats a refused connection as loading (the socket opens only after the engine's `READY`, `server.py:843, 6918`) and polls `GET /health` until 200 with `"loaded": true` and `"service": "strata"` (`server.py:5337–5341`); liveness is the verified parent; the bound is Strata's own 900 s (`STRATA_ENGINE_READY_S`, `server.py:268`) plus a minute; a parent that exits is a failure with the log tail |
 | Served window | the row's `probe`: the served model's `meta.n_ctx` in `/v1/models` with the key (`server.py:5369–5386`), else `/health` `max_context`; trained is `meta.n_ctx_train` when Strata reports it, else the GGUF header the launch's plan read |
-| Retry | one, when the parent exits during the load (a timeout is not retried): a `--max-context` the config sets is halved, never below the floor, and not retried when the half is under it; a record's pinned `context` is never halved and relaunches once at the same window. The recorded files are re-checked before the relaunch. A halved retry that serves is remembered through `confirm_launch` as for llama.cpp (spec 20 §6.4), with `context` the only dimension; a second death ends with the log tail and `Strata could not load <name> twice; its low-RAM setup (setup.sh --low-ram) or the llama.cpp preset may.` |
-| Stop | SIGTERM to the parent, a wait for its exit (the engine's `QUIT` frees the pinned RAM, `server.py:6944–6965`), then SIGKILL to the group after the grace; before every signal the pid is re-proven from `/proc` (exe and argv against the identity, start time against the pidfile), never taken from the pidfile alone; the engine child is never signalled first, since the server restarts a dead engine |
+| Retry | one, when the parent exits during the load; a timeout is not retried and ends `Strata not ready after 960s.` with the log tail. The halving is spec 20 §6.4's: a `--max-context` the config sets is halved, a record's pinned `context` is never halved and relaunches once at the same window. After a halved retry the window line ends `(after one retry at --max-context <n>)`; a same-window relaunch carries no note. The recorded files are re-checked before the relaunch (spec 13). A halved retry that serves is remembered through `confirm_launch` (spec 20 §6.4), with `context` the only dimension; a second death ends with the log tail and `Strata could not load <name> twice; its low-RAM setup (setup.sh --low-ram) or the llama.cpp preset may.` |
+| Stop | SIGTERM to the parent, a wait for its exit (the engine's `QUIT` frees the pinned RAM, `server.py:6944–6965`), then, only if the parent is still alive after the grace, SIGKILL to the group; a parent that exits on SIGTERM and leaves its engine child is not followed up, and live row 11 reads whether one remains; before every signal the pid is re-proven from `/proc` (exe and argv against the identity, start time against the pidfile), never taken from the pidfile alone; the engine child is never signalled first, since the server restarts a dead engine |
 | Logs | the parent's stdout and stderr into the harness's server log, the engine's stderr into the copy's `log`; `log_tail` reads both, redacted at the channel boundary |
 | `--script` | a here-document that writes the copy, then `cd <engine_dir> && exec .venv/bin/python serve/server.py --engine strata --config <copy> --port <port> --host 127.0.0.1`, the key as a `STRATA_API_KEY=<key>` placeholder |
 | Autostart | the row's `unit_servable` is true; `serve` (spec 20 §9.3) `chdir`s to `engine_dir` before it `execve`s the venv's python |
@@ -619,7 +625,7 @@ The `facts` column, one row per runtime:
 |---|---|---|---|
 | llama.cpp | server-side (`--jinja`, `--reasoning-format auto`) | the GGUF's, applied by llama-server (spec 20 §7) | spec 16 §7.4 |
 | vLLM | `MODEL_TYPE_PARSERS` | `--generation-config auto` | spec 16 §7.4 |
-| Strata | server-side parser and chat-template tools; field names unverified (§11.6) | written into the copy's `sampling` from the GGUF header, because Strata is greedy when a request carries none (`DETAILS.md:1269–1271`) and spec 20 §7 sends none | `reasoning_effort` none / low / medium / high (`DETAILS.md:755–760`), a prompt instruction, not a token cap (`DETAILS.md:760–762`); the harness's own cap bounds the reply |
+| Strata | server-side parser and chat-template tools; field names unverified (§11.6) | written into the copy's `sampling` from the GGUF header, because Strata is greedy when a request carries none (`DETAILS.md:1269–1271`) and spec 20 §7 sends none | spec 16 §7.4; Strata accepts `reasoning_effort` none / low / medium / high (`DETAILS.md:755–760`) as a prompt instruction, not a token cap (`DETAILS.md:760–762`) |
 
 Strata serves one request at a time unless its config sets `parallel` ≥ 2 (`README.md:169`), so a delegated child
 queues behind its parent on the same server.
@@ -668,14 +674,19 @@ git clone https://github.com/Niko1221/Strata ~/src/Strata && cd ~/src/Strata && 
 ```
 
 An install is sensed by `plan_entries` at every listing, at `autosense.strata_dir` when set, else at `~/Strata` or
-`~/src/Strata`; it is an install only when `serve/server.py` is a regular file, `engine/strata` is a regular executable, the
-directory and those files are owned by the user and not group- or world-writable, `.venv/bin/python` is a regular
-executable or a symlink (a venv's interpreter is a link to the system's) whose target is a regular executable
-owned by the user or root and not group- or world-writable, and a `strata-*.json` there names in `--native` a file the
-library knows; each check is an `lstat`, a `stat` of the interpreter's target or `open_regular`, and nothing in
-the directory runs to decide it. `serve/server.py` and `engine/strata` stay regular files, never links.
-A sensed install adds `· Strata available: /model <entry>-strata` to the Flash-Next entry; picking that then runs spec
-20 §11's one question (`Set it up and switch?`), which shows the record and adopts it with its `launch` entries.
+`~/src/Strata`. It is an install only when every one of these holds, each an `lstat` (a `stat` of the interpreter's
+target, or `open_regular`), and nothing in the directory runs to decide it:
+
+- the directory and its `serve`, `engine`, `.venv` and `.venv/bin` folders are directories owned by the user and not
+  group- or world-writable;
+- `serve/server.py` is a regular file and `engine/strata` a regular executable, owned and closed the same way, and
+  neither is a link;
+- `.venv/bin/python` is a regular executable owned and closed the same way, or a symlink (a venv's interpreter is a link to the system's) whose target is a regular executable owned by the user or root and not group- or world-writable;
+- a `strata-*.json` there, a regular file owned and closed the same way, names in `--native` a file the library
+  knows.
+
+A sensed install adds `· Strata available: /model <entry>-strata` to the Flash-Next entry; typing that name then runs
+spec 20 §11's one question (`Set it up and switch?`), which shows the record and adopts it with its `launch` entries.
 
 ### 11.6 What is not known
 
@@ -742,7 +753,8 @@ A sensed install adds `· Strata available: /model <entry>-strata` to the Flash-
   (§11.1); the config copy is built from recorded bytes through an allowlist (§11.2); `engine_dir` passes the
   ownership and mode checks at every launch; nothing of Strata is put on the harness's `PATH`; the engine's escape
   hatches are removed from the child environment. Named residuals: the rest of Strata's tree (`serve.*` modules, its
-  venv's site-packages, `~/.config/strata/settings.json`) runs unfingerprinted, so a writer into a user-owned
+  venv's site-packages, `~/.config/strata/settings.json`, and, when `.venv/bin/python` is a link, the target it
+  points to, which sits outside the install and is checked for owner and mode only) runs unfingerprinted, so a writer into a user-owned
   `engine_dir` that leaves the two hashed files alone is not asked about; the engine release is `latest`, checked
   only against a size and SHA-256 published by the same origin (`setup.py:3317–3335`), integrity against transport,
   not origin; Swift's shards are not hash-checked by Strata.
@@ -811,7 +823,8 @@ A sensed install adds `· Strata available: /model <entry>-strata` to the Flash-
   child, another port's copy and a planted pidfile; the re-proof before each signal; the argv and cwd; the copy's
   allowlist (an `env` key, an unknown engine flag and a path outside the three roots each refuse, naming it); the
   environment blocklist; readiness (refused and `loaded: false` are loading, a dead parent is a failure); the `probe`
-  on a fixture `/v1/models`; the halved `--max-context` retry and the second-death sentence; stop order; `--script`
+  on a fixture `/v1/models`; the halved `--max-context` retry, the same-window relaunch of a pinned `context`, the recorded files re-checked
+  before the relaunch and the second-death sentence; stop order; `--script`
   round-tripping the copy; the fingerprint asking after `server.py` changes and not after a touch with an equal hash;
   the install sensing refusing a symlinked `server.py`, a group-writable directory, a missing engine and a config
   naming an unknown file; a `--native` mismatch refused; the RAM check with the reserve and an unreadable
@@ -828,17 +841,20 @@ A sensed install adds `· Strata available: /model <entry>-strata` to the Flash-
   5. `/model` with `llm.service` serving: §10.2's lines, the sentence once; `init` and `start` silent on the second run.
   6. `/model` with `llm.service` stopped: numbered entries, every one launches.
   7. The real `fixed_tokens` of the root and the `web-researcher`, and their floors, written into §8.1.
-  8. Strata install, run by the owner from `doctor`'s command; the next `/model` shows `· Strata available`.
+  8. Strata install, run by the owner from `doctor`'s command; the next `/model` lists `· Strata available: /model
+     Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-strata` on the Flash-Next entry.
   9. `/model Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-strata`: set up, launched, `/health` `loaded`, the window line
-     reads `window: 65,536 · Strata · experts pinned in RAM (40.0 GiB) · one request at a time`, the served window
-     at least the floor, a turn and a delegated turn run; decode recorded beside llama.cpp's 23.8 t/s.
-  10. `localharness start` on the Strata record: attaches when it serves, launches and waits when it does not.
-  11. Strata → llama.cpp 27B → Strata: each stop verified, `MemAvailable` back within 2 GiB after Strata stops with
-     no `engine/strata` process left behind, a delegated turn after each.
+     reads `window: <n> · Strata · experts pinned in RAM (40.0 GiB) · one request at a time` with `<n>` at least the
+     floor, a turn and a delegated turn run; decode recorded beside llama.cpp's 23.8 t/s.
+  10. `localharness start` on the Strata record. With the server up it attaches and prints no launch line; with it
+      down it prints the launch line (`window: <n> · Strata · …`), waits, then serves.
+  11. Strata → llama.cpp 27B → Strata: each stop verified, `MemAvailable` back within 2 GiB of the figure read
+     before the first Strata launch after Strata stops, with no `engine/strata` process left behind, a delegated
+     turn after each.
   12. The response field names for reasoning and tool calls from one `--debug` body, written into §11.6.
 
-  The next live run (0.19.2) carries rows 8–12 above, none yet measured, and these: rows 13–17 each check what
-  §7.1, §7.2, §7.5, §10 and §16 now state, and row 18 checks what §11.2 states.
+  Rows for the next live run (0.19.2): rows 8–12 above and these. Rows 13–17 each check what §7.1, §7.2, §7.5, §10
+  and §16 now state; row 18 checks what §11.2 states:
 
   13. The gemma Q4_K_M GGUF set up and launched with `llm.service` stopped: the launch line's window equals the
       plan's (152,832 at 30.2 GiB free with no `-np`, §16), `nvidia-smi` shows the process resident, and a turn runs.
@@ -851,8 +867,12 @@ A sensed install adds `· Strata available: /model <entry>-strata` to the Flash-
   16. The gemma bf16 `not offered` line, and `/model` on its name printing §10.4's sentence and stopping nothing.
   17. Any launch whose window line carries the spill clause, checked against `nvidia-smi` and decode speed; and a
       launch under the autostart unit, which never carries the clause (§7.5), read by hand against `nvidia-smi`.
-  18. During a Strata load, kill the engine child (`engine/strata`) under its living parent: read whether the launch
-      times out after the bound instead of exiting, since the retry (§11.2) fires only on the parent's exit.
+  18. Start a Strata load (row 9's launch) and, before its window line prints, kill the engine child (`engine/strata`)
+      with SIGKILL, leaving the parent alive. Record which of the three outcomes the code allows happens, and the
+      seconds to it: the parent restarts the engine and the load completes; the parent exits and the retry of §11.2
+      fires; or the launch times out at 960 s with no retry. Then read the teardown after the swap's rollback: no
+      `engine/strata` process remains and `MemAvailable` is back near the figure read before the launch. The teardown
+      is the pass; write the observed sentence into §11.6.
 
 ## 16. Open questions and recorded decisions
 
