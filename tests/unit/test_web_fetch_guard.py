@@ -315,7 +315,7 @@ async def test_a_public_fetch_is_unchanged_and_pinned(monkeypatch):
     seen = _serve(monkeypatch, lambda r: _text("hello"))
     result = await _fetch("https://example.com/page")
     assert result.success, result.error
-    assert result.output.startswith(web_tool._UNTRUSTED) and "hello" in result.output
+    assert result.output.startswith(web_tool.UNTRUSTED_BANNER) and "hello" in result.output
     assert result.metadata["url"] == "https://example.com/page"
     [request] = seen
     assert request.url.host == "93.184.216.34"

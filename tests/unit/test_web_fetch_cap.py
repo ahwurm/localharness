@@ -1,4 +1,4 @@
-"""web_fetch download cap: a huge body stops at _FETCH_MAX_BODY_BYTES and the retained
+"""web_fetch download cap: a huge body stops at FETCH_MAX_BODY_BYTES and the retained
 (lossless-store) text carries the cap notice — truncation is surfaced, never silent."""
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ async def test_fetch_download_capped(monkeypatch):
     res = await WebFetchTool(store).run(url="http://example.com/big")
     assert res.success
     retained = store.get(res.metadata["fetch_id"])
-    cap = web_tool_mod._FETCH_MAX_BODY_BYTES
+    cap = web_tool_mod.FETCH_MAX_BODY_BYTES
     assert len(retained) <= cap + 200  # capped body + the notice line
     assert "download capped" in retained
     assert body.offered < 4, "the download stopped at the cap instead of reading the whole body"
