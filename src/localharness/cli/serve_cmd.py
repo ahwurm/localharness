@@ -16,8 +16,9 @@ The steps, in order (each refusal prints one line on stderr, which the journal k
  7. The service manager is asked (it cannot be -> 1); a verified live launch of this record -> 0.
  8. The own-unit identity test fails -> 78; the captured environment differs from the record -> 78.
  9. Launch decision (refused -> 78), plan, then under the launch lock: the live-pidfile guard (a live
-    process holds the pidfile -> 75), the config.ini home, the pidfile with this process's own pid and the
-    boot marker; the lock is released and `server.exec_server` replaces this process.
+    process holds the pidfile -> 75), the config.ini home (a Strata record: its files re-checked against the
+    machine record -> 78, then its config copy), the pidfile with this process's own pid and the boot marker;
+    the lock is released and `server.exec_server` replaces this process (a Strata record: from its engine_dir).
 
 Exit codes are the contract the unit's restart policy reads (`RestartPreventExitStatus=78`):
 
@@ -29,7 +30,7 @@ Exit codes are the contract the unit's restart policy reads (`RestartPreventExit
 
 `serve` never adopts, never launches through a strategy and never reads a stored selection itself: what it
 serves is whatever the one `resolve_serving` call returns. It writes the pidfile, the boot marker and the
-llama.cpp config.ini home, nothing else. The server's environment is built from an allowlist (see
+llama.cpp config.ini home or the Strata config copy, nothing else. The server's environment is built from an allowlist (see
 `EXEC_INHERITED`), never from the service manager's own.
 """
 from __future__ import annotations
@@ -49,7 +50,7 @@ from localharness.cli import model_ops
 from localharness.cli.workspace import decide_machine_trust, visible_text
 from localharness.config import trust
 from localharness.config.loader import ConfigLoader
-from localharness.provider import lifecycle, procfs, server, units
+from localharness.provider import lifecycle, procfs, server, strata, units
 from localharness.provider.runtimes import RUNTIMES
 
 err_console = Console(stderr=True)
@@ -82,6 +83,7 @@ NO_MANAGER_LINE = "serve: the service manager did not answer — will try again"
 NOT_ON_PATH_LINE = "serve: {binary} is not on the captured PATH ({path}) — set it in the shell and run localharness model --autostart on"
 NOT_EXECUTABLE_LINE = "serve: {binary} is not an executable file"
 HOME_FAILED_LINE = "serve: could not prepare the llama.cpp config home: {why}"
+COPY_FAILED_LINE = "serve: could not prepare the Strata config copy: {why}"
 PIDFILE_FAILED_LINE = "serve: could not record the launch: {why}"
 MARKER_FAILED_LINE = "serve: the boot marker was not written ({why}) — launching anyway"
 EXEC_FAILED_LINE = "serve: could not start {binary}: {why}"
@@ -110,9 +112,25 @@ def _planned_argv(spec: Any, config_dir: Path, autosense: Any, decision: Any, *,
                                      floor=lifecycle.cached_floor(config_dir))
         return list(plan.argv), plan, sensed
     argv = server.serve_command(
-        spec, keyed=keyed, loopback=decision.loopback, key_file_ok=decision.key_file_ok,
-        context=None, cache_ram=None)
+        spec, keyed=keyed, loopback=decision.loopback, key_file_ok=decision.key_file_ok, context=None, cache_ram=None,
+        config_copy=str(strata.copy_path(config_dir, spec.port)) if _is_strata(spec) else None)
     return argv, None, None
+
+
+def _is_strata(spec: Any) -> bool:
+    return "engine_config" in RUNTIMES[spec.runtime].record_fields
+
+
+def _strata_engine(spec: Any, sensed: "lifecycle.Sensed | None") -> "strata.EngineConfig | None":
+    """The Strata config the launch was sensed from (None for any other runtime); a refusal raises LaunchRefused."""
+    if not _is_strata(spec):
+        return None
+    if sensed is not None:
+        return sensed.engine
+    engine, refusal = strata.sense(spec)
+    if refusal is not None:
+        raise server.LaunchRefused(refusal)
+    return engine
 
 
 def _exec_environment(captured: Mapping[str, str], home: str, inherited: Mapping[str, str], spec: Any,
@@ -253,7 +271,8 @@ def serve(
     if decision.note:
         _say(decision.note)
     try:
-        argv, plan, _sensed = _planned_argv(spec, cfg, harness.autosense, decision, keyed=keyed, unit=state)
+        argv, plan, sensed = _planned_argv(spec, cfg, harness.autosense, decision, keyed=keyed, unit=state)
+        engine = _strata_engine(spec, sensed)
     except server.LaunchRefused as refused:
         _stop(EXIT_REFUSED, visible_text(str(refused)))
     binary, why_not = _resolve_binary(argv[0], captured.get("PATH", ""))
@@ -277,6 +296,15 @@ def serve(
                         cfg, spec.port, getattr(spec, "config_ini", None)))
                 except (OSError, UnicodeError) as exc:
                     _stop(EXIT_TRANSIENT, HOME_FAILED_LINE.format(why=getattr(exc, "strerror", None) or exc))
+            if engine is not None:
+                unconfirmed = strata.verify_recorded(cfg, spec, None if record.peer is None else record.peer.name, engine)
+                if unconfirmed is not None:
+                    _stop(EXIT_REFUSED, visible_text(unconfirmed))
+                try:
+                    strata.write_copy(cfg, spec.port, strata.copy_of(
+                        engine, spec, context=strata.launch_context(plan, spec), port=spec.port, config_dir=cfg))
+                except OSError as exc:
+                    _stop(EXIT_TRANSIENT, COPY_FAILED_LINE.format(why=exc.strerror or exc))
             try:
                 server.write_pidfile(cfg, os.getpid(), port=spec.port)
             except OSError as exc:
@@ -297,6 +325,8 @@ def serve(
         except (OSError, ValueError):
             pass
     try:
+        if engine is not None:
+            os.chdir(os.path.expanduser(spec.engine_dir))
         server.exec_server(binary, argv, env)
     except OSError as exc:
         _stop(EXIT_TRANSIENT, EXEC_FAILED_LINE.format(binary=visible_text(binary), why=exc.strerror or exc))
