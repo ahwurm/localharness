@@ -20,7 +20,7 @@ from localharness.tools.base import Tool, ToolResult, ToolSchema
 from localharness.tools.builtin import netguard
 from localharness.tools.builtin.browser_proxy import NAV_TIMEOUT_S, Proxy, serve
 from localharness.tools.builtin.web_tool import (
-    FETCH_DEFAULT_CHARS, FETCH_MAX_BODY_BYTES, UNTRUSTED_BANNER, WebFetchTool, _get_default_store, retain_window)
+    FETCH_DEFAULT_CHARS, FETCH_MAX_BODY_BYTES, UNTRUSTED_BANNER, WebFetchTool, get_default_store, retain_window)
 
 MAX_CONTEXTS = 2
 RETRY_AFTER_S = 60
@@ -303,7 +303,7 @@ class BrowserFetchTool(Tool):
 
     def __init__(self, runtime: BrowserRuntime, store: Any = None) -> None:
         self._runtime = runtime
-        self._store = store if store is not None else _get_default_store()
+        self._store = store if store is not None else get_default_store()
 
     def info(self) -> ToolSchema:
         return ToolSchema(
