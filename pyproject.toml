@@ -120,7 +120,7 @@ vision = [
     "pillow>=10,<13",
 ]
 # The browser plugin's headless Chromium driver. OPTIONAL: the browser itself is a separate download the plugin asks about.
-# The floor is the version the live reach test last passed.
+# The floor is the version uv.lock pins.
 browser = ["playwright>=1.64,<2"]
 dev = [
     "pytest>=8",
