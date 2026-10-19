@@ -2380,7 +2380,7 @@ class ManagedServerConfig(BaseModel):
 
     @model_validator(mode="after")
     def _launch_target_present(self) -> "ManagedServerConfig":
-        from localharness.provider.runtimes import RUNTIMES
+        from localharness.provider.runtimes import RUNTIMES, has_engine_config
         row = RUNTIMES[self.runtime]
         for key, other in RUNTIMES.items():
             names = [n for n in other.record_fields
@@ -2393,7 +2393,7 @@ class ManagedServerConfig(BaseModel):
         for flag, why in row.derived_args.items():
             if any(a == flag or a.startswith(f"{flag}=") for a in self.extra_args):
                 raise ValueError(f"runtime={self.runtime}: `{flag}` must not appear in extra_args — {why}.")
-        if "engine_config" in row.record_fields:
+        if has_engine_config(self.runtime):
             self._engine_record_admitted(row.name)
         if not row.checkpoint:
             return self

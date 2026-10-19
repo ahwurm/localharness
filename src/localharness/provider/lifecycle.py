@@ -50,7 +50,7 @@ from localharness.core.private_files import atomic_write_text, open_regular
 from localharness.provider import autosense as _auto
 from localharness.provider import procfs, server, speed_stats, tuning, units
 from localharness.provider.procfs import LaunchIdentity
-from localharness.provider.runtimes import RUNTIMES
+from localharness.provider.runtimes import RUNTIMES, has_engine_config
 from localharness.provider.tuning import Tuned
 
 log = logging.getLogger(__name__)
@@ -454,7 +454,7 @@ def sense_launch(
         fi = _auto.compute_fit(spec, autosense, meminfo=True, memory=memory)  # its `fits` is priced without the derived types: unused
         remembered = speed_stats.last_retry(speed_stats.default_speed_stats_path(config_dir), record_key(spec))
         engine = engine_refusal = None
-        if "engine_config" in row.record_fields:
+        if has_engine_config(spec.runtime):
             from localharness.provider import strata
 
             engine, engine_refusal = strata.sense(spec)
@@ -666,7 +666,7 @@ def plan_launch(
     if "config_ini" in row.record_fields:
         home = server.config_ini_home(sensed.config_dir, spec.port)
         names.append("XDG_CONFIG_HOME")
-    if "engine_config" in row.record_fields:
+    if has_engine_config(spec.runtime):
         from localharness.provider import strata
 
         kw["config_copy"] = str(strata.copy_path(sensed.config_dir, spec.port))

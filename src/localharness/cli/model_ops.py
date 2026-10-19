@@ -35,7 +35,7 @@ from localharness.config.redact import secret_values, validation_text
 from localharness.config.trust import LAUNCH_KIND, LAUNCH_MODEL_KIND
 from localharness.core.bus import EventBus
 from localharness.core.events import ComponentMutated
-from localharness.provider.runtimes import RUNTIMES, row_of
+from localharness.provider.runtimes import RUNTIMES, has_engine_config, row_of
 from localharness.provider.units import (
     PRIMARY_TARGET, TARGET_NAME, in_flight_target, read_target, remove_target,
 )
@@ -1174,10 +1174,6 @@ def _setup_entries(harness: Any, listed: Any, taken: set[str], *, config_dir: An
     return entries
 
 
-def _is_strata(spec: Any) -> bool:
-    return "engine_config" in RUNTIMES[spec.runtime].record_fields
-
-
 def _file_of(e: PlanEntry) -> str | None:
     return e.path or getattr(e.setup, "real", None)
 
@@ -1331,7 +1327,7 @@ def plan_entries(
     taken = {*(r.name for r in records), *(r.served for r in records), *shown}
     for e in _setup_entries(harness, library, taken, config_dir=config_dir, memory=memory, floor=floor, unit=unit):
         (refused if e.refusal is not None else cold).append(e)
-    has_strata = {_model_file(r.spec) for r in records if r.spec is not None and _is_strata(r.spec)}
+    has_strata = {_model_file(r.spec) for r in records if r.spec is not None and has_engine_config(r.spec.runtime)}
     marked, strata, offers = _strata_pass(
         [*cold, *refused], auto=auto, has_strata=has_strata, taken=taken, offer=foreign is None)
     cold, refused = [e for e in marked if e.refusal is None], [e for e in marked if e.refusal is not None]

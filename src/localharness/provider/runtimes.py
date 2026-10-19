@@ -116,3 +116,8 @@ RUNTIMES: Mapping[str, Runtime] = MappingProxyType({
 
 def row_of(name: object) -> Runtime | None:
     return RUNTIMES.get(name) if isinstance(name, str) else None
+
+
+def has_engine_config(runtime: object) -> bool:
+    row = row_of(runtime)
+    return row is not None and "engine_config" in row.record_fields
