@@ -25,9 +25,10 @@ def test_web_plugin_manifest() -> None:
     assert MobilePlugin.ConfigModel is MobileConfig and set(MobileConfig.model_fields) == {"public_url"}
     from localharness.autoresearch.plugin import AutoresearchPlugin
     from localharness.dispatch.plugin import DispatchPlugin
+    from localharness.tools.builtin.browser_plugin import BrowserPlugin
 
-    # dispatch (49) is bundled and on by default; autoresearch (50) is bundled and on by default
-    assert bundled_plugins() == (ImagePlugin, MobilePlugin, MemoryPlugin, DispatchPlugin, AutoresearchPlugin)
+    assert bundled_plugins() == (ImagePlugin, MobilePlugin, MemoryPlugin, DispatchPlugin, AutoresearchPlugin,
+                                 BrowserPlugin)
 
 
 def test_web_plugin_channels_names_the_web_channel() -> None:
