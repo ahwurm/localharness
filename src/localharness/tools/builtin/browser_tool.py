@@ -293,6 +293,10 @@ _EMPTY = ("[rendered text is under 80 characters — the page is empty or blocki
 _NOT_AVAILABLE = ("browser_fetch is not available on this machine ({reason}); use the search snippet or another source. "
                   "The person can run `localharness doctor`.")
 
+_WEB = WebFetchTool(store=object()).info().parameters
+_PARAMETERS = {**_WEB, "properties": {
+    **_WEB["properties"], "url": {**_WEB["properties"]["url"], "description": "The https URL to render."}}}
+
 
 class BrowserFetchTool(Tool):
     timeout_s = NAV_TIMEOUT_S + 20
@@ -305,7 +309,7 @@ class BrowserFetchTool(Tool):
         return ToolSchema(
             name="browser_fetch", group="web",
             gate_family="network", ingest="untrusted", host="safe", result_origin="untrusted",
-            description=_DESCRIPTION, parameters=WebFetchTool(store=self._store).info().parameters,
+            description=_DESCRIPTION, parameters=_PARAMETERS,
             destructive=False, estimated_tokens=FETCH_DEFAULT_CHARS // 4)
 
     def bound_to(self, store: Any) -> "BrowserFetchTool":
