@@ -32,6 +32,7 @@ ALLOWED: dict[str, set[str]] = {
     "integrate": {"delegation_id", "note"},
     "close": {"status", "note", "human_turn"},
     "show": set(),
+    "resume": set(),
 }
 CHECKPOINT_NEEDS_TURN = ("checkpoint requires human_turn: the human turn that asked to stop; "
                          "use partial for your own stop")
@@ -73,7 +74,8 @@ class TaskTool(Tool):
                 "so they stay in view; record editorial criteria with judge — judgments are opinion, "
                 "never evidence. integrate delegated results: say how each subagent's result was used. "
                 "Declare a check before you run its command so the run binds "
-                "as evidence."
+                "as evidence. A previous session's record is paused and out of view: show lists it when the "
+                "person asks what work is here or to pick it up; resume it only then."
             ),
             parameters={
                 "type": "object",
@@ -148,9 +150,15 @@ class TaskTool(Tool):
                             f"{', '.join(sorted(ALLOWED[action])) or 'none'}", error_type="validation_error")
         if action == "show":
             return self.ok(state.show())
+        if action == "resume":
+            if not state.resume():
+                return self.err("No paused task to resume" if state.current is None or state._live() is not None
+                                else "The task is not paused", error_type="validation_error")
+            return self.ok(f"Resumed task {state.current.id}.\n{state.show()}")
         rec = state.current
         if action != "start" and state._live() is None:
-            return self.err("No active task; call task start for substantive work",
+            hint = ", or resume the paused one" if state.paused else ""
+            return self.err(f"No active task; call task start for substantive work{hint}",
                             error_type="validation_error")
         prev, prev_notes = (rec.to_dict() if rec is not None else None), list(state.notes)
         try:
@@ -215,6 +223,7 @@ class TaskTool(Tool):
             assignment=_text("assignment", f["assignment"]),
             instructions_path=str(self._inside(_text("instructions_path", raw))) if raw else "",
         )
+        was_paused = state.paused
         replaced = state.begin(record)
         for d in decisions:
             if isinstance(d, dict):
@@ -228,7 +237,7 @@ class TaskTool(Tool):
         self._checkpoint(record, f)
         lines = [f"Started task {record.id}."]
         if replaced is not None:
-            lines.append(f"Replaced unfinished task {replaced.id}.")
+            lines.append(f"Replaced {'paused' if was_paused else 'unfinished'} task {replaced.id}.")
         if record.human_turns:
             lines.append("Human turns on record: " + "; ".join(
                 f"{t['n']}: {json.dumps(t['text'][:80], ensure_ascii=False)}" for t in record.human_turns) + ".")

@@ -9,7 +9,9 @@ model's behalf; policy lives in the prompt and workflow instructions. The record
 it was closed as complete with every declared check passed or waived and every delegation
 integrated. Replies are never replaced: at most one `Task evidence:` line is appended. References
 are re-snapshotted before every request of a live task (`refresh_references`); judgments are
-opinion, never evidence. Without a record `TaskState` is inert (no packet, no file).
+opinion, never evidence. Without a record `TaskState` is inert (no packet, no file). A record
+loaded from disk at session start is paused: out of the packet and untouched by human turns until
+the model resumes it through the `task` tool or starts new work.
 """
 from __future__ import annotations
 
@@ -208,6 +210,7 @@ class TaskState:
         self.workspace = workspace
         self.recent_turns: list[dict[str, Any]] = []  # [{"n": int, "text": str}]
         self.notes: list[str] = []  # runtime-only restart notes
+        self.paused = False
         self._store: Any = None  # the content store of the last refresh (for withdraw/drop)
 
     @classmethod
@@ -229,6 +232,7 @@ class TaskState:
                      path, record.workspace, workspace)
             return state, None
         state.current = record
+        state.paused = True
         state.recent_turns = [dict(t) for t in record.human_turns]
         state.reconcile()
         return state, None
@@ -279,7 +283,7 @@ class TaskState:
 
     def _live(self) -> TaskRecord | None:
         rec = self.current
-        return None if rec is None or rec.retired or (rec.closed and self._settled(rec)) else rec
+        return None if rec is None or self.paused or rec.retired or (rec.closed and self._settled(rec)) else rec
 
     def _settled(self, rec: TaskRecord) -> bool:
         return (all(o in {"passed", "waived"} for o in rec.context.outcomes().values())
@@ -374,7 +378,9 @@ class TaskState:
 
     @property
     def status(self) -> str:
-        return self.current.context.status if self.current else "none"
+        if self.current is None:
+            return "none"
+        return "paused" if self.paused else self.current.context.status
 
     @status.setter
     def status(self, value: str) -> None:
@@ -394,7 +400,7 @@ class TaskState:
         n = self.recent_turns[-1]["n"] + 1 if self.recent_turns else 1
         turn = {"n": n, "text": text[:MAX_TURN_CHARS]}
         self.recent_turns = [*self.recent_turns, turn][-MAX_HUMAN_TURNS:]
-        if self.current is not None:
+        if self.current is not None and not self.paused:
             self.current.context.observe_human(text)
             self.current.human_turns = [*self.current.human_turns, dict(turn)][-MAX_HUMAN_TURNS:]
             self._interrupt_running()
@@ -569,12 +575,19 @@ class TaskState:
         return candidate
 
     def begin(self, record: TaskRecord) -> TaskRecord | None:
-        replaced = self.current if self._live() is not None else None
+        replaced = self.current if self._live() is not None or self.paused else None
+        self.paused = False
         record.human_turns = [dict(t) for t in self.recent_turns[-MAX_HUMAN_TURNS:]]
         if self.recent_turns and not record.context.latest_human:
             record.context.latest_human = self.recent_turns[-1]["text"]  # the turn that asked for the work
         self.current, self.notes = record, []
         return replaced
+
+    def resume(self) -> bool:
+        if self.current is None or not self.paused:
+            return False
+        self.paused = False
+        return True
 
     def save(self) -> None:
         if self.path is None or self.current is None:
@@ -605,7 +618,9 @@ class TaskState:
             return "No task record."
         self._observe_artifacts()
         ctx = rec.context
-        if rec.retired:
+        if self.paused:
+            status = f"paused since {rec.updated[:10]} (out of view; resume it when the person picks the work up)"
+        elif rec.retired:
             status = ("closed (no machine checks declared)" if not ctx.requirements
                       else f"closed ({ctx.status})")
         elif rec.closed:

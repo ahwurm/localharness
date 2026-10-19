@@ -152,7 +152,7 @@ _RULES = (
     "Self-checks and CONFIRMED do not prove completion. Avoid repeated unchanged attempts; "
     "report a blocker or unknown result honestly. For substantive multi-step work, keep "
     "the working record with the task tool when it is available: the objective, the "
-    "human's decisions, artifacts, references, and checks."
+    "human's decisions, artifacts, references, and checks. A previous session's record is paused and out of view: look with the task tool's show when the person asks what work is here or to pick it up, and resume it only then."
 )
 
 
