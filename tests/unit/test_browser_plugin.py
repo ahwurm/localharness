@@ -892,3 +892,165 @@ def test_linux_reads_xdg_cache_home_and_a_zero_path_means_the_package_folder(mon
     monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "0")
     monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: SimpleNamespace(origin=str(tmp_path / "pw" / "__init__.py")))
     assert browser_plugin._cache_root() == tmp_path / "pw" / "driver" / "package" / ".local-browsers"
+
+
+# --- with the binary: one tool over one runtime, the launch and sandbox rows, the download, stop() ----------------
+
+
+async def test_tools_returns_the_one_fetch_tool_over_the_runtime_the_plugin_keeps(cache, world, tmp_path):
+    install_shell(cache)
+    plugin = BrowserPlugin()
+    (tool,) = await plugin.tools(plugin_ctx(tmp_path, idle_close_s=7))
+    assert isinstance(tool, BrowserFetchTool) and tool._runtime is plugin._runtime and plugin._runtime._idle_s == 7
+    assert world.launches == []
+    await tool.bound_to(ContentStore()).run(url="https://example.com/")
+    assert world.browsers[0].connected
+    await plugin.stop(plugin_ctx(tmp_path))
+    assert world.browsers[0].closed and world.stopped == 1
+
+
+async def test_stop_with_nothing_started_does_nothing(cache, world, tmp_path):
+    await BrowserPlugin().stop(plugin_ctx(tmp_path))
+    plugin = BrowserPlugin()
+    await plugin.tools(plugin_ctx(tmp_path))
+    await plugin.start(plugin_ctx(tmp_path))
+    await plugin.stop(plugin_ctx(tmp_path))
+    assert world.launches == []
+
+
+async def launch_rows(tmp_path, cache, **cfg):
+    install_shell(cache)
+    plugin = BrowserPlugin()
+    rows = await plugin.doctor(plugin_ctx(tmp_path, **cfg))
+    assert [r.name for r in rows] == ["browser-package", "browser-binary", "browser-launch", "browser-sandbox"]
+    assert plugin._runtime is None
+    return rows[1], rows[2], rows[3]
+
+
+DEPS_HINT = f"sudo {sys.executable} -m playwright install-deps chromium (apt only), or set browser.executable_path to a system Chromium"
+SANDBOX_HINT = ("add an AppArmor profile for the downloaded headless shell (Ubuntu 23.10 and later restrict unprivileged "
+                "user namespaces), or accept the residual with browser.sandbox: false in the machine-level config")
+
+
+async def test_with_a_passing_launch_every_row_passes_and_the_throwaway_runtime_is_closed(cache, world, tmp_path):
+    binary, launch, sandbox = await launch_rows(tmp_path, cache)
+    assert binary == Check(name="browser-binary", status="pass", detail="chromium_headless_shell-1248")
+    assert launch == Check(name="browser-launch", status="pass", detail="reach check ok")
+    assert sandbox == Check(name="browser-sandbox", status="pass")
+    assert len(world.browsers) == 1 and world.browsers[0].closed and world.stopped == 1 and world.open_contexts() == 0
+
+
+async def test_missing_host_libraries_fail_the_launch_with_the_deps_command(cache, world, tmp_path):
+    world.launch_error = FakeError("BrowserType.launch: Host system is missing dependencies to run browsers.\nplease")
+    _, launch, sandbox = await launch_rows(tmp_path, cache)
+    assert launch == Check(name="browser-launch", status="fail",
+                           detail="Host system is missing dependencies to run browsers", hint=DEPS_HINT)
+    assert sandbox == Check(name="browser-sandbox", status="skip", detail="needs a working launch")
+
+
+async def test_a_sandbox_that_cannot_start_fails_its_own_row_and_the_launch_skips(cache, world, tmp_path):
+    world.launch_error = FakeError("Failed to launch: No usable sandbox! If you are running on Ubuntu 23.10+")
+    _, launch, sandbox = await launch_rows(tmp_path, cache)
+    assert launch == Check(name="browser-launch", status="skip", detail="needs the sandbox")
+    assert sandbox == Check(name="browser-sandbox", status="fail", detail="the Chromium sandbox could not start",
+                            hint=SANDBOX_HINT)
+
+
+async def test_a_launch_that_came_up_unsandboxed_is_a_sandbox_failure_too(cache, world, tmp_path):
+    world.argv_edit = lambda argv: [*argv, "--no-sandbox"]
+    _, launch, sandbox = await launch_rows(tmp_path, cache)
+    assert launch.status == "skip" and (sandbox.status, sandbox.detail) == ("fail", "Chromium started without its sandbox")
+    assert sandbox.hint == SANDBOX_HINT
+
+
+async def test_a_failed_reach_check_fails_the_launch_row_and_skips_the_sandbox(cache, world, tmp_path):
+    world.canary = "direct"
+    _, launch, sandbox = await launch_rows(tmp_path, cache)
+    assert (launch.status, launch.detail) == ("fail", "reach check failed")
+    assert launch.hint == "browser_fetch stays off until a launch passes; this Chromium did not go through its checking proxy"
+    assert sandbox == Check(name="browser-sandbox", status="skip", detail="needs a working launch")
+
+
+async def test_a_missing_executable_fails_the_launch_with_the_download_hint(cache, world, tmp_path):
+    world.launch_error = FakeError("Executable doesn't exist at /x/chrome")
+    _, launch, _ = await launch_rows(tmp_path, cache)
+    assert launch == Check(name="browser-launch", status="fail", detail="Chromium is not installed",
+                           hint="run `localharness plugins enable browser` to download it")
+
+
+async def test_any_other_launch_error_names_chromiums_own_error(cache, world, tmp_path):
+    world.launch_error = FakeError("boom\nmore")
+    _, launch, sandbox = await launch_rows(tmp_path, cache)
+    assert launch == Check(name="browser-launch", status="fail", detail="launch failed: boom",
+                           hint="this is Chromium's own error; set browser.executable_path to another Chromium, "
+                                "or run `localharness doctor` again")
+    assert sandbox.status == "skip"
+
+
+async def test_the_machine_level_sandbox_off_is_a_warning_that_names_the_setting(cache, world, tmp_path):
+    _, launch, sandbox = await launch_rows(tmp_path, cache, sandbox=False)
+    assert launch.status == "pass"
+    assert sandbox == Check(name="browser-sandbox", status="warn",
+                            detail="off: browser.sandbox is false in the machine-level config, so Chromium runs unsandboxed")
+
+
+async def test_doctors_launch_never_touches_the_session_runtime(cache, world, tmp_path):
+    install_shell(cache)
+    plugin = BrowserPlugin()
+    (tool,) = await plugin.tools(plugin_ctx(tmp_path))
+    await tool.run(url="https://example.com/")
+    session_browser = world.browsers[0]
+    await plugin.doctor(plugin_ctx(tmp_path))
+    assert len(world.browsers) == 2 and world.browsers[1].closed and session_browser.connected
+    assert plugin._runtime._browser is session_browser
+    await plugin.stop(plugin_ctx(tmp_path))
+
+
+class FakeInstall:
+    def __init__(self, cache_root, returncode=0, stderr="", creates=True, raises=None):
+        self.cache_root, self.returncode, self.stderr, self.creates, self.raises = cache_root, returncode, stderr, creates, raises
+        self.calls = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append((argv, kwargs))
+        if self.raises:
+            raise self.raises
+        if self.creates:
+            install_shell(self.cache_root)
+        return SimpleNamespace(returncode=self.returncode, stderr=self.stderr)
+
+
+def download(monkeypatch, tmp_path, install):
+    monkeypatch.setattr(subprocess, "run", install)
+    return BrowserPlugin().setup_action(plugin_ctx(tmp_path))
+
+
+def test_the_download_runs_playwrights_installer_with_its_progress_visible(cache, monkeypatch, tmp_path):
+    install = FakeInstall(cache)
+    assert download(monkeypatch, tmp_path, install) == [
+        Check(name="browser-binary", status="pass", detail="chromium_headless_shell-1248 installed")]
+    ((argv, kwargs),) = install.calls
+    assert argv == [sys.executable, "-m", "playwright", "install", "--only-shell"]
+    assert "stdout" not in kwargs and kwargs["stderr"] == subprocess.PIPE and kwargs["text"] is True
+
+
+def test_a_failed_download_is_one_row_with_the_last_line_and_a_hint(cache, monkeypatch, tmp_path):
+    install = FakeInstall(cache, returncode=1, stderr="line one\nERROR: download failed\n\n", creates=False)
+    assert download(monkeypatch, tmp_path, install) == [Check(
+        name="browser-binary", status="fail", detail="ERROR: download failed",
+        hint="the download is Playwright's own; check the network, then run `localharness plugins enable browser` again")]
+
+
+def test_a_failed_download_with_no_output_still_says_the_exit_code(cache, monkeypatch, tmp_path):
+    (row,) = download(monkeypatch, tmp_path, FakeInstall(cache, returncode=3, creates=False))
+    assert (row.status, row.detail) == ("fail", "the download exited with code 3")
+
+
+def test_a_download_that_leaves_no_folder_names_where_it_looked(cache, monkeypatch, tmp_path):
+    (row,) = download(monkeypatch, tmp_path, FakeInstall(cache, creates=False))
+    assert row.status == "fail" and str(cache) in row.detail and row.hint.startswith("the download is Playwright's own")
+
+
+def test_a_ctrl_c_during_the_download_propagates(cache, monkeypatch, tmp_path):
+    with pytest.raises(KeyboardInterrupt):
+        download(monkeypatch, tmp_path, FakeInstall(cache, raises=KeyboardInterrupt()))
