@@ -9,8 +9,12 @@ from types import SimpleNamespace
 import pytest
 
 from localharness import __version__
+from localharness.agent.context import ContentStore
+from localharness.tools.base import StoreBound
 from localharness.tools.builtin import browser_tool
-from localharness.tools.builtin.browser_tool import BrowserRuntime, Rendered
+from localharness.tools.builtin.browser_tool import BrowserFetchTool, BrowserRuntime, Rendered
+from localharness.tools.builtin.web_tool import UNTRUSTED_BANNER, WebFetchTool, WebPageQueryTool
+from tests.unit.test_web_fetch_guard import public_web
 
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/156.0.0.0 Safari/537.36"
 CANARY = re.compile(r"https://127\.0\.0\.1:(\d+)/")
@@ -516,3 +520,42 @@ async def test_close_cancels_a_pending_idle_close(world, runtime):
     await runtime.close()
     await asyncio.sleep(0.15)
     assert world.stopped == 1
+
+
+DESCRIPTION = (
+    "Like web_fetch, but runs the page's JavaScript first (slow, up to 30 s). If web_fetch returned "
+    "\"low extractable text\" for an https URL, call this once with the same URL — web_fetch's "
+    "\"do NOT re-fetch\" means do not call web_fetch again, not this tool. Otherwise use web_fetch. "
+    "Same start_index and fetch_id; search the full page with web_page_query.")
+PAGE = "x" * 3000 + " needle " + "y" * 2992
+
+
+@pytest.fixture
+def fetch(world, runtime, monkeypatch):
+    public_web(monkeypatch)
+    world.pages["https://example.com/a"] = (200, PAGE, "text/html")
+    store = ContentStore()
+    return BrowserFetchTool(runtime, store), store
+
+
+async def test_a_rendered_page_is_retained_in_the_tools_store_and_found_by_web_page_query(fetch):
+    tool, store = fetch
+    got = await tool.run(url="https://example.com/a", max_chars=500)
+    assert got.success
+    assert got.output == (UNTRUSTED_BANNER + PAGE[:500] + "\n\n[chars 0-500 of 6000 | fetch_id=pg-1 | "
+                          'web_page_query("pg-1", pattern) to search the full retained page; '
+                          "or browser_fetch start_index=500 for the next window]")
+    assert got.metadata == {"url": "https://example.com/a", "fetch_id": "pg-1", "start_index": 0, "next_start_index": 500}
+    found = await WebPageQueryTool(store).run(fetch_id="pg-1", pattern="needle")
+    assert found.success and "needle" in found.output
+
+
+def test_the_schema_is_web_fetchs_with_the_one_description_and_its_name():
+    tool = BrowserFetchTool(object(), ContentStore())
+    schema, web = tool.info(), WebFetchTool(ContentStore()).info()
+    assert schema.description == DESCRIPTION
+    assert schema.parameters == web.parameters
+    assert list(schema.parameters["properties"]) == list(web.parameters["properties"])
+    assert schema.name == "browser_fetch" and isinstance(tool, StoreBound)
+    assert (schema.group, schema.estimated_tokens, schema.destructive) == (web.group, web.estimated_tokens, False)
+    assert tool.timeout_s == browser_tool.NAV_TIMEOUT_S + 20
