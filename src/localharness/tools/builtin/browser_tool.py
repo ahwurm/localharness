@@ -4,8 +4,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib
+import os
 import re
+import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,6 +19,13 @@ from localharness.tools.builtin.web_tool import FETCH_MAX_BODY_BYTES
 
 MAX_CONTEXTS = 2
 REACH_FAILED = "reach check failed"
+SANDBOX_FAILED = "the Chromium sandbox could not start"
+SANDBOX_OFF = "Chromium started without its sandbox"
+MISSING_LIBS = "system libraries are missing"
+NOT_INSTALLED = "Chromium is not installed"
+_LAUNCH_ERRORS = (("Host system is missing dependencies", MISSING_LIBS), ("No usable sandbox", SANDBOX_FAILED),
+                  ("Executable doesn't exist", NOT_INSTALLED))
+_PROFILE_PREFIX = "playwright_chromiumdev_profile-"
 _ARGS = ("--disable-quic", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp", "--disable-breakpad")
 _SKIPPED_TYPES = frozenset({"image", "media", "font"})
 # Counts UTF-16 code units, so a cut can leave a lone high surrogate, which would not survive the driver pipe.
@@ -59,6 +69,28 @@ def _command_lines() -> list[list[str]]:
     return []
 
 
+def _first_line(e: Exception) -> str:
+    """The error's first line without the driver's `Class.method: ` prefix."""
+    lines = str(e).strip().splitlines()
+    return re.sub(r"^[A-Za-z]+\.[A-Za-z]+: ", "", lines[0]) if lines else type(e).__name__
+
+
+def _unavailable_reason(e: Exception) -> str:
+    return next((reason for needle, reason in _LAUNCH_ERRORS if needle in str(e)), f"launch failed: {_first_line(e)[:200]}")
+
+
+def _sweep_profiles() -> None:
+    """Remove profile directories a crashed launch left behind; nothing is touched unless the process list is readable."""
+    if not (lines := _command_lines()):
+        return
+    live = {a.partition("=")[2] for argv in lines for a in argv if a.startswith("--user-data-dir=")}
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    for d in Path(tempfile.gettempdir()).glob(_PROFILE_PREFIX + "*"):
+        with contextlib.suppress(OSError):
+            if d.is_dir() and not d.is_symlink() and str(d) not in live and (uid is None or d.stat().st_uid == uid):
+                shutil.rmtree(d, ignore_errors=True)
+
+
 async def _cost_route(route) -> None:
     await (route.abort() if route.request.resource_type in _SKIPPED_TYPES else route.continue_())
 
@@ -68,6 +100,7 @@ class BrowserRuntime:
         self._config = config
         self._idle_s = config.idle_close_s
         self._lock = asyncio.Lock()
+        self.unavailable: str | None = None
         self._api: Any = None
         self._proxy: Proxy | None = None
         self._pw: Any = None
@@ -76,14 +109,24 @@ class BrowserRuntime:
 
     async def ensure(self):
         async with self._lock:
+            if self.unavailable:
+                raise RenderError("unavailable", self.unavailable)
             if self._browser is not None and self._browser.is_connected():
                 return self._browser
             await self._teardown()
-            await self._launch()
+            try:
+                await self._launch()
+            except BaseException as e:
+                await self._teardown()
+                if not isinstance(e, Exception):
+                    raise
+                self.unavailable = e.detail if isinstance(e, RenderError) else _unavailable_reason(e)
+                raise RenderError("unavailable", self.unavailable) from None
             return self._browser
 
     async def _launch(self) -> None:
         c = self._config
+        await asyncio.to_thread(_sweep_profiles)
         self._proxy = await serve(None)
         self._api = _API or importlib.import_module("playwright.async_api")
         self._pw = await self._api.async_playwright().start()
@@ -104,6 +147,8 @@ class BrowserRuntime:
         if not (any(x.startswith("--proxy-bypass-list=") and "<-loopback>" in x for x in argv)
                 and all(flag in argv for flag in _ARGS)):
             raise RenderError("unavailable", REACH_FAILED)
+        if self._config.sandbox and "--no-sandbox" in argv:
+            raise RenderError("unavailable", SANDBOX_OFF)
 
     async def _canary(self) -> None:
         """Loopback must reach the proxy and be refused there, never the listener."""

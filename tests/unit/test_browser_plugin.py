@@ -274,10 +274,15 @@ async def test_an_unknown_launch_error_is_cut_at_200_characters(world, runtime):
 async def test_the_proxy_is_closed_when_the_launch_fails(world, runtime, monkeypatch):
     seen = []
     real = browser_tool.serve
-    monkeypatch.setattr(browser_tool, "serve", lambda upstream: seen.append(real(upstream)) or seen[-1])
+
+    async def spy(upstream):
+        seen.append(await real(upstream))
+        return seen[-1]
+
+    monkeypatch.setattr(browser_tool, "serve", spy)
     world.launch_error = FakeError("boom")
     await unavailable(runtime)
-    await refuses_connections((await seen[0]).port)
+    await refuses_connections(seen[0].port)
 
 
 @pytest.mark.parametrize("path,passed", [("/opt/chromium/chrome", "/opt/chromium/chrome"), ("", None)])
@@ -296,8 +301,8 @@ async def test_the_user_agent_keeps_chromiums_own_string_and_appends_the_token(w
 
 async def test_only_unowned_real_stale_profile_directories_are_removed_before_the_launch(
         world, tmp_path, runtime, monkeypatch):
-    live, stale, target = (tmp_path / f"playwright_chromiumdev_profile-{n}" for n in ("live", "stale", "real"))
-    other = tmp_path / "unrelated-dir"
+    live, stale = (tmp_path / f"playwright_chromiumdev_profile-{n}" for n in ("live", "stale"))
+    other, target = tmp_path / "unrelated-dir", tmp_path / "link-target"
     for d in (live, stale, target, other):
         d.mkdir()
     link = tmp_path / "playwright_chromiumdev_profile-link"
