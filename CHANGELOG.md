@@ -4,6 +4,68 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.20.0] — 2026-10-19
+
+**browser** — a sixth bundled plugin, off by default. `localharness plugins enable browser`
+downloads Playwright's headless Chromium (asked first, with its size and source) and gives the web
+researcher and the search verifier `browser_fetch`: an https page opened in a real, sandboxed
+headless browser, its JavaScript run, its text returned in `web_fetch`'s shape (paged, retained,
+searchable with `web_page_query`). The browser reaches public addresses only — the same rule as
+`web_fetch`, applied to every request the page makes through a checking proxy the plugin runs and
+verified at every launch — and holds no cookies, profile or storage between calls. The private
+allowlist stays `web_fetch`'s. Needs `localharness[browser]`.
+
+### Added
+- **The `browser` plugin (off by default; needs `localharness[browser]`).** Install with
+  `uv tool install 'localharness[browser]'`, then `localharness plugins enable browser`, which asks
+  `Download Playwright's headless Chromium now? About 100 MB from Playwright's CDN; it runs as a
+  program on this machine (sandboxed by default).` and runs Playwright's own installer
+  (`playwright install --only-shell chromium`). Settings: `browser.idle_close_s` (default 120) and,
+  machine-level only, `browser.executable_path` and `browser.sandbox`. Its page is
+  [docs/plugins/browser.md](docs/plugins/browser.md).
+- **`browser_fetch`.** Held by the web researcher and the search verifier after `web_search`,
+  `web_fetch` and `web_page_query`, and by an agent you define through `tools.add: [browser_fetch]`;
+  never by the root. https only; a new browser context per call with no downloads and no service
+  workers; images, media and fonts not loaded; the page's `load` event plus half a second, at most
+  30 s; the text cut inside the page to 4,000,000 characters before it reaches the harness; each
+  failure is one fixed line ending in one action.
+- **A checking proxy, proven at every launch.** Every connection Chromium opens is a `CONNECT` to a
+  loopback proxy with per-launch credentials, judged by `web_fetch`'s public-address rule with the
+  private allowlist off and dialled to the checked address. QUIC is off, WebRTC is kept to proxied
+  UDP, crash dumps are off. A launch must pass a loopback canary and a command-line check before
+  any page, or `browser_fetch` stays off.
+- **Four `doctor` rows.** `browser-package`, `browser-binary`, `browser-launch` (with the Linux
+  libraries hint) and `browser-sandbox` (with the AppArmor and `browser.sandbox` hint).
+
+### Changed
+- **The phone's permission prompt labels a tool untrusted from what it declares**, so a plugin tool
+  that ingests web content is labelled like the three built-in web tools, which were the only ones
+  it labelled before.
+
+### Known limitations
+- `permissions.ask.network_hosts` asks once per page, not for each host the page loads from.
+- Data out is wider than `web_fetch`'s one GET: a page can send requests by any verb to public
+  hosts.
+- The terminal prints `browser_fetch` as its own tool line and gives its result no "web results —
+  UNTRUSTED" close note; its result takes the context store's generic large-result eviction; and
+  the bench's ask-rate replay counts it as an undeclared family.
+- Where Chromium's sandbox cannot start (Ubuntu 23.10 and later, without an AppArmor profile for the
+  headless shell) `browser_fetch` stays off until you add one or set the machine-level
+  `browser.sandbox: false`. The profile names the headless shell's path, which carries the build
+  number (`chromium_headless_shell-1248` for Playwright 1.64.0): a Playwright upgrade that changes
+  the build leaves the profile pointing at a binary that no longer exists, and `browser-sandbox`
+  fails again until the profile is rewritten for the new path and reloaded.
+- Live runs, on the reference box. The live reach test ran against Playwright 1.64.0
+  (`chromium_headless_shell-1248`, Chromium 156.0.8078.4) with the sandbox on, through an AppArmor
+  profile for the headless shell on Ubuntu 26.04: `7 passed in 5.74s`, with `doctor` showing
+  `browser-package`, `browser-binary`, `browser-launch` and `browser-sandbox` passing. The live-model
+  check ran against `qwen-27b-swift-1.5` (Qwen3.8-27B Swift 1.5 NVFP4-Q8mix, llama.cpp build
+  `b11435-43fe9c642`): `1 passed in 7.13s`; the model's next call after `web_fetch` came back with
+  its low-text note on a client-rendered page was `browser_fetch` on the same URL. That is one run,
+  one model and one page, not a rate. A newer Playwright 1.x launches with the same launch checks
+  but has not been through the live test.
+- 0.19.3's known limitations stand.
+
 ## [0.19.3] — 2026-10-19
 
 A working record left by a previous session no longer follows you into the next one.
