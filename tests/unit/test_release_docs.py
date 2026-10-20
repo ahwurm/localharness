@@ -2,8 +2,8 @@
 
 - An upgrade note: 0.15.0 documented a plugin API that the next release removes, and the CHANGELOG
   said nothing. The entry for the release that removes it sits above `## [0.15.0]`.
-- A link: the notice for a plugin written for 0.15 points at a heading in spec 09. Renaming that
-  heading must fail here, not 404 in silence for the user who follows the link.
+- A link: the notice for a plugin written for 0.15 points at a heading in the example plugin's
+  README. Renaming that heading must fail here, not 404 in silence for the user who follows the link.
 """
 from __future__ import annotations
 
@@ -29,13 +29,13 @@ def _github_anchors(markdown: str) -> set[str]:
     return anchors
 
 
-def test_the_legacy_notice_links_to_a_real_spec_heading() -> None:
+def test_the_legacy_notice_links_to_a_real_heading() -> None:
     assert LEGACY_API_DOC.startswith(_BLOB), LEGACY_API_DOC
     path, _, anchor = LEGACY_API_DOC.removeprefix(_BLOB).partition("#")
-    assert path == "docs/specs/09-hooks-plugins.md"
+    assert path == "examples/plugin-template/README.md"
     assert (_REPO / path).is_file(), _REPO / path
     anchors = _github_anchors((_REPO / path).read_text(encoding="utf-8"))
-    assert "hook-specifications" in anchors  # the control: the file's headings were read at all
+    assert "removing-a-plugin" in anchors  # the control: the file's headings were read at all
     assert anchor in anchors, f"#{anchor} names no heading in {path}"
 
 

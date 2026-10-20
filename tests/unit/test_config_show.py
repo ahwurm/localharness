@@ -360,7 +360,7 @@ def test_a_deep_path_is_not_folded_across_two_lines(tmp_path, monkeypatch, fake_
 
 
 def test_json_key_rows_carry_value_type_layer_and_default(tmp_path, monkeypatch, fake_home):
-    """The payload shape `docs/specs/10-cli.md` quotes — pinned as an exact dict, not a subset.
+    """The payload shape `config show --json` publishes — pinned as an exact dict, not a subset.
 
     `default` is the field that answers "is this value mine or the shipped one?", and it was
     invisible to every other assertion in this file: dropping it from the payload reddened NOTHING

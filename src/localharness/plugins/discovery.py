@@ -30,8 +30,8 @@ FOLDER_PLUGIN_ATTR = "plugin"   # a folder plugin's __init__.py binds `plugin = 
 _FOLDER_PACKAGE = "localharness_folder_plugins"  # the synthetic parent a folder plugin imports under
 LEGACY_ENTRY_POINT_GROUPS = ("localharness.tools", "localharness.hooks")
 """0.15.0's documented plugin API. Nothing loads either group since 0.16; legacy_notices() names them."""
-LEGACY_API_DOC = ("https://github.com/ahwurm/localharness/blob/main/docs/specs/"
-                  "09-hooks-plugins.md#plugins-written-for-015")
+LEGACY_API_DOC = ("https://github.com/ahwurm/localharness/blob/main/examples/plugin-template/"
+                  "README.md#plugins-written-for-015")
 _LEGACY_MANIFEST = "manifest.yaml"  # a 0.15.0 folder plugin's declaration, beside no __init__.py
 _NOT_LOADED = f"was built for the 0.15 plugin API and is no longer loaded — see {LEGACY_API_DOC}"
 

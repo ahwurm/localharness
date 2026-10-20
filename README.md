@@ -57,7 +57,7 @@ A terminal with no such binding (GNOME Terminal, Konsole, xterm), or anything un
 localharness components set terminal.keys.newline ctrl-o
 ```
 
-If you would rather have Alt+Enter break the line, `localharness components set terminal.keys.newline alt-enter` does that in one command too. A list you set wins over one left at its default ([spec 21](docs/specs/21-terminal-keys.md) §5), so it takes Alt+Enter from the nudge (the `!` prefix remains), and `localharness components set terminal.keys.nudge ctrl-o` gives the nudge a chord again. A change applies at the next `localharness start`.
+If you would rather have Alt+Enter break the line, `localharness components set terminal.keys.newline alt-enter` does that in one command too. A list you set wins over one left at its default ([0.18.1](CHANGELOG.md#0181--2026-10-15)), so it takes Alt+Enter from the nudge (the `!` prefix remains), and `localharness components set terminal.keys.nudge ctrl-o` gives the nudge a chord again. A change applies at the next `localharness start`.
 
 ## Supported runtimes
 
@@ -72,7 +72,7 @@ Every runtime is reached through one OpenAI-compatible client; `init` can also a
 
 A session with no temperature set, and the bench, send none: the server's own sampling defaults govern. To pin one, set it on the server, for example llama-server's `--temp` in a record's `extra_args` or vLLM's `--generation-config`.
 
-Setup: [llama.cpp](docs/runtimes/llamacpp.md), [Ollama](docs/runtimes/ollama.md), [LM Studio](docs/runtimes/lmstudio.md), vLLM ([reference architectures](docs/reference-architectures/README.md)). Details: [spec 13](docs/specs/13-provider-support.md).
+Setup: [llama.cpp](docs/runtimes/llamacpp.md), [Ollama](docs/runtimes/ollama.md), [LM Studio](docs/runtimes/lmstudio.md), vLLM ([reference architectures](docs/reference-architectures/README.md)). Details: [the provider layer](src/localharness/provider/).
 
 ## Security
 
@@ -93,16 +93,16 @@ Each plugin has its own page:
 
 - **image**: a `generate_image` tool and `localharness generate-image`, against a ComfyUI server you run yourself. [Page](docs/plugins/image.md) · [site](https://localharness.dev/plugins/image/) · [Docs](docs/reference-architectures/image-generation.md)
 - **Mobile (the `mobile` plugin)**: drive a session from your phone on your own private network. [Page](docs/plugins/mobile.md) · [site](https://localharness.dev/plugins/mobile/) · [Docs](docs/mobile.md)
-- **memory**: per-agent SQLite memory recalled into each turn, with idle consolidation. [Page](docs/plugins/memory.md) · [site](https://localharness.dev/plugins/memory/) · [Docs](docs/specs/05-memory.md)
-- **dispatch**: `localharness start --channel discord` drives a session from allowlisted Discord messages. [Page](docs/plugins/dispatch.md) · [site](https://localharness.dev/plugins/dispatch/) · [Docs](docs/specs/11-channels.md#the-dispatch-plugin-chat-platforms-discord-today)
-- **autoresearch**: propose one harness change, run it through a statistical gate, adopt or reject it. [Page](docs/plugins/autoresearch.md) · [site](https://localharness.dev/plugins/autoresearch/) · [Docs](docs/specs/09-hooks-plugins.md#the-bundled-plugins)
+- **memory**: per-agent SQLite memory recalled into each turn, with idle consolidation. [Page](docs/plugins/memory.md) · [site](https://localharness.dev/plugins/memory/) · [Source](src/localharness/memory/)
+- **dispatch**: `localharness start --channel discord` drives a session from allowlisted Discord messages. [Page](docs/plugins/dispatch.md) · [site](https://localharness.dev/plugins/dispatch/) · [Source](src/localharness/dispatch/)
+- **autoresearch**: propose one harness change, run it through a statistical gate, adopt or reject it. [Page](docs/plugins/autoresearch.md) · [site](https://localharness.dev/plugins/autoresearch/) · [Source](src/localharness/autoresearch/)
 - **browser**: `browser_fetch` for the web researcher and the search verifier, a JavaScript-rendered https page read through a sandboxed headless Chromium that reaches only public addresses. [Page](docs/plugins/browser.md) · [site](https://localharness.dev/plugins/browser/) · [Security](SECURITY.md#what-a-web-fetch-may-reach)
 
 A plugin you install is found in two places, both on your machine and never in a project: a Python package with a `localharness.plugins` entry point in the same environment as LocalHarness, or a folder `~/.localharness/plugins/<name>/`. It stays off, with none of its code imported, until `localharness plugins enable <name>`, which only your machine-level config can do.
 
 ## Write a plugin
 
-Copy [the example plugin](examples/plugin-template/README.md): one tool, one command, one slash command, one `doctor` check and two settings, exercised by the test suite and in CI. The API is [spec 09](docs/specs/09-hooks-plugins.md); its version is `"1"`, and changes since its first release have only added optional fields. Plugins written for the previous plugin API no longer load; [spec 09](docs/specs/09-hooks-plugins.md#plugins-written-for-015) says how to port one.
+Copy [the example plugin](examples/plugin-template/README.md): one tool, one command, one slash command, one `doctor` check and two settings, exercised by the test suite and in CI. The API is [`plugins/api.py`](src/localharness/plugins/api.py); its version is `"1"`, and changes since its first release have only added optional fields. Plugins written for the previous plugin API no longer load; [the example plugin](examples/plugin-template/README.md#plugins-written-for-015) says how to port one.
 
 ## Status
 
@@ -111,7 +111,7 @@ Early stage (v0.20.1, pre-1.0). Interfaces and config schema may change without 
 ## Links
 
 - [SECURITY.md](SECURITY.md): trust boundaries, the permission gate, the prompt-injection threat model
-- [docs/specs/](docs/specs/): component specs, starting with the [architecture overview](docs/specs/00-architecture-overview.md); the CLI is [spec 10](docs/specs/10-cli.md)
+- [src/localharness/](src/localharness/): the components, one package each; the CLI is [`cli/`](src/localharness/cli/)
 - [docs/zed.md](docs/zed.md): use LocalHarness from Zed's agent panel
 - [docs/task-context.md](docs/task-context.md): how a normal session keeps a working record for substantive work (references, checks, delegation, resume), with a synthetic [example workflow](examples/workflows/research-note/)
 - [docs/reference-architectures/](docs/reference-architectures/README.md): tested hardware and setup notes

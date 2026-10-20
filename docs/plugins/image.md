@@ -40,6 +40,6 @@ A project cannot set the two machine-level ones: ComfyUI runs whatever graph it 
 ## More
 
 - [Setup guide and settings](../reference-architectures/image-generation.md)
-- [Spec 09, the bundled plugins](../specs/09-hooks-plugins.md#the-bundled-plugins)
+- [README, the bundled plugins](../../README.md#plugins)
 - [localharness.dev/plugins/image](https://localharness.dev/plugins/image/)
 - [Write your own plugin](../../examples/plugin-template/README.md)

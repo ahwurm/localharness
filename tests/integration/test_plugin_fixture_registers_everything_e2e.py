@@ -364,8 +364,9 @@ def test_fixture_registers_everything(tmp_path, monkeypatch, fake_home):
                     knows.append((path, node.value[:60]))
     assert not knows, f"core knows the example exists: {knows}"
     # The template is named in core only as prose telling an author what to copy: the two init
-    # READMEs (two lines each), `plugins list`'s nothing-installed hint (44-15) and the plugin API's
-    # module docstring (44-04). None of them is code that reads, finds or loads it.
+    # READMEs (two lines each), `plugins list`'s nothing-installed hint, the plugin API's module
+    # docstring and the 0.15 notice's porting link. None of them is code that reads, finds or loads it.
     pointers = Counter(p.relative_to(src).as_posix() for p in files
                        for line in p.read_text(encoding="utf-8").splitlines() if "plugin-template" in line)
-    assert pointers == {"cli/init_cmd.py": 4, "cli/plugins_cmd.py": 1, "plugins/api.py": 1}, pointers
+    assert pointers == {"cli/init_cmd.py": 4, "cli/plugins_cmd.py": 1, "plugins/api.py": 1,
+                        "plugins/discovery.py": 1}, pointers
