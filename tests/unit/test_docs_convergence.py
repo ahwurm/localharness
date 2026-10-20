@@ -944,6 +944,8 @@ INTERNAL_IDS = (  # internal phase numbers, plan ids and requirement ids
     re.compile(r"\b[Pp]hases?[ -]\(?\d"),
     re.compile(r"\b(?:4[4-9]|5[0-3])-\d{2}\b"),
     re.compile(r"\b(?:PAPI|PLUG|MEMP|ENAB|SAFE|DISP|AUTO|IMGP|WEBP|CORE|DOCS|SEC)-\d\d\b"),
+    re.compile(r"\b(?:LIVE|NUDGE)-\d+\b|\bT-2\d-\d+\b"),  # live-gate and threat ids
+    re.compile(r"\b2[12]-0\d\b"),  # plan ids of the browser milestone
     re.compile(r"\bSETUP-(?:0[5-9]|1[0-5])\b"),  # the setup-wizard rows; SETUP-01..04 are v1.0's, cited by specs 02 and 10
 )
 
