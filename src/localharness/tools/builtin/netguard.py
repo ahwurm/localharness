@@ -166,7 +166,7 @@ async def check(raw: "str | httpx.URL", *, allow_private: bool = True) -> Hop:
     else:
         try:
             addrs = await _resolve(host, url.port or (443 if url.scheme == "https" else 80))
-        except (OSError, asyncio.TimeoutError):
+        except (OSError, asyncio.TimeoutError, UnicodeError):
             addrs = []
     if not addrs:
         raise Refused(f"refused: could not resolve {host}")

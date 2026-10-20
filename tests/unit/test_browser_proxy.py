@@ -15,6 +15,7 @@ from localharness.tools.builtin import browser_proxy, netguard
 from tests.unit.test_web_fetch_guard import _PROXY_VARS, _dns, public_web
 
 PUBLIC = "93.184.216.34"
+_REAL_RESOLVE = netguard._resolve
 
 
 @pytest.fixture(autouse=True)
@@ -393,6 +394,13 @@ async def test_a_malformed_environment_proxy_address_gets_the_client_502(proxy, 
     monkeypatch.setenv("https_proxy", "http://127.0.0.1:notaport")
     assert (await refusal(proxy, connect, "example.com:443")).startswith("HTTP/1.1 502")
     assert list(proxy.refused) == []
+
+
+@pytest.mark.parametrize("authority", ["a" * 64 + ".example.com:443", "a..b:443"])
+async def test_a_host_name_the_resolver_cannot_encode_gets_403_and_is_recorded(authority, proxy, connect, dialled, monkeypatch):
+    monkeypatch.setattr(netguard, "_resolve", _REAL_RESOLVE)
+    assert (await refusal(proxy, connect, authority)).startswith("HTTP/1.1 403")
+    assert (proxy.refused[-1], proxy.refusals, dialled) == (f"{authority} not public", 0, [])
 
 
 async def test_only_an_address_verdict_counts_toward_the_redirect_sentence(proxy, connect, dialled, monkeypatch):

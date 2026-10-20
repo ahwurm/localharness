@@ -173,6 +173,11 @@ async def test_a_name_that_does_not_resolve_is_refused(monkeypatch):
     assert await _refusal("https://intranet.example/x") == "refused: could not resolve intranet.example"
 
 
+@pytest.mark.parametrize("host", ["a" * 64 + ".example", "a..b"])
+async def test_a_host_name_the_resolver_cannot_encode_is_refused_as_unresolvable(host):
+    assert await _refusal(f"https://{host}/") == f"refused: could not resolve {host}"
+
+
 async def test_a_literal_address_is_judged_without_asking_the_resolver(monkeypatch):
     asked = _dns(monkeypatch, {})
     assert await _refusal("http://127.0.0.1/admin") == "refused: 127.0.0.1 is " + PRIVATE
