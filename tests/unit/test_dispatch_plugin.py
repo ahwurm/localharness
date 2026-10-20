@@ -53,7 +53,7 @@ def test_manifest():
 
     m = DispatchPlugin.manifest
     assert (m.name, m.version, m.kind, m.enabled_by_default, m.requires_extra) == (
-        "dispatch", "0.1.0", "channel", True, "dispatch")
+        "dispatch", "0.1.0", "channel", False, "dispatch")
     assert m.channels == ("discord",) == tuple(ADAPTERS) == tuple(DispatchPlugin().channels())
     assert DispatchPlugin().channels() == {"discord": DispatchChannel}
     assert [(f.key, f.secret) for f in m.setup] == [("discord.token", True), ("discord.allow", False)]

@@ -349,13 +349,14 @@ def test_the_mount_lets_through_exactly_what_typers_main_loop_handles() -> None:
 # --------------------------------------------------------------------------- the bundled mobile plugin
 
 
-def test_a_needs_extra_plugins_command_still_mounts_and_prints_its_hint(monkeypatch) -> None:
+def test_a_needs_extra_plugins_command_still_mounts_and_prints_its_hint(mounted, monkeypatch) -> None:
     """Without the mobile extra the command is still there, and running it prints the install hint
     (WEBP-01) instead of "No such command"."""
     from localharness.cli.mobile_plugin import MobilePlugin
     from localharness.plugins import resolve
 
     monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (MobilePlugin,))
+    (mounted / "overrides.yaml").write_text("mobile: {enabled: true}\n", encoding="utf-8")
     monkeypatch.setitem(resolve.resolve.__kwdefaults__, "extra_installed", lambda e: False)
     monkeypatch.setitem(sys.modules, "starlette", None)
     monkeypatch.setitem(sys.modules, "uvicorn", None)

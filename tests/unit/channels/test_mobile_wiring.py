@@ -21,7 +21,7 @@ pytestmark = pytest.mark.asyncio
 
 # ------------------------------------------------------------------ the CLI surface
 
-async def test_the_web_command_mounts_through_the_plugin_descriptor(monkeypatch):
+async def test_the_web_command_mounts_through_the_plugin_descriptor(monkeypatch, _isolate_localharness_home):
     """A channel that exists only in the docs is a channel nobody finds. `mobile` is the mobile plugin's
     command: not registered eagerly in cli/app.py, listed in --help from the manifest, and RUN through
     the lazy descriptor (its own --help is the real command's). Config comes from conftest's autouse
@@ -30,6 +30,8 @@ async def test_the_web_command_mounts_through_the_plugin_descriptor(monkeypatch)
 
     from localharness.cli.app import app
 
+    with (_isolate_localharness_home / "config.yaml").open("a", encoding="utf-8") as f:
+        f.write("mobile:\n  enabled: true\n")
     monkeypatch.setenv("COLUMNS", "400")
     assert "mobile" not in {c.name for c in app.registered_commands}
     helped = CliRunner().invoke(app, ["--help"])
@@ -286,7 +288,8 @@ async def test_doctor_prints_the_web_plugin_check(tmp_path, monkeypatch):
     (cfg / "agents").mkdir(parents=True)
     (cfg / "config.yaml").write_text(yaml.safe_dump({"version": "1", "provider": {
         "provider_type": "vllm", "base_url": "http://127.0.0.1:9/v1",  # discard port: fails fast
-        "default_model": "test-model", "available_models": ["test-model"]}}))
+        "default_model": "test-model", "available_models": ["test-model"]},
+        "mobile": {"enabled": True}}))
 
     def _doctor() -> str:
         r = CliRunner().invoke(app, ["doctor", "--config-dir", str(cfg)])

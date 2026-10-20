@@ -862,6 +862,8 @@ def test_doctor_bundled_plugin_waiting_on_its_extra_is_information(mock_httpx, t
 
     monkeypatch.setitem(resolve.resolve.__kwdefaults__, "extra_installed", lambda e: False)
     _write_config(tmp_path, "llamacpp", "http://localhost:8080/v1", model="m")
+    with (tmp_path / "config.yaml").open("a", encoding="utf-8") as f:
+        f.write("mobile:\n  enabled: true\ndispatch:\n  enabled: true\n")
     _write_orchestrator(tmp_path, 56_000)
     _llamacpp_mocks(mock_httpx, served=65_536, slots=1, slot_ctx=65_536)
 

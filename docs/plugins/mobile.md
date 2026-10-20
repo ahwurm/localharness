@@ -1,6 +1,6 @@
 # Mobile (the phone app)
 
-Mobile lets you drive a LocalHarness session from your phone on your own private network: `localharness mobile` serves a JSON event API and a bare reference page that uses it. It is the `mobile` plugin in the CLI. It ships with LocalHarness, is on by default, and needs the `mobile` install extra; the server and the page are in [`channels/mobile/`](../../src/localharness/channels/mobile/), and the plugin class is [`cli/mobile_plugin.py`](../../src/localharness/cli/mobile_plugin.py).
+Mobile lets you drive a LocalHarness session from your phone on your own private network: `localharness mobile` serves a JSON event API and a bare reference page that uses it. It is the `mobile` plugin in the CLI. It ships with LocalHarness, is off until you turn it on, and needs the `mobile` install extra; the server and the page are in [`channels/mobile/`](../../src/localharness/channels/mobile/), and the plugin class is [`cli/mobile_plugin.py`](../../src/localharness/cli/mobile_plugin.py).
 
 ## Turn it on and off
 

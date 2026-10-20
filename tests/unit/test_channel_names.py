@@ -103,13 +103,15 @@ async def test_start_without_the_web_extra_does_not_warn_about_web(tmp_path, mon
     assert not any("plugin mobile:" in line for line in printed), printed
 
 
-def test_plugins_list_still_shows_the_missing_extra(monkeypatch):
+def test_plugins_list_still_shows_the_missing_extra(monkeypatch, _isolate_localharness_home):
     from typer.testing import CliRunner
 
     from localharness.cli.app import app
 
     _no_extra(monkeypatch)
     monkeypatch.setenv("COLUMNS", "400")
+    with (_isolate_localharness_home / "config.yaml").open("a", encoding="utf-8") as f:
+        f.write("mobile:\n  enabled: true\n")
     out = CliRunner().invoke(app, ["plugins", "list"])
     assert out.exit_code == 0, out.output
     assert "on (install `localharness[mobile]` to use it)" in out.output
@@ -196,7 +198,7 @@ def test_disabling_dispatch_removes_discord(tmp_path, monkeypatch):
     g.mkdir()
     base = {"version": "1", "provider": {"provider_type": "vllm",
             "base_url": "http://localhost:8000/v1", "default_model": "m"}}
-    (g / "config.yaml").write_text(yaml.safe_dump(base), encoding="utf-8")
+    (g / "config.yaml").write_text(yaml.safe_dump({**base, "dispatch": {"enabled": True}}), encoding="utf-8")
     assert "discord" in accepted_channels(resolve(ConfigLoader(config_dir=g)))
     (g / "config.yaml").write_text(yaml.safe_dump({**base, "dispatch": {"enabled": False}}),
                                    encoding="utf-8")

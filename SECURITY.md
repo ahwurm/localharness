@@ -136,8 +136,8 @@ deny patterns remain the mechanism that stops specific actions.
 
 A plugin is code that adds tools, commands, checks or settings to the harness. One trust model
 covers every plugin; where a plugin that ships with LocalHarness and one you install yourself are
-treated differently, it says so below. (Six features ship as plugins: image generation and the browser
-(`browser`), each off until you turn it on, and the phone app `mobile`, memory, Discord (`dispatch`)
+treated differently, it says so below. (Six features ship as plugins: image generation, the phone app
+`mobile`, Discord (`dispatch`) and the browser (`browser`), each off until you turn it on, and memory
 and autoresearch, each on by default; everything else that comes with LocalHarness is built into its core, including the bench
 and its sealed holdout.) A plugin that ships with LocalHarness may own core settings under their old
 names (`autoresearch` owns `proposer:` and `sentinel:`); a plugin you install that tries to is

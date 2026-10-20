@@ -79,8 +79,7 @@ def _global(tmp_path, monkeypatch, discord: dict | None = None):
     """The 49-01 recipe: the explicit config dir `tmp_path` is the GLOBAL layer (no workspace)."""
     _stub_start_boundaries(tmp_path, monkeypatch)
     _offline_provider(tmp_path)
-    if discord is not None:
-        _add_yaml(tmp_path / "config.yaml", {"dispatch": {"discord": discord}})
+    _add_yaml(tmp_path / "config.yaml", {"dispatch": {"enabled": True, **({"discord": discord} if discord is not None else {})}})
     return str(tmp_path)
 
 

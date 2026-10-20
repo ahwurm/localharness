@@ -542,9 +542,8 @@ def test_init_ends_with_every_bundled_plugin_and_its_command(tmp_path, monkeypat
     assert image == "  image         off — turn on: localharness plugins enable image"
     assert "on — set up: localharness plugins enable memory" in memory
     assert "on — set up: localharness plugins enable autoresearch" in autoresearch
-    assert ("(install `localharness[dispatch]` to use it) — set up: localharness plugins enable "
-            "dispatch") in dispatch
-    assert "(install `localharness[mobile]` to use it) — set up: localharness plugins enable mobile" in mobile
+    assert dispatch == "  dispatch      off — turn on: localharness plugins enable dispatch"
+    assert mobile == "  mobile        off — turn on: localharness plugins enable mobile"
     assert browser.split()[0] == "browser" and "off — turn on: localharness plugins enable browser" in browser
     out = result.output
     assert out.index("LocalHarness configured at") < out.index("★") < out.index(HEADER)

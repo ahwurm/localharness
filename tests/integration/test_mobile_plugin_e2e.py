@@ -62,8 +62,22 @@ def _flat(text: str) -> str:
 # --- criterion 1 (CLI half): mounted from the plugin, gone when disabled, hint without the extra --
 
 
-def test_web_is_a_plugin_command_on_by_default_and_gone_when_disabled(tmp_path, monkeypatch, fake_home):
+def _enable(global_dir) -> None:
+    with (global_dir / "config.yaml").open("a", encoding="utf-8") as f:
+        f.write("mobile:\n  enabled: true\n")
+
+
+def test_mobile_is_off_by_default_with_the_enable_hint(tmp_path, monkeypatch, fake_home):
+    _machine(tmp_path, monkeypatch, fake_home)
+    assert "mobile" not in _help_rows(_invoke("--help").output)
+    ran = _invoke("mobile")
+    assert ran.exit_code == 4 and "is provided by the mobile plugin, which is off" in ran.stderr, ran.output
+    assert "run `localharness plugins enable mobile`" in ran.stderr, ran.stderr
+
+
+def test_mobile_is_a_plugin_command_once_enabled_and_gone_when_disabled(tmp_path, monkeypatch, fake_home):
     global_dir, _ = _machine(tmp_path, monkeypatch, fake_home)
+    _enable(global_dir)
     assert "mobile" in _help_rows(_invoke("--help").output)
     helped = _invoke("mobile", "--help")
     assert helped.exit_code == 0, helped.output
@@ -93,7 +107,8 @@ def test_web_is_a_plugin_command_on_by_default_and_gone_when_disabled(tmp_path, 
 def test_without_the_extra_web_prints_the_unchanged_hint(tmp_path, monkeypatch, fake_home):
     from localharness.plugins import resolve
 
-    _machine(tmp_path, monkeypatch, fake_home)
+    global_dir, _ = _machine(tmp_path, monkeypatch, fake_home)
+    _enable(global_dir)
     monkeypatch.setitem(resolve.resolve.__kwdefaults__, "extra_installed", lambda e: False)
     monkeypatch.setitem(sys.modules, "starlette", None)
     monkeypatch.setitem(sys.modules, "uvicorn", None)

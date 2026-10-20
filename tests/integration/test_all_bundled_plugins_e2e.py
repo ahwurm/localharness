@@ -25,7 +25,7 @@ from localharness.cli.app import app
 from tests.dispatch_support import isolate_discord_env
 
 BUNDLED = {"image", "mobile", "memory", "dispatch", "autoresearch", "browser"}
-ON_BY_DEFAULT = ["mobile", "memory", "dispatch", "autoresearch"]
+ON_BY_DEFAULT = ["memory", "autoresearch"]
 runner = CliRunner()
 
 

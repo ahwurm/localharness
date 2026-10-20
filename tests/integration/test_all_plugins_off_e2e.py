@@ -156,9 +156,11 @@ def test_help_lists_no_plugin_commands_when_all_off(tmp_path, monkeypatch):
 
 
 def test_help_lists_web_when_it_is_on(tmp_path, monkeypatch):
-    """The --help twin: the same config dir with web at its default lists `mobile` — so the absence
+    """The --help twin: the same config dir with mobile enabled lists `mobile` — so the absence
     above is the config's doing, not a table that never lists plugin commands."""
     _stub_start_boundaries(tmp_path, monkeypatch, real_plugins=True)
+    with (tmp_path / "config.yaml").open("a", encoding="utf-8") as f:
+        f.write("mobile:\n  enabled: true\n")
     from localharness.cli.app import app
     res = CliRunner().invoke(app, ["--help"], env={"LOCALHARNESS_DIR": str(tmp_path)})
     assert res.exit_code == 0, res.output

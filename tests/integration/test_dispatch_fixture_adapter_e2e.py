@@ -145,7 +145,7 @@ async def test_fixture_platform_runs_through_the_real_start(tmp_path, monkeypatc
     _stub_start_boundaries(tmp_path, monkeypatch, repl_run=run)
     _offline_provider(tmp_path)
     with (tmp_path / "config.yaml").open("a", encoding="utf-8") as f:
-        f.write("dispatch:\n  discord:\n    allow: ['42']\n")  # the named gap: one settings section
+        f.write("dispatch:\n  enabled: true\n  discord:\n    allow: ['42']\n")  # the named gap: one settings section
     _let_the_stub_tokenizer_run_a_turn(monkeypatch)
     printed = _capture_start_console(monkeypatch)
     monkeypatch.setattr("localharness.provider.client.LLMClient.stream_complete", _model())

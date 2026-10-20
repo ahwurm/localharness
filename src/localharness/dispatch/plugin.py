@@ -1,7 +1,7 @@
 """The dispatch plugin: chat platforms as a channel — `start --channel discord` drives the agent from
 allowlisted chat messages, replies posted back.
 
-On by default; needs the `dispatch` install extra (discord.py). plugins/builtin.py imports this
+Off by default; needs the `dispatch` install extra (discord.py). plugins/builtin.py imports this
 module for every `--help`, `doctor` and `plugins list`, so at module level it imports only the
 plugin API and its own settings; the channel core and the adapters are imported inside the methods
 (importing anything under localharness.channels runs channels/__init__.py, which pulls in
@@ -35,7 +35,7 @@ class DispatchPlugin(Plugin):
     Allowlisted messages become turns; replies and permission asks go back to the chat."""
 
     manifest = PluginManifest(
-        name="dispatch", version="0.1.0", kind="channel", enabled_by_default=True,
+        name="dispatch", version="0.1.0", kind="channel", enabled_by_default=False,
         requires_extra="dispatch", channels=("discord",),
         setup=(SetupField(key="discord.token", prompt="Discord bot token", secret=True),
                SetupField(key="discord.allow", prompt="Your Discord user id(s), comma-separated")),

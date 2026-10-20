@@ -1,6 +1,6 @@
 """The mobile plugin: the phone app — `localharness mobile` serves the phone UI and its event API.
 
-On by default; needs the `mobile` install extra (starlette, uvicorn, ...). plugins/builtin.py imports this
+Off by default; needs the `mobile` install extra (starlette, uvicorn, ...). plugins/builtin.py imports this
 module for every `--help`, `doctor` and `plugins list`, so it imports only the plugin API at module
 level; the channel, the server and the token helpers are imported when a caller asks for them.
 It lives in cli/, not channels/mobile/: importing anything under localharness.channels runs
@@ -52,7 +52,7 @@ class MobilePlugin(Plugin):
     """Mobile: the phone page, served with its event API by `localharness mobile`"""
 
     manifest = PluginManifest(
-        name="mobile", version="0.1.0", kind="channel", enabled_by_default=True, requires_extra="mobile",
+        name="mobile", version="0.1.0", kind="channel", enabled_by_default=False, requires_extra="mobile",
         cli=(CliDescriptor(name="mobile", help="Serve the phone UI and its event API (see docs/mobile.md).",
                            target="localharness.cli.mobile_cmd:app"),),
         setup=(SetupField(key="public_url",
