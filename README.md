@@ -87,7 +87,7 @@ An agent that reads untrusted content, such as a web page or an MCP tool's resul
 | `memory` | persistent memory: facts recalled into each turn, memory tools, background consolidation | on | `localharness plugins disable memory` |
 | `dispatch` | chat: Discord | on; needs `localharness[dispatch]` | `localharness plugins disable dispatch` |
 | `autoresearch` | experiment loop | on | `localharness plugins disable autoresearch` |
-| `browser` | reads JavaScript-rendered pages through a sandboxed headless Chromium | off; needs `localharness[browser]` | `uv tool install 'localharness[browser]'`, then `localharness plugins enable browser` |
+| `browser` | reads JavaScript-rendered pages through a sandboxed headless Chromium | off; needs `localharness[browser]` | `uv tool install 'localharness[browser]'` (name the other extras you use too: a reinstall keeps only the ones it names), then `localharness plugins enable browser` |
 
 Each plugin has its own page:
 
