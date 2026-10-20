@@ -913,6 +913,7 @@ def test_the_manifest_is_every_field_of_the_declaration_and_frozen():
 def test_the_help_runs_as_printed_and_the_prompt_has_no_placeholder():
     assert f"{sys.executable} -m playwright install --only-shell chromium" in BROWSER_SETUP_HELP
     assert f"{sys.executable} -m playwright install-deps chromium" in BROWSER_SETUP_HELP
+    assert re.search(r"into /\S*ms-playwright\)", BROWSER_SETUP_HELP) and "~" not in BROWSER_SETUP_HELP
     assert "{" not in BROWSER_AGENT_PROMPT and "browser.sandbox: false" in BROWSER_AGENT_PROMPT
 
 
