@@ -34,11 +34,6 @@ class BrowserConfig(BaseModel):
                           description="Launch Chromium sandboxed; false accepts an unsandboxed browser.")
 
 
-BROWSER_SETUP_HELP = f"""\
-Browser needs Playwright's headless Chromium on this machine, from Playwright's CDN:
-  {sys.executable} -m playwright install --only-shell chromium        (about 100 MB, into ~/.cache/ms-playwright)
-  sudo {sys.executable} -m playwright install-deps chromium    (Linux libraries; apt only — else set browser.executable_path)"""
-
 BROWSER_AGENT_PROMPT = (
     "Set up LocalHarness browser_fetch on this machine. Install LocalHarness with its browser extra,\n"
     "keeping the extras I already use (a reinstall keeps only the extras it names). Then run\n"
@@ -73,6 +68,12 @@ def _cache_root() -> Path:
     else:
         base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
     return base / "ms-playwright"
+
+
+BROWSER_SETUP_HELP = f"""\
+Browser needs Playwright's headless Chromium on this machine, from Playwright's CDN:
+  {sys.executable} -m playwright install --only-shell chromium        (about 100 MB, into {_cache_root()})
+  sudo {sys.executable} -m playwright install-deps chromium    (Linux libraries; apt only — else set browser.executable_path)"""
 
 
 def _revision(folder: Path) -> int:
