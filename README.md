@@ -96,7 +96,7 @@ Each plugin has its own page:
 - **memory**: per-agent SQLite memory recalled into each turn, with idle consolidation. [Page](docs/plugins/memory.md) · [site](https://localharness.dev/plugins/memory/) · [Docs](docs/specs/05-memory.md)
 - **dispatch**: `localharness start --channel discord` drives a session from allowlisted Discord messages. [Page](docs/plugins/dispatch.md) · [site](https://localharness.dev/plugins/dispatch/) · [Docs](docs/specs/11-channels.md#the-dispatch-plugin-chat-platforms-discord-today)
 - **autoresearch**: propose one harness change, run it through a statistical gate, adopt or reject it. [Page](docs/plugins/autoresearch.md) · [site](https://localharness.dev/plugins/autoresearch/) · [Docs](docs/specs/09-hooks-plugins.md#the-bundled-plugins)
-- **browser**: `browser_fetch` for the web researcher and the search verifier, a JavaScript-rendered https page read through a sandboxed headless Chromium that reaches only public addresses. [Page](docs/plugins/browser.md) · [Security](SECURITY.md#what-a-web-fetch-may-reach)
+- **browser**: `browser_fetch` for the web researcher and the search verifier, a JavaScript-rendered https page read through a sandboxed headless Chromium that reaches only public addresses. [Page](docs/plugins/browser.md) · [site](https://localharness.dev/plugins/browser/) · [Security](SECURITY.md#what-a-web-fetch-may-reach)
 
 A plugin you install is found in two places, both on your machine and never in a project: a Python package with a `localharness.plugins` entry point in the same environment as LocalHarness, or a folder `~/.localharness/plugins/<name>/`. It stays off, with none of its code imported, until `localharness plugins enable <name>`, which only your machine-level config can do.
 
@@ -106,7 +106,7 @@ Copy [the example plugin](examples/plugin-template/README.md): one tool, one com
 
 ## Status
 
-Early stage (v0.20.0, pre-1.0). Interfaces and config schema may change without notice. Each release's known limitations are listed in the [CHANGELOG](CHANGELOG.md).
+Early stage (v0.20.1, pre-1.0). Interfaces and config schema may change without notice. Each release's known limitations are listed in the [CHANGELOG](CHANGELOG.md).
 
 ## Links
 

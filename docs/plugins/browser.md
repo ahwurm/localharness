@@ -62,6 +62,7 @@ See [SECURITY.md, What a web fetch may reach](../../SECURITY.md#what-a-web-fetch
 
 ## More
 
+- [localharness.dev/plugins/browser](https://localharness.dev/plugins/browser/)
 - [SECURITY.md, What a web fetch may reach](../../SECURITY.md#what-a-web-fetch-may-reach)
 - [Spec 09, the bundled plugins](../specs/09-hooks-plugins.md#the-bundled-plugins)
 - [Write your own plugin](../../examples/plugin-template/README.md)
