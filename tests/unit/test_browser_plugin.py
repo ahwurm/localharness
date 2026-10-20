@@ -1123,8 +1123,8 @@ async def test_doctors_launch_never_touches_the_session_runtime(cache, world, tm
 
 
 class FakeInstall:
-    def __init__(self, cache_root, returncode=0, stderr="", creates=True, raises=None):
-        self.cache_root, self.returncode, self.stderr, self.creates, self.raises = cache_root, returncode, stderr, creates, raises
+    def __init__(self, cache_root, returncode=0, creates=True, raises=None):
+        self.cache_root, self.returncode, self.creates, self.raises = cache_root, returncode, creates, raises
         self.calls = []
 
     def __call__(self, argv, **kwargs):
@@ -1133,7 +1133,7 @@ class FakeInstall:
             raise self.raises
         if self.creates:
             install_shell(self.cache_root)
-        return SimpleNamespace(returncode=self.returncode, stderr=self.stderr)
+        return SimpleNamespace(returncode=self.returncode)
 
 
 def download(monkeypatch, tmp_path, install):
@@ -1147,19 +1147,14 @@ def test_the_download_runs_playwrights_installer_with_its_progress_visible(cache
         Check(name="browser-binary", status="pass", detail="chromium_headless_shell-1248 installed")]
     ((argv, kwargs),) = install.calls
     assert argv == [sys.executable, "-m", "playwright", "install", "--only-shell", "chromium"]
-    assert "stdout" not in kwargs and kwargs["stderr"] == subprocess.PIPE and kwargs["text"] is True
+    assert kwargs == {}
 
 
-def test_a_failed_download_is_one_row_with_the_last_line_and_a_hint(cache, monkeypatch, tmp_path):
-    install = FakeInstall(cache, returncode=1, stderr="line one\nERROR: download failed\n\n", creates=False)
+def test_a_failed_download_is_one_row_with_the_exit_code_and_a_hint(cache, monkeypatch, tmp_path):
+    install = FakeInstall(cache, returncode=3, creates=False)
     assert download(monkeypatch, tmp_path, install) == [Check(
-        name="browser-binary", status="fail", detail="ERROR: download failed",
+        name="browser-binary", status="fail", detail="the download exited with code 3",
         hint="the download is Playwright's own; check the network, then run `localharness plugins enable browser` again")]
-
-
-def test_a_failed_download_with_no_output_still_says_the_exit_code(cache, monkeypatch, tmp_path):
-    (row,) = download(monkeypatch, tmp_path, FakeInstall(cache, returncode=3, creates=False))
-    assert (row.status, row.detail) == ("fail", "the download exited with code 3")
 
 
 def test_a_download_that_leaves_no_folder_names_where_it_looked(cache, monkeypatch, tmp_path):
