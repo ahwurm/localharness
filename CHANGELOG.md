@@ -17,7 +17,8 @@ allowlist stays `web_fetch`'s. Needs `localharness[browser]`.
 
 ### Added
 - **The `browser` plugin (off by default; needs `localharness[browser]`).** Install with
-  `uv tool install 'localharness[browser]'`, then `localharness plugins enable browser`, which asks
+  `uv tool install 'localharness[browser]'` (name the other extras you use too: a reinstall keeps only
+  the ones it names), then `localharness plugins enable browser`, which asks
   `Download Playwright's headless Chromium now? About 100 MB from Playwright's CDN; it runs as a
   program on this machine (sandboxed by default).` and runs Playwright's own installer
   (`playwright install --only-shell chromium`). Settings: `browser.idle_close_s` (default 120) and,
