@@ -26,6 +26,7 @@ MAX_CONTEXTS = 2
 RETRY_AFTER_S = 60
 _SWEEP_MIN_AGE_S = 300
 REACH_FAILED = "reach check failed"
+NO_PROCESS_LIST = "the browser's command line could not be read on this platform"
 SANDBOX_FAILED = "the Chromium sandbox could not start"
 SANDBOX_OFF = "Chromium started without its sandbox"
 MISSING_LIBS = "system libraries are missing"
@@ -152,7 +153,7 @@ class BrowserRuntime:
                 if not isinstance(e, Exception):
                     raise
                 self.unavailable = e.detail if isinstance(e, RenderError) else _unavailable_reason(e)
-                if self.unavailable not in (REACH_FAILED, SANDBOX_OFF):
+                if self.unavailable not in (REACH_FAILED, SANDBOX_OFF, NO_PROCESS_LIST):
                     self._retry_at = _now() + RETRY_AFTER_S
                 raise RenderError("unavailable", self.unavailable) from None
             return self._browser
@@ -174,7 +175,9 @@ class BrowserRuntime:
 
     async def _assert_flags(self) -> None:
         want = f"127.0.0.1:{self._proxy.port}"
-        argv = next((a for a in await asyncio.to_thread(_command_lines)
+        if not (lines := await asyncio.to_thread(_command_lines)):
+            raise RenderError("unavailable", NO_PROCESS_LIST)
+        argv = next((a for a in lines
                      if not any(x.startswith("--type=") for x in a)
                      and any(x.startswith("--proxy-server=") and x.endswith(want) for x in a)), [])
         if not (any(x.startswith("--proxy-bypass-list=") and "<-loopback>" in x for x in argv)
