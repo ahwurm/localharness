@@ -12,14 +12,16 @@ LocalHarness is an open-source agent harness for local LLMs. It does not serve m
 
 ![LocalHarness: init detects your local model, start drops you into a ready agent, and it researches a question live with web search and multi-step tool calls](assets/demo.gif)
 
-## A small core, six plugins
+## Why LocalHarness
 
-- **Core** owns the agent loop, the built-in tools (read, write, edit, glob, grep, bash, python, web search and fetch, delegation to helper agents), MCP servers, config, the permission gate, the bench and the CLI. With a vision model it also takes pictures: drop a screenshot onto the terminal or `/image <path>`, paste one into Zed or the phone page, or attach one on Discord.
-- **Plugins** add tools, commands, slash commands, `doctor` checks, settings and chat channels through one plugin API. The six that ship with LocalHarness use the same API as a plugin you write yourself. Turning one off removes what it adds; turning off memory or autoresearch leaves their files on disk (the memories, the experiment archive).
+- **Built for local models, not ported to them.** The harness sizes a launch from the model's own files: it senses the served, trained and fitted context windows, prices a llama.cpp launch from the GGUF tensor table, keeps an MoE's experts in RAM when the GPU cannot hold them, refuses a model that fits nowhere in one sentence, and never runs below the window the agent loop needs. Tool calling works on a model without native support through an XML fallback, and `/effort off|low|high|max` bounds how much a model may think per request.
+- **One command owns the model stack.** `localharness start` finds a model on your machine or offers one to fetch, writes it a tuned preset (KV cache type, drafting and parsers derived at launch), serves it, and brings back your last choice next time. `/model` lists every launch this box can make, each priced with its runtime, where its weights sit and its window, and switches in place. `localharness model --autostart on` brings the server up with the harness, `localharness model --script` prints the launch as a shell script you can read, and a turn survives a server restart.
+- **Your data, your trace, your code.** MIT licensed end to end. Memory is SQLite in your home directory, config is YAML you can read, and every session rides one event bus whose stream, logs and bench results stay on your disk. Plugins, pre- and post-tool hooks and the phone app read the same events through the same public plugin API as the six bundled plugins. No account, no telemetry, no relay through anyone's servers; web search runs over DuckDuckGo with no key.
+- **Safe by construction.** One permission gate stands in front of every tool call, helper agents included. An agent that reads untrusted content, a web page or an MCP result, is never given tools that change your machine; the check runs when an agent's tools resolve and fails closed. Where the harness connects, which credential it uses and who may talk to it are machine-level settings that a cloned repository cannot change. [SECURITY.md](SECURITY.md) is the full threat model.
 
 ## Quick start
 
-You need Python 3.12 or later and [uv](https://docs.astral.sh/uv/). A model server is not required: the first `localharness start` finds a model on your machine or offers one to fetch, and sets everything up.
+Python 3.12 or later and [uv](https://docs.astral.sh/uv/). A model server is not required: the first `localharness start` finds a model on your machine or offers one to fetch, and sets everything up.
 
 ```bash
 uv tool install 'localharness[embeddings,mobile]'  # memory's CPU model + the phone app
@@ -28,36 +30,12 @@ localharness start                   # finds a model (or offers one), sets up, o
 localharness plugins list            # every plugin and whether it is on
 localharness plugins disable autoresearch
 localharness plugins enable image --set comfyui_url=http://127.0.0.1:8188
+localharness update                  # the latest release from PyPI
 ```
 
-`plugins enable` and `plugins disable` write `overrides.yaml`, never your `config.yaml`. Add `--workspace` to change a bundled plugin for one project only. Add the `dispatch` extra for Discord.
+Out of the box: agents in YAML with read, write, edit, glob, grep, bash, python, web search and fetch, delegation to helper agents and MCP servers. Drive a session from the terminal, from Zed ([`localharness acp`](docs/zed.md)), from your phone on your own network ([`localharness mobile`](docs/mobile.md)) or from Discord ([`--channel discord`](docs/plugins/dispatch.md)); with a vision model, drop a screenshot on the terminal, paste one into Zed or the phone page, or attach one on Discord.
 
-`init` ends with every plugin and the command that sets it up. Inside a running session, `/plugins enable <name>` does the same and turns the plugin on right away: the first time, or while the plugin is not set up yet, it asks what the plugin needs and checks it, then it restarts the session with your conversation kept. A first `localharness start` with no config runs `init`'s setup and goes on into the session; `localharness init` re-runs that setup on its own.
-
-### Keys
-
-**Shift+Enter submits until your terminal is set up to send it; `\` then Enter always breaks the line.** Alt+Enter, or `!` before the text, sends the line into the running turn. `terminal.keys` changes the chords, and `/help` names your terminal's setup line. To send a message that ends in one `\`, type a space after it.
-
-How to make Shift+Enter send `ESC [ 13 ; 2 u`, which the harness reads as a line break:
-
-| terminal | one line |
-|---|---|
-| kitty | `kitty.conf`: `map shift+enter send_text all \x1b[13;2u` |
-| Ghostty | config: `keybind = shift+enter=text:\x1b[13;2u` |
-| WezTerm | `keys`: `{ key = "Enter", mods = "SHIFT", action = wezterm.action.SendString("\x1b[13;2u") }` |
-| Alacritty | `[[keyboard.bindings]] key = "Enter", mods = "Shift", chars = "\u001b[13;2u"` |
-| foot | `[text-bindings]`: `\x1b[13;2u=Shift+Return` |
-| iTerm2 | Profiles → Keys → add Shift+Enter → *Send Escape Sequence* → `[13;2u` |
-| VS Code terminal | `keybindings.json`: `{ "key": "shift+enter", "command": "workbench.action.terminal.sendSequence", "args": { "text": "\u001b[13;2u" }, "when": "terminalFocus" }` |
-| Windows Terminal (WSL) | `actions`: `{ "command": { "action": "sendInput", "input": "\u001b[13;2u" }, "keys": "shift+enter" }` — the harness reads the sequence under WSL; native Windows uses another input path and is not covered |
-
-A terminal with no such binding (GNOME Terminal, Konsole, xterm), or anything under tmux: `\` then Enter, or give a chord that every terminal sends to the line break. It is one command, and Alt+Enter stays the nudge:
-
-```bash
-localharness components set terminal.keys.newline ctrl-o
-```
-
-If you would rather have Alt+Enter break the line, `localharness components set terminal.keys.newline alt-enter` does that in one command too. A list you set wins over one left at its default ([0.18.1](CHANGELOG.md#0181--2026-10-15)), so it takes Alt+Enter from the nudge (the `!` prefix remains), and `localharness components set terminal.keys.nudge ctrl-o` gives the nudge a chord again. A change applies at the next `localharness start`.
+`plugins enable` and `plugins disable` write `overrides.yaml`, never your `config.yaml`; `--workspace` changes a bundled plugin for one project only. Inside a session, `/plugins enable <name>` asks what the plugin needs, checks it, and restarts with your conversation kept. Multi-line input, Shift+Enter and the chords: [docs/terminal-keys.md](docs/terminal-keys.md).
 
 ## Supported runtimes
 
@@ -70,13 +48,7 @@ Every runtime is reached through one OpenAI-compatible client; `init` can also a
 | **Ollama** | spawns `ollama serve` | native | exact with the `exact-tokenizer` extra, else estimated | CPU round-trip |
 | **LM Studio** | drives headless `lms` | native | exact with the `exact-tokenizer` extra, else estimated | CPU round-trip |
 
-A session with no temperature set, and the bench, send none: the server's own sampling defaults govern. To pin one, set it on the server, for example llama-server's `--temp` in a record's `extra_args` or vLLM's `--generation-config`.
-
-Setup: [llama.cpp](docs/runtimes/llamacpp.md), [Ollama](docs/runtimes/ollama.md), [LM Studio](docs/runtimes/lmstudio.md), vLLM ([reference architectures](docs/reference-architectures/README.md)). Details: [the provider layer](src/localharness/provider/).
-
-## Security
-
-An agent that reads untrusted content, such as a web page or an MCP tool's result, is never given tools that change your machine; this separation is on by default, checked when an agent's tools are resolved, and fails closed. Every tool call of every agent, helper agents included, passes one permission gate. A plugin you install has its tools' gate declarations clamped, except for a tool it registers directly on the tool registry instead of returning it from `tools()`, which skips that rule ([SECURITY.md](SECURITY.md#plugins)). Settings that say where the harness connects, which credential it uses or who may talk to it can be set only in your machine-level config, never by a repository you clone. A plugin you turn on is trusted code that runs with your privileges, and nothing contains a plugin that means harm: read [SECURITY.md](SECURITY.md) before you enable one.
+A session with no temperature set sends none, so the server's own sampling defaults govern; pin one on the server (llama-server's `--temp`, vLLM's `--generation-config`). Setup: [llama.cpp](docs/runtimes/llamacpp.md), [Ollama](docs/runtimes/ollama.md), [LM Studio](docs/runtimes/lmstudio.md), vLLM ([reference architectures](docs/reference-architectures/README.md)); the code is [the provider layer](src/localharness/provider/).
 
 ## Plugins
 
@@ -89,16 +61,9 @@ An agent that reads untrusted content, such as a web page or an MCP tool's resul
 | `autoresearch` | experiment loop | on | `localharness plugins disable autoresearch` |
 | `browser` | reads JavaScript-rendered pages through a sandboxed headless Chromium | off; needs `localharness[browser]` | `uv tool install 'localharness[browser]'` (name the other extras you use too: a reinstall keeps only the ones it names), then `localharness plugins enable browser` |
 
-Each plugin has its own page:
+Pages: [image](docs/plugins/image.md) · [mobile](docs/plugins/mobile.md) · [memory](docs/plugins/memory.md) · [dispatch](docs/plugins/dispatch.md) · [autoresearch](docs/plugins/autoresearch.md) · [browser](docs/plugins/browser.md), and on the site: [image](https://localharness.dev/plugins/image/) · [mobile](https://localharness.dev/plugins/mobile/) · [memory](https://localharness.dev/plugins/memory/) · [dispatch](https://localharness.dev/plugins/dispatch/) · [autoresearch](https://localharness.dev/plugins/autoresearch/) · [browser](https://localharness.dev/plugins/browser/).
 
-- **image**: a `generate_image` tool and `localharness generate-image`, against a ComfyUI server you run yourself. [Page](docs/plugins/image.md) · [site](https://localharness.dev/plugins/image/) · [Docs](docs/reference-architectures/image-generation.md)
-- **Mobile (the `mobile` plugin)**: drive a session from your phone on your own private network. [Page](docs/plugins/mobile.md) · [site](https://localharness.dev/plugins/mobile/) · [Docs](docs/mobile.md)
-- **memory**: per-agent SQLite memory recalled into each turn, with idle consolidation. [Page](docs/plugins/memory.md) · [site](https://localharness.dev/plugins/memory/) · [Source](src/localharness/memory/)
-- **dispatch**: `localharness start --channel discord` drives a session from allowlisted Discord messages. [Page](docs/plugins/dispatch.md) · [site](https://localharness.dev/plugins/dispatch/) · [Source](src/localharness/dispatch/)
-- **autoresearch**: propose one harness change, run it through a statistical gate, adopt or reject it. [Page](docs/plugins/autoresearch.md) · [site](https://localharness.dev/plugins/autoresearch/) · [Source](src/localharness/autoresearch/)
-- **browser**: `browser_fetch` for the web researcher and the search verifier, a JavaScript-rendered https page read through a sandboxed headless Chromium that reaches only public addresses. [Page](docs/plugins/browser.md) · [site](https://localharness.dev/plugins/browser/) · [Security](SECURITY.md#what-a-web-fetch-may-reach)
-
-A plugin you install is found in two places, both on your machine and never in a project: a Python package with a `localharness.plugins` entry point in the same environment as LocalHarness, or a folder `~/.localharness/plugins/<name>/`. It stays off, with none of its code imported, until `localharness plugins enable <name>`, which only your machine-level config can do.
+A plugin you install is found on your machine and never in a project: a Python package with a `localharness.plugins` entry point beside LocalHarness, or a folder `~/.localharness/plugins/<name>/`. None of its code is imported until `localharness plugins enable <name>`, which only your machine-level config can do. A plugin you turn on is trusted code that runs with your privileges: read [SECURITY.md](SECURITY.md#plugins) before you enable one.
 
 ## Write a plugin
 
@@ -112,8 +77,7 @@ Early stage (v0.20.1, pre-1.0). Interfaces and config schema may change without 
 
 - [SECURITY.md](SECURITY.md): trust boundaries, the permission gate, the prompt-injection threat model
 - [src/localharness/](src/localharness/): the components, one package each; the CLI is [`cli/`](src/localharness/cli/)
-- [docs/zed.md](docs/zed.md): use LocalHarness from Zed's agent panel
-- [docs/task-context.md](docs/task-context.md): how a normal session keeps a working record for substantive work (references, checks, delegation, resume), with a synthetic [example workflow](examples/workflows/research-note/)
+- [docs/task-context.md](docs/task-context.md): how a session keeps a working record for substantive work, with an [example workflow](examples/workflows/research-note/)
 - [docs/reference-architectures/](docs/reference-architectures/README.md): tested hardware and setup notes
 - [docs/running-agents-locally.md](docs/running-agents-locally.md): where LocalHarness fits among local agent tools, and where it is behind
 - [LocalShift](https://github.com/ahwurm/localshift): the companion project that moves a headless Claude Code job onto LocalHarness once a local model proves good enough
