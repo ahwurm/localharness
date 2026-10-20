@@ -373,6 +373,14 @@ def test_the_real_command_lines_include_this_process():
     assert any(argv[:1] == [mine] for argv in browser_tool._command_lines())
 
 
+def test_a_command_line_chromium_rewrote_as_one_string_is_read_as_its_separate_flags():
+    rewritten = b"/opt/chrome-headless-shell --proxy-server=http://127.0.0.1:41135 --proxy-bypass-list=<-loopback> --disable-quic --user-data-dir=/tmp/playwright_chromiumdev_profile-J9G4Ue\0"
+    assert browser_tool._argv(rewritten) == [
+        "/opt/chrome-headless-shell", "--proxy-server=http://127.0.0.1:41135", "--proxy-bypass-list=<-loopback>",
+        "--disable-quic", "--user-data-dir=/tmp/playwright_chromiumdev_profile-J9G4Ue"]
+    assert browser_tool._argv(b"/bin/sh\0-c\0true\0") == ["/bin/sh", "-c", "true"]
+
+
 async def until(predicate, seconds=2.0):
     for _ in range(int(seconds / 0.01)):
         if predicate():
