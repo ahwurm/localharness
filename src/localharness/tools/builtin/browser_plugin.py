@@ -179,14 +179,12 @@ class BrowserPlugin(Plugin):
                 Check(name="browser-sandbox", status="skip", detail="needs the binary")]
 
     def setup_action(self, ctx: PluginContext) -> list[Check]:
-        """Playwright's own installer, its progress on this terminal."""
-        done = subprocess.run([sys.executable, "-m", "playwright", "install", "--only-shell", "chromium"],
-                              stderr=subprocess.PIPE, text=True)
+        """Playwright's own installer, inheriting this terminal so its progress shows."""
+        done = subprocess.run([sys.executable, "-m", "playwright", "install", "--only-shell", "chromium"])
         hint = "the download is Playwright's own; check the network, then run `localharness plugins enable browser` again"
         if done.returncode:
-            last = next((line.strip() for line in reversed(done.stderr.splitlines()) if line.strip()),
-                        f"the download exited with code {done.returncode}")
-            return [Check(name="browser-binary", status="fail", detail=last, hint=hint)]
+            return [Check(name="browser-binary", status="fail",
+                          detail=f"the download exited with code {done.returncode}", hint=hint)]
         if (label := _binary(ctx.config)) is None:
             return [Check(name="browser-binary", status="fail", detail=_missing(ctx.config), hint=hint)]
         return [Check(name="browser-binary", status="pass", detail=f"{label} installed")]
