@@ -70,9 +70,14 @@ def _cache_root() -> Path:
     return base / "ms-playwright"
 
 
-BROWSER_SETUP_HELP = f"""\
+def setup_help() -> str:
+    try:
+        cache = _cache_root()
+    except RuntimeError:  # no home directory to anchor the default cache
+        cache = "Playwright's cache"
+    return f"""\
 Browser needs Playwright's headless Chromium on this machine, from Playwright's CDN:
-  {sys.executable} -m playwright install --only-shell chromium        (about 100 MB, into {_cache_root()})
+  {sys.executable} -m playwright install --only-shell chromium        (about 100 MB, into {cache})
   sudo {sys.executable} -m playwright install-deps chromium    (Linux libraries; apt only — else set browser.executable_path)"""
 
 
@@ -145,7 +150,7 @@ class BrowserPlugin(Plugin):
         name="browser", version="0.1.0", kind="tools", enabled_by_default=False, requires_extra="browser",
         setup_action="Download Playwright's headless Chromium now? About 100 MB from Playwright's CDN; "
                      "it runs as a program on this machine (sandboxed by default).",
-        setup_help=BROWSER_SETUP_HELP, agent_prompt=BROWSER_AGENT_PROMPT,
+        setup_help=setup_help(), agent_prompt=BROWSER_AGENT_PROMPT,
         next_steps="browser_fetch (pages that need JavaScript) works once Chromium is downloaded and "
                    "`localharness doctor` shows every browser row passing; `localharness plugins enable "
                    "browser` does the download.",

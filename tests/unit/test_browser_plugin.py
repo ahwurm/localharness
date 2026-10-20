@@ -868,7 +868,7 @@ from localharness.config.plugin_sections import global_only_paths  # noqa: E402
 from localharness.plugins.api import Check, PluginContext, PluginManifest, PluginPaths, plugin_summary  # noqa: E402
 from localharness.tools.builtin import browser_plugin  # noqa: E402
 from localharness.tools.builtin.browser_plugin import (  # noqa: E402
-    BROWSER_AGENT_PROMPT, BROWSER_SETUP_HELP, BrowserConfig, BrowserPlugin)
+    BROWSER_AGENT_PROMPT, BrowserConfig, BrowserPlugin, setup_help)
 
 
 def plugin_ctx(tmp_path: Path, **cfg) -> PluginContext:
@@ -900,10 +900,11 @@ def test_the_manifest_is_every_field_of_the_declaration_and_frozen():
         name="browser", version="0.1.0", kind="tools", enabled_by_default=False, requires_extra="browser",
         setup_action="Download Playwright's headless Chromium now? About 100 MB from Playwright's CDN; "
                      "it runs as a program on this machine (sandboxed by default).",
-        setup_help=BROWSER_SETUP_HELP, agent_prompt=BROWSER_AGENT_PROMPT,
+        setup_help=m.setup_help, agent_prompt=BROWSER_AGENT_PROMPT,
         next_steps="browser_fetch (pages that need JavaScript) works once Chromium is downloaded and "
                    "`localharness doctor` shows every browser row passing; `localharness plugins enable "
                    "browser` does the download.")
+    assert m.setup_help.startswith("Browser needs Playwright's") and "install --only-shell chromium" in m.setup_help
     assert BrowserPlugin.ConfigModel is BrowserConfig and m.setup == ()
     assert plugin_summary(BrowserPlugin) == "reads JavaScript-rendered pages through a sandboxed headless Chromium"
     with pytest.raises(ValidationError):
@@ -911,10 +912,24 @@ def test_the_manifest_is_every_field_of_the_declaration_and_frozen():
 
 
 def test_the_help_runs_as_printed_and_the_prompt_has_no_placeholder():
-    assert f"{sys.executable} -m playwright install --only-shell chromium" in BROWSER_SETUP_HELP
-    assert f"{sys.executable} -m playwright install-deps chromium" in BROWSER_SETUP_HELP
-    assert re.search(r"into /\S*ms-playwright\)", BROWSER_SETUP_HELP) and "~" not in BROWSER_SETUP_HELP
+    assert f"{sys.executable} -m playwright install --only-shell chromium" in setup_help()
+    assert f"{sys.executable} -m playwright install-deps chromium" in setup_help()
+    assert re.search(r"into /\S*ms-playwright\)", setup_help()) and "~" not in setup_help()
     assert "{" not in BROWSER_AGENT_PROMPT and "browser.sandbox: false" in BROWSER_AGENT_PROMPT
+
+
+def test_the_module_imports_and_the_help_prints_with_no_home_directory(monkeypatch):
+    def no_home():
+        raise RuntimeError("Could not determine home directory.")
+
+    for var in ("PLAYWRIGHT_BROWSERS_PATH", "XDG_CACHE_HOME", "LOCALAPPDATA"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(Path, "home", no_home)
+    spec = importlib.util.spec_from_file_location("browser_plugin_without_home", browser_plugin.__file__)
+    fresh = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fresh)
+    assert f"{sys.executable} -m playwright install --only-shell chromium" in fresh.BrowserPlugin.manifest.setup_help
+    assert "into Playwright's cache)" in fresh.setup_help()
 
 
 def test_the_program_and_the_sandbox_are_machine_level_only():
