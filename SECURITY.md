@@ -1313,7 +1313,9 @@ read its answers as same-origin and send it `POST`s. A refusal is one line to th
 no setting. Chromium runs sandboxed, and where the sandbox cannot start (Ubuntu 23.10 and later
 restrict unprivileged user namespaces for a program without an AppArmor profile) the launch fails
 and the machine-level `browser.sandbox: false` is the way to accept an unsandboxed renderer, one
-whose bugs reach your user account below the tool declarations. With
+whose bugs reach your user account below the tool declarations. The AppArmor profile route grants
+user-namespace creation to the executable at the headless shell's path under your home, so name
+that exact path and reload the profile after a Playwright upgrade moves it. With
 `permissions.ask.network_hosts: true` the first `browser_fetch` from a host asks as a `web_fetch`
 would, once per page, and the hosts the page then loads from are not asked about. And data out is
 wider than `web_fetch`'s one GET: a rendered page can send requests by any verb to many public
