@@ -148,7 +148,7 @@ async def test_a_page_reaches_no_private_address_no_udp_path_and_no_local_scheme
         async with _context(runtime, html) as context:
             runtime._proxy.refused.clear()
             page = await context.new_page()
-            context.on("page", popups.append)
+            context.on("page", lambda p: popups.append(p))
             await page.goto(_PROBE, wait_until="load")
             result = await page.evaluate("window.__probe")
             await asyncio.sleep(1)

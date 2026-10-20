@@ -73,13 +73,18 @@ class RenderError(Exception):
         self.kind, self.detail = kind, detail
 
 
+def _argv(raw: bytes) -> list[str]:
+    """Chromium overwrites its argv with one space-joined string (base/process/set_process_title_linux.cc), so the NUL-separated args are split on whitespace too."""
+    return raw.decode(errors="replace").replace("\0", " ").split()
+
+
 def _command_lines() -> list[list[str]]:
     """The argv of every running process."""
     if Path("/proc").is_dir():
         out = []
         for p in Path("/proc").glob("[0-9]*/cmdline"):
             with contextlib.suppress(OSError):
-                out.append([a for a in p.read_bytes().decode(errors="replace").split("\0") if a])
+                out.append(_argv(p.read_bytes()))
         return out
     with contextlib.suppress(OSError, subprocess.SubprocessError):
         ps = subprocess.run(["ps", "-ax", "-o", "command="], capture_output=True, text=True, timeout=10)
