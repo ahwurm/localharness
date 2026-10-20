@@ -1,12 +1,12 @@
 [project]
 name = "localharness"
 version = "0.20.1"
-description = "Model-agnostic hierarchical agent harness for local LLMs"
+description = "Open-source agent harness for local LLMs: YAML agents with tools and a permission gate, on vLLM, llama.cpp, Ollama or LM Studio"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 readme = "README.md"
 authors = [{ name = "ahwurm" }]
-keywords = ["llm", "agents", "local-llm", "agent-harness", "vllm", "ollama"]
+keywords = ["llm", "local-llm", "agents", "ai-agents", "agent-harness", "agent-framework", "coding-agent", "self-hosted", "local-first", "mcp", "tool-calling", "vllm", "llama-cpp", "ollama", "lm-studio"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
