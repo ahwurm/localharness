@@ -36,7 +36,7 @@ class BrowserConfig(BaseModel):
 
 BROWSER_SETUP_HELP = f"""\
 Browser needs Playwright's headless Chromium on this machine, from Playwright's CDN:
-  {sys.executable} -m playwright install --only-shell          (about 100 MB, into ~/.cache/ms-playwright)
+  {sys.executable} -m playwright install --only-shell chromium        (about 100 MB, into ~/.cache/ms-playwright)
   sudo {sys.executable} -m playwright install-deps chromium    (Linux libraries; apt only — else set browser.executable_path)"""
 
 BROWSER_AGENT_PROMPT = (
@@ -180,7 +180,7 @@ class BrowserPlugin(Plugin):
 
     def setup_action(self, ctx: PluginContext) -> list[Check]:
         """Playwright's own installer, its progress on this terminal."""
-        done = subprocess.run([sys.executable, "-m", "playwright", "install", "--only-shell"],
+        done = subprocess.run([sys.executable, "-m", "playwright", "install", "--only-shell", "chromium"],
                               stderr=subprocess.PIPE, text=True)
         hint = "the download is Playwright's own; check the network, then run `localharness plugins enable browser` again"
         if done.returncode:
