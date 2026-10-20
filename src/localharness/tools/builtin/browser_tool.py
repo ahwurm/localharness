@@ -107,12 +107,13 @@ def _sweep_profiles() -> None:
     """Remove profile directories a crashed launch left behind; nothing is touched unless the process list is readable; a young directory may be a launch in progress."""
     if not (lines := _command_lines()):
         return
-    live = {a.partition("=")[2] for argv in lines for a in argv if a.startswith("--user-data-dir=")}
+    texts = [" ".join(argv) for argv in lines]
     uid = os.getuid() if hasattr(os, "getuid") else None
     for d in Path(tempfile.gettempdir()).glob(_PROFILE_PREFIX + "*"):
         with contextlib.suppress(OSError):
-            if d.is_dir() and not d.is_symlink() and str(d) not in live and (uid is None or d.stat().st_uid == uid) \
-                    and time.time() - d.stat().st_mtime > _SWEEP_MIN_AGE_S:
+            name = " ".join(str(d).split())
+            if d.is_dir() and not d.is_symlink() and not any(name in t for t in texts) \
+                    and (uid is None or d.stat().st_uid == uid) and time.time() - d.stat().st_mtime > _SWEEP_MIN_AGE_S:
                 shutil.rmtree(d, ignore_errors=True)
 
 

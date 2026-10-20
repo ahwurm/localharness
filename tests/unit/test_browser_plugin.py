@@ -359,6 +359,23 @@ async def test_only_unowned_real_old_profile_directories_are_removed_before_the_
     assert fresh.exists() and live.exists() and other.exists() and plain_file.exists() and link.is_symlink() and target.exists()
 
 
+async def test_a_live_profile_under_a_path_with_a_space_is_spared(world, tmp_path, runtime, monkeypatch):
+    spaced = tmp_path / "a b"
+    spaced.mkdir()
+    monkeypatch.setattr("tempfile.tempdir", str(spaced))
+    live, stale = (spaced / f"playwright_chromiumdev_profile-{n}" for n in ("live", "stale"))
+    live.mkdir()
+    stale.mkdir()
+    old = time.time() - 600
+    os.utime(live, (old, old))
+    os.utime(stale, (old, old))
+    first = world.command_lines
+    monkeypatch.setattr(browser_tool, "_command_lines",
+                        lambda: [*first(), browser_tool._argv(f"chrome --user-data-dir={live}\0".encode())])
+    await runtime.render("https://example.com/")
+    assert live.exists() and not stale.exists()
+
+
 async def test_nothing_is_swept_when_the_running_processes_cannot_be_read(world, tmp_path, monkeypatch):
     stale = tmp_path / "playwright_chromiumdev_profile-stale"
     stale.mkdir()
