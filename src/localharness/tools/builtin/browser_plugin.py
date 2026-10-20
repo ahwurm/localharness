@@ -105,7 +105,7 @@ def _package_row() -> Check:
 async def _launch_rows(cfg: BrowserConfig) -> list[Check]:
     """The launch and sandbox rows, from one real launch on a runtime of their own, closed again."""
     from localharness.tools.builtin.browser_tool import (
-        MISSING_LIBS, NOT_INSTALLED, REACH_FAILED, SANDBOX_FAILED, SANDBOX_OFF, BrowserRuntime, RenderError)
+        MISSING_LIBS, NO_PROCESS_LIST, NOT_INSTALLED, REACH_FAILED, SANDBOX_FAILED, SANDBOX_OFF, BrowserRuntime, RenderError)
 
     runtime, reason = BrowserRuntime(cfg), None
     try:
@@ -127,6 +127,8 @@ async def _launch_rows(cfg: BrowserConfig) -> list[Check]:
                        f"sudo {sys.executable} -m playwright install-deps chromium (apt only), "
                        "or set browser.executable_path to a system Chromium"),
         NOT_INSTALLED: (reason, _DOWNLOAD_HINT),
+        NO_PROCESS_LIST: (reason, "browser_fetch stays off on a platform where the launch check cannot read the "
+                                  "browser's command line; it is checked on Linux and macOS"),
         REACH_FAILED: (reason, "browser_fetch stays off until a launch passes; this Chromium did not go "
                                "through its checking proxy"),
     }.get(reason, (reason, "this is Chromium's own error; set browser.executable_path to another Chromium, "

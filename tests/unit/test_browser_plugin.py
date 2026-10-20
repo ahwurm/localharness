@@ -252,7 +252,7 @@ async def test_a_bypass_list_without_the_loopback_rule_fails_the_launch(world, r
 
 async def test_an_unreadable_command_line_fails_the_launch_closed(world, monkeypatch, runtime):
     monkeypatch.setattr(browser_tool, "_command_lines", lambda: [])
-    assert await unavailable(runtime) == "reach check failed"
+    assert await unavailable(runtime) == browser_tool.NO_PROCESS_LIST
 
 
 async def test_a_sandboxed_launch_whose_command_line_carries_no_sandbox_is_refused(world, runtime):
@@ -1085,6 +1085,13 @@ async def test_a_failed_reach_check_fails_the_launch_row_and_skips_the_sandbox(c
     assert (launch.status, launch.detail) == ("fail", "reach check failed")
     assert launch.hint == "browser_fetch stays off until a launch passes; this Chromium did not go through its checking proxy"
     assert sandbox == Check(name="browser-sandbox", status="skip", detail="needs a working launch")
+
+
+async def test_a_platform_with_no_process_list_says_so_in_the_launch_row(cache, world, tmp_path, monkeypatch):
+    monkeypatch.setattr(browser_tool, "_command_lines", lambda: [])
+    _, launch, sandbox = await launch_rows(tmp_path, cache)
+    assert (launch.status, launch.detail) == ("fail", "the browser's command line could not be read on this platform")
+    assert "Linux and macOS" in launch.hint and sandbox.status == "skip"
 
 
 async def test_a_missing_executable_fails_the_launch_with_the_download_hint(cache, world, tmp_path):
