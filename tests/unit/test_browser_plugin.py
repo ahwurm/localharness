@@ -886,7 +886,7 @@ def test_the_manifest_is_every_field_of_the_declaration_and_frozen():
 
 
 def test_the_help_runs_as_printed_and_the_prompt_has_no_placeholder():
-    assert f"{sys.executable} -m playwright install --only-shell" in BROWSER_SETUP_HELP
+    assert f"{sys.executable} -m playwright install --only-shell chromium" in BROWSER_SETUP_HELP
     assert f"{sys.executable} -m playwright install-deps chromium" in BROWSER_SETUP_HELP
     assert "{" not in BROWSER_AGENT_PROMPT and "browser.sandbox: false" in BROWSER_AGENT_PROMPT
 
@@ -1138,7 +1138,7 @@ def test_the_download_runs_playwrights_installer_with_its_progress_visible(cache
     assert download(monkeypatch, tmp_path, install) == [
         Check(name="browser-binary", status="pass", detail="chromium_headless_shell-1248 installed")]
     ((argv, kwargs),) = install.calls
-    assert argv == [sys.executable, "-m", "playwright", "install", "--only-shell"]
+    assert argv == [sys.executable, "-m", "playwright", "install", "--only-shell", "chromium"]
     assert "stdout" not in kwargs and kwargs["stderr"] == subprocess.PIPE and kwargs["text"] is True
 
 
