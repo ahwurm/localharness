@@ -4,6 +4,29 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.20.1] — 2026-10-20
+
+Review fixes to the `browser` plugin and its docs.
+
+### Fixed
+- **A host name the resolver cannot encode no longer crashes the checking proxy.** It is refused as
+  unresolvable, the same as any other name that does not resolve.
+- **The Chromium download shows Playwright's progress.** The installer now inherits the terminal, and
+  a failed install reports the installer's exit code.
+- **A platform with no readable process list says so.** The not-available line and the doctor row
+  name that, instead of reporting a failed reach check.
+- **The profile sweep spares a live browser whose profile path contains a space.**
+- **A machine with no home directory still starts,** and the setup help falls back to a plain cache
+  label. Elsewhere the help names the cache folder Playwright will actually use.
+
+### Changed
+- **The browser plugin is documented as Linux and macOS only,** because the launch check reads the
+  browser's command line.
+- **The install line says a reinstall keeps only the extras it names,** in the README and the changelog.
+- **SECURITY.md names the AppArmor route for the browser:** it grants user namespaces to one path, and
+  the profile needs a reload after an upgrade moves that path.
+- The README and the plugin page link to the plugin's page on localharness.dev.
+
 ## [0.20.0] — 2026-10-19
 
 **browser** — a sixth bundled plugin, off by default. `localharness plugins enable browser`
