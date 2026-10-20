@@ -12,7 +12,7 @@ localharness plugins enable browser         # asks to download Playwright's head
 localharness plugins disable browser
 ```
 
-The enable asks "Download Playwright's headless Chromium now? About 100 MB from Playwright's CDN; it runs as a program on this machine (sandboxed by default).", runs Playwright's own installer with its progress on your terminal, then checks four `doctor` rows in this order: `browser-package`, `browser-binary`, `browser-launch` and `browser-sandbox`. It is done when all four pass. Enabled before the extra is installed, it writes the enable, names the install line and downloads nothing, so run it again after installing.
+The enable asks "Download Playwright's headless Chromium now? About 100 MB from Playwright's CDN; it runs as a program on this machine (sandboxed by default).", runs Playwright's own installer with its progress on your terminal, then checks four `doctor` rows in this order: `browser-package`, `browser-binary`, `browser-launch` and `browser-sandbox`. It is done when all four pass. The plugin is for Linux and macOS, where the launch check can read the browser's command line; elsewhere `browser-launch` fails with that reason and `browser_fetch` stays off. Enabled before the extra is installed, it writes the enable, names the install line and downloads nothing, so run it again after installing.
 
 In a running session, `/plugins enable browser` asks the same question and restarts the session with your conversation kept. With the plugin on and no Chromium downloaded, no browser tool exists and `localharness start` prints no warning, while `localharness doctor` and `localharness plugins list` say why.
 
