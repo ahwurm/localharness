@@ -46,8 +46,8 @@ The token comes only from `dispatch.discord.token`. The deprecated environment v
 
 ## More
 
-- [Spec 11, the dispatch plugin](../specs/11-channels.md#the-dispatch-plugin-chat-platforms-discord-today): the channel, the adapter protocol, how a second platform is added
+- [The dispatch plugin's source](../../src/localharness/dispatch/): the channel, the adapter protocol, how a second platform is added
 - [SECURITY.md, machine-level-only settings](../../SECURITY.md#machine-level-only-settings)
-- [Spec 09, the bundled plugins](../specs/09-hooks-plugins.md#the-bundled-plugins)
+- [README, the bundled plugins](../../README.md#plugins)
 - [localharness.dev/plugins/dispatch](https://localharness.dev/plugins/dispatch/)
 - [Write your own plugin](../../examples/plugin-template/README.md)

@@ -19,6 +19,7 @@ bench/results/
 # Internal-only docs (GSD planning, competitive notes)
 .planning/
 docs/competitive/
+docs/specs/
 
 # Live dogfood artifacts (search-verifier ledger writes here per UTC day)
 reports/

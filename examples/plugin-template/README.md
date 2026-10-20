@@ -139,7 +139,7 @@ An artifact is a file a plugin makes for you, like the swatch image.
 ## What this example does not use
 
 Every field below is optional, and the plugin API's version stays `"1"` because each was added
-with a default that leaves an older plugin unchanged. [Spec 09](../../docs/specs/09-hooks-plugins.md#additive-fields)
+with a default that leaves an older plugin unchanged. [`PluginManifest`](../../src/localharness/plugins/api.py)
 lists them all.
 
 - `setup` and `setup_help` on the manifest: the questions `localharness plugins enable <name>` asks
@@ -153,6 +153,25 @@ lists them all.
 A plugin you install cannot add a chat channel (`channels`, `make_channel`), claim core settings
 (`sections`), or share the memory slot: two memory plugins on at once are both refused, so one you
 install takes the slot only after `localharness plugins disable memory`.
+
+## Plugins written for 0.15
+
+LocalHarness 0.15 loaded `localharness.tools` and `localharness.hooks` entry points, and folders
+`~/.localharness/plugins/<dir>/` holding a `manifest.yaml`. None of them loads any more, and nothing
+of theirs is imported: `localharness plugins list`, `localharness doctor` and the start banner name
+each one until it is ported or removed. To port one, with this folder as the model:
+
+1. Write a `Plugin` subclass with a `PluginManifest`.
+2. Expose it as a `localharness.plugins` entry point named after the manifest, in place of the old
+   entry points, or as a folder `~/.localharness/plugins/<name>/` whose `__init__.py` binds
+   `plugin = <the class>`.
+3. Return your tools from `tools(ctx)`, each `ToolSchema` making the four declarations above.
+4. Keep your `pre_tool` and `post_tool` implementations, and register the object that holds them in
+   `start()` with `ctx.hooks.register_plugin(obj, name=self.manifest.name)`.
+5. Drop `on_agent_start`, `on_agent_end` and `on_event`: 0.15 never called them. For events,
+   `ctx.bus.subscribe(<event class from localharness.core.events>, handler)` in `start()`, and
+   unsubscribe in `stop()`.
+6. Install it, then `localharness plugins enable <name>`.
 
 ## Removing a plugin
 

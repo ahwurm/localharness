@@ -3,9 +3,8 @@
 A docs change cannot be "done" because prose was edited. Each check below is a pure function
 `check_*(...) -> list[str]` (one string per disagreement) that reads a document AND the code object
 it describes, and every source of truth is imported, never typed out: `BUILTIN_PLUGINS`,
-`PLUGIN_API_VERSION`, `PluginManifest.model_fields`, `dataclasses.fields(PluginContext)`,
-`inspect.signature(AgentLoop.__init__)`, `global_only_paths`, `ASK_GLOBAL_ONLY_FIELDS`, the
-`ToolSchema` declaration defaults, `plugin_summary`. Each check has a live test on the real file and
+`global_only_paths`, `ASK_GLOBAL_ONLY_FIELDS`, `LAUNCH_KEYS`, the `ToolSchema` declaration
+defaults, `plugin_summary`. Each check has a live test on the real file and
 a "bites" test that feeds it one deliberate break and asserts a non-empty violation list, so no
 check is vacuous.
 
@@ -17,40 +16,24 @@ from `BUILTIN_PLUGINS` only, never discovery (a dev venv may have other plugins 
 """
 from __future__ import annotations
 
-import ast
-import builtins
-import dataclasses
-import functools
-import inspect
-import keyword
 import re
-import typing
 from collections.abc import Callable, Iterable
-from pathlib import Path
 
 import pytest
 
 from localharness.agent.gate_types import PROTECTED_CONFIG_DIR_ENTRIES
-from localharness.agent.loop import AgentLoop
 from localharness.config.loader import (
     AGENT_GLOBAL_ONLY_FIELDS, ASK_GLOBAL_ONLY_FIELDS, HARNESS_GLOBAL_ONLY_FIELDS,
 )
 from localharness.config.plugin_sections import CORE_HARNESS_KEYS, global_only_paths
 from localharness.config.trust import LAUNCH_KEYS, LAUNCH_MODEL_KEYS, LAUNCH_MODEL_KIND
-from localharness.plugins import api
-from localharness.plugins.api import (
-    Check, MemoryBrowse, MemorySlotPlugin, Plugin, PluginContext, PluginManifest, PluginPaths,
-    SessionInfo, SetupField, plugin_summary,
-)
+from localharness.plugins.api import Plugin, plugin_summary
 from localharness.plugins.builtin import BUILTIN_PLUGINS
-from localharness.plugins.plan import PlanState
 from localharness.tools.base import ToolSchema
 from tests.unit.test_release_docs import _BLOB, _REPO, _github_anchors
 
 SRC = _REPO / "src" / "localharness"
 _TREE = _BLOB.replace("/blob/", "/tree/")
-SPEC00 = "docs/specs/00-architecture-overview.md"
-SPEC09 = "docs/specs/09-hooks-plugins.md"
 
 
 # ---------------------------------------------------------------- helpers: read docs as structure
@@ -143,287 +126,6 @@ def bullets(text: str) -> list[tuple[str, str]]:
 
 def paragraphs(text: str) -> list[str]:
     return [p for p in re.split(r"\n\s*\n", "\n".join(unfenced_lines(text))) if p.strip()]
-
-
-# ---------------------------------------------------------------- the code's own index of names
-
-@functools.cache
-def _py_files() -> tuple[tuple[Path, ast.Module], ...]:
-    return tuple((p, ast.parse(p.read_text(encoding="utf-8"))) for p in sorted(SRC.rglob("*.py")))
-
-
-@functools.cache
-def symbol_index() -> frozenset[str]:
-    """Every name src/localharness defines: modules and packages, classes, functions, assigned
-    names, arguments and attribute stores (`self.x = ...`)."""
-    names: set[str] = set()
-    for path, tree in _py_files():
-        names.add(path.stem)
-        names.update(part for part in path.relative_to(SRC).parts[:-1])
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-                names.add(node.name)
-            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-                names.add(node.id)
-            elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store):
-                names.add(node.attr)
-            elif isinstance(node, ast.arg):
-                names.add(node.arg)
-    return frozenset(names)
-
-
-@functools.cache
-def literal_index() -> frozenset[str]:
-    """Every identifier-shaped string constant in src/localharness (Literal values such as `dev` and
-    `warn`, command words such as `enable`), plus Python's builtins and keywords."""
-    found = {node.value for _p, tree in _py_files() for node in ast.walk(tree)
-             if isinstance(node, ast.Constant) and isinstance(node.value, str)
-             and re.fullmatch(r"[A-Za-z_][\w-]*", node.value)}
-    return frozenset(found | set(dir(builtins)) | set(keyword.kwlist))
-
-
-@functools.cache
-def class_index() -> dict[str, list[tuple[set[str], dict[str, str], list[str]]]]:
-    """Class name -> per definition: (member names, annotation text per annotated member, base
-    class names). Read with `ast`, so a class is resolved without importing optional extras."""
-    out: dict[str, list[tuple[set[str], dict[str, str], list[str]]]] = {}
-    for _path, tree in _py_files():
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.ClassDef):
-                continue
-            members: set[str] = set()
-            annotations: dict[str, str] = {}
-            for item in node.body:
-                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    members.add(item.name)
-                elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
-                    members.add(item.target.id)
-                    annotations[item.target.id] = ast.unparse(item.annotation)
-                elif isinstance(item, ast.Assign):
-                    members.update(t.id for t in item.targets if isinstance(t, ast.Name))
-            for fn in node.body:  # instance attributes set in methods (self.x = ...)
-                if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    members.update(n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)
-                                   and isinstance(n.ctx, ast.Store)
-                                   and isinstance(n.value, ast.Name) and n.value.id == "self")
-            bases = [b.id if isinstance(b, ast.Name) else b.attr if isinstance(b, ast.Attribute)
-                     else "" for b in node.bases]
-            out.setdefault(node.name, []).append((members, annotations, bases))
-    return out
-
-
-def _member_type(cls: str, attr: str, _seen: frozenset[str] = frozenset()) -> str | None | bool:
-    """False if no definition of `cls` (or its bases) has `attr`; else the class name its
-    annotation names (first CamelCase word), or None when that is unknown."""
-    if cls in _seen or cls not in class_index():
-        return False
-    for members, anns, bases in class_index()[cls]:
-        if attr in members:
-            m = re.search(r"\b([A-Z]\w*)", anns.get(attr, ""))
-            return m.group(1) if m and m.group(1) in class_index() else None
-        for base in bases:
-            found = _member_type(base, attr, _seen | {cls})
-            if found is not False:
-                return found
-    return False
-
-
-def _module_file(parts: list[str]) -> tuple[Path | None, list[str]]:
-    """The longest `localharness.a.b` prefix that is a module or package, and the rest."""
-    for n in range(len(parts), 1, -1):
-        base = SRC.joinpath(*parts[1:n])
-        for candidate in (base.with_suffix(".py"), base / "__init__.py"):
-            if candidate.is_file():
-                return candidate, parts[n:]
-    return (SRC / "__init__.py", parts[1:]) if parts[0] == "localharness" else (None, parts)
-
-
-# ---------------------------------------------------------------- check 1: spec 09 -> code
-
-ALLOWLIST = frozenset({  # reviewed: spec 09 names these, and none is a LocalHarness symbol
-    # Files a user edits or a 0.15 plugin shipped (dotted, but not Python names).
-    "config.yaml", "overrides.yaml", "manifest.yaml",
-    # Library names: pluggy and its `PluginManager`, Typer's app class, pydantic's `Field`.
-    "pluggy", "PluginManager", "typer.Typer", "Field",
-    # Prose word for the hook specification (the code class is `HarnesHookSpec`).
-    "HookSpec",
-    # The removed 0.15 module the "Plugins written for 0.15" section names (pinned gone below).
-    "localharness.hooks",
-})
-LEGACY_HOOK_NAMES = ("on_agent_start", "on_agent_end", "on_event")
-_MIME = re.compile(r"(?:image|text|application|audio|video)/[\w.+-]+")
-_IDENT = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*")
-_PATHISH = re.compile(r"[\w.\-]+(?:/[\w.\-]+)*/?")
-
-
-def _resolve_path(token: str) -> bool:
-    return any((root / token).exists() for root in (SRC, _REPO, _REPO / "examples", SRC.parent))
-
-
-def _resolve_dotted(parts: list[str]) -> str | None:
-    """None when `a.b.c` resolves, else why not."""
-    if parts[0] == "localharness":
-        file, rest = _module_file(parts)
-        if file is None:
-            return "no such module"
-        if not rest:
-            return None
-        top = {n for _p, t in _py_files() if _p == file for n in _top_names(t)}
-        if rest[0] not in top:
-            return f"{file.relative_to(SRC).as_posix()} defines no {rest[0]}"
-        parts = rest
-    head, *tail = parts
-    if head == "ctx":
-        head = "PluginContext"
-    if re.match(r"[A-Z]\w*[a-z]", head) and head in class_index():
-        cls: str | None = head
-        for attr in tail:
-            if cls is None:
-                return None
-            found = _member_type(cls, attr)
-            if found is False:
-                return f"{cls} has no {attr}"
-            cls = found  # type: ignore[assignment]
-        return None
-    if len(parts) > 1 and re.match(r"[A-Z]\w*[a-z]", head) and head not in symbol_index():
-        return f"no class {head} in src/localharness"
-    if parts[-1] in symbol_index() or (len(parts) == 1 and parts[0] in literal_index()):
-        return None
-    return f"no symbol {parts[-1]} in src/localharness"
-
-
-def _top_names(tree: ast.Module) -> set[str]:
-    names: set[str] = set()
-    for node in tree.body:
-        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-            names.add(node.name)
-        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            names.update(t.id for t in targets if isinstance(t, ast.Name))
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            names.update((a.asname or a.name).split(".")[0] for a in node.names)
-    return names
-
-
-def check_spec09_names_resolve(text: str) -> list[str]:
-    """Every identifier-shaped backtick span outside fenced code names something real: a `*.py`
-    path exists, `Class.attr` is a member of THAT class (never matched by last segment alone),
-    `ctx.x` is a PluginContext field, `localharness.x.y` is a module (and attribute), and any other
-    name is defined somewhere in src/localharness. The 0.15 hook names must stay gone."""
-    out: list[str] = []
-    live = [n for n in LEGACY_HOOK_NAMES if n in symbol_index()]
-    out += [f"`{n}`: the 0.15 hook name is defined in src again" for n in live]
-    if (SRC / "hooks.py").exists() or (SRC / "hooks").is_dir():
-        out.append("`localharness.hooks`: the 0.15 module exists again")
-    for raw in dict.fromkeys(ticks(text)):
-        token = re.sub(r"\(.*\)$", "", raw.strip())
-        if token in ALLOWLIST or token in LEGACY_HOOK_NAMES or not token:
-            continue
-        if _MIME.fullmatch(token):
-            continue
-        if "/" in token or token.endswith(".py"):
-            if _PATHISH.fullmatch(token) and not token.startswith(("/", ".", "~")) \
-                    and (token.endswith(".py") or "/" in token.strip("/")) and not _resolve_path(token):
-                out.append(f"`{raw}`: no such file under src/localharness, examples/ or the repo")
-            continue
-        if not _IDENT.fullmatch(token):
-            continue
-        if (why := _resolve_dotted(token.split("."))) is not None:
-            out.append(f"`{raw}`: {why}")
-    return out
-
-
-def test_spec09_names_resolve_live():
-    """Spec 09 names only identifiers, fields and files that exist."""
-    assert check_spec09_names_resolve(_read(SPEC09)) == []
-
-
-def test_spec09_names_resolve_bites():
-    assert check_spec09_names_resolve("`PluginManifest.setup` and `plugins/plan.py`") == []
-    found = check_spec09_names_resolve("`PluginManifest.stability` and `plugins/planner.py`")
-    assert len(found) == 2, found
-    assert check_spec09_names_resolve("`ctx.paths.artifact_dir` `ctx.nope`") == ["`ctx.nope`: PluginContext has no nope"]
-
-
-# ---------------------------------------------------------------- check 2: code -> spec 09
-
-def _public_methods(cls: type) -> list[str]:
-    return [n for n, v in vars(cls).items() if callable(v) and not n.startswith("_")]
-
-
-def coverage_names() -> dict[str, tuple[str, ...]]:
-    """What spec 09 must name, read from the API module."""
-    def fields(dc: type) -> tuple[str, ...]:
-        return tuple(f.name for f in dataclasses.fields(dc))
-    return {
-        "PluginManifest": tuple(PluginManifest.model_fields),
-        "PluginContext": fields(PluginContext),
-        "PluginPaths": fields(PluginPaths),
-        "SessionInfo": fields(SessionInfo),
-        "SetupField": tuple(SetupField.model_fields),
-        "Plugin": (*_public_methods(Plugin), "make_channel"),
-        "MemorySlotPlugin": tuple(_public_methods(MemorySlotPlugin)),
-        "MemoryBrowse": tuple(_public_methods(MemoryBrowse)),
-        "PlanState": typing.get_args(PlanState),
-        "Check.status": typing.get_args(Check.model_fields["status"].annotation),
-        "types": ("MemoryWriteHandle", "ContextContribution", "ContextBudget", "Availability"),
-    }
-
-
-def check_spec09_covers_code(text: str, names: dict[str, tuple[str, ...]] | None = None) -> list[str]:
-    """Every name the plugin API defines appears in a backtick span of spec 09 — bare (`channels`,
-    `channels()`, `"on"`) or qualified (`PluginManifest.channels`, `ctx.paths`)."""
-    names = coverage_names() if names is None else names
-    spans = {re.sub(r"\(.*\)$", "", t.strip()).strip("\"'") for t in ticks(text)}
-    shown = spans | {s.rsplit(".", 1)[-1] for s in spans}
-    return [f"{owner}: `{n}` is not named in spec 09"
-            for owner, members in names.items() for n in members if n not in shown]
-
-
-def test_spec09_covers_code_live():
-    """Nothing the plugin API defines is missing from spec 09."""
-    assert check_spec09_covers_code(_read(SPEC09)) == []
-
-
-def test_spec09_covers_code_bites():
-    names = coverage_names()
-    good = " ".join(f"`{n}`" for members in names.values() for n in members)
-    assert check_spec09_covers_code(good, names) == []
-    found = check_spec09_covers_code(good.replace("`channels`", ""), names)
-    assert any("`channels`" in v for v in found), found
-    grown = {**names, "PluginManifest": (*names["PluginManifest"], "stability")}
-    assert check_spec09_covers_code(good, grown) == ["PluginManifest: `stability` is not named in spec 09"]
-
-
-# ---------------------------------------------------------------- check 2b: spec 09 status line
-
-_STATUS = re.compile(r'^\*\*Stability:\*\* v1 — .*`PLUGIN_API_VERSION = "([^"]*)"`', re.M)
-
-
-def check_spec09_status(text: str, version: str = api.PLUGIN_API_VERSION) -> list[str]:
-    """Spec 09's status line is `**Stability:** v1 — `PLUGIN_API_VERSION = "<the code's value>"` ...`
-    and the word UNSTABLE is gone."""
-    out = []
-    if (m := _STATUS.search(text)) is None:
-        out.append('no line starting "**Stability:** v1 — " naming `PLUGIN_API_VERSION = "..."`')
-    elif m.group(1) != version:
-        out.append(f"status says PLUGIN_API_VERSION {m.group(1)!r}, the code says {version!r}")
-    if "UNSTABLE" in text:
-        out.append("spec 09 still says UNSTABLE")
-    return out
-
-
-def test_spec09_status_live():
-    """Spec 09 states the API version the code carries, and no longer calls it unstable."""
-    assert check_spec09_status(_read(SPEC09)) == []
-
-
-def test_spec09_status_bites():
-    good = f'**Stability:** v1 — `PLUGIN_API_VERSION = "{api.PLUGIN_API_VERSION}"`. Additive only.\n'
-    assert check_spec09_status(good) == []
-    assert check_spec09_status(good + "**Stability:** UNSTABLE (v1).\n")
-    assert check_spec09_status(good, version="2")
-    assert check_spec09_status("**Stability:** UNSTABLE (v1).\n")
 
 
 # ---------------------------------------------------------------- check 3: machine-level-only list
@@ -768,76 +470,6 @@ def test_plugins_table_bites():
     assert check_plugins_table(good.replace("Name | What it does", "Plugin | What it does"))
 
 
-# ---------------------------------------------------------------- check 6: spec 00 section 5
-
-WIRING_HEADING = "### Constructor wiring (the sanctioned exceptions)"
-
-
-def wiring_code() -> dict[str, frozenset[str]]:
-    params = inspect.signature(AgentLoop.__init__).parameters
-    return {"AgentLoop.__init__": frozenset(p for p in params if p != "self"),
-            "PluginContext": frozenset(f.name for f in dataclasses.fields(PluginContext))}
-
-
-def check_spec00_wiring(text: str, code: dict[str, frozenset[str]] | None = None) -> list[str]:
-    """Spec 00 section 5 opens on the event (data) plane, still names the Config Loader exception,
-    and has `### Constructor wiring (the sanctioned exceptions)` with one bullet labelled
-    `AgentLoop.__init__` and one labelled `PluginContext`: the other backticked names on each
-    bullet equal the parameters / fields, both ways. AP1 no longer calls `registry.execute`."""
-    code = wiring_code() if code is None else code
-    s5 = section(text, "## 5.", prefix=True)
-    if s5 is None:
-        return ["spec 00 has no section 5"]
-    out = []
-    opening = next((p for p in paragraphs(s5) if not p.lstrip().startswith("#")), "").lower()
-    if "event" not in opening or "data plane" not in opening:
-        out.append("section 5's opening paragraph does not name the event bus as the data plane")
-    if "config loader" not in s5.lower():
-        out.append("section 5 no longer names the Config Loader exception")
-    sub = section(s5, WIRING_HEADING)
-    if sub is None:
-        out.append(f"section 5 has no '{WIRING_HEADING}' subsection")
-    else:
-        found = {spans[0]: set(spans[1:]) for _h, b in bullets(sub) if (spans := ticks(b))}
-        for label, want in code.items():
-            if label not in found:
-                out.append(f"no bullet labelled `{label}`")
-                continue
-            out += [f"`{label}`: `{n}` is not listed" for n in sorted(want - found[label])]
-            out += [f"`{label}`: `{n}` is listed but is not in the code" for n in sorted(found[label] - want)]
-    ap1 = section(text, "### AP1", prefix=True)
-    if ap1 is None:
-        out.append("spec 00 has no AP1")
-    elif "registry.execute" in ap1:
-        out.append("AP1 still presents `registry.execute` (the loop dispatches through its injected registry)")
-    return out
-
-
-def test_spec00_wiring_live():
-    """Spec 00 section 5 names the constructor-wired collaborators exactly as the code has them."""
-    assert check_spec00_wiring(_read(SPEC00)) == []
-
-
-def _good_spec00(code: dict[str, frozenset[str]]) -> str:
-    items = "".join(f"- `{label}`: " + ", ".join(f"`{n}`" for n in sorted(names)) + "\n"
-                    for label, names in code.items())
-    return ("## 5. Communication Rule\n\nFacts travel as events on the bus, the data plane.\n\n"
-            "The Config Loader is injected at construction.\n\n"
-            f"{WIRING_HEADING}\n\n{items}\n## 10. Anti-Patterns\n\n### AP1: Direct Component References\n\n"
-            "The loop calls its injected registry.\n")
-
-
-def test_spec00_wiring_bites():
-    code = wiring_code()
-    good = _good_spec00(code)
-    assert check_spec00_wiring(good) == []
-    assert check_spec00_wiring(good.replace(", `memory_slot`", "").replace("`memory_slot`, ", "")) == [
-        "`AgentLoop.__init__`: `memory_slot` is not listed"]
-    grown = {**code, "AgentLoop.__init__": code["AgentLoop.__init__"] | {"planner"}}
-    assert check_spec00_wiring(good, grown) == ["`AgentLoop.__init__`: `planner` is not listed"]
-    assert check_spec00_wiring(good.replace("The loop calls", "Calling registry.execute"))
-
-
 # ---------------------------------------------------------------- check 7: CHANGELOG
 
 def changelog_slice(text: str) -> str:
@@ -946,13 +578,13 @@ INTERNAL_IDS = (  # internal phase numbers, plan ids and requirement ids
     re.compile(r"\b(?:PAPI|PLUG|MEMP|ENAB|SAFE|DISP|AUTO|IMGP|WEBP|CORE|DOCS|SEC)-\d\d\b"),
     re.compile(r"\b(?:LIVE|NUDGE)-\d+\b|\bT-2\d-\d+\b"),  # live-gate and threat ids
     re.compile(r"\b2[12]-0\d\b"),  # plan ids of the browser milestone
-    re.compile(r"\bSETUP-(?:0[5-9]|1[0-5])\b"),  # the setup-wizard rows; SETUP-01..04 are v1.0's, cited by specs 02 and 10
+    re.compile(r"\bSETUP-(?:0[5-9]|1[0-5])\b"),  # the setup-wizard rows; SETUP-01..04 are v1.0's
 )
 
 
 def public_docs() -> list[str]:
     docs = sorted(p.relative_to(_REPO).as_posix() for p in (_REPO / "docs").rglob("*.md"))
-    return ["README.md", "SECURITY.md", "CHANGELOG.md",
+    return ["README.md", "SECURITY.md", "CHANGELOG.md", "examples/README.md", "examples/plugin-template/README.md",
             *[d for d in docs if not d.startswith("docs/competitive/")
               and d != "docs/task-intent-and-clarification-prd.md"]]
 
@@ -979,8 +611,6 @@ def check_denylist(rel: str, text: str) -> list[str]:
         out += [f"{where}: {b!r}" for b in BANNED if b in line]
         if "GuardrailTracker" in line and not re.search(r"design|not built", line + heading, re.I):
             out.append(f"{where}: 'GuardrailTracker' presented as built")
-        if rel == SPEC09 and "UNSTABLE" in line:
-            out.append(f"{where}: 'UNSTABLE'")
         out += [f"{where}: {env!r} names the deleted Discord env fallback"
                 for env in ("LOCALHARNESS_DISCORD_", "DISCORD_BOT_TOKEN") if env in line]
     if rel != "CHANGELOG.md":
@@ -1005,17 +635,16 @@ def test_denylist_bites():
         assert check_denylist("README.md", text + "\n"), text
     assert check_denylist("CHANGELOG.md", "- Removed `run_pre_hooks`.\n") == []
     assert check_denylist("CHANGELOG.md", "- Shipped in Phase 49.\n")
-    assert check_denylist("docs/specs/11-channels.md", "Set `LOCALHARNESS_DISCORD_TOKEN`.\n")
-    assert check_denylist("docs/specs/11-channels.md", "`LOCALHARNESS_DISCORD_TOKEN` (deprecated).\n")
+    assert check_denylist("docs/plugins/dispatch.md", "Set `LOCALHARNESS_DISCORD_TOKEN`.\n")
+    assert check_denylist("docs/plugins/dispatch.md", "`LOCALHARNESS_DISCORD_TOKEN` (deprecated).\n")
     assert check_denylist("README.md", "- Set\n  `LOCALHARNESS_DISCORD_TOKEN`.\n- It is deprecated.\n")
-    assert check_denylist("docs/specs/12-audit.md", "## Tracker\n`GuardrailTracker` runs.\n")
-    assert check_denylist("docs/specs/12-audit.md", "## Tracker (design, not built)\n`GuardrailTracker`.\n") == []
+    assert check_denylist("docs/task-context.md", "## Tracker\n`GuardrailTracker` runs.\n")
+    assert check_denylist("docs/task-context.md", "## Tracker (design, not built)\n`GuardrailTracker`.\n") == []
     assert check_denylist("SECURITY.md", "Set `org.memory_enabled` to turn memory off.\n")
-    assert check_denylist(SPEC09, "**Stability:** UNSTABLE (v1).\n")
     assert check_denylist("README.md", "SETUP-07 says so.\n")
     assert check_denylist("README.md", "SEC-04 says so.\n")
     assert check_denylist("README.md", "as plan 53-02 did\n")
-    assert check_denylist("docs/specs/10-cli.md", "**Requirements:** SETUP-01, SETUP-04\n") == []
+    assert check_denylist("README.md", "**Requirements:** SETUP-01, SETUP-04\n") == []
 
 
 # ---------------------------------------------------------------- check 9: links
@@ -1076,10 +705,10 @@ def test_links_live():
 
 
 def test_links_bites():
-    good = "## Here\n\n[a](#here) [b](SECURITY.md#plugins) [c](docs/specs/) [d](https://example.com)\n"
+    good = "## Here\n\n[a](#here) [b](SECURITY.md#plugins) [c](docs/plugins/) [d](https://example.com)\n"
     assert check_links("README.md", good) == []
     assert check_links("README.md", good.replace("## Here", "## There")) == [
         "README.md: #here names no heading in README.md"]
     assert check_links("README.md", "[x](docs/nope.md)\n") == ["README.md: link to missing 'docs/nope.md'"]
     assert check_links("README.md", "## A\n## A\n[l](#a)\n") == ["README.md: #a names 2 headings in README.md"]
-    assert check_links("README.md", f"[s]({_BLOB}docs/specs/09-hooks-plugins.md#no-such-heading)\n")
+    assert check_links("README.md", f"[s]({_BLOB}docs/plugins/memory.md#no-such-heading)\n")

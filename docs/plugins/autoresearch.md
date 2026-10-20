@@ -71,7 +71,7 @@ It keeps the core settings it had before it became a plugin, under the same name
 
 ## More
 
-- [Spec 09, the bundled plugins](../specs/09-hooks-plugins.md#the-bundled-plugins)
-- [Spec 10, exit codes](../specs/10-cli.md#exit-codes)
+- [README, the bundled plugins](../../README.md#plugins)
+- [The command and its exit codes](../../src/localharness/cli/autoresearch_cmd.py)
 - [localharness.dev/plugins/autoresearch](https://localharness.dev/plugins/autoresearch/)
 - [Write your own plugin](../../examples/plugin-template/README.md)

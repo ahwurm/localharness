@@ -44,6 +44,6 @@ A paired phone can do what you can do at the terminal, including switching the s
 
 - [docs/mobile.md](../mobile.md): install, pairing, notifications, reaching it from the phone, building your own UI
 - [SECURITY.md, `localharness mobile`](../../SECURITY.md#localharness-mobile)
-- [Spec 09, the bundled plugins](../specs/09-hooks-plugins.md#the-bundled-plugins)
+- [README, the bundled plugins](../../README.md#plugins)
 - [localharness.dev/plugins/mobile](https://localharness.dev/plugins/mobile/)
 - [Write your own plugin](../../examples/plugin-template/README.md)

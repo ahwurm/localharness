@@ -1791,7 +1791,7 @@ for 0.15 no longer loads: see Removed and Migration.
 - A plugin written for 0.15 no longer loads, and nothing migrates it for you.
   LocalHarness names it in `localharness plugins list`, `localharness doctor`
   and the start banner. Port it to a `localharness.plugins` entry point:
-  [spec 09, "Plugins written for 0.15"](docs/specs/09-hooks-plugins.md#plugins-written-for-015)
+  spec 09, "Plugins written for 0.15"
   says how.
 - When you uninstall a plugin, delete its `<name>:` section and its
   `agent.<name>` entry from `overrides.yaml` and `config.yaml`. A leftover
@@ -3295,7 +3295,7 @@ everywhere, verified against each server's own numbers.
 
 ### Added
 - **Harness-managed server lifecycle for all four runtimes.** A pluggable
-  lifecycle-strategy layer (`docs/specs/13-provider-support.md`):
+  lifecycle-strategy layer (spec 13, provider support):
   vLLM (docker — stop polls until the container is gone and fails loud —
   or binary), llama.cpp (the harness spawns `llama-server` itself), Ollama
   (the harness spawns and owns `ollama serve`; stop kills the whole daemon,

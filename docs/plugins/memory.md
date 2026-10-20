@@ -46,11 +46,10 @@ All under `agent.memory.*` in an agent's file or `overrides.yaml`; none is machi
 - `agent.memory.inject_into_context` is accepted but does nothing.
 - Five memory event types (`MemoryGateFired`, `ExpectationAttached`, `OutcomeObserved`, `SurpriseScored`, `TurnEndMicroPassCompleted`) are defined, but nothing sends them.
 - The phone's memory screen has no promote button. A promoted fact is not filed in the destination's tag tree.
-- The spec lists further honest limits of recall and capture.
 
 ## More
 
-- [Spec 05, memory](../specs/05-memory.md) and its [honest limits](../specs/05-memory.md#10-honest-limits-named-not-hidden)
-- [Spec 09, the memory slot](../specs/09-hooks-plugins.md#the-memory-slot): how another memory plugin can take its place
+- [The memory plugin's source](../../src/localharness/memory/)
+- [The memory slot](../../src/localharness/plugins/slot.py) and [`MemorySlotPlugin`](../../src/localharness/plugins/api.py): how another memory plugin can take its place
 - [localharness.dev/plugins/memory](https://localharness.dev/plugins/memory/)
 - [Write your own plugin](../../examples/plugin-template/README.md)

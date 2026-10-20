@@ -440,7 +440,7 @@ def test_an_overlay_write_that_fails_keeps_the_config_and_says_nothing_was_writt
 
     result = _init(live.cfg)
 
-    _exited(result, 1)  # docs/specs/10-cli.md: a change that does not validate writes nothing and exits 1
+    _exited(result, 1)  # a change that does not validate writes nothing and exits 1
     assert "Nothing was written" in _flat(result)
     assert trust.recorded_machine(live.cfg) is None and not (live.cfg / "overrides.yaml").exists()
     assert config.read_text(encoding="utf-8") == CONFIG

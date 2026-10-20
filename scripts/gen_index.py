@@ -36,7 +36,7 @@ from pathlib import Path
 
 # ----------------------------------------------------------------------------- hand-kept tables
 
-# Package directory (relative to src/localharness) -> architecture layer (docs/specs/00).
+# Package directory (relative to src/localharness) -> architecture layer.
 LAYERS: dict[str, str] = {
     "": "Package",
     "core": "Layer 1 - Foundation",

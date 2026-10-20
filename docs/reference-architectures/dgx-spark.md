@@ -488,7 +488,7 @@ context:
 The key must be the model name the runtime reports, character for character — there is no
 globbing or prefix matching, and a mistyped key silently falls back to the scalar. A pin
 larger than the served window aborts `start` with an error naming the pin. See
-[spec 06](../specs/06-config.md#per-model-context-pins-contextmodel_context_overrides).
+`model_context_overrides` in [`config/models.py`](../../src/localharness/config/models.py).
 
 Config files live under `~/.localharness` by default (override with `LOCALHARNESS_DIR`).
 Note that agent-level keys like `context:` and `timeout_seconds:` belong in an **agent**
