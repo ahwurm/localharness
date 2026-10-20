@@ -57,9 +57,9 @@ A session with no temperature set sends none, so the server's sampling defaults 
 | Name | What it does | Default | How to switch |
 |------|--------------|---------|---------------|
 | `image` | makes pictures with ComfyUI | off | `localharness plugins enable image --set comfyui_url=<url>` |
-| `mobile` | Mobile: the phone page, served with its event API by `localharness mobile` | on; needs `localharness[mobile]` | `localharness plugins disable mobile` |
+| `mobile` | Mobile: the phone page, served with its event API by `localharness mobile` | off; needs `localharness[mobile]` | `uv tool install 'localharness[mobile]'` (name the other extras you use too: a reinstall keeps only the ones it names), then `localharness plugins enable mobile --set public_url=<url>` |
 | `memory` | persistent memory: facts recalled into each turn, memory tools, background consolidation | on | `localharness plugins disable memory` |
-| `dispatch` | chat: Discord | on; needs `localharness[dispatch]` | `localharness plugins disable dispatch` |
+| `dispatch` | chat: Discord | off; needs `localharness[dispatch]` | `uv tool install 'localharness[dispatch]'` (name the other extras you use too: a reinstall keeps only the ones it names), then `localharness plugins enable dispatch --set discord.token=… --set discord.allow=<your user id>` |
 | `autoresearch` | experiment loop | on | `localharness plugins disable autoresearch` |
 | `browser` | reads JavaScript-rendered pages through a sandboxed headless Chromium | off; needs `localharness[browser]` | `uv tool install 'localharness[browser]'` (name the other extras you use too: a reinstall keeps only the ones it names), then `localharness plugins enable browser` |
 

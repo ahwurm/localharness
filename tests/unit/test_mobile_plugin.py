@@ -20,7 +20,7 @@ def test_web_plugin_manifest() -> None:
     from localharness.tools.builtin.image_plugin import ImagePlugin
 
     m = MobilePlugin.manifest
-    assert (m.name, m.kind, m.requires_extra, m.enabled_by_default) == ("mobile", "channel", "mobile", True)
+    assert (m.name, m.kind, m.requires_extra, m.enabled_by_default) == ("mobile", "channel", "mobile", False)
     assert m.cli[0].name == "mobile" and m.cli[0].target == "localharness.cli.mobile_cmd:app"
     assert MobilePlugin.ConfigModel is MobileConfig and set(MobileConfig.model_fields) == {"public_url"}
     from localharness.autoresearch.plugin import AutoresearchPlugin
@@ -46,6 +46,8 @@ def test_importing_the_bundled_list_pulls_no_web_stack(tmp_path) -> None:
 
 
 def test_cli_without_the_web_stack_still_helps_and_hints(tmp_path) -> None:
+    (tmp_path / "lh").mkdir()
+    (tmp_path / "lh" / "config.yaml").write_text("mobile:\n  enabled: true\n", encoding="utf-8")
     r = _run(
         "import sys\n"
         "sys.modules['starlette'] = None; sys.modules['uvicorn'] = None\n"

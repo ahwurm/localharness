@@ -153,7 +153,6 @@
     "autoresearch",
     "experiment",
     "memory",
-    "mobile",
     "propose"
   ],
   "root_rows": [
@@ -196,10 +195,6 @@
     [
       "memory",
       "Browse and edit the agent's persistent memory (list / show / edit / rm / archive / restore)."
-    ],
-    [
-      "mobile",
-      "Serve the phone UI and its event API (see docs/mobile.md)."
     ],
     [
       "model",

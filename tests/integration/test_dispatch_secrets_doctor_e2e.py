@@ -184,8 +184,14 @@ def _issues(output: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _on(g: Path) -> None:
+    cfg = yaml.safe_load((g / "config.yaml").read_text(encoding="utf-8"))
+    (g / "config.yaml").write_text(yaml.safe_dump({**cfg, "dispatch": {"enabled": True}}), encoding="utf-8")
+
+
 def test_doctor_not_configured_skip_row(g, caplog, monkeypatch) -> None:
     _present(monkeypatch)
+    _on(g)
     r = _run(g, caplog, "doctor")
     flat = _flat(r.output)
     assert "Discord not configured" in flat, r.output
@@ -195,6 +201,7 @@ def test_doctor_not_configured_skip_row(g, caplog, monkeypatch) -> None:
 
 def test_doctor_extra_absent_names_the_install_line_and_runs_no_checks(g, caplog, monkeypatch) -> None:
     _absent(monkeypatch)
+    _on(g)
     r = _run(g, caplog, "doctor")
     flat = _flat(r.output)
     assert "localharness[dispatch]" in flat, r.output

@@ -67,6 +67,8 @@ def test_the_stub_is_not_listed_and_an_unknown_name_is_still_clicks_exit_2(compo
 
 def test_a_needs_extra_plugin_keeps_its_own_guard(components_home, monkeypatch) -> None:
     from localharness.plugins import resolve
+    with (components_home / "config.yaml").open("a", encoding="utf-8") as f:
+        f.write("mobile:\n  enabled: true\n")
     monkeypatch.setitem(resolve.resolve.__kwdefaults__, "extra_installed", lambda e: False)
     on, off = plugin_mount._resolve_commands()
     assert isinstance(on["mobile"], plugin_mount.LazyPluginCommand) and "mobile" not in off
@@ -129,5 +131,5 @@ def test_the_shell_sees_exit_4_for_an_off_plugin_and_2_for_an_unknown_name(tmp_p
 @pytest.mark.skipif(not LOCALHARNESS.exists(), reason="no installed `localharness` entry point")
 def test_with_web_on_the_shell_never_meets_the_stub(tmp_path) -> None:
     on = subprocess.run([str(LOCALHARNESS), "mobile", "--help"], capture_output=True, text=True,
-                        timeout=60, env=_env(tmp_path, ""), cwd=tmp_path)
+                        timeout=60, env=_env(tmp_path, "mobile: {enabled: true}\n"), cwd=tmp_path)
     assert on.returncode == 0 and "is provided by" not in on.stderr, (on.returncode, on.stderr)

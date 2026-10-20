@@ -243,9 +243,7 @@ def test_invalid_settings_fail_the_plugin_not_the_harness(layers) -> None:
 
     entry = r.plan.entry("foo")
     assert entry.state == "failed" and entry.reason.startswith("invalid settings — foo.color: ")
-    # web (46-02) and memory (47) are bundled and on by default; dispatch (49) is bundled and on by default;
-    # autoresearch (50) is bundled and on by default
-    assert "foo" not in r.settings and r.plan.order == ("mobile", "memory", "dispatch", "autoresearch")
+    assert "foo" not in r.settings and r.plan.order == ("memory", "autoresearch")
     assert r.problems() == [f"plugin foo: {entry.reason}"]
     assert not [w for w in r.warnings if "foo.color" in w]  # reported once, by problems()
     assert loader.load_harness().provider.default_model == "global-model"
@@ -509,3 +507,9 @@ def test_the_installed_example_plugin_is_available_until_enabled_then_on(layers,
     assert r.plan.entry("example").state == "on", r.plan.entry("example").display
     assert example_unimported.exists()
     assert r.settings["example"].config.color == "#4a90d9"
+
+
+def test_mobile_and_dispatch_are_off_until_enabled(components_home):
+    from localharness.config.loader import ConfigLoader
+    r = resolve(ConfigLoader(config_dir=components_home), extra_installed=lambda extra: True)
+    assert {n: r.enabled[n] for n in ("mobile", "dispatch")} == {"mobile": False, "dispatch": False}

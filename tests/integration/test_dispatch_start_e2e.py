@@ -26,7 +26,7 @@ from tests.integration.test_guardrails_from_global_dir_e2e import _let_the_stub_
 from tests.integration.test_workspace_cli_surface_e2e import _offline_provider
 from tests.unit.test_start_cmd import _capture_start_console, _stub_start_boundaries
 
-SETTINGS = "dispatch:\n  discord:\n    token: tkn\n    allow: ['42']\n    channels: ['7']\n"
+SETTINGS = "dispatch:\n  enabled: true\n  discord:\n    token: tkn\n    allow: ['42']\n    channels: ['7']\n"
 REPLY = "pong from the model"
 BANNER = "Dispatch mode: Discord — listening for allowlisted messages."
 

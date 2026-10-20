@@ -1,6 +1,6 @@
 # The dispatch plugin (Discord)
 
-The `dispatch` plugin lets you drive a LocalHarness session from Discord: `localharness start --channel discord` turns messages from allowlisted users into turns and posts the replies, permission questions and pictures back to the conversation. It ships with LocalHarness, is on by default and needs the `dispatch` install extra; Discord is its only chat platform today.
+The `dispatch` plugin lets you drive a LocalHarness session from Discord: `localharness start --channel discord` turns messages from allowlisted users into turns and posts the replies, permission questions and pictures back to the conversation. It ships with LocalHarness, is off until you turn it on and needs the `dispatch` install extra; Discord is its only chat platform today.
 
 ## Turn it on and off
 
