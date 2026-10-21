@@ -1734,8 +1734,9 @@ class OrchestratorREPL:
                 await gate.deny()
                 dropped += 1
             self._agent.clear()
-            await self._bus.publish(ConversationCleared(
-                agent_id=self._agent._config.name, session_id=self._agent.current_session_id or ""))
+            sid = self._agent.current_session_id
+            if sid is not None:
+                await self._bus.publish(ConversationCleared(agent_id=self._agent._config.name, session_id=sid))
             text = CLEAR_DROPPED.format(n=dropped) if dropped else CLEAR_DONE
         await self._channel.send_message(text, metadata={"style": "system.info"})
 
