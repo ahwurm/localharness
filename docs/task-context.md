@@ -177,7 +177,7 @@ become `interrupted`. An artifact or reference whose saved and current hashes di
 "changed since last session"; one whose saved file can no longer be read is noted as "removed
 since last session".
 
-`/task` shows the record. `/task clear` deletes it and `task.json`.
+`/task` shows the record. `/task clear` deletes it and `task.json`. `/clear` starts a fresh conversation and keeps the record.
 
 ## The example workflow
 

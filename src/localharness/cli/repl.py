@@ -163,6 +163,9 @@ refused while any wait; the other channels cannot restart a session at all (R10)
 
 CLEAR_DONE = ("Conversation cleared; the next message starts a fresh context. Model, settings, "
               "memory and the task record stay (/task clear drops the record).")
+CLEAR_PARKED = ("Answer the parked calls first (/pending lists them): after /clear the model "
+                "would get an approval for a call it no longer knows.")
+CLEAR_MID_TURN = "A turn is running; /clear after it ends."
 
 
 # Keywords that signal the user wants to create an agent via conversation.
@@ -1724,8 +1727,15 @@ class OrchestratorREPL:
         await self._slash_image("", "")
 
     async def _slash_clear(self, args: str, args_lower: str) -> None:
-        self._agent.clear()
-        await self._channel.send_message(CLEAR_DONE, metadata={"style": "system.info"})
+        gate = self._session_gate()
+        if self._turn_running():
+            text = CLEAR_MID_TURN
+        elif gate is not None and getattr(gate, "pending", None):
+            text = CLEAR_PARKED
+        else:
+            self._agent.clear()
+            text = CLEAR_DONE
+        await self._channel.send_message(text, metadata={"style": "system.info"})
 
     async def _slash_task(self, args: str, args_lower: str) -> None:
         from localharness.agent.task_record import TaskState
