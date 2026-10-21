@@ -83,6 +83,14 @@ def test_channel_and_infra_share_the_infra_hue_deliberately():
     assert ENTITY_STYLES["channel"] == ENTITY_STYLES["infra"]
 
 
+def test_tool_shares_the_agent_accent_deliberately():
+    """The brand has one green (--color-accent); the tool hue is that accent, so tool and agent
+    read the same color on purpose and are told apart by form, not hue. Pinning the merge means
+    an accidental re-split (reverting tool to its old purple) fails here instead of passing
+    silently — the collision guard above no longer watches tool at all."""
+    assert ENTITY_STYLES["tool"] == ENTITY_STYLES["agent"] == SITE_ACCENT
+
+
 def test_unknown_entity_fails_loudly():
     """No silent fallback to unstyled — a typo'd entity name is a bug, not a color choice."""
     with pytest.raises(KeyError):
@@ -145,7 +153,7 @@ def test_tool_and_memory_are_not_the_same_green_they_replaced():
 
 # --------------------------------------------------------------------------- #
 # The per-turn session surface (channels/terminal.py TERMINAL_THEME) draws from the same
-# map, so a tool call in a turn is the same purple as a tool count at startup.
+# map, so a tool call in a turn is the same green as a tool count at startup.
 # --------------------------------------------------------------------------- #
 def _terminal_theme() -> dict[str, str]:
     """Rendered style strings, lowercased: Rich's Style.__str__ lowercases hex, so a
