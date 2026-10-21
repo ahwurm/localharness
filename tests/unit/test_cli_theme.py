@@ -61,7 +61,7 @@ def test_hexes_still_match_the_site_tokens():
     If the site repalettes, this test is the place that should fail and be updated."""
     assert ENTITY_STYLES["agent"] == "#56DC85"      # --color-accent
     assert ENTITY_STYLES["orchestrator"] == "#9EACF1"  # --color-orch
-    assert ENTITY_STYLES["tool"] == "#56DC85"       # --color-tool — the brand accent; shares the agent hue by design
+    assert ENTITY_STYLES["tool"] == "#9CAF88"       # --color-tool — sage green
     assert ENTITY_STYLES["memory"] == "#47D2E8"     # --color-mem
     assert ENTITY_STYLES["provider"] == "#F0BB3B"   # --color-amber
     assert ENTITY_STYLES["channel"] == "#7FBEF3"    # --color-infra
@@ -71,9 +71,8 @@ def test_hexes_still_match_the_site_tokens():
 
 def test_entities_the_plates_distinguish_do_not_collide():
     """The whole point is telling types apart at a glance; two entities sharing a hue on
-    DIFFERENT plates would silently undo that. Tool is the one deliberate exception: it is
-    the brand accent, so it shares the agent hue by design (see test_tool_and_memory...)."""
-    distinct = ("agent", "orchestrator", "memory", "provider", "channel")
+    DIFFERENT plates would silently undo that."""
+    distinct = ("agent", "orchestrator", "tool", "memory", "provider", "channel")
     hues = [ENTITY_STYLES[n] for n in distinct]
     assert len(set(hues)) == len(hues), f"hue collision among {distinct}: {hues}"
 
@@ -83,12 +82,11 @@ def test_channel_and_infra_share_the_infra_hue_deliberately():
     assert ENTITY_STYLES["channel"] == ENTITY_STYLES["infra"]
 
 
-def test_tool_shares_the_agent_accent_deliberately():
-    """The brand has one green (--color-accent); the tool hue is that accent, so tool and agent
-    read the same color on purpose and are told apart by form, not hue. Pinning the merge means
-    an accidental re-split (reverting tool to its old purple) fails here instead of passing
-    silently — the collision guard above no longer watches tool at all."""
-    assert ENTITY_STYLES["tool"] == ENTITY_STYLES["agent"] == SITE_ACCENT
+def test_tool_is_sage_not_the_agent_accent():
+    """Tool calls wear sage green, a distinct hue from the agent's brand accent — the
+    recolor that undid 0.20.3's deliberate merge of tool into the agent hue."""
+    assert ENTITY_STYLES["tool"] == SITE_TOOL == "#9CAF88"
+    assert ENTITY_STYLES["tool"] != SITE_ACCENT
 
 
 def test_unknown_entity_fails_loudly():
@@ -144,16 +142,16 @@ def test_entity_text_is_literal_by_construction_and_carries_the_style():
 
 def test_tool_and_memory_are_not_the_same_green_they_replaced():
     """Regression on the actual complaint: entities used to read as one undifferentiated
-    colour. Memory must not be the accent. Tool, by design, IS the brand accent (it shares
-    the agent hue) — so only memory is guarded here, not tool."""
+    colour. Neither tool (sage) nor memory (cyan) may be the agent accent."""
     assert ENTITY_STYLES["memory"] != SITE_ACCENT
+    assert ENTITY_STYLES["tool"] != SITE_ACCENT
     assert ENTITY_STYLES["tool"] == SITE_TOOL
     assert ENTITY_STYLES["warning"] == SITE_AMBER
 
 
 # --------------------------------------------------------------------------- #
 # The per-turn session surface (channels/terminal.py TERMINAL_THEME) draws from the same
-# map, so a tool call in a turn is the same green as a tool count at startup.
+# map, so a tool call in a turn is the same sage as a tool count at startup.
 # --------------------------------------------------------------------------- #
 def _terminal_theme() -> dict[str, str]:
     """Rendered style strings, lowercased: Rich's Style.__str__ lowercases hex, so a
