@@ -16,7 +16,7 @@ LocalHarness is an open-source, self-hosted agent harness for local LLMs. It con
 
 - **Local models.** The harness sizes a launch from the model's own files. It reads the served, trained and fitted context windows, prices a llama.cpp launch from the GGUF tensor table, keeps an MoE's experts in RAM when the GPU cannot hold them, and refuses a model that fits nowhere. It will not launch below the window the agent loop needs. A model without native tool calling gets an XML fallback. `/effort off|low|high|max` caps how much a model may think per request.
 - **The model server.** `localharness start` finds a model on your machine or offers one to fetch, writes it a preset (KV cache type, drafting and parsers are chosen at launch), serves it, and remembers your last choice. `/model` lists every launch this box can make, each with its runtime, weight placement and window, and switches in place. `localharness model --autostart on` starts the server with the harness, and `localharness model --script` prints the launch as a shell script. A turn survives a server restart.
-- **Private by default.** Memory is SQLite in your home directory, config is YAML, and the event stream, logs and bench results stay on your disk. Plugins, tool hooks and the phone app use the same event bus and public plugin API as the bundled plugins. No account, no telemetry; web search runs over DuckDuckGo with no key. MIT licensed.
+- **Private by default.** Memory is SQLite in your home directory, config is YAML, and the event stream, logs and bench results stay on your disk. Plugins, tool hooks and the phone app use the same event bus and public plugin API as the bundled plugins. No account, no telemetry ([what `start` contacts](SECURITY.md#what-localharness-start-contacts)); web search runs over DuckDuckGo with no key. MIT licensed.
 - **Permissions.** One permission gate stands in front of every tool call, helper agents included. An agent that reads untrusted content, a web page or an MCP result, is not given tools that change your machine; the check runs when an agent's tools resolve and fails closed. The endpoint, credential and allowed senders are set in machine-level config, and a cloned repository cannot change them. Threat model: [SECURITY.md](SECURITY.md).
 
 ## Quick start
@@ -24,7 +24,7 @@ LocalHarness is an open-source, self-hosted agent harness for local LLMs. It con
 Python 3.12 or later and [uv](https://docs.astral.sh/uv/). You do not need a running model server: the first `localharness start` finds a model on your machine or offers one to fetch.
 
 ```bash
-uv tool install 'localharness[embeddings,mobile]'  # memory's CPU model + the phone app
+uv tool install 'localharness[embeddings,mobile]'  # memory's CPU model + the phone app's dependencies (`plugins enable mobile` turns it on)
 localharness start                   # finds a model (or offers one), sets up, opens a session
 
 localharness plugins list            # every plugin and whether it is on
