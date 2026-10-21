@@ -64,7 +64,6 @@ from tests.unit.test_start_plugins import _record_loop
 from tests.unit.test_workspace_state_landing import _boom, _hermetic
 
 OFF_ROW = "off — turn on: localharness plugins enable image"
-UNCONFIGURED = "plugin image: unconfigured — set image.comfyui_url"
 NEXT_STEP = ("next step — give it the ComfyUI address: "
              "localharness plugins enable image --set comfyui_url=http://127.0.0.1:8188")
 DROPPED = ": only the global config may set it"
@@ -221,7 +220,7 @@ def test_enabled_but_unconfigured_warns_and_registers_nothing(tmp_path, monkeypa
     assert NEXT_STEP in enabled.output, enabled.output
     assert yaml.safe_load((global_dir / "overrides.yaml").read_text()) == {"image": {"enabled": True}}
     s = _session(monkeypatch)
-    assert any(UNCONFIGURED in line for line in s["printed"]), s["printed"]
+    assert any("/plugins enable image" in line for line in s["printed"]), s["printed"]
     assert "generate_image" not in s["tools"], sorted(s["tools"])
     doctor = _invoke("doctor").output
     assert "image: unconfigured — set image.comfyui_url" in doctor, doctor

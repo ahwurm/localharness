@@ -271,7 +271,7 @@ def test_fixture_registers_everything(tmp_path, monkeypatch, fake_home):
     # The banner: one plugin, named on its own line under the summary; nothing to warn about it.
     i = next(n for n, line in enumerate(printed) if "startup)" in line)
     assert entity("tool", "3 plugins") in printed[i]
-    assert printed[i + 1] == "  " + entity("tool", "Plugins: memory, autoresearch, example"), printed[i:i + 2]
+    assert printed[i + 1] == "  Plugins: memory, autoresearch, example", printed[i:i + 2]
     assert "plugin example" not in printed[i], f"a startup warning about the example: {printed[i]}"
     assert not any("available, not enabled" in line for line in printed), "an enabled plugin was hinted"
     assert sentinel.exists() and PKG in sys.modules, "an enabled plugin was not imported by start"
