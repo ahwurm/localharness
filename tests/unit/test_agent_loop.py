@@ -1443,6 +1443,33 @@ async def test_compact_md_folds_into_single_leading_system_message(tmp_path):
     assert "research agent" in first_sys
 
 
+@pytest.mark.asyncio
+async def test_clear_keeps_this_sittings_compact_md_out_of_the_next_turn(tmp_path):
+    from localharness.config.models import AgentConfig
+    from tests.conftest import MockLLMClient, FakeLLMResponse
+
+    compact_file = tmp_path / "compact.md"
+    compact_file.write_text("summary of the cleared conversation")
+    llm = MockLLMClient([FakeLLMResponse(content="Done.")])
+    loop = AgentLoop(
+        config=AgentConfig(name="test-agent", role="You are a test assistant."), llm=llm,
+        bus=EventBus(), context_manager=ContextManager(), tool_registry=None,
+        permission_evaluator=PermissionEvaluator(), compact_md_path=compact_file,
+    )
+    loop.clear()
+    requests: list[list] = []
+    original_stream = llm.stream_complete
+
+    async def capturing_stream(messages=None, tools=None, on_token=None):
+        requests.append(list(messages or []))
+        return await original_stream(messages=messages, tools=tools, on_token=on_token)
+
+    llm.stream_complete = capturing_stream
+    await loop.run_turn("hello")
+    assert loop._prior_session_context == ""
+    assert "cleared conversation" not in requests[0][0]["content"]
+
+
 def test_compact_md_path_default_fallback():
     """AgentLoop constructed without compact_md_path stores None (fallback activates in run_turn)."""
     from localharness.config.models import AgentConfig
