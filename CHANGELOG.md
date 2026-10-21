@@ -13,7 +13,8 @@ The tool hue in the terminal moves from purple to the brand green.
   count and the burst-counter lines now wear the brand accent (`#56DC85`, the same green as the
   wordmark banner and the logo) instead of the old purple. This deliberately makes the tool hue
   share the agent hue; tool and agent stay tellable apart by form — the `◆ tool · arg` line and
-  the dimmed result — not by color.
+  the dimmed result — not by color. The mobile channel's tool rows match, so the phone and the
+  terminal agree on the hue.
 
 ## [0.20.2] — 2026-10-20
 
