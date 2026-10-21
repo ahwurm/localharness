@@ -22,7 +22,7 @@ from prompt_toolkit.document import Document
 
 from localharness.channels.terminal import SlashCommandCompleter
 from localharness.agent.context import ContentStore
-from localharness.cli.repl import CLEAR_DONE, OrchestratorREPL
+from localharness.cli.repl import CLEAR_DONE, CLEAR_MID_TURN, CLEAR_PARKED, OrchestratorREPL
 from localharness.cli.slash_commands import (
     SLASH_COMMANDS,
     SlashCommand,
@@ -212,6 +212,21 @@ async def test_clear_empties_the_conversation_and_keeps_the_session(tmp_path):
     assert loop._effort == "high" and loop._llm is llm
     assert repl._gate is gate and gate.mode == "guarded"
     assert channel.sent == [(CLEAR_DONE, INFO)]
+
+
+@pytest.mark.parametrize("parked, running, expected", [
+    ({1: object()}, False, CLEAR_PARKED),
+    ({}, True, CLEAR_MID_TURN),
+])
+async def test_clear_is_refused_while_a_call_is_parked_or_a_turn_runs(parked, running, expected):
+    channel = RecordingChannel([])
+    repl, agent, _ = _build_repl(channel)
+    repl._gate = SimpleNamespace(pending=parked)
+    if running:
+        repl._turn_task = asyncio.get_running_loop().create_future()
+    assert await repl._handle_slash("/clear") is True
+    agent.clear.assert_not_called()
+    assert channel.sent == [(expected, INFO)]
 
 
 async def test_agents_lists_the_cards():

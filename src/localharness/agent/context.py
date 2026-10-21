@@ -420,7 +420,7 @@ class ContentStore:
         return (len(v[0]), v[1]) if v else None
 
     def reset(self) -> None:
-        """Test/seam hook: clear all bodies, the web LRU, and the pg-N alias sequence."""
+        """Clear all bodies, the web LRU and the pg-N alias sequence."""
         self._bodies.clear()
         self._web.clear()
         self._aliases.clear()
