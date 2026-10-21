@@ -24,7 +24,7 @@ from rich.prompt import IntPrompt
 from rich.table import Table
 from rich.text import Text
 
-from localharness.cli.theme import entity, entity_text
+from localharness.cli.theme import SITE_DIM, SITE_INK, SITE_TOOL, entity, entity_text
 from localharness.cli.workspace import (
     NO_INPUT_HELP,
     MachineTrust,
@@ -235,6 +235,28 @@ def _available_hint(names: list[str]) -> str:
                 f"`localharness plugins enable {names[0]}` to turn it on")
     return (f"i {len(names)} plugins available, not enabled: {', '.join(names)} — run "
             f"`localharness plugins enable <name>` to turn one on")
+
+
+def _plugins_text(loaded: list[str], unconfigured: dict[str, str]) -> Text | None:
+    """The Plugins banner line; None when nothing loaded and nothing unconfigured."""
+    if not loaded and not unconfigured:
+        return None
+    t = Text()
+    t.append("  Plugins: ", style=SITE_DIM)
+    if loaded:
+        t.append(", ".join(loaded), style=SITE_TOOL)
+    if unconfigured:
+        if loaded:
+            t.append(", ", style=SITE_DIM)
+        t.append(", ".join(unconfigured), style=SITE_INK)
+        if len(unconfigured) == 1:
+            name = next(iter(unconfigured))
+            t.append(f" (unconfigured — set {unconfigured[name]})", style=SITE_DIM)
+            t.append(f" /plugins enable {name}", style=SITE_DIM)
+        else:
+            t.append(" (unconfigured)", style=SITE_DIM)
+            t.append(" /plugins enable <name>", style=SITE_DIM)
+    return t
 
 
 from localharness.cli.session_resume import (  # noqa: E402 — the handle lives beside its file form
@@ -3297,6 +3319,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                     replace_notices(_boundary, _start_notices, config_dir=config_dir)
                 except OSError:
                     pass  # an unwritable store: the notices simply print again next start
+        # Unconfigured plugins are a normal state, not a warning: they go on the Plugins line in dim.
+        _unconfigured = plugin_result.unconfigured if plugin_result is not None else {}
+        _unconfigured_prefixes = tuple(f"plugin {n}: unconfigured" for n in _unconfigured)
+        if _unconfigured_prefixes:
+            warnings[:] = [w for w in warnings
+                           if not any(w.startswith(p) for p in _unconfigured_prefixes)]
         summary_line = " -- ".join(parts + [", ".join(counts)])
         if warnings:
             # escape() via entity(): a warning is an exception string the user's environment
@@ -3310,9 +3338,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             console.print(summary_line, soft_wrap=True)
         elif warnings:  # a rebuild prints its warnings alone, one amber line
             console.print("  " + entity("warning", f"[{'; '.join(warnings)}]"), soft_wrap=True)
-        if plugin_result is not None and plugin_result.running:
-            console.print("  " + entity("tool", "Plugins: " + ", ".join(plugin_result.loaded_names)),
-                          soft_wrap=True)
+        if plugin_result is not None:
+            _plugins_line = _plugins_text(plugin_result.loaded_names, _unconfigured)
+            if _plugins_line is not None:
+                console.print(_plugins_line, soft_wrap=True)
         if plugin_resolution is not None:
             available = [e.name for e in plugin_resolution.plan.entries if e.state == "available"]
             if available:  # Text: a plugin name is outside text, never markup (39-04's lesson)

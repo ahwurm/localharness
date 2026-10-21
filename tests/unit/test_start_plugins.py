@@ -411,7 +411,69 @@ async def test_the_banner_names_the_loaded_plugins_right_after_the_summary(tmp_p
     await _start_async(None, False, False, str(tmp_path))
 
     i = printed.index(_summary(printed))
-    assert printed[i + 1] == "  " + entity("tool", "Plugins: probe, settled")
+    assert printed[i + 1] == "  Plugins: probe, settled"
+
+
+def test_plugins_text_loaded_only():
+    from localharness.cli.start_cmd import _plugins_text
+    assert str(_plugins_text(["memory", "web"], {})) == "  Plugins: memory, web"
+
+
+def test_plugins_text_unconfigured_only():
+    from localharness.cli.start_cmd import _plugins_text
+    assert str(_plugins_text([], {"image": "image.comfyui_url"})) == \
+        "  Plugins: image (unconfigured — set image.comfyui_url) /plugins enable image"
+
+
+def test_plugins_text_both():
+    from localharness.cli.start_cmd import _plugins_text
+    assert str(_plugins_text(["memory"], {"image": "x", "web": "y"})) == \
+        "  Plugins: memory, image, web (unconfigured) /plugins enable <name>"
+
+
+def test_plugins_text_neither():
+    from localharness.cli.start_cmd import _plugins_text
+    assert _plugins_text([], {}) is None
+
+
+def _spans(t):
+    return [(t.plain[s:e], st) for s, e, st in t.spans]
+
+
+def test_plugins_text_styling_both():
+    from localharness.cli.start_cmd import _plugins_text
+    from localharness.cli.theme import SITE_DIM, SITE_INK, SITE_TOOL
+    t = _plugins_text(["mem"], {"img": "x", "web": "y"})
+    assert _spans(t) == [
+        ("  Plugins: ", SITE_DIM),
+        ("mem", SITE_TOOL),
+        (", ", SITE_DIM),
+        ("img, web", SITE_INK),
+        (" (unconfigured)", SITE_DIM),
+        (" /plugins enable <name>", SITE_DIM),
+    ]
+
+
+def test_plugins_text_styling_loaded_only():
+    from localharness.cli.start_cmd import _plugins_text
+    from localharness.cli.theme import SITE_DIM, SITE_TOOL
+    t = _plugins_text(["mem", "web"], {})
+    assert _spans(t) == [
+        ("  Plugins: ", SITE_DIM),
+        ("mem, web", SITE_TOOL),
+    ]
+
+
+def test_plugins_text_styling_unconfigured_only():
+    from localharness.cli.start_cmd import _plugins_text
+    from localharness.cli.theme import SITE_DIM, SITE_INK
+    t = _plugins_text([], {"img": "img.url"})
+    assert _spans(t) == [
+        ("  Plugins: ", SITE_DIM),
+        ("img", SITE_INK),
+        (" (unconfigured — set img.url)", SITE_DIM),
+        (" /plugins enable img", SITE_DIM),
+    ]
 
 
 class _ImportSpy:

@@ -224,7 +224,7 @@ def test_the_line_the_one_list_the_empty_slot_the_route(tmp_path, monkeypatch, f
     asyncio.run(_start_async(None, False, False, None))
     i = next(n for n, line in enumerate(printed) if "startup)" in line)
     assert entity("tool", "1 plugin") in printed[i], printed[i]
-    assert printed[i + 1] == "  " + entity("tool", "Plugins: fakebundled"), printed[i:i + 2]
+    assert printed[i + 1] == "  Plugins: fakebundled", printed[i:i + 2]
     (session,) = loops
     assert session["tool_registry"].schema_of("fakebundled_probe").source_plugin == "fakebundled"
     assert {a[:2] for a in dialed if isinstance(a, tuple)} <= {("127.0.0.1", 9)}, (
