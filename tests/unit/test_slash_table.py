@@ -14,13 +14,15 @@ import asyncio
 import inspect
 import logging
 import textwrap
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from prompt_toolkit.document import Document
 
 from localharness.channels.terminal import SlashCommandCompleter
-from localharness.cli.repl import OrchestratorREPL
+from localharness.agent.context import ContentStore
+from localharness.cli.repl import CLEAR_DONE, OrchestratorREPL
 from localharness.cli.slash_commands import (
     SLASH_COMMANDS,
     SlashCommand,
@@ -30,6 +32,7 @@ from localharness.cli.slash_commands import (
     set_plugin_rows,
 )
 from tests.unit.channels.test_mobile_server import BEARER, _stack
+from tests.unit.test_compact_md_disable_sentinel import _loop
 from tests.unit.test_repl_unknown_slash import RecordingChannel, _build_repl
 
 CORE = [
@@ -43,6 +46,7 @@ CORE = [
     ("/pending", "Tool calls parked for you to answer"),
     ("/approve", "Run a parked call; /approve [N] (default: the oldest)"),
     ("/deny", "Drop a parked call; /deny [N] (default: the oldest)"),
+    ("/clear", "Start a fresh conversation; model, settings, memory and the task record stay"),
     ("/task", "Show the working task record; /task clear to delete it"),
     ("/instructions", "The project's instructions file (CLAUDE.md, AGENTS.md); /instructions off|on|show"),
     ("/image", "Attach a picture to your next message; /image <path>, /image (the clipboard), "
@@ -67,6 +71,7 @@ HELP_BEFORE = (
     "  /pending       Tool calls parked for you to answer\n"
     "  /approve       Run a parked call; /approve [N] (default: the oldest)\n"
     "  /deny          Drop a parked call; /deny [N] (default: the oldest)\n"
+    "  /clear         Start a fresh conversation; model, settings, memory and the task record stay\n"
     "  /task          Show the working task record; /task clear to delete it\n"
     "  /instructions  The project's instructions file (CLAUDE.md, AGENTS.md); /instructions off|on|show\n"
     "  /image         Attach a picture to your next message; /image <path>, /image (the clipboard), "
@@ -111,7 +116,7 @@ async def _phone_menu(tmp_path) -> list[dict]:
 
 # ------------------------------------------------------------ no plugin rows: nothing moved
 
-def test_the_core_table_is_seventeen_rows_in_order():
+def test_the_core_table_is_eighteen_rows_in_order():
     assert [tuple(row) for row in SLASH_COMMANDS] == CORE  # a row unpacks as (name, description)
     assert all_rows() == SLASH_COMMANDS
 
@@ -126,7 +131,7 @@ def test_the_completer_offers_the_same_menu():
     assert _completions("/M") == _completions("/m")
 
 
-async def test_the_phone_menu_is_the_same_fourteen_rows_in_order(tmp_path):
+async def test_the_phone_menu_is_the_same_fifteen_rows_in_order(tmp_path):
     assert await _phone_menu(tmp_path) == [{"name": n, "description": d} for n, d in PHONE]
 
 
@@ -184,6 +189,29 @@ async def test_help_sends_the_live_render():
     repl, _, _ = _build_repl(channel)
     assert await repl._handle_slash("/HELP") is True
     assert channel.sent == [(help_text(), INFO)]
+
+
+async def test_clear_empties_the_conversation_and_keeps_the_session(tmp_path):
+    loop = _loop(tmp_path)
+    store = ContentStore()
+    loop._ctx = SimpleNamespace(_content_store=store)
+    loop.resume([{"role": "user", "content": "hi"}, {"role": "assistant", "content": "yo"}], "PRIOR")
+    loop.set_effort("high", "session")
+    loop._last_prompt_tokens = 90_000
+    loop.push_user_nudge("stale")
+    assert store.put_web("page") == "pg-1"
+    llm = loop._llm
+    channel = RecordingChannel([])
+    repl, _, _ = _build_repl(channel)
+    gate = SimpleNamespace(pending={}, mode="guarded")
+    repl._agent, repl._gate = loop, gate
+    assert await repl._handle_slash("/CLEAR") is True
+    assert loop.resume_state() == ([], "")
+    assert loop._last_prompt_tokens is None and loop._user_nudge_inbox == []
+    assert store.get("pg-1") is None
+    assert loop._effort == "high" and loop._llm is llm
+    assert repl._gate is gate and gate.mode == "guarded"
+    assert channel.sent == [(CLEAR_DONE, INFO)]
 
 
 async def test_agents_lists_the_cards():

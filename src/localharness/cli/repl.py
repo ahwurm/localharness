@@ -161,6 +161,9 @@ PLUGINS_RESTARTING = "Restarting with {name} {state} — your conversation is ke
 """What `/plugins` answers. A restart drops the gate's parked calls with the session, so it is
 refused while any wait; the other channels cannot restart a session at all (R10)."""
 
+CLEAR_DONE = ("Conversation cleared; the next message starts a fresh context. Model, settings, "
+              "memory and the task record stay (/task clear drops the record).")
+
 
 # Keywords that signal the user wants to create an agent via conversation.
 # Checked case-insensitively against user input when no workflow is active.
@@ -1719,6 +1722,10 @@ class OrchestratorREPL:
     async def _paste_image(self) -> None:
         """Ctrl+V in the input box: the clipboard's picture, staged exactly like `/image`."""
         await self._slash_image("", "")
+
+    async def _slash_clear(self, args: str, args_lower: str) -> None:
+        self._agent.clear()
+        await self._channel.send_message(CLEAR_DONE, metadata={"style": "system.info"})
 
     async def _slash_task(self, args: str, args_lower: str) -> None:
         from localharness.agent.task_record import TaskState

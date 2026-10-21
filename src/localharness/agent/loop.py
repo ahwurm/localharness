@@ -1742,6 +1742,15 @@ class AgentLoop:
         self._conversation = list(conversation)
         self._prior_session_context = prior_context
 
+    def clear(self) -> None:
+        """Forget the conversation; the next run_turn starts like a sitting's first."""
+        self.resume([], "")
+        self._last_prompt_tokens = None
+        self._user_nudge_inbox.clear()
+        store = getattr(self._ctx, "_content_store", None)
+        if store is not None:
+            store.reset()
+
     async def run_turn(
         self,
         task: str,
