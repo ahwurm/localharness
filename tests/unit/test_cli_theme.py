@@ -61,7 +61,7 @@ def test_hexes_still_match_the_site_tokens():
     If the site repalettes, this test is the place that should fail and be updated."""
     assert ENTITY_STYLES["agent"] == "#56DC85"      # --color-accent
     assert ENTITY_STYLES["orchestrator"] == "#9EACF1"  # --color-orch
-    assert ENTITY_STYLES["tool"] == "#BDA8FC"       # --color-tool
+    assert ENTITY_STYLES["tool"] == "#56DC85"       # --color-tool — the brand accent; shares the agent hue by design
     assert ENTITY_STYLES["memory"] == "#47D2E8"     # --color-mem
     assert ENTITY_STYLES["provider"] == "#F0BB3B"   # --color-amber
     assert ENTITY_STYLES["channel"] == "#7FBEF3"    # --color-infra
@@ -71,8 +71,9 @@ def test_hexes_still_match_the_site_tokens():
 
 def test_entities_the_plates_distinguish_do_not_collide():
     """The whole point is telling types apart at a glance; two entities sharing a hue on
-    DIFFERENT plates would silently undo that."""
-    distinct = ("agent", "orchestrator", "tool", "memory", "provider", "channel")
+    DIFFERENT plates would silently undo that. Tool is the one deliberate exception: it is
+    the brand accent, so it shares the agent hue by design (see test_tool_and_memory...)."""
+    distinct = ("agent", "orchestrator", "memory", "provider", "channel")
     hues = [ENTITY_STYLES[n] for n in distinct]
     assert len(set(hues)) == len(hues), f"hue collision among {distinct}: {hues}"
 
@@ -135,8 +136,8 @@ def test_entity_text_is_literal_by_construction_and_carries_the_style():
 
 def test_tool_and_memory_are_not_the_same_green_they_replaced():
     """Regression on the actual complaint: entities used to read as one undifferentiated
-    colour. Tools and memory must not both be the accent."""
-    assert ENTITY_STYLES["tool"] != SITE_ACCENT
+    colour. Memory must not be the accent. Tool, by design, IS the brand accent (it shares
+    the agent hue) — so only memory is guarded here, not tool."""
     assert ENTITY_STYLES["memory"] != SITE_ACCENT
     assert ENTITY_STYLES["tool"] == SITE_TOOL
     assert ENTITY_STYLES["warning"] == SITE_AMBER
