@@ -704,7 +704,7 @@ async def test_one_line_per_outage_carries_the_configured_bound_through_a_roots_
         await pair.recover(base_url=URL, api_key="none", wait_seconds=30, on_lost=child_line,
                            leave_after=0.3)
     assert said.lines == ["child"]
-    assert stated == [30]  # the configured bound, not the child's 0.3 s
+    assert stated == [pytest.approx(30)]  # the configured bound, not the child's 0.3 s
     asyncio.get_running_loop().call_later(0.3, state.update, {"down": False})
     await pair.recover(base_url=URL, api_key="none", wait_seconds=30, on_lost=said.of("root"))
     assert said.lines == ["child"]  # the root continued the same outage: no second line
