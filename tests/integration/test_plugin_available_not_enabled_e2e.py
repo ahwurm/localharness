@@ -259,8 +259,7 @@ def test_available_is_not_enabled(tmp_path, monkeypatch, fake_home):
             in summary), summary
     root = registry.get_tools_for_agent(cfg.name, cfg.division or "", cfg.tools)
     assert "bare_tool" not in root and {"readonlyfam_tool", "allowfam_tool", "example_swatch"} <= set(root)
-    assert ("capability floor: the root agent does not hold bare_tool (plugin bare) — it declares no "
-            "ingest, which counts as ingest: untrusted" in summary), summary
+    assert "bare_tool (plugin bare) held by delegates only" in summary, summary
     assert registry.schema_of("boom_tool") is None and registry.schema_of("future_tool") is None
 
     # --- plugins list and doctor name the broken and the too-new ------------------------------------

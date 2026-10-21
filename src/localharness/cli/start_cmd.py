@@ -2766,10 +2766,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # A plugin tool the root cannot hold is named, not silently missing. Core's web verbs
             # are stripped the same way by design (the root delegates ingestion) and say nothing.
             if (_plugin := _global[_name].source_plugin) is not None:
-                _why = ("it declares ingest: untrusted" if "ingest" in _global[_name].model_fields_set
-                        else "it declares no ingest, which counts as ingest: untrusted")
-                warnings.append(f"capability floor: the root agent does not hold {_name} (plugin "
-                                f"{_plugin}) — {_why}; delegate to an agent without host tools")
+                warnings.append(f"{_name} (plugin {_plugin}) held by delegates only")
 
         if loader.project_mcp_skipped:
             err_console.print(MCP_NOT_STARTED_LINE.format(
