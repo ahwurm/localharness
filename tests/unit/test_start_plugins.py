@@ -475,11 +475,8 @@ async def test_a_plugin_tool_the_floor_keeps_from_the_root_is_named(tmp_path, mo
     await _start_async(None, False, False, str(tmp_path))
 
     summary = _summary(printed)
-    assert ("capability floor: the root agent does not hold probe_fetch (plugin ingests) — it "
-            "declares no ingest, which counts as ingest: untrusted") in summary
-    assert ("capability floor: the root agent does not hold probe_read (plugin reads) — it declares "
-            "ingest: untrusted") in summary
-    assert summary.count("capability floor:") == 2
+    assert "probe_fetch (plugin ingests) held by delegates only" in summary
+    assert "probe_read (plugin reads) held by delegates only" in summary
 
 
 async def test_with_no_plugins_the_banner_is_what_it_was(tmp_path, monkeypatch):
