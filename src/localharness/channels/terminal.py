@@ -57,6 +57,7 @@ from localharness.core.events import (
     ConsolidationFinished,
     ConsolidationStarted,
     Escalation,
+    ConversationCleared,
     Heartbeat,
     InstructionsChanged,
     NarrowingNotice,
@@ -1218,6 +1219,7 @@ class TerminalChannel(ChannelAdapter):
         self._escalation_handle = None
         self._parse_failed_handle = None
         self._heartbeat_handle = None
+        self._cleared_handle = None
         self._provider_lost_handle = None
         self._instructions_handle = None
         self._narrowing_handle = None
@@ -1252,6 +1254,7 @@ class TerminalChannel(ChannelAdapter):
             CompactionTriggered, self.on_compaction_triggered
         )
         self._heartbeat_handle = self.bus.subscribe(Heartbeat, self.on_heartbeat)
+        self._cleared_handle = self.bus.subscribe(ConversationCleared, self.on_conversation_cleared)
         self._provider_lost_handle = self.bus.subscribe(ProviderLost, self.on_provider_lost)
         self._instructions_handle = self.bus.subscribe(
             InstructionsChanged, self.on_instructions_changed
@@ -1280,6 +1283,7 @@ class TerminalChannel(ChannelAdapter):
             self._escalation_handle,
             self._parse_failed_handle,
             self._heartbeat_handle,
+            self._cleared_handle,
             self._provider_lost_handle,
             self._instructions_handle,
             self._narrowing_handle,
@@ -2375,6 +2379,9 @@ class TerminalChannel(ChannelAdapter):
                 f"  [muted]{_NARRATE} {escape(line)}[/muted]",
                 no_wrap=True, overflow="ellipsis",
             )
+
+    async def on_conversation_cleared(self, event: ConversationCleared) -> None:
+        self._context_pct = None
 
     async def on_heartbeat(self, event: Heartbeat) -> None:
         """Track context utilization (shown in the next input bubble) and start the

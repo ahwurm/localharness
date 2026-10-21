@@ -229,6 +229,14 @@ class TestTerminalChannelBasics:
         ))
         assert ch._context_pct == 42.0
 
+    @pytest.mark.asyncio
+    async def test_conversation_cleared_resets_context_pct(self):
+        from localharness.core.events import ConversationCleared
+        ch = make_terminal_channel()
+        ch._context_pct = 42.0
+        await ch.on_conversation_cleared(ConversationCleared(agent_id="a", session_id="s"))
+        assert ch._context_pct is None
+
 
 class TestThinkingIndicator:
     """REPL-02: a rich console.status spinner runs while the model generates and is torn

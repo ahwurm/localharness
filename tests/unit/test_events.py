@@ -1,4 +1,4 @@
-"""Tests for localharness.core.events — all 36 event models, BudgetSpec, AnyEvent, EVENT_TYPE_MAP."""
+"""Tests for localharness.core.events — all 37 event models, BudgetSpec, AnyEvent, EVENT_TYPE_MAP."""
 import json
 import pytest
 from localharness.core.events import (
@@ -144,8 +144,8 @@ def test_event_serialization_roundtrip():
 
 
 def test_event_type_map_complete():
-    """EVENT_TYPE_MAP has entries for all 36 event types."""
-    assert len(EVENT_TYPE_MAP) == 36
+    """EVENT_TYPE_MAP has entries for all 37 event types."""
+    assert len(EVENT_TYPE_MAP) == 37
     expected_keys = {
         "SystemReady", "AgentCreated", "AgentDeleted", "TurnStarted", "TurnCompleted",
         "TurnFailed", "UserMessage", "TaskRequest", "TaskComplete", "Action",
@@ -156,6 +156,7 @@ def test_event_type_map_complete():
         "ConsolidationStarted", "ConsolidationFinished", "InputRouted",
         "TurnEndMicroPassCompleted", "PermissionAsked", "PermissionStaged",
         "PermissionResolved", "ProviderLost", "InstructionsChanged", "NarrowingNotice",
+        "ConversationCleared",
     }
     assert set(EVENT_TYPE_MAP.keys()) == expected_keys
 
@@ -325,14 +326,15 @@ def test_budget_spec_frozen():
 
 
 def test_any_event_union():
-    """AnyEvent type contains all 36 event classes."""
+    """AnyEvent type contains all 37 event classes."""
     # AnyEvent is a Union; check its __args__
     import typing
     from localharness.core.events import (
-        ConsolidationFinished, ConsolidationStarted, InputRouted, TurnEndMicroPassCompleted,
+        ConsolidationFinished, ConsolidationStarted, ConversationCleared, InputRouted,
+        TurnEndMicroPassCompleted,
     )
     args = typing.get_args(AnyEvent)
-    assert len(args) == 36
+    assert len(args) == 37
     expected = {
         SystemReady, AgentCreated, AgentDeleted, TurnStarted, TurnCompleted, TurnFailed,
         UserMessage, TaskRequest, TaskComplete, Action, Observation,
@@ -342,7 +344,7 @@ def test_any_event_union():
         ExpectationAttached, OutcomeObserved, SurpriseScored,
         ConsolidationStarted, ConsolidationFinished, InputRouted,
         TurnEndMicroPassCompleted, PermissionAsked, PermissionStaged, PermissionResolved,
-        ProviderLost, InstructionsChanged, NarrowingNotice,
+        ProviderLost, InstructionsChanged, NarrowingNotice, ConversationCleared,
     }
     assert set(args) == expected
 

@@ -424,6 +424,14 @@ useful": by the time a human answers, the model may already have worked around t
 approval is a one-shot pass on that exact call, not an order to run it."""
 
 
+class ConversationCleared(BaseEvent):
+    """Published when /clear empties the conversation; the session id is kept."""
+
+    event_type: str = "ConversationCleared"
+    agent_id: AgentID
+    session_id: SessionID
+
+
 class Heartbeat(BaseEvent):
     """Published periodically by each running agent."""
 
@@ -791,6 +799,7 @@ AnyEvent = Union[
     PermissionStaged,
     PermissionResolved,
     Heartbeat,
+    ConversationCleared,
     ProviderLost,
     InstructionsChanged,
     NarrowingNotice,
@@ -830,6 +839,7 @@ EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
     "PermissionStaged": PermissionStaged,
     "PermissionResolved": PermissionResolved,
     "Heartbeat": Heartbeat,
+    "ConversationCleared": ConversationCleared,
     "ProviderLost": ProviderLost,
     "InstructionsChanged": InstructionsChanged,
     "NarrowingNotice": NarrowingNotice,
