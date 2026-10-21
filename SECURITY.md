@@ -175,7 +175,9 @@ server's `env` or `headers` value quoted in that one error would reach the phone
   installed first asks one yes/no question that says its code will run with your permissions in
   every session; No leaves it off and the conversation goes on. A plugin that ships with
   LocalHarness can be switched on or
-  off per project, like any other setting. A project can also change a plugin's ordinary settings,
+  off per project, like any other setting, so a project's `.localharness/config.yaml` can switch on
+  `mobile` or `dispatch`; the bind address, `mobile.public_url`, the Discord token, allow-list and
+  channels stay machine-level. A project can also change a plugin's ordinary settings,
   but not one the plugin marks machine-level only (endpoints, credentials, access lists), so that
   protection is only as good as the plugin's marking.
 - **What turning it on vouches for.** The safety checks believe what a tool declares about itself

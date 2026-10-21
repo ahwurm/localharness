@@ -4,6 +4,26 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [Unreleased]
+
+Plugin defaults, the spec move and `/clear`.
+
+### Added
+- **`/clear` starts a fresh conversation without leaving the session.** Parked calls are denied, this
+  sitting's compact.md is not reread and the terminal's context meter resets; the model, settings,
+  memory, the task record and the session id stay. The phone protocol is 8 (a new additive event;
+  older pages ignore it).
+
+### Changed
+- **Mobile and dispatch are off until you turn them on,** like image and the browser;
+  `localharness plugins enable mobile` and `localharness plugins enable dispatch` bring them back. An
+  install that relied on the old default and never set them loses `localharness mobile` and
+  `start --channel discord` on upgrade until it runs that one command; the plugins' own settings are
+  kept. Memory and autoresearch are the only plugins on by default.
+- **The design specs left the public tree.** The README, the examples and the plugin pages point at
+  the user docs and the source. The spec-bound convergence checks went with them (the plugin API
+  version pin stays in the plugin API tests).
+
 ## [0.20.1] — 2026-10-20
 
 Review fixes to the `browser` plugin and its docs.
