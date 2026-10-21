@@ -228,6 +228,7 @@ async def test_clear_is_refused_while_a_turn_runs():
 async def test_clear_denies_parked_calls_and_announces_itself(tmp_path):
     loop = _loop(tmp_path)
     loop.resume([{"role": "user", "content": "hi"}], "")
+    loop._current_session_id = "S1"
     channel = RecordingChannel([])
     repl, _, _ = _build_repl(channel)
     repl._bus = EventBus()
@@ -245,7 +246,20 @@ async def test_clear_denies_parked_calls_and_announces_itself(tmp_path):
     assert gate.deny.await_count == 2 and not gate.pending
     assert loop.resume_state() == ([], "")
     assert channel.sent == [(CLEAR_DROPPED.format(n=2), INFO)]
-    assert len(seen) == 1 and seen[0].agent_id == loop._config.name
+    assert len(seen) == 1 and seen[0].agent_id == loop._config.name and seen[0].session_id == "S1"
+
+
+async def test_clear_before_any_turn_publishes_nothing(tmp_path):
+    loop = _loop(tmp_path)
+    repl, _, _ = _build_repl(RecordingChannel([]))
+    repl._bus, repl._agent, repl._gate = EventBus(), loop, None
+    seen = []
+    async def record(ev):
+        seen.append(ev)
+    repl._bus.subscribe(ConversationCleared, record)
+    assert loop.current_session_id is None
+    assert await repl._handle_slash("/clear") is True
+    assert seen == []
 
 
 async def test_agents_lists_the_cards():
