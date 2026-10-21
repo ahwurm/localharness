@@ -127,6 +127,7 @@ class ToolRegistry:
     """Thread-safe tool registry with scope resolution."""
 
     TOOL_COUNT_WARNING_THRESHOLD: int = 15
+    _tool_count_warned: set[str] = set()
 
     def __init__(
         self,
@@ -280,12 +281,14 @@ class ToolRegistry:
 
         if len(resolved) > self.TOOL_COUNT_WARNING_THRESHOLD:
             import warnings
-            warnings.warn(
-                f"Agent '{agent_id}' has {len(resolved)} tools "
-                f"(threshold: {self.TOOL_COUNT_WARNING_THRESHOLD}). "
-                "Context window degradation likely on models with <32K context.",
-                stacklevel=2,
-            )
+            _warned = ToolRegistry._tool_count_warned
+            if agent_id not in _warned:
+                _warned.add(agent_id)
+                warnings.warn(
+                    f"Agent '{agent_id}' has {len(resolved)} tools "
+                    f"(threshold: {self.TOOL_COUNT_WARNING_THRESHOLD}). "
+                    "Context window degradation likely on models with <32K context.",
+                )
 
         schemas = {name: tool.info() for name, tool in resolved.items()}
         if floor_enabled():
