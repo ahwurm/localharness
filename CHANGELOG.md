@@ -4,6 +4,16 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.20.4] — 2026-10-21
+
+The tool hue moves from the brand green to sage.
+
+### Changed
+- **Tool calls render in sage green, not the brand accent.** Tool calls, the startup tool count
+  and the burst-counter lines now wear sage (`#9CAF88`) instead of the brand green (`#56DC85`).
+  This undoes 0.20.3's deliberate merge of tool into the agent hue; tool and agent are again
+  told apart by color, not just form. The mobile channel's tool rows match.
+
 ## [0.20.3] — 2026-10-21
 
 The tool hue in the terminal moves from purple to the brand green.

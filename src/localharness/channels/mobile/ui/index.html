@@ -69,7 +69,7 @@
     --dim:#9B9EA6;         /* --color-dim        instruments, meta, narration */
     --agent:#56DC85;       /* --color-accent     agent runtime — the answer */
     --agent-ink:#00220B;   /* --color-accent-ink text ON the accent */
-    --tool:#56DC85;        /* --color-tool       tool calls — the brand accent, same green as --agent (matches the terminal) */
+    --tool:#9CAF88;        /* --color-tool       tool calls — sage green */
     --mem:#47D2E8;         /* --color-mem        memory tools */
     --warn:#F0BB3B;        /* --color-amber      the gate needs you */
     --bad:#F7857D;         /* --color-bench      the palette's only red; errors borrow it */
@@ -146,8 +146,8 @@
   .tool > div:first-of-type { color:var(--tool); font-size:13.5px;
                               font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
   /* The group the server reported, not a guess: memory is memory-cyan here exactly as it is in
-     `start`'s output. Every other tool is the brand green (--tool == --agent), so a delegated
-     subagent call wears it too — distinguished from the agent's own answer by the ▸ glyph, not hue. */
+     `start`'s output. Every other tool is sage (--tool), so a delegated subagent call wears it
+     too — distinguished from the agent's own answer by the ▸ glyph, not hue. */
   .tool[data-group="memory"]::before,
   .tool[data-group="memory"] > div:first-of-type     { color:var(--mem); }
   .tool[data-group="delegate"]::before,

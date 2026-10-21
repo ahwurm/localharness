@@ -187,13 +187,12 @@ def _fmt_elapsed(seconds: float) -> str:
 # web_tool.WEB_INGEST_TOOLS, a display set pinned to the builtins that declare ingest: untrusted
 # (the safety model reads declarations, never this set). (Descriptive labels dropped 2026-07-14 —
 # owner: cleaner without; the close_note security disclosure stays.)
-# Display families (owner, 2026-09-11: "group similar tools like web search — the all-green
-# wall"): the read-only local tools and the memory tools collapse the same way. Side-effecting
-# tools stay ITEMIZED on purpose — bash_exec / write / edit / python_exec (the host-dangerous builtins),
-# cruncher_exec and agent delegations print one line per call, because each command, write and
-# hand-off is the user's audit trail. Tool calls wear the brand accent (cli/theme.py), the same
-# green as the agent, so a turn's tool section reads as the agent's own action stream; only the
-# memory family keeps a different hue (the memory hue of the architecture plates).
+# Display families (owner, 2026-09-11: "group similar tools like web search"): the read-only
+# local tools and the memory tools collapse the same way. Side-effecting tools stay ITEMIZED on
+# purpose — bash_exec / write / edit / python_exec (the host-dangerous builtins), cruncher_exec
+# and agent delegations print one line per call, because each command, write and hand-off is the
+# user's audit trail. Tool calls wear sage green (cli/theme.py); the memory family keeps its own
+# hue (the memory hue of the architecture plates).
 # `verbose` (--verbose / /verbose) is the opt-out: every call itemized with its arguments.
 LOCAL_READ = frozenset({"read", "glob", "grep", "load_document", "chunk"})
 MEMORY_TOOLS = frozenset({"memory_search", "memory_get", "remember"})
