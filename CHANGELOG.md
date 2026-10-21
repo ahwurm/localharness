@@ -4,6 +4,17 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.20.3] — 2026-10-21
+
+The tool hue in the terminal moves from purple to the brand green.
+
+### Changed
+- **Tool calls render in the localharness green, not purple.** Tool calls, the startup tool
+  count and the burst-counter lines now wear the brand accent (`#56DC85`, the same green as the
+  wordmark banner and the logo) instead of the old purple. This deliberately makes the tool hue
+  share the agent hue; tool and agent stay tellable apart by form — the `◆ tool · arg` line and
+  the dimmed result — not by color.
+
 ## [0.20.2] — 2026-10-20
 
 Plugin defaults, the spec move and `/clear`.
