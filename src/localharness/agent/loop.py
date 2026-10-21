@@ -1354,6 +1354,7 @@ class AgentLoop:
         # system role (vLLM/Qwen: "System message must be at the beginning"; the SEMA-05 P0).
         # Loaded once on the first turn of a sitting, reused across that sitting's turns.
         self._prior_session_context = ""
+        self._compact_md_loaded = False
         # Determine kill file path
         if kill_file_path is not None:
             kf = kill_file_path
@@ -1747,6 +1748,7 @@ class AgentLoop:
         self.resume([], "")
         self._last_prompt_tokens = None
         self._user_nudge_inbox.clear()
+        self._compact_md_loaded = True
         store = getattr(self._ctx, "_content_store", None)
         if store is not None:
             store.reset()
@@ -1785,7 +1787,8 @@ class AgentLoop:
         # _execute_loop — a second system message is rejected by strict chat templates
         # (vLLM/Qwen: "System message must be at the beginning"; the SEMA-05 P0, 59/59 dead turns).
         compact_path = self._resolve_compact_md_path()
-        if not prior and compact_path is not None:
+        if not prior and not self._compact_md_loaded and compact_path is not None:
+            self._compact_md_loaded = True
             from localharness.agent.context import load_compact_md
             compact_msg = load_compact_md(compact_path)
             if compact_msg is not None:
