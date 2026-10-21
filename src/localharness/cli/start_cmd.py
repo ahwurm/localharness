@@ -9,7 +9,7 @@ import logging
 import os
 import re
 import socket
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -227,19 +227,9 @@ def _children_instructions(handle: Any, children: bool) -> Any:
     return handle.mark_only()
 
 
-def _available_hint(names: list[str]) -> str:
-    """ENAB-04 / PRD §4: nothing runs because it was installed, and the operator is told how to turn
-    it on — once, at start."""
-    if len(names) == 1:
-        return (f"i 1 plugin available, not enabled: {names[0]} — run "
-                f"`localharness plugins enable {names[0]}` to turn it on")
-    return (f"i {len(names)} plugins available, not enabled: {', '.join(names)} — run "
-            f"`localharness plugins enable <name>` to turn one on")
-
-
-def _plugins_text(loaded: list[str], unconfigured: dict[str, str]) -> Text | None:
-    """The Plugins banner line; None when nothing loaded and nothing unconfigured."""
-    if not loaded and not unconfigured:
+def _plugins_text(loaded: list[str], unconfigured: dict[str, str], available: Sequence[str] = ()) -> Text | None:
+    """The Plugins banner line; None when nothing loaded, unconfigured, or available."""
+    if not loaded and not unconfigured and not available:
         return None
     t = Text()
     t.append("  Plugins: ", style=SITE_DIM)
@@ -256,6 +246,11 @@ def _plugins_text(loaded: list[str], unconfigured: dict[str, str]) -> Text | Non
         else:
             t.append(" (unconfigured)", style=SITE_DIM)
             t.append(" /plugins enable <name>", style=SITE_DIM)
+    if available:
+        if loaded or unconfigured:
+            t.append(", ", style=SITE_DIM)
+        t.append(", ".join(available), style=SITE_INK)
+        t.append(" /plugins", style=SITE_DIM)
     return t
 
 
@@ -3321,10 +3316,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                     pass  # an unwritable store: the notices simply print again next start
         # Unconfigured plugins are a normal state, not a warning: they go on the Plugins line in dim.
         _unconfigured = plugin_result.unconfigured if plugin_result is not None else {}
-        _unconfigured_prefixes = tuple(f"plugin {n}: unconfigured" for n in _unconfigured)
-        if _unconfigured_prefixes:
-            warnings[:] = [w for w in warnings
-                           if not any(w.startswith(p) for p in _unconfigured_prefixes)]
+        if _unconfigured:
+            _unconfigured_msgs = {f"plugin {n}: unconfigured — set {d}" for n, d in _unconfigured.items()}
+            warnings[:] = [w for w in warnings if w not in _unconfigured_msgs]
         summary_line = " -- ".join(parts + [", ".join(counts)])
         if warnings:
             # escape() via entity(): a warning is an exception string the user's environment
@@ -3338,14 +3332,15 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             console.print(summary_line, soft_wrap=True)
         elif warnings:  # a rebuild prints its warnings alone, one amber line
             console.print("  " + entity("warning", f"[{'; '.join(warnings)}]"), soft_wrap=True)
-        if plugin_result is not None:
-            _plugins_line = _plugins_text(plugin_result.loaded_names, _unconfigured)
+        if plugin_result is not None or plugin_resolution is not None:
+            available = ([e.name for e in plugin_resolution.plan.entries if e.state == "available"]
+                         if plugin_resolution is not None else [])
+            _plugins_line = _plugins_text(
+                plugin_result.loaded_names if plugin_result is not None else [],
+                _unconfigured, available,
+            )
             if _plugins_line is not None:
                 console.print(_plugins_line, soft_wrap=True)
-        if plugin_resolution is not None:
-            available = [e.name for e in plugin_resolution.plan.entries if e.state == "available"]
-            if available:  # Text: a plugin name is outside text, never markup (39-04's lesson)
-                console.print(Text(_available_hint(available)), soft_wrap=True)
         if resume is not None and not resume.slept:
             console.print(Text(_resume_status(resume, plugin_result)), soft_wrap=True)
 
