@@ -78,8 +78,7 @@ from tests.unit.test_start_plugins import _record_loop
 from tests.unit.test_workspace_state_landing import _boom, _drive, _hermetic
 
 FOLDER_PKG = "localharness_folder_plugins"
-HINT = ("i 1 plugin available, not enabled: example — run `localharness plugins enable example` "
-        "to turn it on")
+HINT = "example /plugins"
 runner = CliRunner()
 
 # Folder plugins in the machine's plugins/ dir, each a small __init__.py binding `plugin`.
@@ -182,8 +181,8 @@ def test_available_is_not_enabled(tmp_path, monkeypatch, fake_home):
 
     # --- start: the one-line hint, and still nothing imported ------------------------------------
     out, _ = start()
-    assert HINT in out, f"no exact hint line in {out}"
-    assert [line.split("Plugins: ")[1].split("[/]")[0] for line in out if "Plugins:" in line] == ["memory, autoresearch"]
+    assert any(HINT in p for p in out), f"no hint in {out}"
+    assert [line.split("Plugins: ")[1].split(" /plugins")[0] for line in out if "Plugins:" in line] == ["memory, autoresearch, example"]
     assert not sentinel.exists() and not example_modules(), "start imported an available plugin"
     rows = _read_sessions(global_dir)
     assert len(rows) == 1 and rows[0][3] == "complete"
@@ -202,7 +201,7 @@ def test_available_is_not_enabled(tmp_path, monkeypatch, fake_home):
         f"from pathlib import Path\nPath({str(sneaky_marker)!r}).write_text('imported')\n")
     forget_example(sentinel)
     out, summary = start()
-    assert [line.split("Plugins: ")[1].split("[/]")[0] for line in out if "Plugins:" in line] == ["memory, autoresearch"] and HINT in out, out
+    assert [line.split("Plugins: ")[1].split(" /plugins")[0] for line in out if "Plugins:" in line] == ["memory, autoresearch, example"] and any(HINT in p for p in out), out
     assert f"ignoring example.enabled in {ws / 'config.yaml'}: only the global config may set it" in summary
     assert not sentinel.exists() and not example_modules(), "a project's `enabled` loaded the plugin"
     assert "sneaky" not in {r["name"] for r in json.loads(_invoke("plugins", "list", "--json").stdout)}

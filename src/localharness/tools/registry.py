@@ -127,13 +127,13 @@ class ToolRegistry:
     """Thread-safe tool registry with scope resolution."""
 
     TOOL_COUNT_WARNING_THRESHOLD: int = 15
-    _tool_count_warned: set[str] = set()
 
     def __init__(
         self,
         default_timeout_s: float = 30.0,
         result_size_cap: int | Callable[[], int] = 50_000,
     ) -> None:
+        self._tool_count_warned: set[str] = set()
         self._tools: dict[str, dict[str, ToolProtocol]] = {
             "global": {},
             "division": {},
@@ -281,9 +281,8 @@ class ToolRegistry:
 
         if len(resolved) > self.TOOL_COUNT_WARNING_THRESHOLD:
             import warnings
-            _warned = ToolRegistry._tool_count_warned
-            if agent_id not in _warned:
-                _warned.add(agent_id)
+            if agent_id not in self._tool_count_warned:
+                self._tool_count_warned.add(agent_id)
                 warnings.warn(
                     f"Agent '{agent_id}' has {len(resolved)} tools "
                     f"(threshold: {self.TOOL_COUNT_WARNING_THRESHOLD}). "

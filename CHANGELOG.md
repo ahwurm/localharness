@@ -4,6 +4,20 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.20.5] — 2026-10-21
+
+One Plugins line: loaded, unconfigured, and not-enabled plugins all share a single banner.
+
+### Changed
+- **Plugins banner consolidates all plugin states.** Loaded (sage), unconfigured (white + dim
+  config-key hint), and not-enabled (white + dim `/plugins` pointer) plugins now render on one
+  line. The separate "i N plugin available, not enabled" info line and the amber
+  "plugin X: unconfigured" warnings are gone.
+- **Tool-count warning fires once per agent.** The registry's >15-tool context-degradation
+  warning no longer repeats every turn; it fires once per agent per registry instance.
+- **Capability-floor warning shortened.** A plugin tool the root cannot hold now reads
+  `name (plugin X) held by delegates only` instead of a full ingest-declaration sentence.
+
 ## [0.20.4] — 2026-10-21
 
 The tool hue moves from the brand green to sage.

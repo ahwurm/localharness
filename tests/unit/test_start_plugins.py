@@ -501,8 +501,7 @@ async def test_one_available_plugin_gets_the_exact_enable_command(tmp_path, monk
 
     await _start_async(None, False, False, str(tmp_path))
 
-    assert ("i 1 plugin available, not enabled: lh-exa — run `localharness plugins enable lh-exa` "
-            "to turn it on") in printed
+    assert any("lh-exa /plugins" in p for p in printed)
     assert "lh_exa" not in spy.asked, "an available plugin must never be imported"
     with pytest.raises(ModuleNotFoundError):
         __import__("lh_exa_premise")
@@ -521,8 +520,7 @@ async def test_several_available_plugins_share_one_line(tmp_path, monkeypatch):
 
     await _start_async(None, False, False, str(tmp_path))
 
-    assert ("i 2 plugins available, not enabled: a, b — run `localharness plugins enable <name>` "
-            "to turn one on") in printed
+    assert any("a, b /plugins" in p for p in printed)
 
 
 async def test_a_plugin_tool_the_floor_keeps_from_the_root_is_named(tmp_path, monkeypatch):
