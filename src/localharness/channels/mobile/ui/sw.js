@@ -8,7 +8,10 @@
 // before anyone suspects the cache. An offline shell would also be of little use for a client
 // whose entire job is talking to a server on the other end of a tailnet.
 //
-// So: no `fetch` handler, no `caches`. Push in, notification out.
+// So: no `caches`, ever. The ONE `fetch` handler below never stores a thing — on success it
+// returns the live network response, so "edit, pull to refresh, see it" still holds. It exists
+// only to turn a failed PAGE navigation (your box unreachable) into a readable line instead of
+// iOS's blank white standalone screen. Push in, notification out; and never a white void.
 
 // Show the notification, and let the page know if it happens to be open.
 self.addEventListener("push", (event) => {
@@ -68,3 +71,29 @@ self.addEventListener("notificationclick", (event) => {
 // for a new worker to disagree with an old one about, so the usual reason for caution is absent.
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
+
+// A page navigation to an unreachable box is the white screen (WEBCH-20 keeps no offline shell).
+// Only navigations are touched. We serve the box-down page when the proxy is up but the backend
+// is not (502/504 — the mobile server itself never emits those) or when the fetch is rejected
+// (tailscale itself unreachable). A real app status (401/404/500) passes through untouched, and
+// nothing is ever cached. iOS standalone has no pull-to-refresh, so the page carries its own:
+// a Retry button, the `online` event, and a quiet HEAD poll that reloads the instant the box
+// answers again. Colors mirror index.html (--color-bg / --color-ink).
+const BOX_DOWN = "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
+  + "<meta name=theme-color content=#0D0F15>"
+  + "<body style='background:#0D0F15;color:#E9EBEF;font:16px/1.5 system-ui;display:grid;"
+  + "place-items:center;min-height:100vh;margin:0;padding:24px;text-align:center'><div>"
+  + "can’t reach your box — is <code>localharness mobile</code> running?<br><br>"
+  + "<button onclick=location.reload() style='font:inherit;color:#0D0F15;background:#E9EBEF;"
+  + "border:0;border-radius:9px;padding:10px 20px'>retry</button></div>"
+  + "<script>addEventListener('online',()=>location.reload());"
+  + "setInterval(()=>fetch(location.href,{method:'HEAD',cache:'no-store'})"
+  + ".then(r=>r.ok&&location.reload()).catch(()=>{}),4000)</script>";
+const boxDown = () => new Response(BOX_DOWN, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+self.addEventListener("fetch", (event) => {
+  if (event.request.mode !== "navigate") return;
+  event.respondWith(
+    fetch(event.request)
+      .then((r) => (r.status === 502 || r.status === 504) ? boxDown() : r)
+      .catch(boxDown));
+});
