@@ -29,6 +29,7 @@ from localharness.core.events import (
     InputRouted,
     PermissionResolved,
     PermissionStaged,
+    ConversationCleared,
     UserMessage,
 )
 from localharness.provider.runtimes import RUNTIMES, row_of
@@ -161,11 +162,9 @@ PLUGINS_RESTARTING = "Restarting with {name} {state} — your conversation is ke
 """What `/plugins` answers. A restart drops the gate's parked calls with the session, so it is
 refused while any wait; the other channels cannot restart a session at all (R10)."""
 
-CLEAR_DONE = ("Conversation cleared; the next message starts a fresh context. Model, settings, "
-              "memory and the task record stay (/task clear drops the record).")
-CLEAR_PARKED = ("Answer the parked calls first (/pending lists them): after /clear the model "
-                "would get an approval for a call it no longer knows.")
-CLEAR_MID_TURN = "A turn is running; /clear after it ends."
+CLEAR_DONE = "Conversation cleared; the next message starts fresh."
+CLEAR_DROPPED = "{n} parked call(s) dropped. " + CLEAR_DONE
+CLEAR_MID_TURN = "A turn is running; send /clear when it ends."
 
 
 # Keywords that signal the user wants to create an agent via conversation.
@@ -1727,14 +1726,17 @@ class OrchestratorREPL:
         await self._slash_image("", "")
 
     async def _slash_clear(self, args: str, args_lower: str) -> None:
-        gate = self._session_gate()
         if self._turn_running():
             text = CLEAR_MID_TURN
-        elif gate is not None and getattr(gate, "pending", None):
-            text = CLEAR_PARKED
         else:
+            gate, dropped = self._session_gate(), 0
+            while gate is not None and gate.pending:
+                await gate.deny()
+                dropped += 1
             self._agent.clear()
-            text = CLEAR_DONE
+            await self._bus.publish(ConversationCleared(
+                agent_id=self._agent._config.name, session_id=self._agent.current_session_id or ""))
+            text = CLEAR_DROPPED.format(n=dropped) if dropped else CLEAR_DONE
         await self._channel.send_message(text, metadata={"style": "system.info"})
 
     async def _slash_task(self, args: str, args_lower: str) -> None:

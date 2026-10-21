@@ -30,7 +30,7 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-PROTOCOL_VERSION = 7
+PROTOCOL_VERSION = 8
 """Bumped on any breaking change to the wire.
 
 v2: Observation gained an optional generated-image id field (never released; replaced by v4's artifact).
@@ -47,6 +47,7 @@ an artifact root is bound and --incognito is off), and GET /api/artifacts lists 
 or frame schema moved.
 v6: ProviderLost: a new event; additive, older pages ignore it at `default: break`.
 v7: InstructionsChanged, NarrowingNotice: new events; additive, older pages ignore them at `default: break`.
+v8: ConversationCleared: a new event; additive, older pages ignore it at `default: break`.
 
 One recorded exception to "a moved schema bumps the version": additive OPTIONAL fields on an
 existing event that the page does not read re-record the snapshot without a bump (the page renders

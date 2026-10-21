@@ -22,7 +22,9 @@ from prompt_toolkit.document import Document
 
 from localharness.channels.terminal import SlashCommandCompleter
 from localharness.agent.context import ContentStore
-from localharness.cli.repl import CLEAR_DONE, CLEAR_MID_TURN, CLEAR_PARKED, OrchestratorREPL
+from localharness.cli.repl import CLEAR_DONE, CLEAR_DROPPED, CLEAR_MID_TURN, OrchestratorREPL
+from localharness.core.bus import EventBus
+from localharness.core.events import ConversationCleared
 from localharness.cli.slash_commands import (
     SLASH_COMMANDS,
     SlashCommand,
@@ -46,7 +48,7 @@ CORE = [
     ("/pending", "Tool calls parked for you to answer"),
     ("/approve", "Run a parked call; /approve [N] (default: the oldest)"),
     ("/deny", "Drop a parked call; /deny [N] (default: the oldest)"),
-    ("/clear", "Start a fresh conversation; model, settings, memory and the task record stay"),
+    ("/clear", "Start a fresh conversation; settings, memory and the task record stay"),
     ("/task", "Show the working task record; /task clear to delete it"),
     ("/instructions", "The project's instructions file (CLAUDE.md, AGENTS.md); /instructions off|on|show"),
     ("/image", "Attach a picture to your next message; /image <path>, /image (the clipboard), "
@@ -71,7 +73,7 @@ HELP_BEFORE = (
     "  /pending       Tool calls parked for you to answer\n"
     "  /approve       Run a parked call; /approve [N] (default: the oldest)\n"
     "  /deny          Drop a parked call; /deny [N] (default: the oldest)\n"
-    "  /clear         Start a fresh conversation; model, settings, memory and the task record stay\n"
+    "  /clear         Start a fresh conversation; settings, memory and the task record stay\n"
     "  /task          Show the working task record; /task clear to delete it\n"
     "  /instructions  The project's instructions file (CLAUDE.md, AGENTS.md); /instructions off|on|show\n"
     "  /image         Attach a picture to your next message; /image <path>, /image (the clipboard), "
@@ -214,19 +216,36 @@ async def test_clear_empties_the_conversation_and_keeps_the_session(tmp_path):
     assert channel.sent == [(CLEAR_DONE, INFO)]
 
 
-@pytest.mark.parametrize("parked, running, expected", [
-    ({1: object()}, False, CLEAR_PARKED),
-    ({}, True, CLEAR_MID_TURN),
-])
-async def test_clear_is_refused_while_a_call_is_parked_or_a_turn_runs(parked, running, expected):
+async def test_clear_is_refused_while_a_turn_runs():
     channel = RecordingChannel([])
     repl, agent, _ = _build_repl(channel)
-    repl._gate = SimpleNamespace(pending=parked)
-    if running:
-        repl._turn_task = asyncio.get_running_loop().create_future()
+    repl._turn_task = asyncio.get_running_loop().create_future()
     assert await repl._handle_slash("/clear") is True
     agent.clear.assert_not_called()
-    assert channel.sent == [(expected, INFO)]
+    assert channel.sent == [(CLEAR_MID_TURN, INFO)]
+
+
+async def test_clear_denies_parked_calls_and_announces_itself(tmp_path):
+    loop = _loop(tmp_path)
+    loop.resume([{"role": "user", "content": "hi"}], "")
+    channel = RecordingChannel([])
+    repl, _, _ = _build_repl(channel)
+    repl._bus = EventBus()
+    pending = {1: object(), 2: object()}
+
+    async def deny():
+        pending.popitem()
+    gate = SimpleNamespace(pending=pending, deny=AsyncMock(side_effect=deny))
+    repl._agent, repl._gate = loop, gate
+    seen = []
+    async def record(ev):
+        seen.append(ev)
+    repl._bus.subscribe(ConversationCleared, record)
+    assert await repl._handle_slash("/clear") is True
+    assert gate.deny.await_count == 2 and not gate.pending
+    assert loop.resume_state() == ([], "")
+    assert channel.sent == [(CLEAR_DROPPED.format(n=2), INFO)]
+    assert len(seen) == 1 and seen[0].agent_id == loop._config.name
 
 
 async def test_agents_lists_the_cards():
