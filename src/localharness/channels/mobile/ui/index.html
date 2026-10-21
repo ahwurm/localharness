@@ -146,7 +146,8 @@
   .tool > div:first-of-type { color:var(--tool); font-size:13.5px;
                               font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
   /* The group the server reported, not a guess: memory is memory-cyan here exactly as it is in
-     `start`'s output, and a delegated subagent call is agent-green. */
+     `start`'s output. Every other tool is the brand green (--tool == --agent), so a delegated
+     subagent call wears it too — distinguished from the agent's own answer by the ▸ glyph, not hue. */
   .tool[data-group="memory"]::before,
   .tool[data-group="memory"] > div:first-of-type     { color:var(--mem); }
   .tool[data-group="delegate"]::before,
