@@ -27,6 +27,7 @@ from localharness.cli import doctor_cmd
 from localharness.cli.app import app
 from localharness.plugins import builtin, discovery
 from localharness.plugins.api import Check, Plugin, PluginManifest
+from localharness.plugins.lifecycle import DoctorRow
 from tests.unit.test_doctor_layer_report import _layout, _run_doctor, _squash, _write_workspace
 from tests.unit.test_plugin_resolve import write_folder_plugin
 
@@ -335,3 +336,52 @@ def test_an_overridden_plugin_setting_names_its_plugin(tmp_path, monkeypatch, fa
 
     assert _squash("p.color = '#00ff00'  [workspace-config (plugin: p)]  (global: '#4a90d9')") \
         in _squash(out), out
+
+
+# ------------------------------------------------------- plugin-authored text is sanitized, then escaped
+
+
+def _printed(monkeypatch, row) -> tuple[str, list[str]]:
+    import io
+
+    from rich.console import Console
+    buf = io.StringIO()
+    monkeypatch.setattr(doctor_cmd, "console", Console(file=buf, width=400, color_system=None))
+    failures: list[str] = []
+    doctor_cmd.print_plugin_row(row, failures)
+    return buf.getvalue(), failures
+
+
+def test_a_check_with_controls_and_markup_prints_stripped_and_verbatim(monkeypatch) -> None:
+    row = DoctorRow("p", "on", "", checks=(Check(
+        name="p\x1b]0;evil\x07", status="fail",
+        detail="[browser][/x] down\x1b[2J", hint="try\u009b2J again"),))
+
+    out, failures = _printed(monkeypatch, row)
+
+    assert not {"\x1b", "\x07", "\u009b"} & set(out)
+    assert "[browser][/x] down" in out and "[/x]" in out
+    assert failures == ["plugin-p"]
+
+
+def test_a_non_on_row_prints_its_glyph_line_without_controls(monkeypatch) -> None:
+    out, failures = _printed(monkeypatch, DoctorRow("p\x1b[2J", "off", "off\x1b]0;x\x07 [/x]"))
+
+    assert "\x1b" not in out and "\x07" not in out
+    assert "i  p: off [/x]\n" == out
+    assert failures == []
+
+
+def test_a_tab_in_a_check_detail_survives_sanitizing(monkeypatch) -> None:
+    out, _ = _printed(monkeypatch, DoctorRow("p", "on", "", checks=(
+        Check(name="p", status="pass", detail="a\tb"),)))
+
+    assert "p: ab" not in out and "a  b" in out  # rich expands the kept tab; a stripped one would print "ab"
+
+
+def test_a_check_without_detail_or_hint_prints_one_plain_name_line(monkeypatch) -> None:
+    out, failures = _printed(monkeypatch, DoctorRow("p", "on", "", checks=(
+        Check(name="p", status="pass"),)))
+
+    assert out == "✓ p\n"
+    assert failures == []
