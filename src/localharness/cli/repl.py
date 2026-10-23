@@ -1074,7 +1074,7 @@ class OrchestratorREPL:
         return _complete
 
     async def _await_turn_with_sigint(self, turn_task: asyncio.Task) -> None:
-        """Await one turn so a mid-turn Ctrl-C cancels the turn, not the session; a cancel of this task itself propagates."""
+        """Await one turn so a mid-turn Ctrl-C cancels the turn, not the session."""
         async with sigint_cancels(turn_task) as cancelled:
             try:
                 await turn_task

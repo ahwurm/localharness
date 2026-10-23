@@ -23,7 +23,7 @@ async def sigint_cancels(
     def _restore() -> None:
         try:
             loop.remove_signal_handler(signal.SIGINT)
-            # never Python's default: under `localharness mobile` previous is uvicorn's shutdown (2026-10-04)
+            # never Python's default: under `localharness mobile` previous is uvicorn's shutdown
             if previous is not None:
                 signal.signal(signal.SIGINT, previous)
         except (NotImplementedError, RuntimeError, ValueError, TypeError):

@@ -249,7 +249,7 @@ def _authority_unparseable(url: str) -> bool:
 
 
 def redact_text(text: str, secrets: Sequence[str] = ()) -> str:
-    """`text` with `secrets` masked, URL userinfo stripped, and a URL with an `@` past its authority masked whole."""
+    """`text` with `secrets` masked and URL userinfo stripped; an unparseable credentialed URL is masked whole."""
     from localharness.provider.server import strip_url_credentials  # pulls httpx: not at CLI start
 
     stripped = strip_url_credentials(scrub(text, list(secrets)))
