@@ -1,10 +1,4 @@
-"""`localharness components` subapp: list, get, set with audit trail.
-
-Phase 14 — REG-01..04. See:
-  - 14-RESEARCH.md Example A for the end-to-end set flow
-  - 14-CONTEXT.md for the locked CLI output format
-  - 14-VALIDATION.md for the test contract
-"""
+"""`localharness components` subapp: list, get, set with audit trail."""
 from __future__ import annotations
 
 import asyncio
@@ -12,6 +6,7 @@ import json as _json
 import re
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, Optional
 
@@ -309,6 +304,66 @@ def _stdin_is_a_terminal() -> bool:
     return sys.stdin is not None and sys.stdin.isatty()
 
 
+class Refusal(Exception):
+    """A write the checked path declined; its message is already scrubbed."""
+
+    def __init__(self, text: str, secrets: Sequence[str]) -> None:
+        super().__init__(scrub(text, list(secrets)))
+
+
+@dataclass(frozen=True)
+class Written:
+    path: str
+    before: Any = field(repr=False)
+    after: Any = field(repr=False)
+    annotation: Any
+    overlay_path: Path
+    audit_path: Path | None
+
+
+def write_value(loader: ConfigLoader, catalogue: dict[str, ComponentEntry],
+                plugins: Sequence[PluginRows], path: str, raw: str) -> Written:
+    """Coerce, validate and atomically write one value to the machine overlay; raises Refusal."""
+    entry = catalogue.get(path)
+    if entry is None:
+        raise Refusal(AGENT_PATHS_NOT_ADDRESSABLE.get(path) or f"Unknown path: {path!r}", ())
+    try:
+        typed_value = coerce_value(raw, entry.annotation)
+    except ValueError as exc:
+        raise Refusal(f"Cannot coerce {shown(raw, entry.annotation)} to {entry.type_name}: {exc}",
+                      [raw] if is_secret(entry.annotation) else []) from exc
+    before = entry.current_value
+    audit_log = loader.load_harness().org.audit_log_path
+    audit_path = resolve_runtime_path(audit_log, loader._config_dir) if audit_log else None
+    overlay_path = loader.user_overlay_path
+    new_overlay = set_value_in_dict(dict(load_overlay(overlay_path)), path, typed_value)
+    try:
+        _validate_overlay(loader, path, new_overlay, plugins=plugins)
+    except ValueError as exc:  # a pydantic ValidationError, or a plugin's contained validator failure
+        # Never pydantic's input_value (the whole merged settings), and never a secret either file
+        # holds: a plugin validator's own message can quote its section.
+        why = _validation_text(exc) if isinstance(exc, ValidationError) else str(exc)
+        raise Refusal(f"Validation failed for {path}={shown(typed_value, entry.annotation)}: {why}",
+                      _settings_secrets(catalogue, loader, new_overlay)) from exc
+    try:
+        atomic_write_overlay(overlay_path, new_overlay)
+    except Exception as exc:
+        raise Refusal(f"Failed to write overlay {overlay_path}: {exc}", ()) from exc
+    loader.invalidate_cache()
+    return Written(path, before, typed_value, entry.annotation, overlay_path, audit_path)
+
+
+async def audit_value(written: Written) -> None:
+    secret = is_secret(written.annotation)
+    await EventBus(persist_path=written.audit_path).publish(ComponentMutated(
+        path=written.path,
+        before_value=_serialize_value(written.before, secret),
+        after_value=_serialize_value(written.after, secret),
+        layer="user",
+        actor="cli",
+    ))
+
+
 # ------------------------------------------------------------------ #
 # list
 # ------------------------------------------------------------------ #
@@ -491,7 +546,7 @@ def components_set(
 
     try:
         loader, workspace = _build_layered_loader(config_dir, json_output=json_output)
-        cfg = loader.load_harness()
+        loader.load_harness()
     except Exception as exc:
         _err_config(json_output, exc)
         return
@@ -509,91 +564,35 @@ def components_set(
         plugins=plugins,
     )
     entry = catalogue.get(path)
-    if entry is None:
-        _err(json_output, AGENT_PATHS_NOT_ADDRESSABLE.get(path) or f"Unknown path: {path!r}",
-             exit_code=2)
-        return
-    secret = is_secret(entry.annotation)
-    if secret and value == "-":  # read without echo: never in shell history or `ps`
+    if entry is not None and is_secret(entry.annotation) and value == "-":  # never in shell history or `ps`
         value = (typer.prompt(path, hide_input=True, default="", show_default=False).strip()
                  if _stdin_is_a_terminal() else sys.stdin.readline().rstrip("\r\n"))
         if not value:
             _err(json_output, f"No value read for {path}; nothing was written.", exit_code=2)
             return
 
-    # 3. Coerce CLI string to typed value
+    async def write_and_audit() -> Written:
+        written = write_value(loader, catalogue, plugins, path, value)
+        await audit_value(written)
+        return written
+
+    coro = write_and_audit()
     try:
-        typed_value = coerce_value(value, entry.annotation)
-    except ValueError as exc:
-        _err(
-            json_output,
-            scrub(f"Cannot coerce {shown(value, entry.annotation)} to {entry.type_name}: {exc}",
-                  [value] if is_secret(entry.annotation) else []),
-            exit_code=2,
-        )
-        return
-
-    before = entry.current_value
-
-    # 4. Load existing overlay, deep-set new value, validate against the model that OWNS the path.
-    #    agent.* validates against AgentConfig; everything else against the merged HarnessConfig
-    #    (issue #22). No disk write happens until validation passes.
-    overlay_path = loader.user_overlay_path
-    existing_overlay = load_overlay(overlay_path)
-    new_overlay = set_value_in_dict(dict(existing_overlay), path, typed_value)
-
-    try:
-        _validate_overlay(loader, path, new_overlay, plugins=plugins)
-    except ValueError as exc:  # a pydantic ValidationError, or a plugin's contained validator failure
-        # Never pydantic's input_value (the whole merged settings), and never a secret either file
-        # holds: a plugin validator's own message can quote its section.
-        why = _validation_text(exc) if isinstance(exc, ValidationError) else str(exc)
-        _err(
-            json_output,
-            scrub(f"Validation failed for {path}={shown(typed_value, entry.annotation)}: {why}",
-                  _settings_secrets(catalogue, loader, new_overlay)),
-            exit_code=2,
-        )
-        return
-
-    # 5. Atomic write -- overlay does NOT touch disk until this succeeds
-    try:
-        atomic_write_overlay(overlay_path, new_overlay)
-    except Exception as exc:
-        _err(
-            json_output,
-            f"Failed to write overlay {overlay_path}: {exc}",
-            exit_code=2,
-        )
-        return
-
-    # 6. Invalidate loader cache so next read sees the new value
-    loader.invalidate_cache()
-
-    # 7. Emit ComponentMutated audit event. Resolve the audit path against the loader's config
-    # dir (#35 — a bare default 'audit.jsonl' lands under it; absolute/~ values honored as-is).
-    audit_path = cfg.org.audit_log_path
-    audit_path_resolved: Optional[Path] = (
-        resolve_runtime_path(audit_path, loader._config_dir) if audit_path else None
-    )
-
-    bus = EventBus(persist_path=audit_path_resolved)
-    event = ComponentMutated(
-        path=path,
-        before_value=_serialize_value(before, secret),
-        after_value=_serialize_value(typed_value, secret),
-        layer="user",
-        actor="cli",
-    )
-    try:
-        asyncio.run(bus.publish(event))
-    except RuntimeError:
-        # Already inside an event loop (rare for CLI but possible under pytest-asyncio)
-        loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(bus.publish(event))
-        finally:
-            loop.close()
+            written = asyncio.run(coro)
+        except RuntimeError:
+            # Already inside an event loop (rare for CLI but possible under pytest-asyncio)
+            coro.close()
+            loop = asyncio.new_event_loop()
+            try:
+                written = loop.run_until_complete(write_and_audit())
+            finally:
+                loop.close()
+    except Refusal as refusal:
+        _err(json_output, str(refusal), exit_code=2)
+        return
+    before, typed_value, overlay_path = written.before, written.after, written.overlay_path
+    secret = is_secret(written.annotation)
 
     # 8. Confirm, and SAY WHERE IT WENT. The write target has always been the global
     #    overrides.yaml; F4 is that nothing said so at the moment it happened, so a user standing

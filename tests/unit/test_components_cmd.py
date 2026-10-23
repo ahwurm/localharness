@@ -457,3 +457,155 @@ def test_get_agent_effort_says_the_same(components_home):
     result = runner.invoke(app, ["components", "get", "agent.effort"])
     assert result.exit_code == 2, result.output
     assert "agents/<name>.yaml" in result.output
+
+
+# ------------------------------------------------------------------ #
+# write_value / audit_value: the checked write under `components set`
+# ------------------------------------------------------------------ #
+
+import asyncio  # noqa: E402
+
+from pydantic import BaseModel, Field  # noqa: E402
+
+from localharness.cli.components_cmd import (  # noqa: E402
+    Refusal,
+    Written,
+    audit_value,
+    write_value,
+)
+from localharness.config.loader import ConfigLoader  # noqa: E402
+from localharness.registry.catalogue import PluginRows, plugin_catalogue_rows  # noqa: E402
+from localharness.registry.provenance import layered_catalogue  # noqa: E402
+
+_PCT = "org.context.compaction_threshold_pct"
+
+
+def _write_deps(home: Path, extra_plugins=()):
+    _write_project_yaml(home, org={"audit_log_path": str(home / "audit.jsonl")})
+    loader = ConfigLoader(config_dir=home)
+    from localharness.plugins.resolve import resolve
+
+    plugins = (*plugin_catalogue_rows(resolve(loader)), *extra_plugins)
+    catalogue, _ = layered_catalogue(home, None, loader=loader, plugins=plugins)
+    return loader, catalogue, plugins
+
+
+def test_write_value_writes_the_machine_overlay_and_returns_written(components_home):
+    loader, catalogue, plugins = _write_deps(components_home)
+    written = write_value(loader, catalogue, plugins, _PCT, "85.0")
+    assert isinstance(written, Written)
+    assert (written.path, written.after) == (_PCT, 85.0)
+    assert written.before == catalogue[_PCT].current_value
+    assert written.overlay_path == loader.user_overlay_path
+    assert written.audit_path == components_home / "audit.jsonl"
+    assert yaml.safe_load(written.overlay_path.read_text(encoding="utf-8"))["org"]["context"][
+        "compaction_threshold_pct"] == 85.0
+
+
+def test_written_repr_shows_neither_value(components_home):
+    loader, catalogue, plugins = _write_deps(components_home)
+    written = write_value(loader, catalogue, plugins, _PCT, "85.5")
+    assert "85.5" not in repr(written)
+    assert repr(written.before) not in repr(written)
+
+
+def test_written_is_frozen(components_home):
+    loader, catalogue, plugins = _write_deps(components_home)
+    written = write_value(loader, catalogue, plugins, _PCT, "85.0")
+    with pytest.raises(Exception):
+        written.path = "other"  # type: ignore[misc]
+
+
+def test_write_value_audit_path_is_none_when_the_org_leaves_it_unset(components_home):
+    loader, catalogue, plugins = _write_deps(components_home)
+    (components_home / "config.yaml").write_text(
+        yaml.safe_dump({"version": "1", "provider": {
+            "provider_type": "ollama", "base_url": "http://localhost:11434/v1",
+            "default_model": "test-model"}, "org": {"audit_log_path": ""}}), encoding="utf-8")
+    loader = ConfigLoader(config_dir=components_home)
+    catalogue, _ = layered_catalogue(components_home, None, loader=loader, plugins=plugins)
+    assert write_value(loader, catalogue, plugins, _PCT, "85.0").audit_path is None
+
+
+@pytest.mark.parametrize("path, raw, text", [
+    ("no.such.path", "1", "Unknown path: 'no.such.path'"),
+    ("agent.effort", "high", "agent.effort is not settable here"),
+    (_PCT, "abc", "Cannot coerce 'abc' to float"),
+    (_PCT, "150.0", "Validation failed for org.context.compaction_threshold_pct=150.0"),
+])
+def test_write_value_refuses_and_leaves_the_overlay_unchanged(components_home, path, raw, text):
+    loader, catalogue, plugins = _write_deps(components_home)
+    before = _read_overlay_bytes(components_home)
+    with pytest.raises(Refusal) as info:
+        write_value(loader, catalogue, plugins, path, raw)
+    assert text in str(info.value)
+    assert _read_overlay_bytes(components_home) == before
+
+
+def test_write_value_refuses_a_value_the_plugins_own_model_refuses(components_home):
+    class FakeConfig(BaseModel):
+        n: int = Field(0, le=3)
+
+    rows = PluginRows("fakeplug", True, False, FakeConfig, FakeConfig())
+    loader, catalogue, plugins = _write_deps(components_home, (rows,))
+    before = _read_overlay_bytes(components_home)
+    with pytest.raises(Refusal) as info:
+        write_value(loader, catalogue, plugins, "fakeplug.n", "9")
+    assert "Validation failed for fakeplug.n=9" in str(info.value)
+    assert "less than or equal to 3" in str(info.value)
+    assert _read_overlay_bytes(components_home) == before
+
+
+def test_write_value_refuses_a_failed_overlay_write(components_home, monkeypatch):
+    loader, catalogue, plugins = _write_deps(components_home)
+
+    def boom(path, overlay):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("localharness.cli.components_cmd.atomic_write_overlay", boom)
+    with pytest.raises(Refusal) as info:
+        write_value(loader, catalogue, plugins, _PCT, "85.0")
+    assert str(info.value) == f"Failed to write overlay {loader.user_overlay_path}: disk full"
+
+
+def test_write_value_never_writes_a_workspace_overlay(components_home, tmp_path):
+    ws = tmp_path / "proj" / ".localharness"
+    ws.mkdir(parents=True)
+    (ws / "overrides.yaml").write_text("org: {}\n", encoding="utf-8")
+    ws_bytes = (ws / "overrides.yaml").read_bytes()
+    _write_project_yaml(components_home, org={"audit_log_path": str(components_home / "audit.jsonl")})
+    loader = ConfigLoader(config_dir=components_home, local_config_dir=ws)
+    from localharness.plugins.resolve import resolve
+
+    plugins = plugin_catalogue_rows(resolve(loader))
+    catalogue, _ = layered_catalogue(components_home, ws, loader=loader, plugins=plugins)
+    written = write_value(loader, catalogue, plugins, _PCT, "85.0")
+    assert written.overlay_path == loader.user_overlay_path
+    assert (ws / "overrides.yaml").read_bytes() == ws_bytes
+
+
+def test_a_refusal_scrubs_its_secrets():
+    assert "hunter2" not in str(Refusal("Cannot coerce 'hunter2' to SecretStr: bad", ["hunter2"]))
+
+
+def test_audit_value_appends_one_component_mutated_entry(components_home):
+    loader, catalogue, plugins = _write_deps(components_home)
+    written = write_value(loader, catalogue, plugins, _PCT, "85.0")
+
+    async def go():
+        await audit_value(written)
+
+    asyncio.run(go())
+    mutations = [e for e in _read_audit(components_home) if e.get("event_type") == "ComponentMutated"]
+    assert len(mutations) == 1
+    assert (mutations[0]["path"], mutations[0]["after_value"]) == (_PCT, 85.0)
+    assert mutations[0]["before_value"] == written.before
+    assert (mutations[0]["layer"], mutations[0]["actor"]) == ("user", "cli")
+
+
+def test_set_run_through_write_value_keeps_its_receipt(components_home):
+    _write_project_yaml(components_home, org={"audit_log_path": str(components_home / "audit.jsonl")})
+    result = runner.invoke(app, ["components", "set", _PCT, "85.0", "--json"])
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.stdout)
+    assert (receipt["path"], receipt["after"], receipt["layer"]) == (_PCT, 85.0, "user")
