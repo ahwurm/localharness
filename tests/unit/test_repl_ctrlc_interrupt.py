@@ -171,6 +171,60 @@ def test_ctrl_c_during_turn_reaps_the_turns_bash_child(tmp_path):
     assert any("Turn cancelled" in t for t, _ in channel.sent), channel.sent
 
 
+async def _slow_unwind(started: asyncio.Event, *a, **kw):
+    started.set()
+    try:
+        await asyncio.sleep(100)
+    finally:
+        await asyncio.sleep(0.2)
+
+
+def test_a_slow_first_press_stop_prints_turn_cancelled():
+    turn_started = asyncio.Event()
+    channel = RecordingChannel(["do a long task"])
+    repl, agent, bus = _build_repl(channel, lambda *a, **kw: _slow_unwind(turn_started, *a, **kw))
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        captured: dict = {}
+        loop.add_signal_handler = lambda sig, cb, *a: captured.__setitem__("cb", cb)
+        loop.remove_signal_handler = lambda sig: None
+        run_task = asyncio.ensure_future(repl.run())
+        await asyncio.wait_for(turn_started.wait(), timeout=2.0)
+        captured["cb"]()
+        await asyncio.wait_for(run_task, timeout=2.0)
+
+    asyncio.run(scenario())
+    assert any("Turn cancelled" in t for t, _ in channel.sent), channel.sent
+
+
+def test_a_third_press_during_the_unwind_re_raises_out_of_the_handler():
+    """Press 3 reaches the host's handler, which cancels the awaiting task (the Runner cancels the
+    main task): the handler must let that cancel through instead of printing "Turn cancelled."."""
+    turn_started = asyncio.Event()
+    channel = RecordingChannel([])
+    repl, agent, bus = _build_repl(channel, None)
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        captured: dict = {}
+        loop.add_signal_handler = lambda sig, cb, *a: captured.__setitem__("cb", cb)
+        loop.remove_signal_handler = lambda sig: None
+        turn_task = asyncio.ensure_future(_slow_unwind(turn_started))
+        handler = asyncio.ensure_future(repl._await_turn_with_sigint(turn_task))
+        await asyncio.wait_for(turn_started.wait(), timeout=2.0)
+        captured["cb"]()
+        captured["cb"]()
+        await asyncio.sleep(0.05)
+        handler.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await handler
+        assert turn_task.cancelled()
+
+    asyncio.run(scenario())
+    assert not any("Turn cancelled" in t for t, _ in channel.sent), channel.sent
+
+
 @pytest.mark.asyncio
 async def test_normal_turn_completes_without_cancel_message():
     # Sanity: with no interrupt the turn completes and no 'Turn cancelled.' is emitted.

@@ -8,7 +8,6 @@ import logging
 import os
 import re
 import shlex
-import signal
 import time
 from collections import deque
 from collections.abc import Sequence
@@ -32,6 +31,7 @@ from localharness.core.events import (
     ConversationCleared,
     UserMessage,
 )
+from localharness.core.interrupt import sigint_cancels
 from localharness.provider.runtimes import RUNTIMES, row_of
 
 log = logging.getLogger(__name__)
@@ -1074,77 +1074,17 @@ class OrchestratorREPL:
         return _complete
 
     async def _await_turn_with_sigint(self, turn_task: asyncio.Task) -> None:
-        """Await ONE agent turn (classic path) as a cancellable task so a mid-turn Ctrl+C cancels
-        the turn, not the session (#47).
-
-        While a turn is in flight the prompt_toolkit input app is NOT holding the terminal
-        (it released raw mode when read_input returned), so Ctrl+C arrives as a real SIGINT.
-        The default handler raises KeyboardInterrupt out of the event loop, tearing the whole
-        session down ('Goodbye.') — the exact inversion users hit. We install a loop-level
-        SIGINT handler for the turn's duration that CANCELS the turn task instead. Cancelling
-        propagates asyncio.CancelledError through the loop (never caught by run_turn's
-        `except Exception`) and closes the in-flight streaming HTTP call, so vLLM aborts
-        generation engine-side (the #18 disconnect behavior) — no ghost request.
-
-        Idle Ctrl+C is unchanged: at the prompt the input app's own c-c key binding
-        (TerminalChannel.read_input) absorbs it. A second Ctrl+C while a turn is already
-        cancelling puts back the handler that was in place before the turn, so a further
-        Ctrl+C exits the way the host does (escape hatch). `turn_task` is the already-started
-        turn (from _dispatch_input).
-
-        The handler in place before the turn goes back afterwards — not Python's default, which
-        is what `remove_signal_handler` alone leaves. When `localharness mobile` hosts this REPL
-        that handler is uvicorn's graceful shutdown; with the default in its place, Ctrl-C after
-        the first turn raised KeyboardInterrupt out of the loop and killed the process instead
-        of stopping it (seen on the real surface, 2026-10-04)."""
-        loop = asyncio.get_running_loop()
-        interrupts = 0
-        cancelled_by_user = False
-        previous = signal.getsignal(signal.SIGINT)
-
-        def _restore() -> None:
+        """Await one turn so a mid-turn Ctrl-C cancels the turn, not the session; a cancel of this task itself propagates."""
+        async with sigint_cancels(turn_task) as cancelled:
             try:
-                loop.remove_signal_handler(signal.SIGINT)
-                if previous is not None:
-                    signal.signal(signal.SIGINT, previous)
-            except (NotImplementedError, RuntimeError, ValueError, TypeError):
-                pass
-
-        def _on_sigint() -> None:
-            nonlocal interrupts, cancelled_by_user
-            interrupts += 1
-            if interrupts == 1:
-                cancelled_by_user = True
-                turn_task.cancel()
-            else:
-                _restore()  # escape hatch: a further Ctrl+C reaches the host's handler
-
-        handler_installed = False
-        try:
-            loop.add_signal_handler(signal.SIGINT, _on_sigint)
-            handler_installed = True
-        except (NotImplementedError, RuntimeError, ValueError):
-            # No loop signal support (non-main thread / some event loops): run the turn
-            # anyway; Ctrl+C keeps its prior whole-loop behavior. Never block the turn.
-            pass
-
-        try:
-            await turn_task
-        except asyncio.CancelledError:
-            if cancelled_by_user:
-                # The turn was cancelled by Ctrl+C — the SESSION survives. Truthful line;
-                # send_message stops the thinking spinner / any burst first, so the prompt
-                # returns with sane state (no half-rendered spinner).
+                await turn_task
+            except asyncio.CancelledError:
+                if not cancelled():
+                    turn_task.cancel()
+                    raise
                 await self._channel.send_message(
                     "Turn cancelled.", metadata={"style": "system.info"}
                 )
-            else:
-                # The REPL task itself was cancelled (e.g. shutdown): don't leak the turn.
-                turn_task.cancel()
-                raise
-        finally:
-            if handler_installed:
-                _restore()
 
     async def _handle_reasoning_cmd(self, arg: str) -> None:
         """/reasoning [on|off] — toggle the live reasoning stream on a channel that has one.
