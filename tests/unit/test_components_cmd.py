@@ -609,3 +609,164 @@ def test_set_run_through_write_value_keeps_its_receipt(components_home):
     assert result.exit_code == 0, result.output
     receipt = json.loads(result.stdout)
     assert (receipt["path"], receipt["after"], receipt["layer"]) == (_PCT, 85.0, "user")
+
+
+# ------------------------------------------------------------------ #
+# A credential in a URL is masked in a refusal, the receipts and the audit
+# ------------------------------------------------------------------ #
+
+from types import SimpleNamespace  # noqa: E402
+
+from localharness.cli.components_cmd import (  # noqa: E402
+    redact_text,
+    userinfo_present,
+    workspace_file_of,
+)
+from localharness.config.redact import SECRET_MASK  # noqa: E402
+from localharness.registry.catalogue import LAYER_BANDS  # noqa: E402
+
+_CRED = "https://u:pw@host/x"
+
+
+@pytest.mark.parametrize("text", [
+    "", "plain text", "a@b.c", "https://host/x", "https://host/@user/repo", "https://host/x?to=a@b",
+])
+def test_redact_text_leaves_a_text_without_userinfo_alone(text):
+    assert redact_text(text) == text
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("https://u:pw@host/x", "https://host/x"),
+    ("https://@host", "https://host"),
+    ("http://u:p@ss@host", "http://host"),
+    ("https://u%40x:p@host", "https://host"),
+    ("https://ü:p@host", "https://host"),
+    ("https://a:b@h1/x and http://c:d@h2/y", "https://h1/x and http://h2/y"),
+])
+def test_redact_text_strips_userinfo(text, expected):
+    assert redact_text(text) == expected
+
+
+def test_redact_text_masks_a_url_whose_authority_does_not_parse_whole():
+    assert redact_text("see https://u:p/w@host now") == f"see {SECRET_MASK} now"
+    assert redact_text("Cannot coerce 'https://u:p/w@host' to float") == (
+        f"Cannot coerce '{SECRET_MASK}' to float")
+
+
+def test_redact_text_scrubs_the_secrets_before_it_strips():
+    out = redact_text("key=abc https://abc@h", ["abc"])
+    assert "abc" not in out and out == f"key={SECRET_MASK} https://h"
+
+
+@pytest.mark.parametrize("value", [_CRED, [_CRED], ("x", _CRED), {_CRED}, frozenset({_CRED}), {"k": _CRED}])
+def test_userinfo_present_scans_strings_and_containers(value):
+    assert userinfo_present(value) is True
+
+
+def test_userinfo_present_scans_model_fields_recursively():
+    class Inner(BaseModel):
+        url: str = ""
+
+    class Outer(BaseModel):
+        inner: Inner = Inner()
+        n: int = 0
+
+    assert userinfo_present(Outer(inner=Inner(url=_CRED)))
+    assert not userinfo_present(Outer())
+
+
+@pytest.mark.parametrize("value", ["", None, [], {}, "a@b.c", "https://host/@user/repo", 3, 1.5, True, object()])
+def test_userinfo_present_is_false_for_a_value_without_userinfo(value):
+    assert userinfo_present(value) is False
+
+
+def test_a_refusal_with_no_secrets_still_strips_userinfo():
+    assert str(Refusal(f"bad {_CRED}", ())) == "bad https://host/x"
+    assert str(Refusal("k=abc https://abc@h", ["abc"])) == redact_text("k=abc https://abc@h", ["abc"])
+
+
+def _written(tmp_path, before, after, annotation):
+    return Written("x.y", before, after, annotation, tmp_path / "o.yaml", tmp_path / "audit.jsonl")
+
+
+def _audited(tmp_path, before, after, annotation):
+    asyncio.run(audit_value(_written(tmp_path, before, after, annotation)))
+    (event,) = [json.loads(line) for line in (tmp_path / "audit.jsonl").read_text("utf-8").splitlines()]
+    return event["before_value"], event["after_value"]
+
+
+def test_audit_value_masks_each_side_on_its_own(tmp_path):
+    assert _audited(tmp_path, _CRED, "plain", str) == (SECRET_MASK, "plain")
+
+
+def test_audit_value_masks_the_before_side_when_a_credentialed_url_is_cleared(tmp_path):
+    assert _audited(tmp_path, _CRED, None, str | None) == (SECRET_MASK, None)
+
+
+def test_audit_value_masks_a_credential_inside_a_list(tmp_path):
+    assert _audited(tmp_path, ["a"], ["a", _CRED], list[str]) == (["a"], SECRET_MASK)
+
+
+def test_audit_value_masks_a_credential_in_a_model_typed_leaf(tmp_path):
+    class Endpoint(BaseModel):
+        url: str = ""
+
+    assert _audited(tmp_path, Endpoint(url="http://h"), Endpoint(url=_CRED), Endpoint) == (
+        {"url": "http://h"}, SECRET_MASK)
+
+
+def test_audit_value_masks_both_sides_of_a_secret_annotation(tmp_path):
+    from pydantic import SecretStr
+
+    assert _audited(tmp_path, SecretStr("a"), SecretStr("b"), SecretStr) == (SECRET_MASK, SECRET_MASK)
+
+
+def test_a_credential_url_in_a_float_refusal_is_stripped_in_text_and_json(components_home):
+    _write_project_yaml(components_home, org={"audit_log_path": str(components_home / "audit.jsonl")})
+    plain = runner.invoke(app, ["components", "set", _PCT, "https://u:pw@host"])
+    assert plain.exit_code == 2
+    assert "https://host" in plain.output and "u:pw" not in plain.output
+    as_json = runner.invoke(app, ["components", "set", _PCT, "https://u:pw@host", "--json"])
+    assert as_json.exit_code == 2
+    error = json.loads(as_json.stderr)["error"]
+    assert "https://host" in error and "u:pw" not in error
+
+
+def _set_model(home: Path, value: str, *extra: str):
+    result = runner.invoke(app, ["components", "set", "provider.default_model", value, *extra])
+    assert result.exit_code == 0, result.output
+    return result
+
+
+def test_a_credentialed_value_is_masked_on_all_four_serialized_sides(components_home):
+    _write_project_yaml(components_home, org={"audit_log_path": str(components_home / "audit.jsonl")})
+    first = json.loads(_set_model(components_home, _CRED, "--json").stdout)
+    second = json.loads(_set_model(components_home, "plain-model", "--json").stdout)
+    assert (first["before"], first["after"]) == ("test-model", SECRET_MASK)
+    assert (second["before"], second["after"]) == (SECRET_MASK, "plain-model")
+    one, two = [e for e in _read_audit(components_home) if e.get("event_type") == "ComponentMutated"]
+    assert (one["before_value"], one["after_value"]) == ("test-model", SECRET_MASK)
+    assert (two["before_value"], two["after_value"]) == (SECRET_MASK, "plain-model")
+    assert "pw" not in (components_home / "audit.jsonl").read_text("utf-8")
+
+
+def test_the_human_receipt_shows_the_stripped_url_and_never_the_userinfo(components_home):
+    _write_project_yaml(components_home, org={"audit_log_path": str(components_home / "audit.jsonl")})
+    out = _set_model(components_home, "https://u2:pw2@host2").output
+    assert "https://host2" in out and "pw2" not in out and "u2:" not in out
+
+
+def test_workspace_file_of_names_the_workspace_file_for_a_workspace_band():
+    files = ("/g/config.yaml", "/g/overrides.yaml", "/w/config.yaml", "/w/overrides.yaml")
+    loader = SimpleNamespace(plugin_layer_files=lambda: files)
+    assert workspace_file_of(loader, "workspace-config") == Path("/w/config.yaml")
+    assert workspace_file_of(loader, "workspace-overrides") == Path("/w/overrides.yaml")
+    for band in ("global-config", "global-overrides", "default", "experiment"):
+        assert workspace_file_of(loader, band) is None
+    assert LAYER_BANDS[2:] == ("workspace-config", "workspace-overrides")
+
+
+def test_workspace_file_of_is_none_for_a_workspace_band_when_no_workspace_applies():
+    loader = SimpleNamespace(plugin_layer_files=lambda: ("/g/c.yaml", "/g/o.yaml", "", ""))
+    assert workspace_file_of(loader, "workspace-config") is None
+    assert workspace_file_of(loader, "workspace-overrides") is None
