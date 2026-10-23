@@ -79,6 +79,14 @@ async def test_an_async_action_is_awaited_on_the_loop_thread(tmp_path, flags):
     assert not downloading(NAME) and flags.cleared == 1
 
 
+async def test_a_sync_wrapper_returning_a_coroutine_is_awaited(tmp_path, flags):
+    async def inner():
+        return OK
+
+    assert await _rows(tmp_path, lambda self, ctx: inner()) == tuple(OK)
+    assert not downloading(NAME) and flags.cleared == 1
+
+
 async def test_a_second_call_while_the_first_runs_is_refused(tmp_path, flags):
     release = threading.Event()
 
