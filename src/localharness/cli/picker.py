@@ -90,4 +90,4 @@ def build_picker(
 
 async def pick(options: Sequence[str], current: str | None, **kw: Any) -> str | None:
     """Run the picker; the chosen option, or ``None`` when the person left it."""
-    return await build_picker(options, current, **kw).run_async()
+    return await build_picker(options, current, **kw).run_async(handle_sigint=False)

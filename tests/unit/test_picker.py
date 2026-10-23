@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import signal
+import sys
 from pathlib import Path
 
 import pytest
@@ -79,6 +81,40 @@ async def test_pick_is_the_async_wrapper():
             pick(LEVELS, "high", input=inp, output=DummyOutput()), timeout=10.0
         )
     assert got == "max"
+
+
+async def test_pick_runs_its_application_without_a_sigint_handler(monkeypatch):
+    seen = {}
+
+    class _App:
+        async def run_async(self, **kw):
+            seen.update(kw)
+            return "low"
+
+    monkeypatch.setattr(picker_mod, "build_picker", lambda *a, **k: _App())
+    assert await pick(LEVELS, "high") == "low"
+    assert seen == {"handle_sigint": False}
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="loop signal handlers are POSIX-only")
+async def test_a_loop_sigint_handler_survives_a_pick():
+    loop = asyncio.get_running_loop()
+    loop.add_signal_handler(signal.SIGINT, lambda: None)
+    try:
+        with create_pipe_input() as inp:
+            inp.send_text("\r")
+            got = await asyncio.wait_for(pick(LEVELS, "high", input=inp, output=DummyOutput()), timeout=10.0)
+        assert got == "high"
+        assert loop.remove_signal_handler(signal.SIGINT) is True
+    finally:
+        loop.remove_signal_handler(signal.SIGINT)
+
+
+@pytest.mark.parametrize("keys", ["\x03", "\x1b"])
+async def test_pick_still_answers_none_to_ctrl_c_and_escape(keys):
+    with create_pipe_input() as inp:
+        inp.send_text(keys)
+        assert await asyncio.wait_for(pick(LEVELS, "high", input=inp, output=DummyOutput()), timeout=10.0) is None
 
 
 def test_the_highlighted_option_is_selected_and_the_rest_are_hints():
