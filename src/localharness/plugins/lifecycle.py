@@ -393,7 +393,7 @@ def downloading(name: str) -> bool:
 
 
 async def setup_action_rows(resolution: Resolution, name: str, paths: PluginPaths) -> tuple[Check, ...]:
-    """Run NAME's setup_action() once on a throwaway context; contained like doctor(), and a second call while it still runs is one DOWNLOAD_RUNNING row."""
+    """Run NAME's setup_action() on a throwaway context, contained; a call while one runs is refused."""
     if name in _downloading:
         return (Check(name=name, status="fail", detail=DOWNLOAD_RUNNING),)
     ctx = plugin_context(resolution, name, bus=EventBus(), registry=ToolRegistry(),
