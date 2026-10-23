@@ -107,9 +107,10 @@ async def _call(fn: Callable[..., Any], *args: Any, threaded: bool = False) -> A
     if inspect.iscoroutinefunction(fn):
         return await fn(*args)
     if threaded:
-        return await asyncio.get_running_loop().run_in_executor(
+        value = await asyncio.get_running_loop().run_in_executor(
             None, contextvars.copy_context().run, fn, *args)
-    value = fn(*args)
+    else:
+        value = fn(*args)
     return await value if inspect.isawaitable(value) else value
 
 
