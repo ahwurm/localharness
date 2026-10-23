@@ -17,6 +17,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.rule import Rule
 
+from localharness.channels.base import sanitize_for_display
 from localharness.cli.workspace import NO_INPUT_HELP
 from localharness.config.loader import ConfigLoader
 from localharness.config.migrate import BACKUP_PREFIX, BACKUP_STAMP_FORMAT
@@ -425,10 +426,10 @@ def print_plugin_row(row, failures: list[str]) -> None:
     """One plugin's doctor lines — its checks (hint on the next line) or its state row. Shared with
     `plugins enable`, so the check it runs after setup prints exactly as doctor prints it."""
     for check in row.checks:
-        console.print(_CHECK_GLYPH[check.status] + escape(
-            check.name + (f": {check.detail}" if check.detail else "")), soft_wrap=True)
+        console.print(_CHECK_GLYPH[check.status] + escape(sanitize_for_display(
+            check.name + (f": {check.detail}" if check.detail else ""))), soft_wrap=True)
         if check.hint:
-            console.print(escape(f"       {check.hint}"), soft_wrap=True)
+            console.print(escape(sanitize_for_display(f"       {check.hint}")), soft_wrap=True)
         if check.status == "fail":
             failures.append(f"plugin-{row.name}")
     if row.state == "on":
@@ -436,7 +437,7 @@ def print_plugin_row(row, failures: list[str]) -> None:
     glyph = _ROW_GLYPH.get(row.state, _FAIL + " ")
     if row.state == "needs-extra" and row.bundled:
         glyph = _INFO + "  "
-    console.print(glyph + escape(f"{row.name}: {row.detail}"), soft_wrap=True)
+    console.print(glyph + escape(sanitize_for_display(f"{row.name}: {row.detail}")), soft_wrap=True)
     if row.state not in _ROW_GLYPH:
         failures.append(f"plugin-{row.name}")
 
