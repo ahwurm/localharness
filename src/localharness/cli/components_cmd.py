@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, Optional
+from urllib.parse import urlsplit
 
 import typer
 from pydantic import ValidationError
@@ -31,8 +32,6 @@ from localharness.config.redact import validation_text as _validation_text
 from localharness.core.bus import EventBus
 from localharness.core.events import ComponentMutated
 from localharness.registry import (
-    LAYER_WORKSPACE_CONFIG,
-    LAYER_WORKSPACE_OVERRIDES,
     SURFACE_FAMILIES,
     ComponentEntry,
     coerce_value,
@@ -41,6 +40,7 @@ from localharness.registry import (
 )
 from localharness.registry.catalogue import (
     AGENT_PATHS_NOT_ADDRESSABLE,
+    LAYER_BANDS,
     PluginRows,
     plugin_catalogue_rows,
 )
@@ -236,6 +236,48 @@ def shown(value: Any, annotation: Any = None) -> str:
     return repr(SECRET_MASK) if holds_secret(annotation) or isinstance(value, SecretStr) else repr(value)
 
 
+_URL_WITH_AT = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"]*@[^\s'\"]*")
+
+
+def _authority_unparseable(url: str) -> bool:
+    try:
+        urlsplit(url).port
+    except ValueError:
+        return True
+    return False
+
+
+def redact_text(text: str, secrets: Sequence[str] = ()) -> str:
+    """`text` with `secrets` masked and URL userinfo stripped; a URL whose authority will not parse
+    but still holds an `@` (an unencoded slash in a password) is masked whole."""
+    from localharness.provider.server import strip_url_credentials  # pulls httpx: not at CLI start
+
+    stripped = strip_url_credentials(scrub(text, list(secrets)))
+    return _URL_WITH_AT.sub(lambda m: SECRET_MASK if _authority_unparseable(m.group()) else m.group(), stripped)
+
+
+def userinfo_present(value: Any) -> bool:
+    from pydantic import BaseModel
+
+    if isinstance(value, str):
+        return redact_text(value) != value
+    if isinstance(value, BaseModel):
+        return any(userinfo_present(getattr(value, name)) for name in type(value).model_fields)
+    if isinstance(value, dict):
+        return any(userinfo_present(v) for v in value.values())
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return any(userinfo_present(v) for v in value)
+    return False
+
+
+def workspace_file_of(loader: ConfigLoader, winning_layer: str) -> Path | None:
+    """The workspace file `winning_layer` names, or None for any other band or no workspace."""
+    if winning_layer not in LAYER_BANDS[2:]:
+        return None
+    file = loader.plugin_layer_files()[LAYER_BANDS.index(winning_layer)]
+    return Path(file) if file else None
+
+
 def _overlay_secrets(catalogue: dict[str, ComponentEntry], overlay: dict) -> list[str]:
     """The raw strings an overlay holds at secret leaves."""
     out = []
@@ -308,7 +350,7 @@ class Refusal(Exception):
     """A write the checked path declined; its message is already scrubbed."""
 
     def __init__(self, text: str, secrets: Sequence[str]) -> None:
-        super().__init__(scrub(text, list(secrets)))
+        super().__init__(redact_text(text, secrets))
 
 
 @dataclass(frozen=True)
@@ -353,12 +395,15 @@ def write_value(loader: ConfigLoader, catalogue: dict[str, ComponentEntry],
     return Written(path, before, typed_value, entry.annotation, overlay_path, audit_path)
 
 
+def _side(value: Any, annotation: Any) -> Any:
+    return _serialize_value(value, is_secret(annotation) or userinfo_present(value))
+
+
 async def audit_value(written: Written) -> None:
-    secret = is_secret(written.annotation)
     await EventBus(persist_path=written.audit_path).publish(ComponentMutated(
         path=written.path,
-        before_value=_serialize_value(written.before, secret),
-        after_value=_serialize_value(written.after, secret),
+        before_value=_side(written.before, written.annotation),
+        after_value=_side(written.after, written.annotation),
         layer="user",
         actor="cli",
     ))
@@ -592,7 +637,6 @@ def components_set(
         _err(json_output, str(refusal), exit_code=2)
         return
     before, typed_value, overlay_path = written.before, written.after, written.overlay_path
-    secret = is_secret(written.annotation)
 
     # 8. Confirm, and SAY WHERE IT WENT. The write target has always been the global
     #    overrides.yaml; F4 is that nothing said so at the moment it happened, so a user standing
@@ -614,8 +658,8 @@ def components_set(
     if json_output:
         receipt = {
             "path": path,
-            "before": _serialize_value(before, secret),
-            "after": _serialize_value(after, secret),
+            "before": _side(before, written.annotation),
+            "after": _side(after, written.annotation),
             # `layer` is the ComponentMutated audit event's own, older vocabulary and is
             # NOT the registry band — renaming it would change a persisted log's schema.
             # `target` is the honest addition: the file that was actually written.
@@ -634,8 +678,8 @@ def components_set(
         # like `[dim]` renders as nothing at all — this receipt would confirm setting a key to an
         # empty string. Same lesson as the path lines, applied to values (41-06 / doctor's rows).
         console.print(
-            "[green]set[/green] " + escape(f"{path} = {shown(after, entry.annotation)} "
-                                          f"(was: {shown(before, entry.annotation)})"),
+            "[green]set[/green] " + escape(redact_text(f"{path} = {shown(after, entry.annotation)} "
+                                                      f"(was: {shown(before, entry.annotation)})")),
             soft_wrap=True,
         )
         # escape(): a path is data, not markup — a folder named `[old] proj` must not be parsed
@@ -650,7 +694,7 @@ def components_set(
                 "project, including this one. A per-project value goes in "
                 f"{escape(str(workspace / 'config.yaml'))}."
             )
-            if entry.winning_layer in (LAYER_WORKSPACE_CONFIG, LAYER_WORKSPACE_OVERRIDES):
+            if workspace_file_of(loader, entry.winning_layer) is not None:
                 # Without this the command reports success and the value a user reads back does
                 # not move — the same class of silence F4 exists to remove.
                 console.print(
