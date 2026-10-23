@@ -31,8 +31,11 @@ Named residuals — what containment does NOT cover:
 """
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import inspect
 import logging
+import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -99,8 +102,13 @@ def _what(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
 
 
-async def _call(fn: Callable[..., Any], *args: Any) -> Any:
-    """Call a plugin method, awaiting it if it is async (a plain def is taken as written)."""
+async def _call(fn: Callable[..., Any], *args: Any, threaded: bool = False) -> Any:
+    """Call a plugin method: awaited if async; a plain def runs inline, or on the executor when `threaded`."""
+    if inspect.iscoroutinefunction(fn):
+        return await fn(*args)
+    if threaded:
+        return await asyncio.get_running_loop().run_in_executor(
+            None, contextvars.copy_context().run, fn, *args)
     value = fn(*args)
     return await value if inspect.isawaitable(value) else value
 
@@ -374,17 +382,41 @@ async def _doctor_row(resolution: Resolution, name: str, paths: PluginPaths) -> 
     return DoctorRow(name, "on", "", tuple(checks), bundled=bundled)
 
 
+DOWNLOAD_RUNNING = ("download still stopping — try again in a minute; if it never clears, quit and "
+                    "restart localharness")
+_downloading: set[str] = set()
+
+
+def downloading(name: str) -> bool:
+    return name in _downloading
+
+
 async def setup_action_rows(resolution: Resolution, name: str, paths: PluginPaths) -> tuple[Check, ...]:
-    """Run NAME's setup_action() once, outside any session, against a throwaway context like
-    doctor's (no LLM client). Contained like doctor(): an exception (SystemExit included) or a
-    return that is not a list of Check is one failing row naming it. KeyboardInterrupt propagates.
-    Called only by `plugins enable` on a terminal — never at start."""
+    """Run NAME's setup_action() once on a throwaway context; contained like doctor(), and a second call while it still runs is one DOWNLOAD_RUNNING row."""
+    if name in _downloading:
+        return (Check(name=name, status="fail", detail=DOWNLOAD_RUNNING),)
     ctx = plugin_context(resolution, name, bus=EventBus(), registry=ToolRegistry(),
                          hooks=HookSystem(), llm=None, paths=paths)
+    claim = threading.Lock()  # taken by whoever clears _downloading: the thread, or an awaiter gone first
+
+    def guarded(ctx: PluginContext) -> Any:
+        if not claim.acquire(False):
+            return
+        try:
+            return action(ctx)
+        finally:
+            _downloading.discard(name)
+
     try:
-        rows = await _call(resolution.classes[name]().setup_action, ctx)
+        action = resolution.classes[name]().setup_action
+        _downloading.add(name)
+        rows = await _call(action if inspect.iscoroutinefunction(action) else guarded, ctx,
+                           threaded=True)
     except (Exception, SystemExit) as exc:  # noqa: BLE001 — PAPI-11: never fatal
         return (Check(name=name, status="fail", detail=f"its setup action raised {_what(exc)}"),)
+    finally:
+        if claim.acquire(False):
+            _downloading.discard(name)
     if not (isinstance(rows, (list, tuple)) and all(isinstance(c, Check) for c in rows)):
         return (Check(name=name, status="fail",
                       detail=f"its setup action returned {rows!r:.80}, not a list of Check"),)
