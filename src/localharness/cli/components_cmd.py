@@ -614,26 +614,21 @@ def components_set(
             _err(json_output, f"No value read for {path}; nothing was written.", exit_code=2)
             return
 
-    async def write_and_audit() -> Written:
-        written = write_value(loader, catalogue, plugins, path, value)
-        await audit_value(written)
-        return written
-
-    coro = write_and_audit()
     try:
-        try:
-            written = asyncio.run(coro)
-        except RuntimeError:
-            # Already inside an event loop (rare for CLI but possible under pytest-asyncio)
-            coro.close()
-            loop = asyncio.new_event_loop()
-            try:
-                written = loop.run_until_complete(write_and_audit())
-            finally:
-                loop.close()
+        written = write_value(loader, catalogue, plugins, path, value)
     except Refusal as refusal:
         _err(json_output, str(refusal), exit_code=2)
         return
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(audit_value(written))
+    else:  # already inside an event loop (possible under pytest-asyncio)
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(audit_value(written))
+        finally:
+            loop.close()
     before, typed_value, overlay_path = written.before, written.after, written.overlay_path
 
     # 8. Confirm, and SAY WHERE IT WENT. The write target has always been the global
