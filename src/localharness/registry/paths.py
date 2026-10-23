@@ -9,15 +9,16 @@ See 14-RESEARCH.md Patterns 1, 2, 3 + Pitfall 1 (always use class-level model_fi
 """
 from __future__ import annotations
 
+import types
 from functools import reduce
 from typing import Any, Union, get_args, get_origin
 
 from pydantic import BaseModel
 
 
-def _unwrap_optional(ann: Any) -> Any:
-    """Optional[X] == Union[X, None] → X. Leaves non-Optional unchanged."""
-    if get_origin(ann) is Union:
+def unwrap_optional(ann: Any) -> Any:
+    """Optional[X] / X | None → X; anything else unchanged."""
+    if get_origin(ann) in (Union, types.UnionType):
         args = [a for a in get_args(ann) if a is not type(None)]
         if len(args) == 1:
             return args[0]
@@ -44,7 +45,7 @@ def walk_model_fields(
         ann = info.annotation
         path = f"{prefix}.{name}" if prefix else name
 
-        inner = _unwrap_optional(ann)
+        inner = unwrap_optional(ann)
 
         # Skip ambiguous non-Optional unions silently for now (no such fields today)
         if get_origin(inner) is Union:

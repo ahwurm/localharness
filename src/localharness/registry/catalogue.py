@@ -88,6 +88,7 @@ LAYER_WORKSPACE_CONFIG = "workspace-config"
 LAYER_WORKSPACE_OVERRIDES = "workspace-overrides"
 LAYER_EXPERIMENT = "experiment"
 LAYER_DEFAULT = "default"
+LAYER_BANDS = (LAYER_GLOBAL_CONFIG, LAYER_GLOBAL_OVERRIDES, LAYER_WORKSPACE_CONFIG, LAYER_WORKSPACE_OVERRIDES)
 
 # Highest-priority FIRST. The order IS the owner's ruled merge order read backwards:
 # global config < global overrides < workspace config < workspace overrides, with `experiment`

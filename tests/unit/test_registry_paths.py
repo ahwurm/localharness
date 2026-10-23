@@ -153,6 +153,7 @@ def test_coerce_value_optional_unwraps():
     from typing import Optional
     from localharness.registry.coerce import coerce_value
     assert coerce_value("5", Optional[int]) == 5
+    assert coerce_value("5", int | None) == 5
 
 
 def test_coerce_value_optional_null_sentinels():
@@ -161,6 +162,26 @@ def test_coerce_value_optional_null_sentinels():
     assert coerce_value("null", Optional[int]) is None
     assert coerce_value("none", Optional[int]) is None
     assert coerce_value("~", Optional[int]) is None
+
+
+def test_coerce_value_pep604_optional_str_clears_like_typing_optional():
+    from typing import Optional
+    from localharness.registry.coerce import coerce_value
+    for raw in ("null", "none", "~"):
+        assert coerce_value(raw, Optional[str]) is None
+        assert coerce_value(raw, str | None) is None
+    assert coerce_value("none", str) == "none"
+    assert coerce_value("x", str | None) == "x"
+
+
+def test_unwrap_optional_handles_both_union_spellings():
+    from typing import Optional, Union
+    from localharness.registry.paths import unwrap_optional
+    assert unwrap_optional(Optional[str]) is str
+    assert unwrap_optional(Union[int, None]) is int
+    assert unwrap_optional(str | None) is str
+    assert unwrap_optional(int) is int
+    assert unwrap_optional(int | str) == int | str
 
 
 def test_coerce_value_bad_int_raises():

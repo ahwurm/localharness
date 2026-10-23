@@ -6,22 +6,14 @@ inheritance would otherwise silently produce 0.0).
 """
 from __future__ import annotations
 
-from typing import Any, Union, get_args, get_origin
+from typing import Any
 
+from localharness.registry.paths import unwrap_optional
 
 _TRUE_LITERALS = frozenset({"true", "1", "yes", "on"})
 _FALSE_LITERALS = frozenset({"false", "0", "no", "off"})
 _NULL_LITERALS = frozenset({"null", "none", "~"})
 _BOOL_LITERALS = _TRUE_LITERALS | _FALSE_LITERALS
-
-
-def _unwrap_optional(ann: Any) -> tuple[Any, bool]:
-    """Return (inner_type, is_optional). Optional[X] → (X, True)."""
-    if get_origin(ann) is Union:
-        args = [a for a in get_args(ann) if a is not type(None)]
-        if len(args) == 1:
-            return args[0], True
-    return ann, False
 
 
 def coerce_value(raw: str, annotation: Any) -> Any:
@@ -31,10 +23,10 @@ def coerce_value(raw: str, annotation: Any) -> Any:
     Optional[X] → returns None for raw in {"null", "none", "~"}, else coerces to X.
     Any → passthrough (returns raw unchanged).
     """
-    inner, is_optional = _unwrap_optional(annotation)
+    inner = unwrap_optional(annotation)
 
     # Optional → null sentinels
-    if is_optional and raw.strip().lower() in _NULL_LITERALS:
+    if inner is not annotation and raw.strip().lower() in _NULL_LITERALS:
         return None
 
     # Any → passthrough
