@@ -647,10 +647,13 @@ def test_redact_text_strips_userinfo(text, expected):
     assert redact_text(text) == expected
 
 
-def test_redact_text_masks_a_url_whose_authority_does_not_parse_whole():
-    assert redact_text("see https://u:p/w@host now") == f"see {SECRET_MASK} now"
-    assert redact_text("Cannot coerce 'https://u:p/w@host' to float") == (
-        f"Cannot coerce '{SECRET_MASK}' to float")
+_UNSPLIT = ["https://u:p/w@host", "http://u:12345/ss@host", "http://u:123?ss@host", "http://host:8080/@user/x"]
+
+
+@pytest.mark.parametrize("url", _UNSPLIT)
+def test_redact_text_masks_a_url_whose_authority_does_not_parse_whole(url):
+    assert redact_text(f"see {url} now") == f"see {SECRET_MASK} now"
+    assert redact_text(f"Cannot coerce '{url}' to float") == f"Cannot coerce '{SECRET_MASK}' to float"
 
 
 def test_redact_text_scrubs_the_secrets_before_it_strips():
@@ -697,6 +700,11 @@ def _audited(tmp_path, before, after, annotation):
 
 def test_audit_value_masks_each_side_on_its_own(tmp_path):
     assert _audited(tmp_path, _CRED, "plain", str) == (SECRET_MASK, "plain")
+
+
+@pytest.mark.parametrize("url", _UNSPLIT)
+def test_audit_value_masks_a_url_whose_authority_does_not_parse(tmp_path, url):
+    assert _audited(tmp_path, url, "plain", str) == (SECRET_MASK, "plain")
 
 
 def test_audit_value_masks_the_before_side_when_a_credentialed_url_is_cleared(tmp_path):
