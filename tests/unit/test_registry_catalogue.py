@@ -495,6 +495,18 @@ def test_layer_priority_records_the_ruled_order():
     ), "the exported constants must BE the tuple — one anchor, no second spelling"
 
 
+def test_layer_bands_is_the_loader_slot_order_and_plugins_cmd_keeps_no_copy():
+    from localharness.cli import plugins_cmd
+    from localharness.registry import catalogue
+    assert catalogue.LAYER_BANDS == (
+        catalogue.LAYER_GLOBAL_CONFIG,
+        catalogue.LAYER_GLOBAL_OVERRIDES,
+        catalogue.LAYER_WORKSPACE_CONFIG,
+        catalogue.LAYER_WORKSPACE_OVERRIDES,
+    ), "plugin_layers() / plugin_layer_files() slot order"
+    assert not hasattr(plugins_cmd, "_BANDS")
+
+
 def test_workspace_outranks_user_when_both_declare_a_path():
     """The ruled order proven behaviorally, not only as a tuple literal.
 

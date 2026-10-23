@@ -38,7 +38,7 @@ from localharness.registry.catalogue import (
     build_catalogue,
     plugin_catalogue_rows,
 )
-from localharness.registry.paths import _unwrap_optional
+from localharness.registry.paths import unwrap_optional
 
 _AGENT_KEY = "agent"
 _AGENT_PREFIX = _AGENT_KEY + "."
@@ -156,7 +156,7 @@ def _accumulated(layers: list[str]) -> str:
 
 def _is_dict_leaf(entry: ComponentEntry) -> bool:
     """A `dict[K, V]` leaf, which `deep_merge` MERGES key-wise rather than replacing."""
-    return get_origin(_unwrap_optional(entry.annotation)) is dict
+    return get_origin(unwrap_optional(entry.annotation)) is dict
 
 
 def _under(path: str, roots: frozenset[str]) -> bool:

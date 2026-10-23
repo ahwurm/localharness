@@ -43,11 +43,8 @@ from localharness.cli.components_cmd import (
 from localharness.cli.workspace import _stdin_is_a_terminal
 from localharness.config.overlay import atomic_write_overlay, load_overlay
 from localharness.config.plugin_sections import unowned_hint
-from localharness.registry import (
-    LAYER_DEFAULT, LAYER_GLOBAL_CONFIG, LAYER_GLOBAL_OVERRIDES, LAYER_WORKSPACE_CONFIG,
-    LAYER_WORKSPACE_OVERRIDES, coerce_value, set_value_in_dict, walk_model_fields,
-)
-from localharness.registry.catalogue import plugin_catalogue_rows
+from localharness.registry import LAYER_DEFAULT, coerce_value, set_value_in_dict, walk_model_fields
+from localharness.registry.catalogue import LAYER_BANDS, plugin_catalogue_rows
 from localharness.registry.provenance import layered_catalogue
 
 if TYPE_CHECKING:
@@ -70,7 +67,6 @@ Name = Annotated[str, typer.Argument(help="The plugin's name, as `plugins list` 
 Workspace = Annotated[bool, typer.Option(
     "--workspace", help="Write this project's overrides.yaml instead of the machine's. Plugins that "
                         "ship with LocalHarness only: a plugin you installed is switched machine-wide.")]
-_BANDS = (LAYER_GLOBAL_CONFIG, LAYER_GLOBAL_OVERRIDES, LAYER_WORKSPACE_CONFIG, LAYER_WORKSPACE_OVERRIDES)
 # Asked once, in a session, before turning on a plugin the user installed: it is machine-wide trust
 # in code that runs with their permissions (SAFE-06). Bundled plugins and the shell command never ask.
 THIRD_PARTY_CONFIRM = ("{name} is a plugin you installed, not one that ships with LocalHarness: turning "
@@ -164,7 +160,7 @@ def _switch_layer(loader: ConfigLoader, name: str, bundled: bool) -> str:
     """The layer `<name>.enabled` is read from: the four for a bundled plugin, the machine's two for
     a plugin you installed (the resolver's rule)."""
     sections = loader.plugin_layers().get(name, (None,) * 4)[: 4 if bundled else 2]
-    return next((band for band, section in reversed(list(zip(_BANDS, sections)))
+    return next((band for band, section in reversed(list(zip(LAYER_BANDS, sections)))
                  if isinstance(section, dict) and "enabled" in section), LAYER_DEFAULT)
 
 
