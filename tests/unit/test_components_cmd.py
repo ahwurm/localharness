@@ -647,7 +647,8 @@ def test_redact_text_strips_userinfo(text, expected):
     assert redact_text(text) == expected
 
 
-_UNSPLIT = ["https://u:p/w@host", "http://u:12345/ss@host", "http://u:123?ss@host", "http://host:8080/@user/x"]
+_UNSPLIT = ["https://u:p/w@host", "http://u:12345/ss@host", "http://u:123?ss@host", "http://host:8080/@user/x",
+            "https://[::1/x@y"]
 
 
 @pytest.mark.parametrize("url", _UNSPLIT)
