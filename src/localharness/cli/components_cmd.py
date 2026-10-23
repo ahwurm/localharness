@@ -12,7 +12,7 @@ from typing import Annotated, Any, Optional
 from urllib.parse import urlsplit
 
 import typer
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
@@ -240,16 +240,16 @@ _URL_WITH_AT = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"]*@[^\s'\"]*")
 
 
 def _authority_unparseable(url: str) -> bool:
+    parts = urlsplit(url)
     try:
-        urlsplit(url).port
+        parts.port
     except ValueError:
         return True
-    return False
+    return ":" in parts.netloc and "@" in url[len(parts.scheme) + 3 + len(parts.netloc):]
 
 
 def redact_text(text: str, secrets: Sequence[str] = ()) -> str:
-    """`text` with `secrets` masked and URL userinfo stripped; a URL whose authority will not parse
-    but still holds an `@` (an unencoded slash in a password) is masked whole."""
+    """`text` with `secrets` masked, URL userinfo stripped, and a URL with an `@` past its authority masked whole."""
     from localharness.provider.server import strip_url_credentials  # pulls httpx: not at CLI start
 
     stripped = strip_url_credentials(scrub(text, list(secrets)))
@@ -257,8 +257,6 @@ def redact_text(text: str, secrets: Sequence[str] = ()) -> str:
 
 
 def userinfo_present(value: Any) -> bool:
-    from pydantic import BaseModel
-
     if isinstance(value, str):
         return redact_text(value) != value
     if isinstance(value, BaseModel):
