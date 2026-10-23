@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import io
 import sys
-import termios
 from types import SimpleNamespace
 
 import pytest
@@ -130,6 +129,7 @@ def test_a_stdout_console_leaves_the_output_to_the_session(monkeypatch):
 
 
 def test_pending_input_is_flushed_before_the_session_exists(monkeypatch, sessions):
+    termios = pytest.importorskip("termios")
     flushed = []
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(fileno=lambda: 7))
     monkeypatch.setattr(termios, "tcflush", lambda fd, queue: flushed.append((fd, queue, len(sessions))))
@@ -138,6 +138,8 @@ def test_pending_input_is_flushed_before_the_session_exists(monkeypatch, session
 
 
 def test_a_failing_or_missing_termios_is_tolerated(monkeypatch):
+    termios = pytest.importorskip("termios")
+
     def boom(fd, queue):
         raise termios.error(25, "not a tty")
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(fileno=lambda: 7))
