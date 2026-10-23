@@ -6,7 +6,7 @@ from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
 from localharness.cli import interview, workspace
-from localharness.cli.interview import Answer, Option, ask, build_interview
+from localharness.cli.interview import Answer, Option, Unreachable, ask, build_interview, can_draw, n_of
 from tests.unit.interview_support import CANCEL, UNREACHED, Asked, scripted
 
 TWO_MODELS = [
@@ -95,7 +95,7 @@ def test_a_pipe_on_stdin_is_cancelled_unreached_and_no_application_is_built(monk
     tty_streams(stdin=False)
     built = []
     monkeypatch.setattr(interview, "build_interview", lambda *a, **k: built.append(1))
-    assert ask(QUESTION, TWO_MODELS, default=0, cancel="skip") == Answer(("skip",), True, reached=False)
+    assert ask(QUESTION, TWO_MODELS, default=0, cancel="skip") == Answer(("skip",), True, False, Unreachable.NO_OPERATOR)
     assert built == []
 
 
@@ -234,14 +234,14 @@ class _Sized(DummyOutput):
 def test_a_dumb_terminal_is_unreached_and_builds_nothing(monkeypatch):
     monkeypatch.setenv("TERM", "dumb")
     monkeypatch.setattr(interview, "build_interview", lambda *a, **k: pytest.fail("built"))
-    assert ask(QUESTION, ABC, default=0, cancel="c") == Answer(("c",), True, reached=False)
+    assert ask(QUESTION, ABC, default=0, cancel="c") == Answer(("c",), True, False, Unreachable.DUMB)
 
 
 @pytest.mark.parametrize("rows,columns", [(2, 80), (24, 19)])
 def test_a_terminal_below_three_rows_or_twenty_columns_is_unreached(rows, columns, monkeypatch):
     monkeypatch.setattr(interview, "build_interview", lambda *a, **k: pytest.fail("built"))
     out = _Sized(rows, columns)
-    assert ask(QUESTION, ABC, default=0, cancel="c", output=out) == Answer(("c",), True, reached=False)
+    assert ask(QUESTION, ABC, default=0, cancel="c", output=out) == Answer(("c",), True, False, Unreachable.TOO_SMALL)
 
 
 def test_a_failure_while_drawing_is_unreached_not_an_exception(monkeypatch):
@@ -250,7 +250,38 @@ def test_a_failure_while_drawing_is_unreached_not_an_exception(monkeypatch):
             raise OSError("no terminal")
 
     monkeypatch.setattr(interview, "build_interview", lambda *a, **k: Boom())
-    assert ask(QUESTION, ABC, default=0, cancel="c") == Answer(("c",), True, reached=False)
+    assert ask(QUESTION, ABC, default=0, cancel="c") == Answer(("c",), True, False, Unreachable.ERROR)
+
+
+class _Raising(DummyOutput):
+    def get_size(self):
+        raise OSError("no size")
+
+
+def test_can_draw_names_why_the_terminal_cannot_be_drawn_on(monkeypatch):
+    big = _Sized(24, 80)
+    assert can_draw(big) is None
+    assert can_draw(_Sized(2, 80)) is Unreachable.TOO_SMALL
+    assert can_draw(_Raising()) is Unreachable.ERROR
+    monkeypatch.setenv("TERM", "dumb")
+    assert can_draw(big) is Unreachable.DUMB
+    monkeypatch.setattr(interview, "local_operator", lambda no_input: False)
+    assert can_draw(big) is Unreachable.NO_OPERATOR
+    assert [u.name for u in Unreachable] == ["NO_TTY", "NO_OPERATOR", "DUMB", "TOO_SMALL", "ERROR"]
+
+
+def test_without_an_output_can_draw_measures_the_one_it_creates(monkeypatch):
+    monkeypatch.setattr(interview, "create_output", lambda: _Sized(24, 19))
+    assert can_draw() is Unreachable.TOO_SMALL
+
+
+def test_n_of_pluralises_by_count():
+    assert (n_of(1, "ask"), n_of(3, "ask"), n_of(0, "ask")) == ("1 ask", "3 asks", "0 asks")
+
+
+def test_erase_when_done_reaches_the_application():
+    app = build_interview(QUESTION, ABC, default=0, cancel="a", output=DummyOutput(), erase_when_done=True)
+    assert app.erase_when_done is True
 
 
 def test_a_real_pipe_on_stdin_is_never_read(monkeypatch, tty_streams):
@@ -260,7 +291,7 @@ def test_a_real_pipe_on_stdin_is_never_read(monkeypatch, tty_streams):
     os.write(w, b"\r")
     with os.fdopen(r) as pipe:
         monkeypatch.setattr("sys.stdin", pipe)
-        assert ask(QUESTION, ABC, default=0, cancel="c") == Answer(("c",), True, reached=False)
+        assert ask(QUESTION, ABC, default=0, cancel="c") == Answer(("c",), True, False, Unreachable.NO_OPERATOR)
         assert os.read(pipe.fileno(), 1) == b"\r"
     os.close(w)
 

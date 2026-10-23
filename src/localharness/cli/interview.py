@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass
+from enum import Enum, auto
 from typing import Any
 
 from prompt_toolkit.application import Application
@@ -14,6 +17,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import ConditionalContainer, HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.output.defaults import create_output
+from prompt_toolkit.shortcuts import PromptSession
 
 from localharness.cli.picker import PICKER_STYLE
 from localharness.cli.workspace import local_operator, visible_text
@@ -33,12 +37,25 @@ class Option:
     hint: str = ""
 
 
+class Unreachable(Enum):
+    NO_TTY = auto()
+    NO_OPERATOR = auto()
+    DUMB = auto()
+    TOO_SMALL = auto()
+    ERROR = auto()
+
+
 @dataclass(frozen=True)
 class Answer:
     """`reached` is False when nobody could be asked; `cancelled` alone cannot tell that from a person's Esc."""
     keys: tuple[str, ...]
     cancelled: bool
     reached: bool = True
+    why: Unreachable | None = None
+
+
+def n_of(n: int, noun: str) -> str:
+    return f"{n} {noun}{'' if n == 1 else 's'}"
 
 
 def build_interview(
@@ -50,6 +67,7 @@ def build_interview(
     multi: bool = False,
     input: Any = None,
     output: Any = None,
+    erase_when_done: bool = False,
 ) -> Application:
     opts = list(options)
     shown_question = visible_text(question)
@@ -152,7 +170,7 @@ def build_interview(
         key_bindings=kb,
         style=PICKER_STYLE,
         mouse_support=False,
-        erase_when_done=False,
+        erase_when_done=erase_when_done,
         **({"input": input} if input is not None else {}),
         **({"output": output} if output is not None else {}),
     )
@@ -187,16 +205,50 @@ def ask(
 ) -> Answer:
     """Ask one question; `reached=False` when no person could be asked, with nothing read."""
     _validate(options, default, cancel, multi)
-    unreached = Answer((cancel,), True, reached=False)
-    if not local_operator(False) or os.environ.get("TERM") == "dumb":
-        return unreached
+    why = can_draw(output)
+    if why is None:
+        try:
+            return build_interview(question, options, default=default, cancel=cancel, multi=multi,
+                                   input=input, output=output).run(in_thread=True)
+        except Exception:
+            why = Unreachable.ERROR
+    return Answer((cancel,), True, reached=False, why=why)
+
+
+def can_draw(output: Any = None) -> Unreachable | None:
+    """`NO_TTY` is the channel's to report; this gate assumes a terminal is on both ends."""
     try:
-        output = output if output is not None else create_output()
-        size = output.get_size()
-        if size.rows < MIN_ROWS or size.columns < MIN_COLUMNS:
-            return unreached
-        app = build_interview(question, options, default=default, cancel=cancel, multi=multi,
-                              input=input, output=output)
-        return app.run(in_thread=True)
+        if not local_operator(False):
+            return Unreachable.NO_OPERATOR
+        if os.environ.get("TERM") == "dumb":
+            return Unreachable.DUMB
+        size = (output if output is not None else create_output()).get_size()
+        return Unreachable.TOO_SMALL if size.rows < MIN_ROWS or size.columns < MIN_COLUMNS else None
     except Exception:
-        return unreached
+        return Unreachable.ERROR
+
+
+def _flush_typed_ahead() -> None:
+    with suppress(Exception):
+        import termios
+        termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+
+
+async def prompt_line(text: str, *, console: Any, default: str = "", secret: bool = False) -> str | None:
+    """One line typed at a fresh session; a reused session would keep an accepted secret in its history."""
+    _flush_typed_ahead()
+    out = {"output": create_output(always_prefer_tty=True)} if console.stderr else {}
+    session = PromptSession([("", text)], is_password=secret, **out)
+    try:
+        return (await session.prompt_async(default=default, handle_sigint=False)).strip()
+    except (KeyboardInterrupt, EOFError):
+        return None
+
+
+async def confirm_line(text: str, *, console: Any, default: bool, tail: str = "") -> bool | None:
+    shown = f"{text} [{'Y/n' if default else 'y/N'}]" + (f"  {tail}" if tail else "") + " "
+    answers = {"": default, "y": True, "yes": True, "n": False, "no": False}
+    while (line := await prompt_line(shown, console=console)) is not None:
+        if line.lower() in answers:
+            return answers[line.lower()]
+    return None
