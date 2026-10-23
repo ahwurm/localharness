@@ -15,20 +15,26 @@ and this one returns immediately.
 """
 from __future__ import annotations
 
+import importlib.metadata
+import importlib.util
 import json
+import shlex
 import subprocess
 import sys
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import typer
+from packaging.utils import canonicalize_name
 from rich.console import Console
 
 import localharness
 from localharness import resolved_version
 from localharness.core.which import which_outside_cwd
+from localharness.plugins.plan import installed_extras
 
 console = Console()
 err_console = Console(stderr=True)
@@ -80,17 +86,74 @@ def _upgrade_command() -> list[str] | None:
     A `uv tool` install lives in a uv-managed environment that pip must not touch, so it is
     detected first and upgraded with uv. Everything else is a normal pip-managed environment.
     """
-    prefix = str(Path(sys.prefix).resolve()).replace("\\", "/")
-    if "/uv/tools/" in f"{prefix}/":
-        uv = which_outside_cwd("uv")
+    kind, uv = _installer_kind()
+    if kind == "uv-tool":
         return [uv, "tool", "upgrade", "localharness"] if uv else None
     return [sys.executable, "-m", "pip", "install", "--upgrade", "localharness"]
+
+
+def _installer_kind() -> tuple[Literal["uv-tool", "pip"], str | None]:
+    prefix = str(Path(sys.prefix).resolve()).replace("\\", "/")
+    if "/uv/tools/" in f"{prefix}/":
+        return "uv-tool", which_outside_cwd("uv")
+    return "pip", None
 
 
 def _is_windows() -> bool:
     """Read at call time, never at import: the tests fake the platform, and a module-level
     constant would freeze whichever machine built the wheel."""
     return sys.platform.startswith("win")
+
+
+@dataclass(frozen=True)
+class Manual:
+    prereq: str | None
+    quit_first: bool
+    command: str
+
+
+@dataclass(frozen=True)
+class InstallRoute:
+    spec: str
+    argv: list[str] | None
+    manual: Manual | None
+
+
+def _quote(argv: list[str]) -> str:
+    return subprocess.list2cmdline(argv) if _is_windows() else shlex.join(argv)
+
+
+def _source_root() -> Path:
+    pkg_dir = Path(localharness.__file__).resolve().parent
+    return next((p for p in pkg_dir.parents if (p / "pyproject.toml").is_file()), pkg_dir.parent)
+
+
+def install_route(extra: str) -> InstallRoute | None:
+    """How this install gets `localharness[<extra>]`: argv to run here, or a command to paste."""
+    try:
+        declared = importlib.metadata.distribution("localharness").metadata.get_all("Provides-Extra")
+        version = importlib.metadata.version("localharness")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    name = canonicalize_name(extra)
+    if name not in map(canonicalize_name, declared or ()):
+        return None
+    extras = sorted(installed_extras() | {name})
+    spec = f"localharness[{','.join(extras)}]=={version}"
+    if _is_source_install():
+        sync = ["uv", "sync", *(a for e in extras for a in ("--extra", e))]
+        command = f"{_quote(['cd', str(_source_root())])} && {_quote(sync)}"
+        return InstallRoute(spec, None, Manual(None, False, command))
+    kind, uv = _installer_kind()
+    if kind == "uv-tool":
+        if uv and not _is_windows():
+            return InstallRoute(spec, [uv, "tool", "install", spec], None)
+        prereq = None if uv else "Install uv first (https://docs.astral.sh/uv/)."
+        return InstallRoute(spec, None, Manual(prereq, _is_windows(), _quote(["uv", "tool", "install", spec])))
+    argv = [sys.executable, "-I", "-m", "pip", "install", spec]
+    if importlib.util.find_spec("pip"):
+        return InstallRoute(spec, argv, None)
+    return InstallRoute(spec, None, Manual("Run python -m ensurepip --upgrade first.", False, _quote(argv)))
 
 
 def _spawn_detached(cmd: list[str]) -> bool:

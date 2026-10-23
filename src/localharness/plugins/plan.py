@@ -320,3 +320,12 @@ def extra_installed(extra: str) -> bool:
         return True
     except importlib.metadata.PackageNotFoundError:
         return False
+
+
+def installed_extras() -> frozenset[str]:
+    """Every canonicalized Provides-Extra name `extra_installed` reports true for."""
+    try:
+        declared = importlib.metadata.distribution("localharness").metadata.get_all("Provides-Extra")
+    except importlib.metadata.PackageNotFoundError:
+        return frozenset()
+    return frozenset(e for e in map(canonicalize_name, declared or ()) if extra_installed(e))
