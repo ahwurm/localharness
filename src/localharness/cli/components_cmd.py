@@ -240,8 +240,8 @@ _URL_WITH_AT = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"]*@[^\s'\"]*")
 
 
 def _authority_unparseable(url: str) -> bool:
-    parts = urlsplit(url)
     try:
+        parts = urlsplit(url)
         parts.port
     except ValueError:
         return True
