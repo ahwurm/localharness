@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Mapping, NoReturn, Optional
@@ -41,8 +41,8 @@ from rich.table import Table
 
 from localharness.channels.base import sanitize_for_display
 from localharness.cli.components_cmd import (
-    _build_layered_loader, _core_secret_values, _err, _err_config, _serialize_value,
-    _validate_overlay, _validation_text, is_secret, scrub, shown, walk_secret_values,
+    Refusal, _build_layered_loader, _core_secret_values, _err, _err_config, _serialize_value,
+    _validate_overlay, _validation_text, is_secret, redact_text, shown, walk_secret_values,
 )
 from localharness.cli.interview import confirm_line, prompt_line
 from localharness.cli.workspace import _stdin_is_a_terminal
@@ -242,7 +242,7 @@ def plugins_info(name: Name, json_output: Json = False, config_dir: ConfigDir = 
 def _checked(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry, pairs: list[str],
              to_workspace: bool, overlay: dict[str, Any]) -> dict[str, Any]:
     """Put each --set KEY=VALUE under `<name>.` in `overlay`, after checking the section the next
-    start will read with the plugin's own ConfigModel; exit 2, writing nothing, on any refusal.
+    start will read with the plugin's own ConfigModel; raise Refusal, writing nothing, on any refusal.
     Returns each key's value as it may be SHOWN (a secret leaf masked)."""
     from localharness.config.plugin_sections import merge_plugin_layers
     from localharness.plugins import discovery
@@ -256,26 +256,26 @@ def _checked(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry, pai
         try:
             cls = discovery.load_plugin_class(found)
         except (Exception, SystemExit) as exc:  # noqa: BLE001 — contained, as the resolver does
-            _fail(f"cannot check the --set values: {name} could not be imported: "
-                  f"{type(exc).__name__}: {exc}")
+            raise Refusal(f"cannot check the --set values: {name} could not be imported: "
+                          f"{type(exc).__name__}: {exc}", ())
     model = cls.ConfigModel if cls is not None else None
     if model is None:
-        _fail(f"{name} has no settings to set")
+        raise Refusal(f"{name} has no settings to set", ())
     leaves, machine = dict(walk_model_fields(model)), _machine_only(model, entry.bundled)
     values: dict[str, Any] = {}
     for pair in pairs:
         key, sep, raw = pair.partition("=")
         if not sep:
-            _fail(f"--set takes KEY=VALUE, not {pair!r}")
+            raise Refusal(f"--set takes KEY=VALUE, not {pair!r}", ())
         if key not in leaves:
-            _fail(f"{name} has no setting {key!r} — its settings: {', '.join(sorted(leaves))}")
+            raise Refusal(f"{name} has no setting {key!r} — its settings: {', '.join(sorted(leaves))}", ())
         if to_workspace and key in machine:
-            _fail(f"{name}.{key} is a machine-level setting — set it without --workspace")
+            raise Refusal(f"{name}.{key} is a machine-level setting — set it without --workspace", ())
         try:
             values[key] = coerce_value(raw, leaves[key])
         except ValueError as exc:
-            _fail(scrub(f"Cannot coerce {shown(raw, leaves[key])} for {name}.{key}: {exc}",
-                        [raw] if is_secret(leaves[key]) else []))
+            raise Refusal(f"Cannot coerce {shown(raw, leaves[key])} for {name}.{key}: {exc}",
+                          [raw] if is_secret(leaves[key]) else [])
         set_value_in_dict(overlay, f"{name}.{key}", values[key])
     layers = list(loader.plugin_layers().get(name, (None,) * 4))
     # The written layer as it will read; a machine value holds in every project, so it is checked
@@ -288,9 +288,9 @@ def _checked(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry, pai
     except (Exception, SystemExit) as exc:  # noqa: BLE001 — the plugin's own validator: contained
         # Its message can quote the section it was given: scrub every layer's secrets, config.yaml's
         # included, not only the overlay's.
-        _fail(scrub(f"Validation failed for {name}: {_validation_text(exc)}",
-                    [v for layer in layers if isinstance(layer, dict)
-                     for _, v in walk_secret_values(leaves, layer)]))
+        raise Refusal(f"Validation failed for {name}: {_validation_text(exc)}",
+                      [v for layer in layers if isinstance(layer, dict)
+                       for _, v in walk_secret_values(leaves, layer)])
     return {f"{name}.{key}": shown(value, leaves[key]) for key, value in values.items()}
 
 
@@ -306,7 +306,7 @@ def _checked_core(loader: ConfigLoader, entry: PlanEntry, pairs: list[str], to_w
 
     if to_workspace:
         keys = ", ".join(pair.partition("=")[0] for pair in pairs)
-        _fail(f"{keys}: these are machine-level settings for {entry.name} — run it without --workspace")
+        raise Refusal(f"{keys}: these are machine-level settings for {entry.name} — run it without --workspace", ())
     try:  # the settings these are checked against must load, as `components set` requires
         loader.load_harness()
     except Exception as exc:  # noqa: BLE001 — reported as `components` reports it, exit 2
@@ -317,22 +317,22 @@ def _checked_core(loader: ConfigLoader, entry: PlanEntry, pairs: list[str], to_w
     for pair in pairs:
         key, sep, raw = pair.partition("=")
         if not sep:
-            _fail(f"--set takes KEY=VALUE, not {pair!r}")
+            raise Refusal(f"--set takes KEY=VALUE, not {pair!r}", ())
         if key not in leaves:
-            _fail(f"{entry.name} has no setting {key!r}")
+            raise Refusal(f"{entry.name} has no setting {key!r}", ())
         if is_secret(leaves[key]):
             typed_secrets.append(raw)
         try:
             value = coerce_value(raw, leaves[key])
         except ValueError as exc:
-            _fail(scrub(f"Cannot coerce {shown(raw, leaves[key])} for {key}: {exc}", typed_secrets))
+            raise Refusal(f"Cannot coerce {shown(raw, leaves[key])} for {key}: {exc}", typed_secrets)
         set_value_in_dict(overlay, key, value)
         out[key] = shown(value, leaves[key])
     try:
         _validate_overlay(loader, pairs[0].partition("=")[0], overlay)
     except ValueError as exc:  # a pydantic ValidationError is one
-        _fail(scrub(f"Validation failed for {entry.name}: {_validation_text(exc)}",
-                    typed_secrets + _core_secret_values(loader, overlay)))
+        raise Refusal(f"Validation failed for {entry.name}: {_validation_text(exc)}",
+                      typed_secrets + _core_secret_values(loader, overlay))
     return out
 
 
@@ -653,9 +653,13 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
     setup action runs only while the step is pending or when answers were written in this run."""
     resolution, loader, workspace = _resolve(config_dir, json_output=False)
     entry = _entry(resolution, loader, name, False)
-    return asyncio.run(_switch_body(
-        resolution, loader, workspace, entry, name, on, pairs, to_workspace, ask, in_session,
-        partial(prompt_line, console=console), partial(confirm_line, console=console)))
+    try:
+        return asyncio.run(_switch_body(
+            resolution, loader, workspace, entry, name, on, pairs, to_workspace, ask, in_session,
+            partial(prompt_line, console=console), partial(confirm_line, console=console)))
+    except Refusal as refusal:
+        err_console.print("[bold red]Error:[/bold red] " + escape(str(refusal)), soft_wrap=True)
+        raise typer.Exit(code=2)
 
 
 async def _confirmed(confirm: Any, text: str, default: bool) -> bool:
@@ -676,13 +680,13 @@ async def _switch_body(resolution: Resolution, loader: ConfigLoader, workspace: 
 
     word, verb = ("on", "enable") if on else ("off", "disable")
     if name not in resolution.enabled:  # a refused NAME (invalid, a core key, taken): its key is
-        _fail(f"{name} cannot be turned {word}: {entry.reason}")  # not this plugin's to write
+        raise Refusal(f"{name} cannot be turned {word}: {entry.reason}", ())  # not this plugin's to write
     if to_workspace and not entry.bundled:
-        _fail(f"a plugin you installed is turned {word} only in machine-level settings — run "
-              f"`localharness plugins {verb} {name}` without --workspace")
+        raise Refusal(f"a plugin you installed is turned {word} only in machine-level settings — run "
+                      f"`localharness plugins {verb} {name}` without --workspace", ())
     if to_workspace and workspace is None:
-        _fail("no project workspace applies here — run `localharness init --workspace` in the "
-              "project first, or leave out --workspace to change the machine-level setting")
+        raise Refusal("no project workspace applies here — run `localharness init --workspace` in the "
+                      "project first, or leave out --workspace to change the machine-level setting", ())
     if (in_session and on and ask and not entry.bundled
             and not await _confirmed(confirm, THIRD_PARTY_CONFIRM.format(name=name), False)):
         console.print(escape(f"{name} stays off. Your conversation continues."), soft_wrap=True)
@@ -712,8 +716,8 @@ async def _switch_body(resolution: Resolution, loader: ConfigLoader, workspace: 
     tail = "" if in_session else " — takes effect on the next `localharness start`"
     console.print("[green]✓[/green] " + escape(f"{name} {verb}d in {target}{tail}"), soft_wrap=True)
     for path, value in values.items():
-        console.print(escape(f"  set {path} = {value}"), soft_wrap=True)
-    fresh_loader = fresh = after = None
+        console.print(escape(f"  set {path} = {redact_text(value)}"), soft_wrap=True)
+    fresh_loader = fresh = after = row = None
     if m is not None:
         # What was just written, read through a NEW loader over the same layers: ConfigLoader caches
         # its harness and raw sources, and re-deriving the workspace would print its trust notice
@@ -723,8 +727,7 @@ async def _switch_body(resolution: Resolution, loader: ConfigLoader, workspace: 
             fresh = resolve(fresh_loader)
             after = fresh.plan.entry(name)
         except Exception as exc:  # noqa: BLE001 — the enable already wrote; the rest is advice
-            console.print(escape(f"  could not check it now: {type(exc).__name__}: {exc}"),
-                          soft_wrap=True)
+            row = could_not_check(name, exc)
     if after is not None and m.requires_extra and after.state == "needs-extra":
         missing = True  # "takes effect on the next start" is not true without its install extra
         console.print("  [yellow]note:[/yellow] " + escape(
@@ -741,15 +744,17 @@ async def _switch_body(resolution: Resolution, loader: ConfigLoader, workspace: 
     rows: tuple = ()
     if step and has_action and after.state == "on" and (pending or pairs) and (
             not m.setup_action or await _confirmed(confirm, m.setup_action, True)):
-        rows = await setup_action_rows(fresh, name, paths)
+        rows = _stripped(DoctorRow(name, "on", "", await setup_action_rows(fresh, name, paths))).checks
         if rows:
             print_plugin_row(DoctorRow(name, "on", "", rows), [])
     failed, skipped, block = "", "", False
-    if step and (setup or has_action):
+    if row is not None or (step and (setup or has_action)):
         console.print("Checking it now:")
-        row = await _probe(name, fresh, paths)
-        unanswered = any(not _stored(fresh, fresh_loader, after, f.key) for f in setup)
-        not_clean = row is not None and _not_clean(row, unanswered)
+        stored = row is not None
+        row = row or await probe(name, fresh, paths)
+        print_plugin_row(row, [])
+        unanswered = not stored and any(not _stored(fresh, fresh_loader, after, f.key) for f in setup)
+        not_clean = _not_clean(row, unanswered)
         # The setup action's rows count as the check's do: one that failed (a far end that does not
         # answer, a download that raised) is not set up, even when the offline doctor row passes.
         action_failed = [c for c in rows if c.status == "fail"]
@@ -758,16 +763,19 @@ async def _switch_body(resolution: Resolution, loader: ConfigLoader, workspace: 
             # none failing is a plugin not set up yet (mobile's "not enrolled yet"), not a failure; a
             # check row that is not on (unconfigured, failed) has only its state to say.
             checks = row.checks if not_clean else ()
-            failed = (row.detail if not_clean and row.state != "on" else
-                      next((c.detail for c in (*checks, *action_failed) if c.status == "fail"), ""))
-            skipped = "" if failed else next((c.detail for c in checks if c.status == "skip"), "")
+            failed = sanitize_for_display(
+                row.detail if not_clean and row.state != "on" else
+                next((c.detail for c in (*checks, *action_failed) if c.status == "fail"), ""))
+            skipped = "" if failed else sanitize_for_display(
+                next((c.detail for c in checks if c.status == "skip"), ""))
             if m.setup_help:  # the one place it prints
                 console.print()
                 console.print(escape(m.setup_help), soft_wrap=True)
             if m.agent_prompt:
                 console.print()
-                console.print(escape(render_agent_prompt(m.agent_prompt, _prompt_values(
-                    fresh, fresh_loader, after, m.agent_prompt))), soft_wrap=True)
+                console.print(escape(redact_text(render_agent_prompt(m.agent_prompt, _prompt_values(
+                    fresh or resolution, fresh_loader or loader, after or entry, m.agent_prompt)))),
+                    soft_wrap=True)
             block = bool(m.setup_help or m.agent_prompt)
     elif not ask and m is not None:
         if setup and not pairs:
@@ -784,22 +792,27 @@ async def _switch_body(resolution: Resolution, loader: ConfigLoader, workspace: 
     return StepOutcome(name, on, failed_check=failed, skipped_check=skipped)
 
 
-async def _probe(name: str, resolution: Resolution, paths: PluginPaths) -> DoctorRow | None:
-    """Run the plugin's doctor check once against `resolution` — read after the write — and print
-    it with doctor's own row printer. Returns that row, or None when it could not check. Never
-    fails the enable (it wrote)."""
-    from localharness.cli.doctor_cmd import print_plugin_row
+def could_not_check(name: str, exc: Exception) -> DoctorRow:
+    """The failed row for a check that could not run, its text scrubbed of credentials."""
+    from localharness.plugins.lifecycle import DoctorRow
+    return DoctorRow(name, "failed", f"could not check it now: {type(exc).__name__}: {redact_text(str(exc))}")
+
+
+def _stripped(row: DoctorRow) -> DoctorRow:
+    return replace(row, detail=redact_text(row.detail), checks=tuple(
+        c.model_copy(update={"detail": redact_text(c.detail), "hint": redact_text(c.hint)}) for c in row.checks))
+
+
+async def probe(name: str, resolution: Resolution, paths: PluginPaths) -> DoctorRow:
+    """The plugin's doctor row read from `resolution` (after the write), or the row that says it could not."""
     from localharness.plugins.lifecycle import DoctorRow, _doctor_row
 
     try:
         entry = resolution.plan.entry(name)
-        row = (await _doctor_row(resolution, name, paths) if entry.state == "on"
-               else DoctorRow(name, entry.state, entry.display, bundled=entry.bundled))
-        print_plugin_row(row, [])
-        return row
+        return _stripped(await _doctor_row(resolution, name, paths) if entry.state == "on"
+                         else DoctorRow(name, entry.state, entry.display, bundled=entry.bundled))
     except Exception as exc:  # noqa: BLE001 — the enable already wrote; the check is advice
-        console.print(escape(f"  could not check it now: {type(exc).__name__}: {exc}"), soft_wrap=True)
-        return None
+        return could_not_check(name, exc)
 
 
 def session_step(action: tuple[str, str], config_dir: str | None) -> StepOutcome:

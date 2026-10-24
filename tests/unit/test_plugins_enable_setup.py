@@ -18,13 +18,13 @@ from pathlib import Path
 
 import pytest
 import yaml
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from rich.console import Console
 from typer.testing import CliRunner
 
 from localharness.cli import plugins_cmd
 from localharness.cli.app import app
-from localharness.plugins import builtin, discovery
+from localharness.plugins import builtin, discovery, lifecycle, resolve
 from localharness.plugins.api import GLOBAL_ONLY, Check, Plugin, PluginManifest, SetupField
 from tests.plugin_prompts import fake_prompts
 from tests.unit.test_doctor_layer_report import _layout
@@ -59,6 +59,31 @@ class Stub(Plugin):
         if url == "http://ok":
             return [Check(name="stub", status="pass", detail=f"answers at {url}")]
         return [Check(name="stub", status="fail", detail=f"no answer at {url}", hint="start it")]
+
+
+class ProConfig(BaseModel):
+    url: str = Field("", json_schema_extra=GLOBAL_ONLY)
+
+    @field_validator("url")
+    @classmethod
+    def _not_bad(cls, value: str) -> str:
+        if "bad" in value:
+            raise ValueError(f"cannot reach {value!r}")
+        return value
+
+
+class Pro(Plugin):
+    """answers at an address, and says so in help"""
+
+    manifest = PluginManifest(
+        name="pro", version="0.1.0", kind="tools", enabled_by_default=False,
+        setup=(SetupField(key="url", prompt="Server address", default="http://127.0.0.1:1"),),
+        setup_help="PRO-HELP", agent_prompt="Run it at {url}. Done when it answers.",
+        next_steps="Then: start it.")
+    ConfigModel = ProConfig
+
+    def doctor(self, ctx):
+        return [Check(name="pro", status="pass", detail=f"at {ctx.config.url}")]
 
 
 class Plain(Plugin):
@@ -104,7 +129,7 @@ class Secty(Plugin):
 
 @pytest.fixture(autouse=True)
 def bundled(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Stub, Plain, Two, Needy, Secty))
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Stub, Plain, Two, Needy, Secty, Pro))
     monkeypatch.setattr(discovery, "discover", lambda global_config_dir: [
         f for f in _REAL_DISCOVER(global_config_dir) if f.source == "folder"])
     monkeypatch.setenv("COLUMNS", "400")
@@ -398,3 +423,74 @@ def test_a_sections_write_over_a_config_that_cannot_load_is_reported(g, no_promp
     assert result.exit_code == 2, result.output
     assert "Failed to load config" in result.output
     assert not (g / "overrides.yaml").exists()
+
+
+# --- a check that could not run is a failed check; a credential is stripped where it shows ----------
+
+
+def _doctor_raises(monkeypatch, g: Path) -> None:
+    real = lifecycle._doctor_row
+
+    async def doctor_row(*a, **kw):
+        if (g / "overrides.yaml").exists():
+            raise RuntimeError("boom")
+        return await real(*a, **kw)
+    monkeypatch.setattr(lifecycle, "_doctor_row", doctor_row)
+
+
+def _second_resolve_raises(monkeypatch) -> None:
+    real, calls = resolve.resolve, []
+
+    def resolve_twice(*a, **kw):
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("boom")
+        return real(*a, **kw)
+    monkeypatch.setattr(resolve, "resolve", resolve_twice)
+
+
+def test_a_check_that_raises_is_a_failed_row_with_the_help_and_the_prompt(g, prompts, monkeypatch) -> None:
+    _doctor_raises(monkeypatch, g)
+    result = _enable(g, "pro")
+
+    assert result.exit_code == 0, result.output
+    row = "✗ pro: could not check it now: RuntimeError: boom"
+    assert (result.output.index("Checking it now:") < result.output.index(row)
+            < result.output.index("PRO-HELP") < result.output.index("Run it at http://ok."))
+    assert _overrides(g) == {"pro": {"enabled": True, "url": "http://ok"}}
+
+
+def test_a_resolve_that_raises_after_the_write_is_the_same_failed_row(g, prompts, monkeypatch) -> None:
+    _second_resolve_raises(monkeypatch)
+    result = _enable(g, "pro")
+
+    assert result.exit_code == 0, result.output
+    assert result.output.count("could not check it now") == 1
+    assert (result.output.index("Checking it now:")
+            < result.output.index("✗ pro: could not check it now: RuntimeError: boom")
+            < result.output.index("PRO-HELP") < result.output.index("Then: start it."))
+
+
+def test_could_not_check_is_a_failed_row_with_the_credential_stripped() -> None:
+    row = plugins_cmd.could_not_check("x", RuntimeError("cannot reach https://u:pw@h.test/x"))
+
+    assert row.state == "failed"
+    assert row.detail.startswith("could not check it now: RuntimeError: ")
+    assert "https://h.test/x" in row.detail and "u:pw" not in row.detail
+
+
+def test_a_refusal_quoting_a_credentialed_url_prints_it_stripped(g, no_prompt) -> None:
+    result = _enable(g, "pro", "--set", "url=https://user:pw@bad.test")
+
+    assert result.exit_code == 2, result.output
+    assert "https://bad.test" in result.stderr and "user:pw" not in result.stderr + result.stdout
+    assert not (g / "overrides.yaml").exists()
+
+
+def test_the_set_receipt_strips_a_credential_and_the_overlay_keeps_it(g, no_prompt) -> None:
+    result = _enable(g, "stub", "--set", "url=https://user:pw@ok.test")
+
+    assert result.exit_code == 0, result.output
+    assert "  set stub.url = 'https://ok.test'" in result.output and "user:pw" not in result.output
+    assert _overrides(g)["stub"]["url"] == "https://user:pw@ok.test"
+    assert "  set stub.url = 'http://ok'" in _enable(g, "stub", "--set", "url=http://ok").output

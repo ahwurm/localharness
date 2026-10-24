@@ -17,7 +17,7 @@
   "enable_help_prompt_credential_url": {
     "exit": 0,
     "stderr": "",
-    "stdout": "\u2713 pro enabled in <TMP>/g/overrides.yaml \u2014 takes effect on the next `localharness start`\n  set pro.url = 'https://user:pw@example.test'\n  set pro.token = '**********'\nChecking it now:\n\u2717 pro: at https://user:pw@example.test\n\nPRO-HELP\n\nOr paste this into your coding agent to set it up for your hardware:\n\n  Run it at https://user:pw@example.test. Done when it answers.\n\n  Then: start it.\n  Then: use it.\n"
+    "stdout": "\u2713 pro enabled in <TMP>/g/overrides.yaml \u2014 takes effect on the next `localharness start`\n  set pro.url = 'https://example.test'\n  set pro.token = '**********'\nChecking it now:\n\u2717 pro: at https://example.test\n\nPRO-HELP\n\nOr paste this into your coding agent to set it up for your hardware:\n\n  Run it at https://example.test. Done when it answers.\n\n  Then: start it.\n  Then: use it.\n"
   },
   "enable_missing_extra_note": {
     "exit": 0,
@@ -32,7 +32,7 @@
   "enable_probe_raises": {
     "exit": 0,
     "stderr": "",
-    "stdout": "\u2713 pro enabled in <TMP>/g/overrides.yaml \u2014 takes effect on the next `localharness start`\n  set pro.url = 'http://ok.test'\n  set pro.token = '**********'\nChecking it now:\n  could not check it now: RuntimeError: boom\n  Then: start it.\n  Then: use it.\n"
+    "stdout": "\u2713 pro enabled in <TMP>/g/overrides.yaml \u2014 takes effect on the next `localharness start`\n  set pro.url = 'http://ok.test'\n  set pro.token = '**********'\nChecking it now:\n\u2717 pro: could not check it now: RuntimeError: boom\n\nPRO-HELP\n\nOr paste this into your coding agent to set it up for your hardware:\n\n  Run it at http://ok.test. Done when it answers.\n\n  Then: start it.\n  Then: use it.\n"
   },
   "enable_project_override_note": {
     "exit": 0,
@@ -46,13 +46,13 @@
   },
   "enable_refused_credential_url": {
     "exit": 2,
-    "stderr": "Error: Validation failed for pro: url: Value error, cannot reach 'https://user:pw@bad.test'\n",
+    "stderr": "Error: Validation failed for pro: url: Value error, cannot reach 'https://bad.test'\n",
     "stdout": ""
   },
   "enable_resolve_raises": {
     "exit": 0,
     "stderr": "",
-    "stdout": "\u2713 pro enabled in <TMP>/g/overrides.yaml \u2014 takes effect on the next `localharness start`\n  set pro.url = 'http://ok.test'\n  set pro.token = '**********'\n  could not check it now: RuntimeError: boom\n  Then: start it.\n  Then: use it.\n"
+    "stdout": "\u2713 pro enabled in <TMP>/g/overrides.yaml \u2014 takes effect on the next `localharness start`\n  set pro.url = 'http://ok.test'\n  set pro.token = '**********'\nChecking it now:\n\u2717 pro: could not check it now: RuntimeError: boom\n\nPRO-HELP\n\nOr paste this into your coding agent to set it up for your hardware:\n\n  Run it at http://127.0.0.1:1. Done when it answers.\n\n  Then: start it.\n  Then: use it.\n"
   },
   "enable_set_values": {
     "exit": 0,
@@ -96,11 +96,11 @@
     "stopped": false
   },
   "step_probe_raises": {
-    "failed_check": "",
+    "failed_check": "could not check it now: RuntimeError: boom",
     "on": true,
     "skipped_check": "",
     "stderr": "",
-    "stdout": "\u2713 pro enabled in <TMP>/g/overrides.yaml\n  set pro.url = 'http://ok.test'\n  set pro.token = '**********'\nChecking it now:\n  could not check it now: RuntimeError: boom\n  Then: start it.\n  Then: use it.\n",
+    "stdout": "\u2713 pro enabled in <TMP>/g/overrides.yaml\n  set pro.url = 'http://ok.test'\n  set pro.token = '**********'\nChecking it now:\n\u2717 pro: could not check it now: RuntimeError: boom\n\nPRO-HELP\n\nOr paste this into your coding agent to set it up for your hardware:\n\n  Run it at http://ok.test. Done when it answers.\n\n  Then: start it.\n  Then: use it.\n",
     "stopped": false
   },
   "step_questions_check_passes": {
@@ -115,7 +115,7 @@
     "failed_check": "",
     "on": true,
     "skipped_check": "",
-    "stderr": "Error: Validation failed for pro: url: Value error, cannot reach 'https://user:pw@bad.test'\n",
+    "stderr": "Error: Validation failed for pro: url: Value error, cannot reach 'https://bad.test'\n",
     "stdout": "Stopped. Your conversation continues.\n",
     "stopped": true
   },
