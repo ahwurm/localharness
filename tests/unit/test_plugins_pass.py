@@ -17,7 +17,7 @@ from rich.console import Console
 from localharness.cli import plugins_cmd
 from localharness.cli.plugins_cmd import (
     CONSENT, CTRLC, CTRLC_DOES, CTRLC_IGNORED, OVERRIDE_LINE, OVERRIDE_SAVED, THIRD_PARTY_CONFIRM, PassProgress, PassResult, PluginSession,
-    Refusal, StepOutcome, Touch, disable_pass, enable_pass, override_line, override_of,
+    Refusal, StepOutcome, Touch, configure_one, disable_pass, enable_pass, override_line, override_of, settings_rows,
 )
 from localharness.config.loader import ConfigLoader
 from localharness.core.bus import EventBus
@@ -903,3 +903,165 @@ async def test_rerun_while_a_download_still_runs_is_blocked_before_anything_else
 
     assert (result.kind, result.detail, result.loads) == ("rerun_blocked", lifecycle.DOWNLOAD_RUNNING, False)
     assert talk.asked == [] and talk.confirmed == [] and talk.reports == []
+
+
+class _CfgConfig(BaseModel):
+    port: int = 1
+    label: str = ""
+    token: SecretStr = SecretStr("")
+
+    @field_validator("label")
+    @classmethod
+    def _not_banned(cls, value: str) -> str:
+        if "banned" in value:
+            raise ValueError(f"label {value!r} is banned")
+        return value
+
+
+class Cfg(Plugin):
+    """has a port, a label and a token"""
+
+    manifest = PluginManifest(name="cfg", version="0.1.0", kind="tools", enabled_by_default=False)
+    ConfigModel = _CfgConfig
+
+
+@pytest.fixture
+def cfg(layers, monkeypatch) -> SimpleNamespace:
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Stub, Cfg))
+    audit = layers.g / "audit.jsonl"
+    (layers.g / "config.yaml").write_text(yaml.safe_dump(_CONFIG | {"org": {"audit_log_path": str(audit)}}), encoding="utf-8")
+    return SimpleNamespace(g=layers.g, ws=layers.ws, audit=audit)
+
+
+def _rows(layers, name: str = "cfg"):
+    loader = ConfigLoader(config_dir=layers.g, local_config_dir=layers.ws)
+    resolution = resolve(loader)
+    return settings_rows(resolution, loader, resolution.plan.entry(name))
+
+
+def _row(layers, path: str):
+    return next(r for r in _rows(layers) if r.path == path)
+
+
+async def _configure(layers, row, raw, **kw):
+    progress, reports = PassProgress(), []
+    result = await configure_one(_session(layers, **kw), row, raw, progress=progress,
+                                 report=lambda kind, payload: reports.append((kind, payload)))
+    return result, progress, reports
+
+
+def _lines(path: Path) -> list[str]:
+    return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+
+def test_settings_rows_are_the_plugins_own_sorted_without_its_switch_or_agent_rows(cfg) -> None:
+    assert [r.path for r in _rows(cfg)] == ["cfg.label", "cfg.port", "cfg.token"]
+    assert {r.plugin for r in _rows(cfg)} == {"cfg"}
+
+
+def test_settings_rows_without_a_class_is_empty_and_imports_nothing(folder, monkeypatch) -> None:
+    write_folder_plugin(folder.g, "swatch")
+
+    def never(*a, **kw):
+        raise AssertionError("imported")
+
+    monkeypatch.setattr(discovery, "load_plugin_class", never)
+
+    loader = ConfigLoader(config_dir=folder.g, local_config_dir=folder.ws)
+    resolution = resolve(loader)
+
+    assert resolution.plan.entry("swatch") is not None
+    assert settings_rows(resolution, loader, resolution.plan.entry("swatch")) == ()
+    assert not list((folder.g.parent / "sentinels").iterdir())
+
+
+async def test_configure_one_writes_the_machine_overlay_and_audits_once(cfg) -> None:
+    result, progress, reports = await _configure(cfg, _row(cfg, "cfg.port"), "7", running=frozenset({"cfg"}))
+
+    assert yaml.safe_load((cfg.g / "overrides.yaml").read_text(encoding="utf-8")) == {"cfg": {"port": 7}}
+    assert len(_lines(cfg.audit)) == 1
+    assert (result.kind, result.rebind, result.loads, result.shown) == ("saved", True, True, "7")
+    assert result.step == StepOutcome("cfg", True)
+    assert (progress.phase, progress.wrote, progress.overridden) == ("edit", True, False)
+    assert reports == [("wrote", (f"cfg.port saved in {cfg.g / 'overrides.yaml'}", (("cfg.port", "7"),)))]
+    assert "cfg.port" in _lines(cfg.audit)[0]
+
+
+async def test_configure_one_a_plugin_that_is_not_running_is_no_rebind_and_keeps_loads(cfg) -> None:
+    result, _, _ = await _configure(cfg, _row(cfg, "cfg.label"), "hello", touched={"cfg": Touch(False, False, ("failed", "x"))})
+
+    assert (result.kind, result.rebind, result.loads, result.shown) == ("saved", False, False, "'hello'")
+
+
+async def test_configure_one_a_secret_is_shown_masked_and_never_written_to_a_project_file(cfg) -> None:
+    result, _, reports = await _configure(cfg, _row(cfg, "cfg.token"), "s3cret-value")
+
+    assert "s3cret-value" not in result.shown and "s3cret-value" not in repr(reports)
+    assert "s3cret-value" not in "".join(_lines(cfg.audit))
+    assert not (cfg.ws / "overrides.yaml").exists()
+
+
+async def test_configure_one_a_value_the_plugins_model_refuses_is_refused_and_unaudited(cfg, monkeypatch) -> None:
+    (cfg.g / "overrides.yaml").write_text(yaml.safe_dump({"cfg": {"port": 3}}), encoding="utf-8")
+    before = (cfg.g / "overrides.yaml").read_bytes()
+
+    async def never(written):
+        raise AssertionError("audited")
+
+    monkeypatch.setattr(plugins_cmd, "audit_value", never)
+
+    result, progress, reports = await _configure(cfg, _row(cfg, "cfg.label"), "banned!")
+
+    assert (result.kind, result.install, result.step) == ("refused", "none", StepOutcome("cfg", False))
+    assert "banned" in result.detail and reports == []
+    assert (cfg.g / "overrides.yaml").read_bytes() == before
+    assert (progress.phase, progress.wrote) == ("edit", False)
+
+
+async def test_configure_one_a_row_the_project_wins_is_saved_overridden_and_leaves_the_project_file(cfg) -> None:
+    project = cfg.ws / "overrides.yaml"
+    project.write_text(yaml.safe_dump({"cfg": {"port": 9}}), encoding="utf-8")
+    before = project.read_bytes()
+    row = _row(cfg, "cfg.port")
+    assert row.winning_layer == "workspace-overrides"
+
+    result, progress, _ = await _configure(cfg, row, "7", running=frozenset({"cfg"}))
+
+    assert (result.kind, result.override, result.rebind, result.shown) == ("saved_overridden", (None, project), False, "7")
+    assert progress.overridden and progress.wrote
+    assert project.read_bytes() == before
+    assert yaml.safe_load((cfg.g / "overrides.yaml").read_text(encoding="utf-8")) == {"cfg": {"port": 7}}
+
+
+async def test_configure_one_refuses_a_core_row_and_the_switch_and_writes_nothing(cfg) -> None:
+    loader = ConfigLoader(config_dir=cfg.g, local_config_dir=cfg.ws)
+    resolution = resolve(loader)
+    catalogue, _ = plugins_cmd.layered_catalogue(cfg.g, cfg.ws, loader=loader, plugins=plugins_cmd.plugin_catalogue_rows(resolution))
+    core = next(e for e in catalogue.values() if e.plugin is None)
+    switch = catalogue["cfg.enabled"]
+
+    for row in (core, switch):
+        result, progress, _ = await _configure(cfg, row, "1")
+        assert result.kind == "refused" and "not one of" in result.detail
+        assert progress.phase == "edit" and not progress.wrote
+
+    assert not (cfg.g / "overrides.yaml").exists()
+    assert _lines(cfg.audit) == []
+
+
+async def test_configure_one_sets_wrote_and_overridden_before_the_audit_awaits(cfg, monkeypatch) -> None:
+    (cfg.ws / "overrides.yaml").write_text(yaml.safe_dump({"cfg": {"port": 9}}), encoding="utf-8")
+    seen = []
+
+    async def cancelled(written):
+        seen.append((progress.wrote, progress.overridden))
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(plugins_cmd, "audit_value", cancelled)
+    progress = PassProgress()
+
+    with pytest.raises(asyncio.CancelledError):
+        await configure_one(_session(cfg), _row(cfg, "cfg.port"), "7", progress=progress, report=lambda k, p: None)
+
+    assert seen == [(True, True)]
+    assert yaml.safe_load((cfg.g / "overrides.yaml").read_text(encoding="utf-8")) == {"cfg": {"port": 7}}
