@@ -141,6 +141,7 @@
     "init",
     "start",
     "doctor",
+    "skills",
     "validate",
     "model",
     "update",
@@ -207,6 +208,10 @@
     [
       "propose",
       "Generate ONE typed mutation {diff, rationale} for ONE component from failed TRAIN traces."
+    ],
+    [
+      "skills",
+      "List the skills found and why any was skipped."
     ],
     [
       "start",
