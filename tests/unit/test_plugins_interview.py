@@ -19,7 +19,7 @@ from rich.console import Console
 from localharness.cli import plugins_cmd, plugins_interview
 from localharness.cli.interview import Answer, Unreachable
 from localharness.cli.plugins_cmd import (
-    OVERRIDE_LINE, Kind, PassProgress, PassResult, PluginSession, Refusal, ReloadPlan, StepOutcome, TailKey, Touch,
+    CONSENT, CTRLC, CTRLC_DOES, OVERRIDE_LINE, THIRD_PARTY_CONFIRM, Kind, PassProgress, PassResult, PluginSession, Refusal, ReloadPlan, StepOutcome, TailKey, Touch,
     reload_names,
 )
 from localharness.cli.plugins_interview import CLOSE_LABELS, PLUGINS_QUESTION, at_close, run
@@ -28,12 +28,17 @@ from localharness.plugins import lifecycle
 from localharness.plugins import resolve as resolve_module
 from localharness.plugins.api import PluginManifest
 from localharness.plugins.plan import PlanEntry
+from localharness.plugins.setup import AGENT_PROMPT_LEAD
 from tests.unit.interview_support import CANCEL, UNREACHED, Asked
 from tests.unit.test_plugin_resolve import write_folder_plugin
+from tests.unit.test_extra_install import SPEC
+from tests.unit.test_extra_install import dist as _dist
+from tests.unit.test_plugins_pass import DOWNLOAD
 from tests.unit.test_plugins_pass import folder as _folder
 from tests.unit.test_plugins_pass import layers as _layers
+from tests.unit.test_plugins_pass import mobile as _mobile
 
-layers, folder = _layers, _folder
+layers, folder, dist, mobile = _layers, _folder, _dist, _mobile
 HANG = object()
 
 
@@ -859,7 +864,7 @@ async def test_menu_a_picked_row_asks_its_state_with_back_and_distinct_keys(laye
     menu = channel.asked[1]
     assert menu.question == "stub — on — not running; Re-run setup starts it (Esc = back)"
     assert (menu.default, menu.cancel) == (0, "back")
-    assert _labels(menu) == ["Disable", "Info"] and len({o.key for o in menu.options}) == 2
+    assert _labels(menu) == ["Re-run setup", "Disable", "Info"] and len({o.key for o in menu.options}) == 3
     assert channel.asked[2].question == PLUGINS_QUESTION
 
 
@@ -895,12 +900,12 @@ async def test_menu_a_plugin_that_vanished_sends_the_person_back_to_the_root(lay
 
 
 @pytest.mark.parametrize(("state", "enabled", "route", "labels"), [
-    ("on", True, None, ["Disable", "Info"]),
-    ("off", False, None, ["Info"]),
-    ("available", False, None, ["Info"]),
+    ("on", True, None, ["Re-run setup", "Disable", "Info"]),
+    ("off", False, None, ["Enable", "Info"]),
+    ("available", False, None, ["Enable", "Info"]),
     ("needs-extra", True, _MANUAL, ["Show install step", "Disable", "Info"]),
     ("needs-extra", True, None, ["Disable", "Info"]),
-    ("needs-extra", True, _ARGV, ["Disable", "Info"]),
+    ("needs-extra", True, _ARGV, ["Install and set up", "Disable", "Info"]),
     ("failed", True, None, ["Disable", "Info"]),
     ("refused", False, None, ["Info"]),
     ("skipped", False, None, ["Info"]),
@@ -1138,3 +1143,209 @@ def test_stop_path_stopping_prints_only_when_an_install_stop_outlasts_a_second(l
         return channel.lines
 
     assert asyncio.run(scenario()) == lines
+
+
+class Said:
+    """Replaces the module's prompt and confirm: answers in order, records what was asked."""
+
+    def __init__(self, monkeypatch, answers=(), yes=()) -> None:
+        self.answers, self.yes, self.asked, self.confirmed = list(answers), list(yes), [], []
+
+        async def prompt(text, *, console, default="", secret=False):
+            self.asked.append((text, secret))
+            return self._next(self.answers)
+
+        async def confirm(text, *, console, default, tail=""):
+            self.confirmed.append((text, default, tail))
+            return self._next(self.yes)
+
+        monkeypatch.setattr(plugins_interview, "prompt_line", prompt)
+        monkeypatch.setattr(plugins_interview, "confirm_line", confirm)
+
+    @staticmethod
+    def _next(script):
+        answer = script.pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+
+def _written(layers) -> dict:
+    return yaml.safe_load((layers.g / "overrides.yaml").read_text(encoding="utf-8"))
+
+
+def _enable_script(name, label="Enable"):
+    return (Label(name), Label(label), "+close")
+
+
+async def test_enable_installs_asks_and_checks_in_one_pass(layers, mobile, dist, monkeypatch) -> None:
+    said = Said(monkeypatch, ["http://box"], [True])
+    channel = FakeChannel(*_enable_script("mob"))
+    touched: dict = {}
+
+    assert await _run(layers, channel, touched=touched) is True
+
+    assert len(mobile.spawns) == 1 and mobile.spawns[0][0][-1] == SPEC
+    (text, default, tail), = said.confirmed
+    assert (text, default) == ("", True) and CTRLC.format(does=CTRLC_DOES["prompt"]) in tail
+    assert CTRLC.format(does=CTRLC_DOES["batch"]) not in tail and said.asked == [("Address: ", False)]
+    lines = channel.lines
+    assert lines[0] == CONSENT[0].format(names="mob") and f"mob: {DOWNLOAD}" in lines
+    assert lines[-2:] == ["mob: enabled; starts when you close Plugins", "MOB-NEXT"]
+    assert DOWNLOAD not in [text for text, *_ in said.confirmed]
+    assert _written(layers) == {"mob": {"enabled": True, "url": "http://box"}}
+    assert channel.asked[-1].options[2].hint == "on — starts when you close Plugins"
+    assert channel.asked[-1].options[-1].label == "Close — restarts to apply (1 plugin)" and channel.closed
+    assert touched["mob"].loads is True
+
+
+async def test_enable_a_failed_check_prints_the_result_then_the_help_then_the_next_steps(layers, monkeypatch) -> None:
+    Said(monkeypatch, ["http://box", "s3cr3t-typed"])
+    touched: dict = {}
+    channel = FakeChannel(*_enable_script("ask"))
+
+    await _run(layers, channel, touched=touched)
+
+    assert [x for x in channel.lines if x] == [
+        "ask: enabled, but its check failed: no answer; starts when you close Plugins",
+        "ASK-HELP", AGENT_PROMPT_LEAD, "  Run it at http://box.", "ASK-NEXT"]
+    assert channel.lines[-2:] == ["", "ASK-NEXT"]
+    assert "s3cr3t-typed" not in channel.text and "s3cr3t-typed" not in repr(touched)
+
+
+async def test_enable_a_secret_answer_is_asked_hidden_and_never_reaches_the_console_or_touched(layers, monkeypatch) -> None:
+    said = Said(monkeypatch, ["http://box-ok", "s3cr3t-typed"])
+    touched: dict = {}
+    channel = FakeChannel(*_enable_script("ask"))
+
+    await _run(layers, channel, touched=touched)
+
+    assert said.asked == [("Address: ", False), ("Token: ", True)]
+    assert "s3cr3t-typed" not in channel.text + repr(touched) and "http://box-ok" not in channel.text
+    assert channel.lines == ["ask: enabled; starts when you close Plugins", "ASK-NEXT"]
+
+
+async def test_enable_a_declined_install_prints_the_skipped_block_once_then_the_next_steps(layers, mobile, dist, monkeypatch) -> None:
+    Said(monkeypatch, yes=[False])
+    touched: dict = {}
+    channel = FakeChannel(*_enable_script("mob"))
+
+    assert await _run(layers, channel, touched=touched) is False
+
+    lines = channel.lines
+    assert [x for x in lines if x.startswith("mob: enabled in config, package not installed")] == [lines[4]]
+    assert lines[-1] == "MOB-NEXT" and not any(x.startswith("mob: enabled") and "package" not in x for x in lines)
+    assert mobile.spawns == [] and touched["mob"].loads is False
+    assert channel.asked[-1].options[-1].label == "Close"
+    assert _written(layers) == {"mob": {"enabled": True}}
+
+
+async def test_enable_a_manual_route_prints_the_by_hand_block_and_no_result_line(layers, mobile, monkeypatch) -> None:
+    monkeypatch.setattr(plugins_cmd, "install_route_for", lambda entry: _MANUAL)
+    monkeypatch.setattr(plugins_cmd, "extra_for", lambda entry: "mobile")
+    touched: dict = {}
+    channel = FakeChannel(*_enable_script("mob"))
+
+    assert await _run(layers, channel, touched=touched) is False
+
+    assert channel.lines == [
+        "mob: enabled in config; this install must be done by hand.", "In another terminal run:",
+        "uv sync --extra mobile", "then Re-run setup under /plugins → mob", "MOB-NEXT"]
+    assert not touched["mob"].loads and channel.asked[-1].options[-1].label == "Close"
+
+
+async def test_enable_a_plugin_with_nothing_to_set_up_runs_no_probe_and_prints_no_next_steps(layers, monkeypatch) -> None:
+    def boom(*a, **kw):
+        raise AssertionError("probed")
+
+    monkeypatch.setattr(plugins_cmd, "probe", boom)
+    touched: dict = {}
+    channel = FakeChannel(*_enable_script("stub"))
+
+    await _run(layers, channel, touched=touched)
+
+    assert channel.lines == ["stub: enabled; starts when you close Plugins"] and touched["stub"].loads is True
+
+
+async def test_enable_a_plugin_you_installed_asks_the_trust_question_with_the_prompt_tail_first(folder, monkeypatch) -> None:
+    write_folder_plugin(folder.g, "swatch")
+    said = Said(monkeypatch, yes=[True])
+    touched: dict = {}
+    channel = FakeChannel(*_enable_script("swatch"))
+
+    await _run(folder, channel, touched=touched)
+
+    assert said.confirmed == [(THIRD_PARTY_CONFIRM.format(name="swatch"), False, CTRLC.format(does=CTRLC_DOES["prompt"]))]
+    assert channel.lines == ["swatch: enabled; starts when you close Plugins"] and touched["swatch"].loads is True
+
+
+async def test_enable_a_no_to_the_trust_question_stays_off_and_writes_nothing(folder, monkeypatch) -> None:
+    write_folder_plugin(folder.g, "swatch")
+    Said(monkeypatch, yes=[False])
+    touched: dict = {}
+    channel = FakeChannel(*_enable_script("swatch"))
+
+    await _run(folder, channel, touched=touched)
+
+    assert channel.lines == ["swatch: stays off"] and touched == {}
+    assert not (folder.g / "overrides.yaml").exists()
+
+
+async def test_enable_a_plugin_you_installed_whose_extra_nobody_provides_is_not_loading(folder, monkeypatch) -> None:
+    write_folder_plugin(folder.g, "swatch", manifest=', requires_extra="nosuchextra"')
+    Said(monkeypatch, yes=[True])
+    channel = FakeChannel(*_enable_script("swatch"))
+
+    await _run(folder, channel)
+
+    (line,) = channel.lines
+    assert line.startswith("swatch: enabled — not loading: ") and "nosuchextra" in line
+
+
+async def test_enable_a_plugin_you_installed_that_fails_to_import_is_not_loading(folder, monkeypatch) -> None:
+    write_folder_plugin(folder.g, "swatch", prelude="raise RuntimeError('boom')")
+    Said(monkeypatch, yes=[True])
+    channel = FakeChannel(*_enable_script("swatch"))
+
+    await _run(folder, channel)
+
+    (line,) = channel.lines
+    assert line.startswith("swatch: enabled — not loading: ") and "could not be imported" in line
+
+
+async def test_enable_a_resolve_that_raises_after_the_install_is_one_refused_line_and_writes_nothing(
+        layers, mobile, dist, monkeypatch) -> None:
+    real, fired = resolve_module.resolve, []
+
+    def once(loader, **kw):
+        if mobile.installed and not fired:
+            fired.append(1)
+            raise RuntimeError("boom http://user:pw@host/x")
+        return real(loader, **kw)
+
+    once.__kwdefaults__ = real.__kwdefaults__
+    monkeypatch.setattr(resolve_module, "resolve", once)
+    Said(monkeypatch, yes=[True])
+    touched: dict = {}
+    channel = FakeChannel(*_enable_script("mob"))
+
+    await _run(layers, channel, touched=touched)
+
+    line = channel.lines[-1]
+    assert line.startswith("mob: settings not changed — RuntimeError: boom") and "pw" not in line
+    assert line.endswith("(package installed — Enable to finish)")
+    assert not (layers.g / "overrides.yaml").exists() and touched == {}
+
+
+async def test_enable_install_and_set_up_runs_the_same_pass_for_an_enabled_plugin_missing_its_extra(
+        layers, mobile, dist, monkeypatch) -> None:
+    _on_disk(layers, mob=True)
+    said = Said(monkeypatch, ["http://box"], [True])
+    touched: dict = {}
+    channel = FakeChannel(*_enable_script("mob", "Install and set up"))
+
+    assert await _run(layers, channel, touched=touched) is True
+
+    assert _labels(channel.asked[1]) == ["Install and set up", "Disable", "Info"]
+    assert len(mobile.spawns) == 1 and len(said.confirmed) == 1
+    assert channel.lines[-2:] == ["mob: enabled; starts when you close Plugins", "MOB-NEXT"]

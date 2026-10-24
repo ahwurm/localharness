@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 
 import click
 from rich.text import Text
@@ -18,7 +18,8 @@ from localharness.cli.interview import Option, Unreachable, confirm_line, n_of, 
 from localharness.cli.plugins_cmd import (
     ACTION_DISABLE, ACTION_ENABLE, ACTION_INFO, ACTION_INSTALL, ACTION_RERUN, ACTION_SHOW_INSTALL, ENABLE_MANUAL,
     OVERRIDE_LINE, OVERRIDE_SAVED, ROUTE_BACK, Kind, PassProgress, PassResult, PluginSession, Refusal, ReloadPlan, Touch,
-    disable_pass, info_renderable, manual_block, override_line, prior_touch, refused, touch_after_stop, touch_from,
+    disable_pass, enable_pass, info_renderable, manual_block, override_line, prior_touch, refused, touch_after_stop,
+    touch_from,
 )
 from localharness.core.interrupt import sigint_cancels
 
@@ -91,6 +92,10 @@ STOP_TAILS = MappingProxyType({
     "edit_written": "{key} saved — applies {applies}" + AUDIT_MISSING,
     "disable": "nothing changed",
 })
+RERUN_HINT = "download still stopping"
+NEXT_STEPS_KINDS = frozenset({
+    "enabled", "enabled_unconfigured", "check_failed", "check_failed_noload", "check_skipped", "enabled_not_loading",
+    "rerun_ok", "rerun_failed", "install_skipped", "enabled_manual"})
 STOPPING = "{names}: stopping — pressing Ctrl-C two more times quits localharness"
 
 _STOP = object()
@@ -287,6 +292,12 @@ async def _act(flow: Flow, entry: Any, node: Callable, progress: PassProgress, *
     flow.plan = flow.should_reload(flow.session.touched)
     if (outcome := result_line(name, result, flow.session, flow.plan, progress, key=key)) is not None:
         _say(flow.console, RESULT.format(name=name, outcome=outcome))
+    if result.kind == "enabled_manual":
+        _manual(flow.console, name, plugins_cmd.install_route_for(entry))
+    if result.kind in NEXT_STEPS_KINDS:
+        steps = result.next_steps.splitlines()
+        _say(flow.console, *(line for paragraph in result.help for line in ("", paragraph)),
+             *(("", *steps) if result.help and steps else steps))
     return result
 
 
@@ -320,8 +331,25 @@ def _no_report(kind: str, payload: Any) -> None:
     return None
 
 
+def _manual(console: Any, name: str, route: Any) -> None:
+    _say(console, ENABLE_MANUAL.format(name=name), *manual_block([name], route.manual, ROUTE_BACK))
+
+
 async def _show_install(flow: Flow, entry: Any, route: Any) -> None:
-    _say(flow.console, ENABLE_MANUAL.format(name=entry.name), *manual_block([entry.name], route.manual, ROUTE_BACK))
+    _manual(flow.console, entry.name, route)
+
+
+def _pass_handler(mode: Literal["enable", "rerun"]) -> Callable[[Flow, Any, Any], Awaitable[None]]:
+    async def handler(flow: Flow, entry: Any, route: Any) -> None:
+        progress = PassProgress()
+
+        async def node() -> PassResult:
+            return await enable_pass(flow.session, entry.name, mode=mode, progress=progress, prompt=flow.prompt,
+                                     confirm=flow.confirm, report=_no_report, install="own", console=flow.console)
+
+        await _act(flow, entry, node, progress)
+
+    return handler
 
 
 async def _disable(flow: Flow, entry: Any, route: Any) -> None:
@@ -338,24 +366,42 @@ async def _info(flow: Flow, entry: Any, route: Any) -> bool:
     return True
 
 
-def _manual_route(entry: Any, enabled: bool | None, route: Any) -> bool:
+def _argv_route(entry: Any, enabled: bool | None, route: Any, session: PluginSession) -> bool:
+    return entry.state == "needs-extra" and route is not None and route.argv is not None
+
+
+def _manual_route(entry: Any, enabled: bool | None, route: Any, session: PluginSession) -> bool:
     return entry.state == "needs-extra" and route is not None and route.manual is not None
 
 
-ACTIONS: tuple[tuple[str, str, Callable[[Any, bool | None, Any], bool], Callable[[Flow, Any, Any], Awaitable[bool | None]]], ...] = (
+def _rerun_offered(entry: Any, enabled: bool | None, route: Any, session: PluginSession) -> bool:
+    touch, m = session.touched.get(entry.name), entry.manifest
+    return entry.state == "on" and (
+        bool(m is not None and (m.setup or m.setup_action)) or entry.name not in session.running
+        or (touch is not None and touch.probe is not None and touch.probe[0] != "on"))
+
+
+ACTIONS: tuple[tuple[str, str, Callable[[Any, bool | None, Any, PluginSession], bool],
+                     Callable[[Flow, Any, Any], Awaitable[bool | None]]], ...] = (
+    ("enable", ACTION_ENABLE, lambda entry, enabled, route, session: entry.state in ("off", "available"), _pass_handler("enable")),
+    ("install", ACTION_INSTALL, _argv_route, _pass_handler("enable")),
     ("show_install", ACTION_SHOW_INSTALL, _manual_route, _show_install),
-    ("disable", ACTION_DISABLE, lambda entry, enabled, route: enabled is True, _disable),
-    ("info", ACTION_INFO, lambda entry, enabled, route: True, _info),
+    ("rerun", ACTION_RERUN, _rerun_offered, _pass_handler("rerun")),
+    ("disable", ACTION_DISABLE, lambda entry, enabled, route, session: enabled is True, _disable),
+    ("info", ACTION_INFO, lambda entry, enabled, route, session: True, _info),
 )
 
 
 def actions_for(entry: Any, session: PluginSession, route: Any) -> list[tuple[Option, Callable]]:
     """The menu rows a plugin's state allows, each with its handler; a handler answering True keeps the menu open."""
     from localharness.config.loader import ConfigLoader
+    from localharness.plugins import lifecycle
     from localharness.plugins.resolve import resolve
 
     enabled = resolve(ConfigLoader(config_dir=session.cfg_path, local_config_dir=session.workspace)).enabled.get(entry.name)
-    return [(Option(key, label), handler) for key, label, available, handler in ACTIONS if available(entry, enabled, route)]
+    hint = RERUN_HINT if lifecycle.downloading(entry.name) else ""
+    return [(Option(key, label, hint if key == "rerun" else ""), handler)
+            for key, label, available, handler in ACTIONS if available(entry, enabled, route, session)]
 
 
 async def _ask_menu(flow: Flow, name: str) -> Any:
