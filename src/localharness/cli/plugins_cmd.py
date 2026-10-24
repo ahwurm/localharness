@@ -653,13 +653,87 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
     setup action runs only while the step is pending or when answers were written in this run."""
     resolution, loader, workspace = _resolve(config_dir, json_output=False)
     entry = _entry(resolution, loader, name, False)
+    state = PassState(name, on, tuple(pairs), to_workspace, ask, in_session, resolution, loader, workspace, entry)
     try:
-        return asyncio.run(_switch_body(
-            resolution, loader, workspace, entry, name, on, pairs, to_workspace, ask, in_session,
-            partial(prompt_line, console=console), partial(confirm_line, console=console)))
+        done = asyncio.run(_run_pass(state, prompt=partial(prompt_line, console=console),
+                                     confirm=partial(confirm_line, console=console), report=shell_report))
     except Refusal as refusal:
-        err_console.print("[bold red]Error:[/bold red] " + escape(str(refusal)), soft_wrap=True)
+        shell_report("refused", str(refusal))
         raise typer.Exit(code=2)
+    return StepOutcome(name, on, failed_check=done.failed, skipped_check=done.skipped, stopped=done.declined)
+
+
+def shell_report(kind: ReportKind, payload: Any) -> None:
+    """The shell's transcript: the one place a pass's lines are drawn, every text as text."""
+    from localharness.cli.doctor_cmd import print_plugin_row
+
+    def say(text: str, lead: str = "") -> None:
+        console.print(lead + escape(sanitize_for_display(text)), soft_wrap=True)
+
+    if kind == "wrote":
+        line, values = payload
+        say(line, "[green]✓[/green] ")
+        for path, value in values:
+            say(f"  set {path} = {value}")
+    elif kind == "note":
+        say(payload, "  [yellow]note:[/yellow] ")
+    elif kind == "checking":
+        console.print("Checking it now:")
+    elif kind == "row":
+        print_plugin_row(payload, [])
+    elif kind == "help":
+        for paragraph in payload:
+            console.print()
+            say(paragraph)
+    elif kind == "next_steps":
+        blank_first, lines = payload
+        if blank_first:
+            console.print()
+        for line in lines:
+            say(f"  {line}")
+    elif kind == "stays_off":
+        say(f"{payload} stays off. Your conversation continues.")
+    else:
+        err_console.print("[bold red]Error:[/bold red] " + escape(sanitize_for_display(payload)), soft_wrap=True)
+
+
+@dataclass(frozen=True)
+class PassState:
+    name: str
+    on: bool
+    pairs: tuple[str, ...]
+    to_workspace: bool
+    ask: bool
+    in_session: bool
+    resolution: Resolution
+    loader: ConfigLoader
+    workspace: Any
+    entry: PlanEntry
+    m: PluginManifest | None = None
+    missing: bool = False
+    setup: tuple[SetupField, ...] = ()
+    cls: Any = None
+    has_action: bool = False
+    pending: bool = True
+    target: Path | None = None
+    declined: bool = False
+    values: tuple[tuple[str, str], ...] = ()
+    fresh_loader: ConfigLoader | None = None
+    fresh: Resolution | None = None
+    after: PlanEntry | None = None
+    paths: PluginPaths | None = None
+    rows: tuple = ()
+    row: DoctorRow | None = None
+    failed: str = ""
+    skipped: str = ""
+
+    @property
+    def verb(self) -> str:
+        return "enable" if self.on else "disable"
+
+    @property
+    def step(self) -> bool:
+        return self.ask and self.after is not None and not self.missing
 
 
 async def _confirmed(confirm: Any, text: str, default: bool) -> bool:
@@ -669,95 +743,122 @@ async def _confirmed(confirm: Any, text: str, default: bool) -> bool:
     return answer
 
 
-async def _switch_body(resolution: Resolution, loader: ConfigLoader, workspace: Any, entry: PlanEntry,
-                       name: str, on: bool, pairs: list[str], to_workspace: bool, ask: bool,
-                       in_session: bool, prompt: Any, confirm: Any) -> StepOutcome:
-    from localharness.cli.doctor_cmd import print_plugin_row
-    from localharness.config.loader import ConfigLoader
-    from localharness.plugins.lifecycle import DoctorRow, setup_action_rows
-    from localharness.plugins.resolve import resolve
-    from localharness.plugins.setup import has_setup_action, render_agent_prompt
+async def _run_pass(state: PassState, *, prompt: Any, confirm: Any, report: Any) -> PassState:
+    state = await _prepare(state, confirm=confirm, report=report)
+    if state.declined:
+        return state
+    state = await _questions(state, prompt=prompt)
+    state = await _write(state, report=report)
+    state = await _act(state, confirm=confirm, report=report)
+    return await _check(state, report=report)
 
-    word, verb = ("on", "enable") if on else ("off", "disable")
-    if name not in resolution.enabled:  # a refused NAME (invalid, a core key, taken): its key is
-        raise Refusal(f"{name} cannot be turned {word}: {entry.reason}", ())  # not this plugin's to write
-    if to_workspace and not entry.bundled:
+
+async def _prepare(s: PassState, *, confirm: Any, report: Any) -> PassState:
+    from localharness.plugins.setup import has_setup_action
+
+    word = "on" if s.on else "off"
+    if s.name not in s.resolution.enabled:  # a refused NAME (invalid, a core key, taken): its key is
+        raise Refusal(f"{s.name} cannot be turned {word}: {s.entry.reason}", ())  # not this plugin's to write
+    if s.to_workspace and not s.entry.bundled:
         raise Refusal(f"a plugin you installed is turned {word} only in machine-level settings — run "
-                      f"`localharness plugins {verb} {name}` without --workspace", ())
-    if to_workspace and workspace is None:
+                      f"`localharness plugins {s.verb} {s.name}` without --workspace", ())
+    if s.to_workspace and s.workspace is None:
         raise Refusal("no project workspace applies here — run `localharness init --workspace` in the "
                       "project first, or leave out --workspace to change the machine-level setting", ())
-    if (in_session and on and ask and not entry.bundled
-            and not await _confirmed(confirm, THIRD_PARTY_CONFIRM.format(name=name), False)):
-        console.print(escape(f"{name} stays off. Your conversation continues."), soft_wrap=True)
-        return StepOutcome(name, on, stopped=True)
-    # Each layer's overrides.yaml exactly as config/loader.py reads it.
-    target = workspace / "overrides.yaml" if to_workspace else loader.user_overlay_path
-    m = entry.manifest if on else None
+    if (s.in_session and s.on and s.ask and not s.entry.bundled
+            and not await _confirmed(confirm, THIRD_PARTY_CONFIRM.format(name=s.name), False)):
+        report("stays_off", s.name)
+        return replace(s, declined=True)
+    m = s.entry.manifest if s.on else None
     # A missing extra is tested directly, not through the plan state: a default-on plugin the user
     # turned off reads `off` there, and would still be asked for settings it cannot use.
     missing = m is not None and _extra_missing(m)
-    setup = m.setup if m is not None else ()
-    cls = resolution.classes.get(name)
+    cls = s.resolution.classes.get(s.name)
     has_action = m is not None and cls is not None and has_setup_action(cls)
     # Before asking, from what is stored now: does the step still have work? The shell asks every
     # question every time, as it always has; a session asks only while the step is pending.
-    pending = (await step_pending(resolution, loader, entry, _paths(loader, workspace))
-               if ask and m is not None and not missing and (in_session or has_action) else True)
-    if ask and setup and not missing and (pending or not in_session):
-        # the answers go through the one checked write path, as --set values
-        pairs = await ask_fields(setup, lambda key: _stored(resolution, loader, entry, key),
-                                 lambda key: _secret_stored(resolution, loader, entry, key),
-                                 lambda key: _cleared(resolution, entry, key), prompt=prompt)
-    overlay = load_overlay(target)
-    set_value_in_dict(overlay, f"{name}.enabled", on)
-    values = _checked_all(resolution, loader, entry, pairs, to_workspace, overlay) if pairs else {}
-    atomic_write_overlay(target, overlay)
-    tail = "" if in_session else " — takes effect on the next `localharness start`"
-    console.print("[green]✓[/green] " + escape(f"{name} {verb}d in {target}{tail}"), soft_wrap=True)
-    for path, value in values.items():
-        console.print(escape(f"  set {path} = {redact_text(value)}"), soft_wrap=True)
+    pending = (await step_pending(s.resolution, s.loader, s.entry, _paths(s.loader, s.workspace))
+               if s.ask and m is not None and not missing and (s.in_session or has_action) else True)
+    # Each layer's overrides.yaml exactly as config/loader.py reads it.
+    target = s.workspace / "overrides.yaml" if s.to_workspace else s.loader.user_overlay_path
+    return replace(s, m=m, missing=missing, setup=m.setup if m is not None else (), cls=cls,
+                   has_action=has_action, pending=pending, target=target)
+
+
+async def _questions(s: PassState, *, prompt: Any) -> PassState:
+    if not (s.ask and s.setup and not s.missing and (s.pending or not s.in_session)):
+        return s
+    # the answers go through the one checked write path, as --set values
+    pairs = await ask_fields(s.setup, lambda key: _stored(s.resolution, s.loader, s.entry, key),
+                             lambda key: _secret_stored(s.resolution, s.loader, s.entry, key),
+                             lambda key: _cleared(s.resolution, s.entry, key), prompt=prompt)
+    return replace(s, pairs=tuple(pairs))
+
+
+async def _write(s: PassState, *, report: Any) -> PassState:
+    from localharness.config.loader import ConfigLoader
+    from localharness.plugins.resolve import resolve
+
+    overlay = load_overlay(s.target)
+    set_value_in_dict(overlay, f"{s.name}.enabled", s.on)
+    values = (_checked_all(s.resolution, s.loader, s.entry, list(s.pairs), s.to_workspace, overlay)
+              if s.pairs else {})
+    atomic_write_overlay(s.target, overlay)
+    tail = "" if s.in_session else " — takes effect on the next `localharness start`"
+    shown_values = tuple((path, redact_text(value)) for path, value in values.items())
+    report("wrote", (f"{s.name} {s.verb}d in {s.target}{tail}", shown_values))
     fresh_loader = fresh = after = row = None
-    if m is not None:
+    if s.m is not None:
         # What was just written, read through a NEW loader over the same layers: ConfigLoader caches
         # its harness and raw sources, and re-deriving the workspace would print its trust notice
         # (and maybe ask) a second time.
-        fresh_loader = ConfigLoader(config_dir=loader.global_config_dir, local_config_dir=workspace)
+        fresh_loader = ConfigLoader(config_dir=s.loader.global_config_dir, local_config_dir=s.workspace)
         try:
             fresh = resolve(fresh_loader)
-            after = fresh.plan.entry(name)
+            after = fresh.plan.entry(s.name)
         except Exception as exc:  # noqa: BLE001 — the enable already wrote; the rest is advice
-            row = could_not_check(name, exc)
-    if after is not None and m.requires_extra and after.state == "needs-extra":
+            row = could_not_check(s.name, exc)
+    missing = s.missing
+    if after is not None and s.m.requires_extra and after.state == "needs-extra":
         missing = True  # "takes effect on the next start" is not true without its install extra
-        console.print("  [yellow]note:[/yellow] " + escape(
-            f"{name} is missing its install extra — {after.reason}"), soft_wrap=True)
-    project = [s["enabled"] for s in loader.plugin_layers().get(name, (None,) * 4)[2:]
-               if isinstance(s, dict) and isinstance(s.get("enabled"), bool)]
-    if not to_workspace and entry.bundled and project and project[-1] is not on:
-        console.print("  [yellow]note:[/yellow] " + escape(
-            f"this project turns {name} {'off' if on else 'on'} ({workspace}), and that still wins "
-            f"here — `localharness plugins {verb} {name} --workspace` changes it for this project"),
-            soft_wrap=True)
-    step = ask and after is not None and not missing
-    paths = _paths(fresh_loader, workspace) if fresh_loader is not None else None
-    rows: tuple = ()
-    if step and has_action and after.state == "on" and (pending or pairs) and (
-            not m.setup_action or await _confirmed(confirm, m.setup_action, True)):
-        rows = _stripped(DoctorRow(name, "on", "", await setup_action_rows(fresh, name, paths))).checks
-        if rows:
-            print_plugin_row(DoctorRow(name, "on", "", rows), [])
-    failed, skipped, block = "", "", False
-    if row is not None or (step and (setup or has_action)):
-        console.print("Checking it now:")
+        report("note", f"{s.name} is missing its install extra — {after.reason}")
+    project = [x["enabled"] for x in s.loader.plugin_layers().get(s.name, (None,) * 4)[2:]
+               if isinstance(x, dict) and isinstance(x.get("enabled"), bool)]
+    if not s.to_workspace and s.entry.bundled and project and project[-1] is not s.on:
+        report("note", f"this project turns {s.name} {'off' if s.on else 'on'} ({s.workspace}), and that "
+                       f"still wins here — `localharness plugins {s.verb} {s.name} --workspace` "
+                       "changes it for this project")
+    paths = _paths(fresh_loader, s.workspace) if fresh_loader is not None else None
+    return replace(s, values=shown_values, missing=missing, fresh_loader=fresh_loader, fresh=fresh,
+                   after=after, paths=paths, row=row)
+
+
+async def _act(s: PassState, *, confirm: Any, report: Any) -> PassState:
+    from localharness.plugins.lifecycle import DoctorRow, setup_action_rows
+
+    if not (s.step and s.has_action and s.after.state == "on" and (s.pending or s.pairs) and (
+            not s.m.setup_action or await _confirmed(confirm, s.m.setup_action, True))):
+        return s
+    rows = _stripped(DoctorRow(s.name, "on", "", await setup_action_rows(s.fresh, s.name, s.paths))).checks
+    if rows:
+        report("row", DoctorRow(s.name, "on", "", rows))
+    return replace(s, rows=rows)
+
+
+async def _check(s: PassState, *, report: Any) -> PassState:
+    from localharness.plugins.setup import render_agent_prompt
+
+    m, row, failed, skipped, block = s.m, s.row, "", "", False
+    if row is not None or (s.step and (s.setup or s.has_action)):
+        report("checking", None)
         stored = row is not None
-        row = row or await probe(name, fresh, paths)
-        print_plugin_row(row, [])
-        unanswered = not stored and any(not _stored(fresh, fresh_loader, after, f.key) for f in setup)
+        row = row or await probe(s.name, s.fresh, s.paths)
+        report("row", row)
+        unanswered = not stored and any(not _stored(s.fresh, s.fresh_loader, s.after, f.key) for f in s.setup)
         not_clean = _not_clean(row, unanswered)
         # The setup action's rows count as the check's do: one that failed (a far end that does not
         # answer, a download that raised) is not set up, even when the offline doctor row passes.
-        action_failed = [c for c in rows if c.status == "fail"]
+        action_failed = [c for c in s.rows if c.status == "fail"]
         if not_clean or action_failed:
             # A failing row, the check's or the setup action's, is a failed check; a skipped row with
             # none failing is a plugin not set up yet (mobile's "not enrolled yet"), not a failure; a
@@ -768,28 +869,22 @@ async def _switch_body(resolution: Resolution, loader: ConfigLoader, workspace: 
                 next((c.detail for c in (*checks, *action_failed) if c.status == "fail"), ""))
             skipped = "" if failed else sanitize_for_display(
                 next((c.detail for c in checks if c.status == "skip"), ""))
-            if m.setup_help:  # the one place it prints
-                console.print()
-                console.print(escape(m.setup_help), soft_wrap=True)
-            if m.agent_prompt:
-                console.print()
-                console.print(escape(redact_text(render_agent_prompt(m.agent_prompt, _prompt_values(
-                    fresh or resolution, fresh_loader or loader, after or entry, m.agent_prompt)))),
-                    soft_wrap=True)
-            block = bool(m.setup_help or m.agent_prompt)
-    elif not ask and m is not None:
-        if setup and not pairs:
-            console.print(escape("  next step — give it the " + ", ".join(f.prompt for f in setup)
-                                 + ": " + _set_spelling(name, setup)), soft_wrap=True)
-        if has_action and m.setup_action:
-            console.print(escape(f"  next step — run `localharness plugins enable {name}` "
-                                 f"on a terminal to answer: {m.setup_action}"), soft_wrap=True)
+            paragraphs = tuple(p for p in (m.setup_help, redact_text(render_agent_prompt(
+                m.agent_prompt, _prompt_values(s.fresh or s.resolution, s.fresh_loader or s.loader,
+                                               s.after or s.entry, m.agent_prompt))) if m.agent_prompt else "") if p)
+            if paragraphs:  # the one place it prints
+                report("help", paragraphs)
+            block = bool(paragraphs)
+    elif not s.ask and m is not None:
+        lines = ((f"next step — give it the {', '.join(f.prompt for f in s.setup)}: "
+                  f"{_set_spelling(s.name, s.setup)}",) if s.setup and not s.pairs else ()) + (
+            (f"next step — run `localharness plugins enable {s.name}` on a terminal to answer: "
+             f"{m.setup_action}",) if s.has_action and m.setup_action else ())
+        if lines:
+            report("next_steps", (False, lines))
     if m is not None and m.next_steps:
-        if block:  # a blank line ends the text to paste: the next step is not part of it
-            console.print()
-        for line in m.next_steps.splitlines():
-            console.print(escape(f"  {line}"), soft_wrap=True)
-    return StepOutcome(name, on, failed_check=failed, skipped_check=skipped)
+        report("next_steps", (block, tuple(m.next_steps.splitlines())))  # a blank line ends the text to paste
+    return replace(s, row=row, failed=failed, skipped=skipped)
 
 
 def could_not_check(name: str, exc: Exception) -> DoctorRow:
