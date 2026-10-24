@@ -1706,6 +1706,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.channels.terminal import TerminalChannel
     from localharness.cli import model_ops, start_serving
     from localharness.cli.agent_cmd import _build_agent_yaml
+    from localharness.cli.skill_session import SkillSession, skill_row
     from localharness.cli.slash_commands import set_plugin_rows
     from localharness.config.loader import ConfigLoader
     from localharness.config.paths import global_config_dir, resolve_config_dir, resolve_runtime_path
@@ -2720,6 +2721,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     mcp_manager = None
     plugin_resolution = None
     plugin_result = None
+    plugin_rows: tuple = ()
     session_info = None
     _exit_reason = "complete"
     restart_request: Restart | None = None
@@ -2788,11 +2790,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                     session=session_info,
                 )
                 warnings.extend(plugin_result.warnings)
-                warnings.extend(set_plugin_rows(plugin_result.slash_rows))
+                plugin_rows = tuple(plugin_result.slash_rows)
                 plugins_loaded = len(plugin_result.running)
         except Exception as exc:  # noqa: BLE001 — the substrate itself failing is still not fatal
             plugin_error = f"plugins: {exc}"
             warnings.append(plugin_error)
+        warnings.extend(set_plugin_rows((*plugin_rows, *(skill_row(s) for s in skill_set.skills))))
         if channel_refusal is not None:
             # Nothing has started (start_plugins was skipped, MCP is step 6); the finally below
             # still closes the LLM client.
@@ -3564,6 +3567,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # The harness's own unit state sensed once above: the session's launches go through it too
             # (D-19) and it never senses again.
             unit_state=_unit,
+            skills=SkillSession(skill_set) if skill_set.skills else None,
         )
 
         repl_cell.append(repl)  # late binding: the supplier now answers repl.server_recovery()
