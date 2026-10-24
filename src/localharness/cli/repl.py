@@ -304,6 +304,7 @@ class OrchestratorREPL:
     detected, drives the AgentCreationWorkflow state machine through conversation.
     All other input is dispatched to the agent loop.
     """
+    _skills: Any = None
 
     def __init__(
         self,
