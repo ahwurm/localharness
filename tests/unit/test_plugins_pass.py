@@ -1,18 +1,22 @@
 """The project override (its one predicate and its one sentence) and the enable and disable producers."""
 from __future__ import annotations
 
+import asyncio
 import inspect
+import io
+import signal
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import yaml
-from pydantic import BaseModel, SecretStr
+from pydantic import BaseModel, SecretStr, field_validator
+from rich.console import Console
 
 from localharness.cli import plugins_cmd
 from localharness.cli.plugins_cmd import (
-    CTRLC, CTRLC_DOES, OVERRIDE_LINE, OVERRIDE_SAVED, THIRD_PARTY_CONFIRM, PassProgress, PassResult, PluginSession,
+    CONSENT, CTRLC, CTRLC_DOES, CTRLC_IGNORED, OVERRIDE_LINE, OVERRIDE_SAVED, THIRD_PARTY_CONFIRM, PassProgress, PassResult, PluginSession,
     Refusal, StepOutcome, Touch, disable_pass, enable_pass, override_line, override_of,
 )
 from localharness.config.loader import ConfigLoader
@@ -21,10 +25,14 @@ from localharness.plugins import builtin, discovery, lifecycle
 from localharness.plugins import resolve as resolve_module
 from localharness.plugins.api import Check, Plugin, PluginManifest, SetupField
 from localharness.plugins.resolve import resolve
+from tests.plugin_prompts import fake_prompts
+from tests.unit.test_extra_install import SPEC, _Proc, dist  # noqa: F401
 from tests.unit.test_plugin_resolve import write_folder_plugin
 from tests.unit.test_plugins_bookkeeping import _CONFIG, Stub
 
 _REAL_DISCOVER = discovery.discover
+CALLS: list[str] = []
+DOWNLOAD = "Download the model (1.2 GB)?"
 
 
 class _AskConfig(BaseModel):
@@ -50,10 +58,42 @@ class Ask(Plugin):
         return [Check(name="ask", status=status, detail={"pass": "answers", "skip": "not paired"}.get(status, "no answer"))]
 
 
+class _MobConfig(BaseModel):
+    url: str = ""
+
+    @field_validator("url")
+    @classmethod
+    def _not_refused(cls, value: str) -> str:
+        if "refuse" in value:
+            raise ValueError(f"cannot reach {value!r}")
+        return value
+
+
+class Mob(Plugin):
+    """needs the mobile extra, asks an address and downloads a model"""
+
+    manifest = PluginManifest(
+        name="mob", version="0.1.0", kind="tools", enabled_by_default=False, requires_extra="mobile",
+        setup=(SetupField(key="url", prompt="Address", default="http://127.0.0.1:1"),),
+        setup_action=DOWNLOAD, next_steps="MOB-NEXT")
+    ConfigModel = _MobConfig
+
+    async def configure(self, ctx):
+        return "ready" if ctx.config.url else ("unconfigured", "mob.url")
+
+    def setup_action(self, ctx):
+        CALLS.append("download")
+        return [Check(name="mob", status="pass", detail="fetched")]
+
+    def doctor(self, ctx):
+        return [Check(name="mob", status="pass" if "download" in CALLS else "fail", detail="ready")]
+
+
 @pytest.fixture
 def layers(tmp_path: Path, monkeypatch) -> SimpleNamespace:
-    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Stub, Ask))
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Stub, Ask, Mob))
     monkeypatch.setattr(discovery, "discover", lambda global_config_dir: [])
+    CALLS.clear()
     g, ws = tmp_path / "g", tmp_path / "proj" / ".localharness"
     g.mkdir()
     ws.mkdir(parents=True)
@@ -463,3 +503,215 @@ async def test_enable_pass_written_starts_from_the_flag_not_from_the_name(layers
     _, talk = await _enable(layers, "ask", Talk(["box-ok", "tok"]))
 
     assert talk.seen[0] == ("question", True)
+
+
+class _Tee(io.StringIO):
+    def write(self, text: str) -> int:
+        CALLS.append(text.strip())
+        return super().write(text)
+
+
+@pytest.fixture
+def mobile(monkeypatch):
+    """The mobile extra, missing until a faked installer exits 0."""
+    state = SimpleNamespace(installed=False, spawns=[], proc=_Proc([b"installed\n"]))
+
+    async def spawn(*argv, **kw):
+        state.spawns.append((argv, kw))
+        state.installed = True
+        return state.proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setitem(resolve_module.resolve.__kwdefaults__, "extra_installed",
+                        lambda extra: state.installed or extra != "mobile")
+    return state
+
+
+@pytest.fixture
+def route(monkeypatch):
+    """A route for mob without the real distribution, and an install_pass that answers as scripted."""
+    state = SimpleNamespace(extra="mobile", argv=["pip", "install", "x"], done=True, calls=[])
+
+    async def fake_install(session, extras, names, **kw):
+        state.calls.append((extras, names, kw))
+        return frozenset(names) if state.done else frozenset()
+
+    monkeypatch.setattr(plugins_cmd, "extra_for", lambda entry: state.extra)
+    monkeypatch.setattr(plugins_cmd, "install_route_for", lambda entry: SimpleNamespace(argv=state.argv))
+    monkeypatch.setattr(plugins_cmd, "install_pass", fake_install)
+    return state
+
+
+def _written(layers) -> dict:
+    return yaml.safe_load((layers.g / "overrides.yaml").read_text(encoding="utf-8"))
+
+
+async def test_enable_pass_installs_the_missing_extra_after_one_consent_and_asks_as_question_installed(
+        layers, mobile, dist) -> None:  # noqa: F811
+    out = io.StringIO()
+
+    result, talk = await _enable(layers, "mob", Talk(["http://box"], yes=[True]), console=Console(file=out, width=400))
+
+    assert (result.kind, result.install, result.downloaded, result.next_steps, result.loads) == (
+        "enabled", "done", True, "MOB-NEXT", True)
+    assert CALLS == ["download"]
+    assert len(talk.confirmed) == 1 and talk.confirmed[0][0] == "" and talk.confirmed[0][1] is True
+    assert DOWNLOAD not in [text for text, *_ in talk.confirmed]
+    assert talk.seen == [("consent", False), ("question_installed", False)]
+    assert talk.progress.phase == "check" and talk.progress.written is True
+    assert len(mobile.spawns) == 1 and mobile.spawns[0][0][-1] == SPEC
+    assert CONSENT[0].format(names="mob") in out.getvalue() and DOWNLOAD in out.getvalue()
+    assert _written(layers) == {"mob": {"enabled": True, "url": "http://box"}}
+
+
+async def test_enable_pass_a_declined_install_writes_the_enable_and_stops(layers, mobile, route) -> None:
+    route.done = False
+
+    result, talk = await _enable(layers, "mob")
+
+    assert (result.kind, result.install, result.loads, result.downloaded, result.questions) == (
+        "install_skipped", "skipped", False, False, "none")
+    assert len(route.calls) == 1 and route.calls[0][:2] == ({"mobile"}, ["mob"])
+    assert talk.asked == [] and talk.confirmed == [] and CALLS == []
+    assert _written(layers) == {"mob": {"enabled": True}} and talk.progress.wrote is True
+
+
+async def test_enable_pass_install_skipped_by_a_batch_does_not_run_the_install(layers, mobile, route) -> None:
+    result, talk = await _enable(layers, "mob", install="skipped")
+
+    assert (result.kind, result.install, result.loads) == ("install_skipped", "skipped", False)
+    assert route.calls == [] and talk.asked == [] and talk.confirmed == []
+    assert _written(layers) == {"mob": {"enabled": True}}
+
+
+async def test_enable_pass_a_manual_install_route_writes_the_enable_and_nothing_else(layers, mobile, route) -> None:
+    route.argv = None
+
+    result, talk = await _enable(layers, "mob")
+
+    assert (result.kind, result.install, result.loads, result.questions) == ("enabled_manual", "none", False, "none")
+    assert route.calls == [] and talk.asked == [] and talk.confirmed == [] and CALLS == []
+    assert _written(layers) == {"mob": {"enabled": True}}
+
+
+async def test_enable_pass_a_missing_extra_with_no_route_is_not_loading(layers, mobile, route) -> None:
+    route.extra = None
+
+    result, talk = await _enable(layers, "mob")
+
+    assert (result.kind, result.loads, result.install, result.detail) == (
+        "enabled_not_loading", False, "none", "install `localharness[mobile]` to use it")
+    assert route.calls == [] and talk.asked == [] and talk.confirmed == []
+    assert _written(layers) == {"mob": {"enabled": True}}
+
+
+async def test_enable_pass_a_resolve_that_raises_after_the_install_is_refused_with_nothing_written(
+        layers, mobile, route, monkeypatch) -> None:
+    calls = []
+
+    def second_raises(loader, *a, **kw):
+        calls.append(loader)
+        if len(calls) == 2:
+            raise RuntimeError("boom http://user:pw@host/x")
+        return resolve(loader, *a, **kw)
+
+    monkeypatch.setattr(resolve_module, "resolve", second_raises)
+
+    result, talk = await _enable(layers, "mob")
+
+    assert (result.kind, result.install, result.loads) == ("refused", "done", False)
+    assert result.detail.startswith("RuntimeError: boom") and "pw" not in result.detail
+    assert not (layers.g / "overrides.yaml").exists() and talk.progress.wrote is False
+    assert talk.progress.phase == "question_installed"
+
+
+async def test_enable_pass_install_done_runs_every_question_as_question_installed_and_skips_the_download_confirm(
+        layers, mobile) -> None:
+    mobile.installed = True
+
+    result, talk = await _enable(layers, "mob", Talk(["http://box"]), install="done")
+
+    assert (result.kind, result.install, result.downloaded) == ("enabled", "done", True)
+    assert talk.seen == [("question_installed", False)] and talk.confirmed == [] and CALLS == ["download"]
+    assert talk.progress.phase == "check"
+
+
+async def test_enable_pass_install_done_a_refused_answer_leaves_the_phase_at_question_installed(
+        layers, mobile) -> None:
+    mobile.installed = True
+    talk = Talk(["http://refuse"])
+
+    with pytest.raises(Refusal):
+        await _enable(layers, "mob", talk, install="done")
+
+    assert talk.progress.phase == "question_installed" and not (layers.g / "overrides.yaml").exists()
+
+
+async def test_enable_pass_install_none_asks_the_plugins_own_download_confirm_in_the_download_phase(
+        layers, mobile) -> None:
+    mobile.installed = True
+
+    result, talk = await _enable(layers, "mob", Talk(["http://box"], yes=[True]), install="none")
+
+    assert (result.install, result.downloaded, CALLS) == ("none", True, ["download"])
+    assert talk.confirmed == [(DOWNLOAD, True, "")]
+    assert talk.seen == [("question", False), ("download", True)]
+
+
+async def test_enable_pass_a_no_to_the_download_confirm_downloads_nothing(layers, mobile) -> None:
+    mobile.installed = True
+
+    result, talk = await _enable(layers, "mob", Talk(["http://box"], yes=[False]), install="none")
+
+    assert (result.downloaded, CALLS, talk.progress.phase) == (False, [], "check")
+
+
+async def test_enable_pass_in_batch_puts_the_batch_tail_on_the_download_confirm(layers, mobile) -> None:
+    mobile.installed = True
+
+    _, talk = await _enable(layers, "mob", Talk(["http://box"], yes=[True]), install="none", in_batch=True)
+
+    assert talk.confirmed == [(DOWNLOAD, True, "Ctrl-C stops the batch")]
+
+
+async def test_enable_pass_in_batch_puts_the_batch_tail_on_the_trust_question(folder) -> None:
+    write_folder_plugin(folder.g, "swatch")
+
+    _, talk = await _enable(folder, "swatch", Talk(yes=[True]), in_batch=True)
+
+    assert talk.confirmed == [(THIRD_PARTY_CONFIRM.format(name="swatch"), False, "Ctrl-C stops the batch")]
+
+
+async def test_enable_pass_in_an_ignore_launch_says_the_download_cannot_be_stopped_before_it_starts(
+        layers, mobile, monkeypatch) -> None:
+    mobile.installed = True
+    monkeypatch.setattr(signal, "getsignal", lambda signum: signal.SIG_IGN)
+    line = CTRLC_IGNORED.format(step="download")
+
+    await _enable(layers, "mob", Talk(["http://box"], yes=[True]), install="none", console=Console(file=_Tee(), width=400))
+
+    assert CALLS.count(line) == 1 and CALLS.index(line) < CALLS.index("download")
+
+
+async def test_enable_pass_prints_no_ignored_line_when_sigint_is_not_ignored_or_the_download_is_declined(
+        layers, mobile, monkeypatch) -> None:
+    mobile.installed = True
+    out = io.StringIO()
+
+    await _enable(layers, "mob", Talk(["http://box"], yes=[True]), install="none", console=Console(file=out, width=400))
+    monkeypatch.setattr(signal, "getsignal", lambda signum: signal.SIG_IGN)
+    await _enable(layers, "mob", Talk(["http://box"], yes=[False]), install="none", console=Console(file=out, width=400))
+
+    assert out.getvalue() == ""
+
+
+def test_the_shell_step_never_prints_the_ignored_line(layers, mobile, monkeypatch) -> None:
+    mobile.installed = True
+    out = io.StringIO()
+    monkeypatch.setattr(plugins_cmd, "console", Console(file=out, width=400))
+    monkeypatch.setattr(signal, "getsignal", lambda signum: signal.SIG_IGN)
+    fake_prompts(monkeypatch, prompt=lambda text, **kw: "http://box", confirm=lambda text, **kw: True)
+
+    plugins_cmd._switch("mob", True, [], False, str(layers.g), ask=True, in_session=True)
+
+    assert CTRLC_IGNORED.format(step="download") not in out.getvalue() and CALLS == ["download"]

@@ -803,7 +803,11 @@ class PassState:
     skipped: str = ""
     help: tuple[str, ...] = ()
     progress: PassProgress = field(default_factory=PassProgress)
+    install: Literal["done", "skipped", "none"] = "none"
+    halt: Literal["install_skipped", "enabled_manual"] | None = None
+    console: Console | None = None
     trust_tail: str = ""
+    download_tail: str = ""
     verify: bool = False
     asked: bool = False
     downloaded: bool = False
@@ -835,8 +839,6 @@ async def _run_pass(state: PassState, *, prompt: Any, confirm: Any, report: Any)
 
 
 async def _prepare(s: PassState, *, confirm: Any, report: Any) -> PassState:
-    from localharness.plugins.setup import has_setup_action
-
     word = "on" if s.on else "off"
     if s.name not in s.resolution.enabled:  # a refused NAME (invalid, a core key, taken): its key is
         raise Refusal(f"{s.name} cannot be turned {word}: {s.entry.reason}", ())  # not this plugin's to write
@@ -853,6 +855,12 @@ async def _prepare(s: PassState, *, confirm: Any, report: Any) -> PassState:
             and not await _confirmed(confirm, THIRD_PARTY_CONFIRM.format(name=s.name), False, s.trust_tail)):
         report("stays_off", s.name)
         return replace(s, declined=True)
+    return await _snapshot(s)
+
+
+async def _snapshot(s: PassState) -> PassState:
+    from localharness.plugins.setup import has_setup_action
+
     m = s.entry.manifest if s.on else None
     # A missing extra is tested directly, not through the plan state: a default-on plugin the user
     # turned off reads `off` there, and would still be asked for settings it cannot use.
@@ -870,7 +878,7 @@ async def _prepare(s: PassState, *, confirm: Any, report: Any) -> PassState:
 
 
 async def _questions(s: PassState, *, prompt: Any) -> PassState:
-    s.progress.phase = "question"
+    s.progress.phase = "question_installed" if s.install == "done" else "question"
     if not (s.ask and s.setup and not s.missing and (s.pending or not s.in_session)):
         return s
     # the answers go through the one checked write path, as --set values
@@ -921,8 +929,11 @@ async def _act(s: PassState, *, confirm: Any, report: Any) -> PassState:
     if not (s.step and s.has_action and s.after.state == "on" and (s.pending or s.pairs)):
         return s
     s.progress.phase = "download"
-    if s.m.setup_action and not await _confirmed(confirm, s.m.setup_action, True):
+    if s.m.setup_action and s.install != "done" and not await _confirmed(
+            confirm, s.m.setup_action, True, s.download_tail):
         return s
+    if s.console is not None and signal.getsignal(signal.SIGINT) is signal.SIG_IGN:
+        s.console.print(Text(CTRLC_IGNORED.format(step="download")), soft_wrap=True)
     rows = _stripped(DoctorRow(s.name, "on", "", await setup_action_rows(s.fresh, s.name, s.paths))).checks
     if rows:
         report("row", DoctorRow(s.name, "on", "", rows))
@@ -1127,6 +1138,31 @@ async def install_pass(session: PluginSession, extras: set[str], names: list[str
     return frozenset(names)
 
 
+async def _install(s: PassState, session: PluginSession, *, confirm: Any, install: str, in_batch: bool
+                   ) -> PassState | PassResult:
+    """Step 2 and 3: the consented install of the missing extra, or why the pass writes the enable and stops."""
+    from localharness.config.loader import ConfigLoader
+    from localharness.plugins.resolve import resolve
+
+    if install == "skipped":
+        return replace(s, install="skipped", halt="install_skipped")
+    if install != "own" or not (extra := extra_for(s.entry)):
+        return replace(s, install="done" if install == "done" else "none")
+    if install_route_for(s.entry).argv is None:
+        return replace(s, halt="enabled_manual")
+    if s.name not in await install_pass(session, {extra}, [s.name], progress=s.progress, confirm=confirm,
+                                        console=s.console, in_batch=in_batch):
+        return replace(s, install="skipped", halt="install_skipped")
+    s.progress.phase = "question_installed"
+    try:
+        loader = ConfigLoader(config_dir=session.cfg_path, local_config_dir=session.workspace)
+        resolution = resolve(loader)
+    except Exception as exc:  # noqa: BLE001 — the package is installed and nothing is written
+        return refused(session, s.name, redact_text(f"{type(exc).__name__}: {exc}"), "done")
+    return await _snapshot(replace(s, install="done", loader=loader, resolution=resolution,
+                                   entry=resolution.plan.entry(s.name)))
+
+
 def _pass_result(s: PassState, session: PluginSession, prior: Touch) -> PassResult:
     row, after = s.row, s.after
     answered = tuple(pair.partition("=")[0] for pair in s.pairs)
@@ -1152,7 +1188,7 @@ def _pass_result(s: PassState, session: PluginSession, prior: Touch) -> PassResu
     rebind = s.name in session.running and (bool(answered) or (
         row is not None and row.state != (prior.probe[0] if prior.probe else "on")))
     return PassResult(kind, StepOutcome(s.name, True, failed_check=s.failed, skipped_check=s.skipped),
-                      questions=questions, answered=answered, downloaded=s.downloaded, row=row,
+                      install=s.install, questions=questions, answered=answered, downloaded=s.downloaded, row=row,
                       loads=loads, rebind=rebind, detail=redact_text(sanitize_for_display(detail)),
                       next_steps=s.m.next_steps if s.m is not None else "", help=s.help)
 
@@ -1173,13 +1209,20 @@ async def enable_pass(session, name, *, mode: Literal["enable", "rerun"], progre
     progress.written = resolution.enabled.get(name, False)
     tail = CTRLC.format(does=CTRLC_DOES["batch" if in_batch else "prompt"])
     state = PassState(name, True, (), False, True, True, resolution, loader, session.workspace, entry,
-                      progress=progress, trust_tail=tail, verify=True)
+                      progress=progress, console=console, trust_tail=tail, download_tail=tail if in_batch else "",
+                      verify=True, install=install if install == "done" else "none")
     state = await _prepare(state, confirm=confirm, report=report)
     if state.overridden:
         return PassResult("override", StepOutcome(name, True, stopped=True), override=override_of(loader, entry, True, False),
                           loads=loads_from_plan(session, name, prior, None, resolution))
     if state.declined:
         return PassResult("declined", StepOutcome(name, True, stopped=True))
+    state = await _install(state, session, confirm=confirm, install=install, in_batch=in_batch)
+    if isinstance(state, PassResult):
+        return state
+    if state.halt:
+        state = await _write(state, report=report)
+        return PassResult(state.halt, StepOutcome(name, True), install=state.install)
     state = await _write(await _questions(state, prompt=prompt), report=report)
     state = await _check(await _act(state, confirm=confirm, report=report), report=report)
     return _pass_result(state, session, prior)
