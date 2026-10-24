@@ -68,6 +68,14 @@ async def _maybe_await(result: Any) -> Any:
     return result
 
 
+def cut_output(text: str, cap: int) -> str:
+    """Cut to `cap` characters, marker included, so the model never mistakes a cut text for a whole one."""
+    if len(text) <= cap:
+        return text
+    marker = f"\n... [output cut: {len(text)} chars total — head kept] ..."
+    return text[:cap - len(marker)] + marker if cap > len(marker) else text[:cap]
+
+
 log = logging.getLogger(__name__)
 
 
@@ -492,13 +500,8 @@ class ToolRegistry:
 
         cap = self.result_size_cap_chars  # resolved once per dispatch, for output and error alike
         if len(result.output) > cap:
-            # The model reads this cut text, so it says so (as the stage-1 cap's "chars elided" does)
-            # and the whole stays within the cap: marker included, a result cut at 1,000 characters is
-            # never mistaken for a complete one. A cap too small to hold the marker cuts plainly.
-            marker = f"\n... [output cut: {len(result.output)} chars total — head kept] ..."
-            kept = result.output[:cap - len(marker)] + marker if cap > len(marker) else result.output[:cap]
             result = ToolResult(
-                output=kept,
+                output=cut_output(result.output, cap),
                 success=result.success,
                 error=result.error,
                 error_type=result.error_type,
