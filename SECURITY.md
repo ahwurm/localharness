@@ -180,6 +180,20 @@ server's `env` or `headers` value quoted in that one error would reach the phone
   channels stay machine-level. A project can also change a plugin's ordinary settings,
   but not one the plugin marks machine-level only (endpoints, credentials, access lists), so that
   protection is only as good as the plugin's marking.
+- **Installing the package a plugin needs trusts your package index.** A plugin that ships with
+  LocalHarness can need a package that is not installed (`browser` needs `localharness[browser]`).
+  Where the harness can run the install itself — `uv tool install` for a `uv tool` install, else
+  `python -I -m pip install` — Enable in Plugins and `/plugins enable <name>` offer it after one
+  yes/no question that says it installs "from your package index" and "runs its build steps";
+  elsewhere they print the command to run. The install names
+  `localharness[<extras>]==<version>`: LocalHarness is pinned to the version you are running, with
+  the extras you already have kept, but the extra's own dependencies are unpinned and come from the
+  index your pip or uv configuration names, with no hash checking, and their build steps run with
+  your permissions. It runs with no shell, in a fresh private folder under your config directory,
+  so a project's `uv.toml`, `pyproject.toml` or a `pip` package in its folder cannot steer it;
+  your own pip and uv configuration and your `PIP_*` and `UV_*` variables are used as they are.
+  `localharness plugins enable` from a shell never installs, and a plugin you installed yourself
+  is never offered an install.
 - **What turning it on vouches for.** The safety checks believe what a tool declares about itself
   (step 4 of the approval gate, and the prompt-injection section). The one exception is the
   permission gate: a `gate_family` declared by a tool from a plugin you installed counts only when
@@ -203,6 +217,11 @@ means harm once it runs. A plugin that hangs instead of failing: containment cat
 stalls. And anything a plugin registers directly on the tool registry, a tool or a raw pre/post
 hook, instead of handing it over through its `tools()` method or the hook system, skips the
 gate-family rule above and stays registered if the plugin later fails.
+The install trusts your own configuration: the agent's interpreter tools can rewrite any file you
+own, so a prompt-injected agent could edit `pip.conf` or `uv.toml` and the next install you
+confirm would use the index it names, the same exposure any `pip install` on this machine has. And
+`uv` is found on your `PATH`, so a `PATH` entry another account can write could put a different
+`uv` first.
 
 ### Machine-level-only settings
 
