@@ -26,6 +26,7 @@ from localharness.cli import plugins_cmd
 from localharness.cli.app import app
 from localharness.plugins import builtin, discovery
 from localharness.plugins.api import GLOBAL_ONLY, Check, Plugin, PluginManifest, SetupField
+from tests.plugin_prompts import fake_prompts
 from tests.unit.test_doctor_layer_report import _layout
 
 runner = CliRunner()
@@ -132,7 +133,7 @@ def prompts(monkeypatch):
         return answer[0]
 
     monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: True)
-    monkeypatch.setattr(plugins_cmd.typer, "prompt", prompt)
+    fake_prompts(monkeypatch, prompt=prompt)
     return calls, answer
 
 
@@ -140,7 +141,7 @@ def prompts(monkeypatch):
 def no_prompt(monkeypatch):
     def prompt(*a, **kw):
         raise AssertionError("prompted")
-    monkeypatch.setattr(plugins_cmd.typer, "prompt", prompt)
+    fake_prompts(monkeypatch, prompt=prompt)
 
 
 @pytest.fixture
@@ -155,7 +156,7 @@ def scripted(monkeypatch):
         return answers.pop(0)
 
     monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: True)
-    monkeypatch.setattr(plugins_cmd.typer, "prompt", prompt)
+    fake_prompts(monkeypatch, prompt=prompt)
     return calls, answers
 
 

@@ -20,6 +20,7 @@ from localharness.cli import plugins_cmd
 from localharness.cli.app import app
 from localharness.plugins import setup
 from localharness.plugins.setup import AGENT_PROMPT_LEAD
+from tests.plugin_prompts import fake_prompts
 from tests.unit.test_image_plugin import UNET, _full, fake_comfy
 from tests.unit.test_plugin_sections import _INFO_KEYS
 
@@ -58,7 +59,7 @@ def prompts(monkeypatch):
         return URL
 
     monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: True)
-    monkeypatch.setattr(plugins_cmd.typer, "prompt", prompt)
+    fake_prompts(monkeypatch, prompt=prompt)
     return calls
 
 
@@ -108,7 +109,7 @@ def test_a_missing_model_file_is_named_and_the_setup_text_follows(g, prompts, mo
 def test_off_a_terminal_it_names_the_next_step(g, monkeypatch):
     def prompt(*a, **kw):
         raise AssertionError("prompted")
-    monkeypatch.setattr(plugins_cmd.typer, "prompt", prompt)
+    fake_prompts(monkeypatch, prompt=prompt)
     monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: False)
     result = _enable(g)
 
