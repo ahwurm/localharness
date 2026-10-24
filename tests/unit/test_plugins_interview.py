@@ -8,6 +8,7 @@ import signal
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import get_args
 
 import click
 import pytest
@@ -16,8 +17,12 @@ from rich.console import Console
 
 from localharness.cli import plugins_cmd, plugins_interview
 from localharness.cli.interview import Answer, Unreachable
-from localharness.cli.plugins_cmd import PassProgress, PluginSession, Refusal, ReloadPlan, Touch, reload_names
+from localharness.cli.plugins_cmd import (
+    OVERRIDE_LINE, Kind, PassProgress, PassResult, PluginSession, Refusal, ReloadPlan, StepOutcome, TailKey, Touch,
+    reload_names,
+)
 from localharness.cli.plugins_interview import CLOSE_LABELS, PLUGINS_QUESTION, at_close, run
+from localharness.plugins import lifecycle
 from localharness.plugins import resolve as resolve_module
 from localharness.plugins.api import PluginManifest
 from localharness.plugins.plan import PlanEntry
@@ -616,3 +621,204 @@ async def test_closed_on_error_an_error_outside_any_node_closes_plugins_with_its
 
     (line,) = channel.lines
     assert line.startswith("Plugins closed on an error: AttributeError: ")
+
+
+_NAMED = frozenset({"p"})
+
+
+def _flat(alias) -> set[str]:
+    return {m for arm in get_args(alias) for m in get_args(arm)}
+
+
+def _outcome(kind, *, running=False, names=_NAMED, parked=0, progress=None, key="", **kw):
+    session = PluginSession(Path("/nowhere"), None, frozenset({"p"} if running else ()), {}, {})
+    result = PassResult(kind, kw.pop("step", StepOutcome("p", True)), **kw)
+    plan = ReloadPlan(frozenset(names), parked, 0)
+    return plugins_interview.result_line("p", result, session, plan, progress or PassProgress(), key=key)
+
+
+_FAILED = StepOutcome("p", True, failed_check="no answer")
+_SKIPPED = StepOutcome("p", True, skipped_check="not paired")
+_PROJECT = Path("/w/config.yaml")
+
+
+def test_result_line_kinds_are_the_outcome_keys_plus_the_two_block_kinds() -> None:
+    assert set(get_args(Kind)) == set(plugins_interview.RESULT_OUTCOMES) | {"install_skipped", "enabled_manual"}
+    assert plugins_interview.RESULT == "{name}: {outcome}"
+    assert plugins_interview.RESULT_OUTCOMES["override"] is OVERRIDE_LINE
+
+
+@pytest.mark.parametrize(("kind", "kw", "line"), [
+    ("enabled", dict(), f"enabled; starts {CLOSING}"),
+    ("enabled", dict(parked=1), f"enabled; starts {LATER}"),
+    ("enabled", dict(running=True, names=_NAMED), f"enabled; applies {CLOSING}"),
+    ("enabled", dict(running=True, names=()), "enabled; already running"),
+    ("enabled_unconfigured", dict(questions="skipped"),
+     "enabled, not set up — setup questions skipped; Re-run setup to finish, then it starts"),
+    ("enabled_unconfigured", dict(running=True, names=_NAMED, questions="skipped"),
+     f"not set up — setup questions skipped; Re-run setup to finish; stops {CLOSING}"),
+    ("enabled_unconfigured", dict(detail="unconfigured — set ask.url"),
+     "enabled, not set up — set ask.url; Re-run setup to finish, then it starts"),
+    ("enabled_unconfigured", dict(detail="set ask.url", running=True, names=_NAMED, parked=2),
+     f"not set up — set ask.url; Re-run setup to finish; stops {LATER}"),
+    ("enabled_unconfigured", dict(), "enabled, not set up — setup questions skipped; Re-run setup to finish, then it starts"),
+    ("check_failed", dict(step=_FAILED), f"enabled, but its check failed: no answer; starts {CLOSING}"),
+    ("check_failed", dict(step=_FAILED, detail="from detail"), f"enabled, but its check failed: from detail; starts {CLOSING}"),
+    ("check_failed", dict(step=_FAILED, running=True, names=_NAMED),
+     f"enabled, but its check failed: no answer; applies {CLOSING}"),
+    ("check_failed", dict(step=_FAILED, running=True, names=()), "enabled, but its check failed: no answer; already running"),
+    ("check_failed_noload", dict(detail="no answer"), "enabled, but not loading — no answer; Re-run setup to retry"),
+    ("check_failed_noload", dict(detail="no answer", running=True, names=_NAMED),
+     f"enabled, but not loading — no answer; Re-run setup to retry; stops {CLOSING}"),
+    ("check_skipped", dict(step=_SKIPPED), f"enabled — not paired; starts {CLOSING}"),
+    ("check_skipped", dict(step=_SKIPPED, running=True, names=()), "enabled — not paired; already running"),
+    ("check_skipped", dict(step=_SKIPPED, running=True, names=_NAMED), f"enabled — not paired; applies {CLOSING}"),
+    ("enabled_not_loading", dict(detail="needs localharness[mobile]"), "enabled — not loading: needs localharness[mobile]"),
+    ("enabled_not_loading", dict(detail="import broke", running=True, names=_NAMED),
+     f"enabled — not loading: import broke; stops {CLOSING}"),
+    ("rerun_ok", dict(), "setup re-run — check passed"),
+    ("rerun_ok", dict(loads=True), f"setup re-run — check passed; starts {CLOSING}"),
+    ("rerun_ok", dict(loads=True, parked=1), f"setup re-run — check passed; starts {LATER}"),
+    ("rerun_ok", dict(running=True, names=_NAMED, rebind=True), f"setup re-run — check passed; applies {CLOSING}"),
+    ("rerun_ok", dict(running=True, loads=True, names=()), "setup re-run — check passed"),
+    ("rerun_failed", dict(step=_FAILED), "setup re-run — check failed: no answer"),
+    ("rerun_failed", dict(step=_FAILED, loads=True), f"setup re-run — check failed: no answer; starts {CLOSING}"),
+    ("rerun_failed", dict(step=_FAILED, running=True, names=_NAMED, rebind=True),
+     f"setup re-run — check failed: no answer; applies {CLOSING}"),
+    ("rerun_blocked", dict(detail=lifecycle.DOWNLOAD_RUNNING), f"setup not re-run — {lifecycle.DOWNLOAD_RUNNING}"),
+    ("disabled", dict(running=True, names=_NAMED), f"off {CLOSING}"),
+    ("disabled", dict(running=True, names=_NAMED, parked=1), f"off {LATER}"),
+    ("disabled", dict(), "off"),
+    ("saved", dict(loads=True), f"color saved — applies {CLOSING}"),
+    ("saved", dict(loads=True, parked=1), f"color saved — applies {LATER}"),
+    ("saved", dict(), "color saved — applies when it starts"),
+    ("saved_overridden", dict(override=(None, _PROJECT)),
+     "color saved on this machine, but this project's /w/config.yaml still wins here"),
+    ("declined", dict(), "stays off"),
+    ("refused", dict(detail="boom"), "settings not changed — boom"),
+    ("refused", dict(detail="boom", install="skipped"), "settings not changed — boom"),
+    ("refused", dict(detail="boom", install="done"), "settings not changed — boom (package installed — Enable to finish)"),
+    ("install_skipped", dict(), None),
+    ("enabled_manual", dict(), None),
+])
+def test_result_line_each_kind(kind, kw, line) -> None:
+    assert _outcome(kind, key="color", **kw) == line
+
+
+def test_result_line_refused_after_an_install_names_re_run_setup_when_the_plugin_was_already_enabled() -> None:
+    line = _outcome("refused", detail="boom", install="done", progress=PassProgress(written=True))
+
+    assert line == "settings not changed — boom (package installed — Re-run setup to finish)"
+
+
+@pytest.mark.parametrize(("wrote", "saved"), [(False, ""), (True, "saved on this machine, but ")])
+@pytest.mark.parametrize(("state", "flip"), [("on", "disable"), ("off", "enable")])
+def test_result_line_override_renders_the_one_sentence_and_saves_only_when_the_pass_wrote(wrote, saved, state, flip) -> None:
+    line = _outcome("override", override=(state, _PROJECT), progress=PassProgress(wrote=wrote))
+
+    assert line == OVERRIDE_LINE.format(saved=saved, state=state, file=_PROJECT, flip=flip, name="p")
+    assert line.startswith(saved + "this project turns it ")
+
+
+@pytest.mark.parametrize("kind", ["enabled_unconfigured", "check_failed_noload", "enabled_not_loading", "rerun_blocked", "refused"])
+def test_result_line_a_detail_is_stripped_and_redacted(kind) -> None:
+    line = _outcome(kind, detail="boom\x1b]0;t\x07 https://u:p@h.test/x")
+
+    assert "https://h.test/x" in line
+    assert not any(bad in line for bad in ("\x1b", "\x07", "u:p@"))
+
+
+@pytest.mark.parametrize("step", [
+    StepOutcome("p", True, failed_check="boom\x1b[2J https://u:p@h.test/x"),
+    StepOutcome("p", True, skipped_check="boom\x1b[2J https://u:p@h.test/x"),
+])
+def test_result_line_a_step_detail_is_stripped_and_redacted(step) -> None:
+    kind = "check_failed" if step.failed_check else "check_skipped"
+    line = _outcome(kind, step=step)
+
+    assert "https://h.test/x" in line and "\x1b" not in line and "u:p@" not in line
+
+
+_TAIL_PLAN = ReloadPlan(frozenset({"p"}), 0, 0)
+
+
+def _tail(progress, *, names=("p",), plan=_TAIL_PLAN, running=(), touched=None, **kw):
+    session = PluginSession(Path("/nowhere"), None, frozenset(running), {}, {}, touched or {})
+    return plugins_interview.stop_tail(names, progress, session, plan, **kw)
+
+
+def test_stop_tail_keys_are_the_tail_keys() -> None:
+    assert _flat(TailKey) == set(plugins_interview.STOP_TAILS)
+    assert plugins_interview.STOP_LINE == "{names}: stopped — {tail}"
+    assert plugins_interview.TURN_SEVERAL_ON == "Turn several on…"
+
+
+@pytest.mark.parametrize("phase", ["consent", "question", "edit", "disable"])
+def test_stop_tail_changes_nothing_before_a_write(phase) -> None:
+    assert _tail(PassProgress(phase=phase)) == "nothing changed"
+
+
+@pytest.mark.parametrize(("written", "tail"), [
+    (False, "install interrupted — Enable to retry"),
+    (True, "install interrupted — Install and set up to retry"),
+])
+def test_stop_tail_install(written, tail) -> None:
+    assert _tail(PassProgress(phase="install", written=written)) == tail
+
+
+def test_stop_tail_install_batch_names_the_multi_select_and_ignores_written() -> None:
+    progress = PassProgress(phase="install", written=True)
+
+    assert _tail(progress, names=("a", "b"), in_batch=True) == "install interrupted — pick them again under Turn several on…"
+
+
+@pytest.mark.parametrize(("written", "tail"), [
+    (False, "package installed, not set up — Enable to finish"),
+    (True, "package installed, not set up — Re-run setup to finish"),
+])
+def test_stop_tail_question_installed(written, tail) -> None:
+    assert _tail(PassProgress(phase="question_installed", written=written)) == tail
+
+
+@pytest.mark.parametrize(("phase", "text"), [
+    ("download", "enabled, but its download did not finish — Re-run setup"),
+    ("check", "enabled, but not checked — Re-run setup"),
+])
+@pytest.mark.parametrize(("busy", "retry"), [(False, ""), (True, " in a minute")])
+def test_stop_tail_download_and_check_retry_in_a_minute_only_while_downloading(monkeypatch, phase, text, busy, retry) -> None:
+    monkeypatch.setattr(lifecycle, "downloading", lambda name: busy and name == "p")
+
+    assert _tail(PassProgress(phase=phase, wrote=True)) == text + retry
+
+
+def test_stop_tail_download_asks_downloading_of_the_first_name_only(monkeypatch) -> None:
+    monkeypatch.setattr(lifecycle, "downloading", lambda name: name == "b")
+
+    assert _tail(PassProgress(phase="download"), names=("a", "b")).endswith("Re-run setup")
+
+
+@pytest.mark.parametrize(("running", "touched", "plan", "applies"), [
+    ((), {}, _TAIL_PLAN, "when it starts"),
+    (("p",), {}, _TAIL_PLAN, CLOSING),
+    (("p",), {"p": Touch(True, True, None)}, ReloadPlan(frozenset({"p"}), 1, 0), LATER),
+    ((), {"p": Touch(False, True, None)}, _TAIL_PLAN, CLOSING),
+    (("p",), {"p": Touch(False, False, None)}, _TAIL_PLAN, "when it starts"),
+])
+def test_stop_tail_edit_written_applies_from_the_stored_or_seeded_touch(running, touched, plan, applies) -> None:
+    tail = _tail(PassProgress(phase="edit", wrote=True), running=running, touched=touched, plan=plan, key="color")
+
+    assert tail == f"color saved — applies {applies}; the audit entry may be missing"
+
+
+def test_stop_tail_edit_written_for_an_overridden_write_says_where_the_value_lost() -> None:
+    progress = PassProgress(phase="edit", wrote=True, overridden=True)
+
+    assert _tail(progress, key="color", file=_PROJECT) == (
+        "color saved on this machine, but this project's /w/config.yaml still wins here; the audit entry may be missing")
+
+
+def test_stop_tail_a_stop_line_joins_every_name() -> None:
+    tail = _tail(PassProgress(phase="install"), names=("a", "b"), in_batch=True)
+
+    assert plugins_interview.STOP_LINE.format(names="a, b", tail=tail) == (
+        "a, b: stopped — install interrupted — pick them again under Turn several on…")

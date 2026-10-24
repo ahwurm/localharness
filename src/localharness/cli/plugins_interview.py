@@ -16,7 +16,8 @@ from localharness.cli import plugins_cmd
 from localharness.cli.components_cmd import redact_text
 from localharness.cli.interview import Option, Unreachable, confirm_line, n_of, prompt_line
 from localharness.cli.plugins_cmd import (
-    ACTION_INSTALL, ACTION_RERUN, ACTION_SHOW_INSTALL, PluginSession, Refusal, ReloadPlan, Touch, refused,
+    ACTION_ENABLE, ACTION_INSTALL, ACTION_RERUN, ACTION_SHOW_INSTALL, OVERRIDE_LINE, OVERRIDE_SAVED, Kind, PassProgress,
+    PassResult, PluginSession, Refusal, ReloadPlan, Touch, override_line, prior_touch, refused,
 )
 from localharness.core.interrupt import sigint_cancels
 
@@ -55,6 +56,42 @@ NOT_APPLIED_CASES = MappingProxyType({
 })
 CLOSED_ON_ERROR = "Plugins closed on an error: {error}"
 
+TURN_SEVERAL_ON = "Turn several on…"
+RESULT = "{name}: {outcome}"
+RESULT_OUTCOMES: dict[Kind, str] = {
+    "enabled": "enabled{starts}",
+    "enabled_unconfigured": "{lead}not set up — {detail}; {rerun} to finish{then}",
+    "check_failed": "enabled, but its check failed: {detail}{starts}",
+    "check_failed_noload": "enabled, but not loading — {detail}; {rerun} to retry{stops}",
+    "check_skipped": "enabled — {detail}{starts}",
+    "enabled_not_loading": "enabled — not loading: {detail}{stops}",
+    "rerun_ok": "setup re-run — check passed{rebound}",
+    "rerun_failed": "setup re-run — check failed: {detail}{rebound}",
+    "rerun_blocked": "setup not re-run — {detail}",
+    "disabled": "off{later}",
+    "saved": "{key} saved — applies {applies}",
+    "saved_overridden": "{key} saved on this machine, but this project's {file} still wins here",
+    "override": OVERRIDE_LINE,
+    "declined": "stays off",
+    "refused": "settings not changed — {detail}{installed}",
+}
+INSTALLED = " (package installed — {again} to finish)"
+STOP_LINE = "{names}: stopped — {tail}"
+AUDIT_MISSING = "; the audit entry may be missing"
+STOP_TAILS = MappingProxyType({
+    "consent": "nothing changed",
+    "install": "install interrupted — {again} to retry",
+    "install_batch": f"install interrupted — pick them again under {TURN_SEVERAL_ON}",
+    "question": "nothing changed",
+    "question_installed": "package installed, not set up — {again} to finish",
+    "download": "enabled, but its download did not finish — {rerun}{retry}",
+    "check": "enabled, but not checked — {rerun}{retry}",
+    "edit": "nothing changed",
+    "edit_written": "{key} saved — applies {applies}" + AUDIT_MISSING,
+    "disable": "nothing changed",
+})
+STOPPING = "{names}: stopping — pressing Ctrl-C two more times quits localharness"
+
 _STOP = object()
 _STOPS = (click.exceptions.Abort, click.exceptions.Exit, EOFError, KeyboardInterrupt, SystemExit)
 
@@ -88,6 +125,58 @@ def unavailable(why: Unreachable) -> str:
 
 def at_close(plan: ReloadPlan) -> str:
     return "when you close Plugins" if plan.reload else "when you next close Plugins with no asks pending"
+
+
+def _applies(loads: bool, plan: ReloadPlan) -> str:
+    return at_close(plan) if loads else "when it starts"
+
+
+def _clean(text: str) -> str:
+    return redact_text(sanitize_for_display(text))
+
+
+def result_line(name: str, result: PassResult, session: PluginSession, plan: ReloadPlan, progress: PassProgress,
+                *, key: str = "") -> str | None:
+    """What a returned pass says happened, or None when its own block was the result."""
+    if result.kind not in RESULT_OUTCOMES:
+        return None
+    if result.kind == "override":
+        return override_line(name, result.override, OVERRIDE_SAVED if progress.wrote else "")
+    running, named, ac = name in session.running, name in plan.names, at_close(plan)
+    detail = _clean(result.detail or result.step.failed_check or result.step.skipped_check)
+    if result.kind == "enabled_unconfigured":
+        detail = detail.removeprefix("unconfigured — ") or "setup questions skipped"
+    stops = f"; stops {ac}" if running else ""
+    return RESULT_OUTCOMES[result.kind].format(
+        starts=f"; applies {ac}" if running and named else "; already running" if running else f"; starts {ac}",
+        stops=stops, detail=detail, rerun=ACTION_RERUN, key=key,
+        lead="" if running else "enabled, ", then=stops or ", then it starts",
+        rebound=f"; applies {ac}" if running and named else f"; starts {ac}" if not running and result.loads else "",
+        later=f" {ac}" if running else "", applies=_applies(result.loads, plan),
+        file=result.override[1] if result.override else "",
+        installed=INSTALLED.format(again=ACTION_RERUN if progress.written else ACTION_ENABLE)
+        if result.kind == "refused" and result.install == "done" else "")
+
+
+def stop_tail(names: tuple[str, ...], progress: PassProgress, session: PluginSession, plan: ReloadPlan,
+              *, in_batch: bool = False, key: str = "", file: Any = None) -> str:
+    """The state a stop leaves behind, one sentence chosen by the phase it landed in."""
+    from localharness.plugins import lifecycle
+
+    phase = progress.phase
+    if phase == "edit" and progress.wrote and progress.overridden:
+        return RESULT_OUTCOMES["saved_overridden"].format(key=key, file=file) + AUDIT_MISSING
+    tail_key = "install_batch" if phase == "install" and in_batch else "edit_written" if phase == "edit" and progress.wrote else phase
+    touch = session.touched.get(names[0]) or prior_touch(session, names[0])
+    again = {"install": ACTION_INSTALL, "question_installed": ACTION_RERUN}.get(phase, ACTION_ENABLE)
+    return STOP_TAILS[tail_key].format(
+        again=again if progress.written else ACTION_ENABLE, rerun=ACTION_RERUN, retry=" in a minute" if lifecycle.downloading(names[0]) else "", key=key,
+        applies=_applies(touch.loads, plan))
+
+
+def stopping_line(console: Any, names: tuple[str, ...], progress: PassProgress) -> None:
+    if progress.phase == "install":
+        _say(console, STOPPING.format(names=", ".join(names)))
 
 
 def _say(console: Any, *lines: str) -> None:
