@@ -31,6 +31,7 @@ from localharness.plugins import builtin, discovery, lifecycle, resolve, setup
 from localharness.plugins.api import GLOBAL_ONLY, Check, Plugin, PluginManifest, SetupField
 from localharness.plugins.setup import AGENT_PROMPT_LEAD
 from tests.plugin_prompts import fake_prompts
+from tests.unit.test_doctor_layer_report import _layout
 from tests.unit.test_plugin_sections import _INFO_KEYS
 from tests.unit.test_plugins_enable_setup import _CONFIG
 
@@ -651,6 +652,23 @@ def test_session_step_disable_writes_the_switch_off(g, term, capsys) -> None:
     assert yaml.safe_load((g / "overrides.yaml").read_text())["pro"]["enabled"] is False
     assert outcome == plugins_cmd.StepOutcome(name="pro", on=False)
     assert term.asked == [] and term.confirmed == []
+
+
+def test_session_step_an_enable_a_project_overrides_prints_the_line_and_writes_nothing(
+        tmp_path, monkeypatch, fake_home, term, capsys) -> None:
+    layout = _layout(tmp_path, monkeypatch, fake_home)
+    (layout.ws_dir / "config.yaml").write_text("plain: {enabled: false}\n", encoding="utf-8")
+    overlay = layout.global_dir / "overrides.yaml"
+    overlay.write_text("act: {enabled: false}\n", encoding="utf-8")
+    before = overlay.read_bytes()
+
+    outcome = plugins_cmd.session_step(("enable", "plain"), None)
+
+    assert (f"  note: this project turns it off ({layout.ws_dir / 'config.yaml'}) and that still wins — "
+            "localharness plugins enable plain --workspace changes it") in capsys.readouterr().out.splitlines()
+    assert overlay.read_bytes() == before
+    assert term.asked == [] and term.confirmed == []
+    assert outcome == plugins_cmd.StepOutcome(name="plain", on=True, stopped=True)
 
 
 def _doctor_raises(monkeypatch, g: Path) -> None:

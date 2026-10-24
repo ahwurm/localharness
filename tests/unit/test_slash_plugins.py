@@ -105,8 +105,8 @@ def test_decision_a_project_that_turns_it_off_still_wins(g, tmp_path):
     ws.mkdir(parents=True)
     (ws / "config.yaml").write_text(yaml.safe_dump({"stub": {"enabled": False}}), encoding="utf-8")
     assert _decide("stub", True, set(), g, ws) == (
-        f"this project turns stub off ({ws}), and that still wins here — "
-        "`localharness plugins enable stub --workspace` changes it for this project")
+        f"this project turns it off ({ws / 'config.yaml'}) and that still wins — "
+        "localharness plugins enable stub --workspace changes it")
 
 
 def test_decision_disable_of_an_enabled_plugin_restarts(g):

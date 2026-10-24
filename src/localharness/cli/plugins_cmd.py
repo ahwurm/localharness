@@ -52,7 +52,7 @@ from localharness.channels.base import sanitize_for_display
 from localharness.cli import update_cmd
 from localharness.cli.components_cmd import (
     Refusal, _build_layered_loader, _core_secret_values, _err, _err_config, _serialize_value,
-    _validate_overlay, _validation_text, is_secret, redact_text, shown, walk_secret_values,
+    _validate_overlay, _validation_text, is_secret, redact_text, shown, walk_secret_values, workspace_file_of,
 )
 from localharness.cli.interview import confirm_line, prompt_line
 from localharness.cli.workspace import _stdin_is_a_terminal
@@ -89,6 +89,9 @@ Workspace = Annotated[bool, typer.Option(
 THIRD_PARTY_CONFIRM = ("{name} is a plugin you installed, not one that ships with LocalHarness: turning "
                        "it on lets its code run with your permissions on this machine, in every "
                        "session. Turn it on?")
+OVERRIDE_SAVED = "saved on this machine, but "
+OVERRIDE_LINE = ("{saved}this project turns it {state} ({file}) and that still wins — "
+                 "localharness plugins {flip} {name} --workspace changes it")
 # The same literal init's scaffolded plugins/README.md links to (a PyPI install has no examples/).
 _TEMPLATE_URL = "https://github.com/ahwurm/localharness/tree/main/examples/plugin-template"
 # A setup question for a secret that is already stored (#28): what Enter does, and how to clear it.
@@ -206,6 +209,25 @@ def _switch_layer(loader: ConfigLoader, name: str, bundled: bool) -> str:
     sections = loader.plugin_layers().get(name, (None,) * 4)[: 4 if bundled else 2]
     return next((band for band, section in reversed(list(zip(LAYER_BANDS, sections)))
                  if isinstance(section, dict) and "enabled" in section), LAYER_DEFAULT)
+
+
+def override_of(loader, entry, on, to_workspace) -> tuple[Literal["on", "off"], Path] | None:
+    """The state a project layer holds against a machine-level switch to `on`, and the file that holds it."""
+    if to_workspace or not entry.bundled:
+        return None
+    sections = loader.plugin_layers().get(entry.name, (None,) * 4)[2:]
+    held = [(band, x["enabled"]) for band, x in zip(LAYER_BANDS[2:], sections)
+            if isinstance(x, dict) and isinstance(x.get("enabled"), bool)]
+    if not held or held[-1][1] is on:
+        return None
+    band, state = held[-1]
+    return ("on" if state else "off"), workspace_file_of(loader, band) or Path(loader.plugin_layer_files()[2]).parent
+
+
+def override_line(name: str, pair: tuple[Literal["on", "off"], Path], saved: str = "") -> str:
+    state, file = pair
+    return OVERRIDE_LINE.format(saved=saved, state=state, file=file, flip="enable" if state == "off" else "disable",
+                                name=name)
 
 
 @plugins_app.command("info")
@@ -712,7 +734,7 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
     except Refusal as refusal:
         shell_report("refused", str(refusal))
         raise typer.Exit(code=2)
-    return StepOutcome(name, on, failed_check=done.failed, skipped_check=done.skipped, stopped=done.declined)
+    return StepOutcome(name, on, failed_check=done.failed, skipped_check=done.skipped, stopped=done.declined or done.overridden)
 
 
 def shell_report(kind: ReportKind, payload: Any) -> None:
@@ -769,6 +791,7 @@ class PassState:
     pending: bool = True
     target: Path | None = None
     declined: bool = False
+    overridden: bool = False
     values: tuple[tuple[str, str], ...] = ()
     fresh_loader: ConfigLoader | None = None
     fresh: Resolution | None = None
@@ -797,7 +820,7 @@ async def _confirmed(confirm: Any, text: str, default: bool) -> bool:
 
 async def _run_pass(state: PassState, *, prompt: Any, confirm: Any, report: Any) -> PassState:
     state = await _prepare(state, confirm=confirm, report=report)
-    if state.declined:
+    if state.declined or state.overridden:
         return state
     state = await _questions(state, prompt=prompt)
     state = await _write(state, report=report)
@@ -817,6 +840,9 @@ async def _prepare(s: PassState, *, confirm: Any, report: Any) -> PassState:
     if s.to_workspace and s.workspace is None:
         raise Refusal("no project workspace applies here — run `localharness init --workspace` in the "
                       "project first, or leave out --workspace to change the machine-level setting", ())
+    if s.in_session and s.on and (pair := override_of(s.loader, s.entry, True, s.to_workspace)):
+        report("note", override_line(s.name, pair))
+        return replace(s, overridden=True)
     if (s.in_session and s.on and s.ask and not s.entry.bundled
             and not await _confirmed(confirm, THIRD_PARTY_CONFIRM.format(name=s.name), False)):
         report("stays_off", s.name)
@@ -874,12 +900,8 @@ async def _write(s: PassState, *, report: Any) -> PassState:
     if after is not None and s.m.requires_extra and after.state == "needs-extra":
         missing = True  # "takes effect on the next start" is not true without its install extra
         report("note", f"{s.name} is missing its install extra — {after.reason}")
-    project = [x["enabled"] for x in s.loader.plugin_layers().get(s.name, (None,) * 4)[2:]
-               if isinstance(x, dict) and isinstance(x.get("enabled"), bool)]
-    if not s.to_workspace and s.entry.bundled and project and project[-1] is not s.on:
-        report("note", f"this project turns {s.name} {'off' if s.on else 'on'} ({s.workspace}), and that "
-                       f"still wins here — `localharness plugins {s.verb} {s.name} --workspace` "
-                       "changes it for this project")
+    if pair := override_of(s.loader, s.entry, s.on, s.to_workspace):
+        report("note", override_line(s.name, pair, OVERRIDE_SAVED))
     paths = _paths(fresh_loader, s.workspace) if fresh_loader is not None else None
     return replace(s, values=shown_values, missing=missing, fresh_loader=fresh_loader, fresh=fresh,
                    after=after, paths=paths, row=row)
@@ -1127,16 +1149,13 @@ async def switch_decision(name: str, on: bool, running: frozenset[str], global_c
     loader = ConfigLoader(config_dir=global_config_dir, local_config_dir=workspace)
     resolution = resolve(loader)
     entry = resolution.plan.entry(name)
-    word, verb = ("on", "enable") if on else ("off", "disable")
+    word = "on" if on else "off"
     if entry is None:
         return f"Unknown plugin: {name}. /plugins lists them."
     if name not in resolution.enabled:
         return f"{name} cannot be turned {word}: {entry.reason}"
-    project = [s["enabled"] for s in loader.plugin_layers().get(name, (None,) * 4)[2:]
-               if isinstance(s, dict) and isinstance(s.get("enabled"), bool)]
-    if entry.bundled and project and project[-1] is not on:
-        return (f"this project turns {name} {'off' if on else 'on'} ({workspace}), and that still wins "
-                f"here — `localharness plugins {verb} {name} --workspace` changes it for this project")
+    if pair := override_of(loader, entry, on, False):
+        return override_line(name, pair)
     flag = resolution.enabled[name]
     if not on:  # on on disk, or still running here: the restart writes the flag and stops it
         return None if flag or name in running else f"{name} is already off."
