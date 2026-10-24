@@ -435,7 +435,7 @@ def test_the_install_strings_are_the_spec_text():
         "declined": "", "failed": " — the install failed (exit {code}; see the output above)",
         "not_writable": " — {dir} is not writable",
         "open": " — {dir} is open to other accounts and could not be made private",
-        "no_temp": " — no temp dir under {dir}"}
+        "no_temp": " — no temp dir under {dir}", "no_start": " — the installer could not start: {error}"}
     assert p.ROUTE_BACK == "{rerun} under /plugins → {names}"
     assert p.ENABLE_MANUAL == "{name}: enabled in config; this install must be done by hand."
     assert p.TYPED_NEEDS_EXTRA == "{name}: needs {extra}."
@@ -555,13 +555,15 @@ def test_install_pass_no_temp_dir_aborts_with_its_reason(h, monkeypatch):
     _only_skipped(h, f" — no temp dir under {h.cfg}")
 
 
-def test_install_pass_spawn_raises_propagates_and_leaves_no_directory(h, monkeypatch):
+def test_install_pass_a_spawn_that_raises_takes_the_decline_path_and_leaves_no_directory(h, monkeypatch):
     async def refuse(*argv, **kw):
-        raise FileNotFoundError(argv[0])
+        raise FileNotFoundError(2, "No such file https://user:pw@idx.test/simple")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", refuse)
-    with pytest.raises(FileNotFoundError):
-        h.run()
-    assert list(h.cfg.iterdir()) == [] and "package not installed" not in h.buf.getvalue()
+    assert h.run() == frozenset()
+    why = " — the installer could not start: [Errno 2] No such file https://idx.test/simple"
+    assert h.lines[-4:] == [f"a: enabled in config, package not installed{why}", *SKIP]
+    assert h.buf.getvalue().count("package not installed") == 1 and "pw" not in h.buf.getvalue()
+    assert list(h.cfg.iterdir()) == []
 
 
 # --------------------------------------------------------------------------- the output reader
