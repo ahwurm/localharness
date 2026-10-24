@@ -1,0 +1,212 @@
+"""The pass records, the action labels and the pure functions that decide whether closing Plugins restarts."""
+from __future__ import annotations
+
+import dataclasses
+from pathlib import Path
+from types import SimpleNamespace
+from typing import get_args
+
+import pytest
+import yaml
+from pydantic import BaseModel
+
+from localharness.cli.plugins_cmd import (
+    ACTION_CONFIGURE, ACTION_DISABLE, ACTION_ENABLE, ACTION_INFO, ACTION_INSTALL, ACTION_RERUN,
+    ACTION_SHOW_INSTALL, Kind, PassProgress, PassResult, Phase, PluginSession, ReloadPlan, ReportKind,
+    StepOutcome, TailKey, Touch, loads_from_plan, prior_touch, refused,
+)
+from localharness.plugins import builtin, discovery
+from localharness.plugins.api import Plugin, PluginManifest
+from localharness.plugins.lifecycle import DoctorRow
+
+_OUTCOMES = {
+    "enabled", "enabled_unconfigured", "check_failed", "check_failed_noload", "check_skipped",
+    "enabled_not_loading", "rerun_ok", "rerun_failed", "rerun_blocked", "disabled", "saved",
+    "saved_overridden", "override", "declined", "refused",
+}
+_PHASES = {"consent", "install", "question", "question_installed", "download", "check", "edit", "disable"}
+_CONFIG = {
+    "version": "1",
+    "provider": {"provider_type": "vllm", "base_url": "http://127.0.0.1:9/v1",
+                 "default_model": "test-model", "available_models": ["test-model"]},
+}
+
+
+class _Settings(BaseModel):
+    pass
+
+
+class Stub(Plugin):
+    """a bundled plugin with nothing to ask"""
+
+    manifest = PluginManifest(name="stub", version="0.1.0", kind="tools", enabled_by_default=False)
+    ConfigModel = _Settings
+
+
+def _flat(alias) -> set[str]:
+    return {m for arm in get_args(alias) for m in get_args(arm)}
+
+
+def _session(cfg: Path = Path("/nowhere"), **kw) -> PluginSession:
+    return PluginSession(cfg, None, kw.pop("running", frozenset()), kw.pop("unconfigured", {}),
+                         kw.pop("failed", {}), **kw)
+
+
+def _resolution(state: str | None):
+    entry = None if state is None else SimpleNamespace(state=state)
+    return SimpleNamespace(plan=SimpleNamespace(entry=lambda n: entry if n == "a" else None))
+
+
+def _row(state: str, detail: str = "") -> DoctorRow:
+    return DoctorRow("a", state, detail)
+
+
+@pytest.fixture
+def machine(tmp_path: Path, monkeypatch) -> Path:
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Stub,))
+    monkeypatch.setattr(discovery, "discover", lambda global_config_dir: [])
+    g = tmp_path / "g"
+    g.mkdir()
+    (g / "config.yaml").write_text(yaml.safe_dump(_CONFIG), encoding="utf-8")
+    return g
+
+
+def _turn(g: Path, on: bool) -> None:
+    (g / "overrides.yaml").write_text(yaml.safe_dump({"stub": {"enabled": on}}), encoding="utf-8")
+
+
+def test_kind_is_every_outcome_plus_the_two_unprinted() -> None:
+    assert set(get_args(Kind)) == _OUTCOMES | {"install_skipped", "enabled_manual"}
+
+
+def test_phase_members() -> None:
+    assert set(get_args(Phase)) == _PHASES
+
+
+def test_tail_key_is_the_phases_and_two_selectors() -> None:
+    assert _flat(TailKey) == _PHASES | {"install_batch", "edit_written"}
+
+
+def test_report_kind_members() -> None:
+    assert set(get_args(ReportKind)) == {"wrote", "note", "checking", "row", "help", "next_steps",
+                                         "stays_off", "refused"}
+
+
+def test_literals_are_exact_strings() -> None:
+    assert "Enabled" not in get_args(Kind) and "enabled " not in get_args(Kind)
+    assert all(type(m) is str for m in get_args(Kind) + get_args(Phase) + get_args(ReportKind))
+
+
+def test_pass_result_fields_hold_no_typed_value() -> None:
+    assert [f.name for f in dataclasses.fields(PassResult)] == [
+        "kind", "step", "install", "questions", "answered", "downloaded", "row", "loads", "rebind",
+        "override", "shown", "detail", "next_steps", "help"]
+
+
+def test_pass_result_defaults() -> None:
+    r = PassResult("enabled", StepOutcome("x", True))
+    assert (r.install, r.questions, r.answered, r.downloaded, r.row) == ("none", "none", (), False, None)
+    assert (r.loads, r.rebind, r.override, r.shown, r.detail, r.next_steps, r.help) == (
+        False, False, None, "", "", "", ())
+
+
+def test_pass_result_answered_keeps_the_producers_order() -> None:
+    assert PassResult("saved", StepOutcome("x", True), answered=("b", "a")).answered == ("b", "a")
+
+
+@pytest.mark.parametrize("record", [
+    PassResult("enabled", StepOutcome("x", True)), Touch(False, False, None),
+    ReloadPlan(frozenset(), 0, 0), _session()])
+def test_records_are_frozen(record) -> None:
+    field = dataclasses.fields(record)[0].name
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        setattr(record, field, None)
+
+
+def test_pass_progress_is_the_one_mutable_holder() -> None:
+    p = PassProgress()
+    assert (p.phase, p.written, p.wrote, p.answered, p.overridden, p.rerun) == (
+        "consent", False, False, False, False, False)
+    p.phase, p.wrote = "download", True
+    assert (p.phase, p.wrote) == ("download", True)
+
+
+@pytest.mark.parametrize("parked, waiting, names, reload", [
+    (0, 0, {"a"}, True), (1, 0, {"a"}, False), (0, 1, {"a"}, False), (0, 0, set(), False)])
+def test_reload_only_with_names_and_nothing_parked_or_waiting(parked, waiting, names, reload) -> None:
+    assert ReloadPlan(frozenset(names), parked, waiting).reload is reload
+
+
+def test_a_session_without_touched_gets_its_own_dict() -> None:
+    a, b = _session(), _session()
+    assert a.touched == {} and a.touched is not b.touched
+
+
+def test_action_labels() -> None:
+    assert (ACTION_ENABLE, ACTION_INSTALL, ACTION_SHOW_INSTALL, ACTION_CONFIGURE, ACTION_RERUN,
+            ACTION_DISABLE, ACTION_INFO) == (
+        "Enable", "Install and set up", "Show install step", "Configure…", "Re-run setup", "Disable",
+        "Info")
+
+
+def test_prior_touch_seeds_from_running() -> None:
+    s = _session(running=frozenset({"a"}))
+    assert prior_touch(s, "a") == Touch(False, True, None)
+    assert prior_touch(s, "b") == Touch(False, False, None)
+
+
+def test_refused_carries_the_text_the_install_and_the_prior_loads() -> None:
+    s = _session(running=frozenset({"a"}), touched={"a": Touch(False, False, None)})
+    r = refused(s, "a", "why", "done")
+    assert (r.kind, r.install, r.detail, r.loads, r.step) == ("refused", "done", "why", False,
+                                                                StepOutcome("a", False))
+    assert refused(_session(running=frozenset({"a"})), "a", "why", "none").loads is True
+
+
+def test_refused_has_no_default_install() -> None:
+    with pytest.raises(TypeError):
+        refused(_session(), "a", "why")
+
+
+def test_refused_leaves_touched_alone() -> None:
+    s = _session()
+    refused(s, "a", "why", "none")
+    assert s.touched == {}
+
+
+@pytest.mark.parametrize("state, probe, prior, extra, expect", [
+    ("off", None, None, {}, False),
+    (None, None, None, {}, False),
+    ("on", None, None, {}, True),
+    ("on", None, ("on", ""), {}, True),
+    ("on", None, ("failed", "x"), {}, False),
+    ("on", None, ("unconfigured", "x"), {}, False),
+    ("on", None, None, {"failed": {"a": "boom"}}, False),
+    ("on", None, None, {"unconfigured": {"a": "set k"}}, False),
+    ("on", _row("failed", "failed — x"), None, {}, False),
+    ("on", _row("unconfigured", "set k"), None, {}, False),
+    ("on", _row("on"), None, {}, True),
+    ("on", _row("on"), ("failed", "x"), {}, True),
+    ("on", _row("on"), None, {"failed": {"a": "boom"}}, True),
+    ("off", _row("on"), None, {}, False),
+])
+def test_loads_from_plan_per_conjunct(state, probe, prior, extra, expect) -> None:
+    s = _session(**extra)
+    assert loads_from_plan(s, "a", Touch(False, False, prior), probe, resolution=_resolution(state)) is expect
+
+
+def test_loads_from_plan_resolves_fresh_through_the_session_dirs(machine) -> None:
+    s, prior = _session(machine), Touch(False, False, None)
+    _turn(machine, True)
+    assert loads_from_plan(s, "stub", prior, None) is True
+    assert loads_from_plan(s, "nosuch", prior, None) is False
+    _turn(machine, False)
+    assert loads_from_plan(s, "stub", prior, None) is False
+
+
+def test_the_bookkeeping_never_stores_into_touched() -> None:
+    s = _session(running=frozenset({"a"}))
+    prior_touch(s, "a")
+    loads_from_plan(s, "a", Touch(False, False, None), None, resolution=_resolution("on"))
+    refused(s, "a", "why", "none")
+    assert s.touched == {}
