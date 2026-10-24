@@ -1,4 +1,4 @@
-"""The localharness skills verb: how the model's shell gate classifies it and, from a later phase, what it prints."""
+"""How the model's shell gate classifies the localharness skills verb."""
 from __future__ import annotations
 
 import pytest
@@ -47,11 +47,22 @@ def test_a_compound_behind_localharness_skills_is_not_read_only(ws):
 def test_a_config_dir_before_the_subcommand_asks(ws):
     command = "localharness --config-dir X skills"
     shell = classify_shell(command, SETTINGS)
-    assert shell.signatures == ("localharness X",)
+    assert shell.signatures == ("localharness",)
     assert not shell.segments[0].read_only
     result = evaluate("bash_exec", {"command": command}, SHELL_META, make_ctx(ws), SETTINGS)
     assert result.verdict is Verdict.ASK
-    assert (result.request.klass, result.request.key) == ("shell-unfamiliar", "localharness X")
+    assert (result.request.klass, result.request.key) == ("shell-unfamiliar", "localharness")
+
+
+@pytest.mark.parametrize("flags", ["--install-completion", "--show-completion", "-h", "--config-dir=X"])
+def test_a_flag_before_skills_is_not_the_read_only_verb(flags):
+    shell = classify_shell(f"localharness {flags} skills", SETTINGS)
+    assert shell.signatures == ("localharness",)
+    assert not shell.segments[0].read_only
+
+
+def test_a_flag_after_skills_stays_read_only():
+    assert classify_shell("localharness skills --config-dir X", SETTINGS).segments[0].read_only
 
 
 def test_a_bare_localharness_grant_no_longer_covers_a_subcommand(ws):
