@@ -420,7 +420,10 @@ async def _disable(flow: Flow, entry: Any, route: Any) -> None:
 
 
 async def _info(flow: Flow, entry: Any, route: Any) -> bool:
-    flow.console.print(info_renderable(flow.session, entry), soft_wrap=True)
+    async def show() -> None:
+        flow.console.print(info_renderable(flow.session, entry), soft_wrap=True)
+
+    await guarded(flow, show)
     return True
 
 
@@ -669,10 +672,10 @@ def _finish(flow: Flow, *, closing: bool, why: Unreachable | None = None, error:
 
     plan = flow.should_reload(flow.session.touched)
     if closing and plan.reload:
-        flow.close()
         for name in sorted(flow.session.touched):
             if lifecycle.downloading(name):
                 _say(flow.console, *(line.format(name=name) for line in RELOAD_WAITS))
+        flow.close()
         return True
     if plan.names:
         _say(flow.console, _not_applied(plan, why, error))
