@@ -147,6 +147,18 @@ def _not_regular(cfg, proj, pkg):
     return _expect(skills.NOT_REGULAR, path=path)
 
 
+def _link(link, target):
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target)
+    return link
+
+
+def _outside(cfg, proj, pkg):
+    _skill(cfg.parent / "dotfiles", "x")
+    link = _link(cfg / "skills" / "x", cfg.parent / "dotfiles" / "x")
+    return _expect(skills.OUTSIDE, dir=link, origin=cfg / "skills")
+
+
 def _control_path(cfg, proj, pkg):
     return _expect(skills.CONTROL_PATH, path=_write(cfg, _fm(), entry="a\nb"))
 
@@ -214,6 +226,7 @@ def _control_description(cfg, proj, pkg):
 
 CASES = [
     (skills.NOT_REGULAR, _not_regular),
+    (skills.OUTSIDE, _outside),
     (skills.CONTROL_PATH, _control_path),
     (skills.TOO_LARGE, _too_large),
     (skills.UNREADABLE, _unreadable),
@@ -444,3 +457,83 @@ def test_the_skill_path_is_lexical(tmp_path):
     link.symlink_to(real)
     (kept,) = SkillSet.discover(link, None).skills
     assert kept.path == link / "skills" / "a" / "SKILL.md"
+
+
+def _outside_lines(origin, *names):
+    return [_expect(skills.OUTSIDE, dir=origin / name, origin=origin) for name in names]
+
+
+def test_a_symlinked_agents_directory_skips_every_skill_even_when_the_target_is_inside_the_root(cfg, proj):
+    for name in ("a", "b"):
+        _skill(proj / "tools" / "agents" / "skills", name)
+    _link(proj / ".agents", proj / "tools" / "agents")
+    found = SkillSet.discover(cfg, proj)
+    assert found.skills == ()
+    assert [skip_line(s) for s in found.skipped] == _outside_lines(proj / ".agents" / "skills", "a", "b")
+
+
+def test_a_symlinked_agents_skills_directory_skips_every_skill_under_it(cfg, proj):
+    _skill(proj / "shared" / "skills", "a")
+    _link(proj / ".agents" / "skills", proj / "shared" / "skills")
+    found = SkillSet.discover(cfg, proj)
+    assert found.skills == ()
+    assert [skip_line(s) for s in found.skipped] == _outside_lines(proj / ".agents" / "skills", "a")
+
+
+def test_a_project_skill_linked_into_another_project_is_skipped(tmp_path, cfg, proj):
+    _skill(tmp_path / "other" / ".localharness" / "skills", "x")
+    _link(proj / ".localharness" / "skills" / "x", tmp_path / "other" / ".localharness" / "skills" / "x")
+    found = SkillSet.discover(cfg, proj)
+    assert found.skills == ()
+    assert [skip_line(s) for s in found.skipped] == _outside_lines(proj / ".localharness" / "skills", "x")
+
+
+def test_a_skill_linked_to_a_sibling_origin_is_skipped_and_the_real_one_kept(cfg, proj):
+    real = _skill(proj / ".localharness" / "skills", "x")
+    _link(proj / ".agents" / "skills" / "x", Path("../../.localharness/skills/x"))
+    found = SkillSet.discover(cfg, proj)
+    assert [s.path for s in found.skills] == [real]
+    assert [skip_line(s) for s in found.skipped] == _outside_lines(proj / ".agents" / "skills", "x")
+
+
+def test_a_skill_linked_inside_the_root_but_outside_its_origin_is_skipped(cfg, proj):
+    _skill(proj / "docs", "x")
+    _link(proj / ".localharness" / "skills" / "x", proj / "docs" / "x")
+    found = SkillSet.discover(cfg, proj)
+    assert found.skills == ()
+    assert [skip_line(s) for s in found.skipped] == _outside_lines(proj / ".localharness" / "skills", "x")
+
+
+def test_a_skill_linked_to_another_directory_inside_its_origin_is_kept(cfg):
+    _skill(cfg / "skills", "store", _fm("y"))
+    _link(cfg / "skills" / "y", Path("store"))
+    found = SkillSet.discover(cfg, None)
+    assert [s.path for s in found.skills] == [cfg / "skills" / "y" / "SKILL.md"]
+    assert [skip_line(s) for s in found.skipped] == [
+        _expect(skills.NAME_DIR, path=cfg / "skills" / "store" / "SKILL.md", name="y")
+    ]
+
+
+def test_a_link_at_the_base_is_followed(tmp_path):
+    _skill(tmp_path / "cfg-real" / "skills", "alpha")
+    link = _link(tmp_path / "cfg-link", tmp_path / "cfg-real")
+    found = SkillSet.discover(link, None)
+    assert [s.path for s in found.skills] == [link / "skills" / "alpha" / "SKILL.md"]
+    assert found.skipped == ()
+
+
+def test_the_regular_file_test_runs_before_containment(tmp_path, cfg):
+    real = tmp_path / "dotfiles" / "x"
+    _skill(tmp_path / "dotfiles", "x")
+    (real / "SKILL.md").unlink()
+    (real / "other.md").write_text(_fm("x"))
+    (real / "SKILL.md").symlink_to(real / "other.md")
+    link = _link(cfg / "skills" / "x", real)
+    assert _only(cfg) == [_expect(skills.NOT_REGULAR, path=link / "SKILL.md")]
+
+
+def test_regular_file_test_is_lstat():
+    tree = _tree("config/skills.py")
+    assert "is_file" not in {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    calls = {ast.unparse(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    assert {"os.lstat", "stat.S_ISREG"} <= calls
