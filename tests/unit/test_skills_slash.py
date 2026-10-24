@@ -1,4 +1,4 @@
-"""Slash rows for skills: the dispatch seam, late rows and, from a later phase, the /<name> turn and the session."""
+"""Slash rows for skills: the dispatch seam and late rows."""
 from __future__ import annotations
 
 import ast
@@ -92,8 +92,17 @@ def test_a_refused_late_row_returns_its_warning_and_changes_nothing(rows, late, 
 
 def test_the_taken_name_check_is_exact(rows):
     rows([_plugin("example")])
-    assert add_plugin_row(_skill("Example")) is None
-    assert [row.name for row in all_rows()][-2:] == ["/example", "/Example"]
+    assert add_plugin_row(_skill("example-two")) is None
+    assert [row.name for row in all_rows()][-2:] == ["/example", "/example-two"]
+
+
+@pytest.mark.parametrize("handler", ["_slash_skill", AsyncMock()])
+def test_a_row_naming_no_plugin_is_skipped_in_both_entry_points(rows, handler):
+    row = SlashCommand("/orphan", "x", handler)
+    warning = "slash command /orphan names no plugin — skipped"
+    assert rows([row]) == [warning]
+    assert add_plugin_row(row) == warning
+    assert all_rows() == SLASH_COMMANDS
 
 
 async def test_a_callable_on_a_late_row_gets_the_stripped_text_only(rows):
