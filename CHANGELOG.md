@@ -4,6 +4,17 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.21.1] — 2026-10-24
+
+The installed phone app shows a "can't reach your box" page instead of a white screen when the box is unreachable.
+
+### Fixed
+- **The installed phone app no longer white-screens when the box is unreachable.** When
+  `localharness mobile` isn't running (or the box can't be reached behind its proxy), the phone's
+  service worker serves a "can't reach your box" page — with a Retry button, and a quiet poll that
+  reloads on its own once the server answers again — instead of iOS's blank standalone screen. The
+  worker still never caches: a reachable server always serves the live page.
+
 ## [0.21.0] — 2026-10-24
 
 `/plugins` opens Plugins inside the session, and two Ctrl-C behaviors change.
