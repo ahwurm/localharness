@@ -519,6 +519,11 @@ class OrchestratorREPL:
 
     def _subscribe_pending(self) -> None:
         """Subscribe the pending-permission row and the skill session to the bus."""
+        # The ROW is the REPL's to draw and nothing else is: it shows the whole queue, oldest
+        # first, and only the gate knows what is left after an answer, an object `channels`
+        # deliberately cannot import. The transcript LINE stays the channel's own, drawn from
+        # its own PermissionStaged subscription, so a channel that already says it (Discord,
+        # ACP) never says it twice because the REPL is hosting it.
         self._pending_handles = [
             self._bus.subscribe(PermissionStaged, self._on_pending_changed),
             self._bus.subscribe(PermissionResolved, self._on_pending_changed),
