@@ -285,3 +285,22 @@ class SkillSet:
             if lexical == here.parent:
                 return _load(record.path, lexical, real)
         return _skip(OUTSIDE, here, dir=here, origin=here.parent)
+
+    def find(self, name) -> Skill | Skipped | None:
+        """Look a typed name up, rescanning with the start-time workspace decision; the one method that grows the set."""
+        if not isinstance(name, str) or len(name) > MAX_NAME or not NAME.fullmatch(name):
+            return None
+        live = next((s for s in self.skills if s.name == name), None)
+        if live is not None:
+            return live
+        hits = [item for entry, item in _scan(self.config_dir, self.project_root) if entry == name]
+        record = next((i for i in hits if isinstance(i, Skill)), None)
+        if record is None:
+            return hits[0] if hits else None
+        here = record.path.parent
+        if record.origin == "project" and sum(s.origin == "project" for s in self.skills) >= MAX_PROJECT:
+            return _skip(CAP_PROJECT, here, dir=here)
+        if len(self.skills) >= MAX_SKILLS:
+            return _skip(CAP_TOTAL, here, dir=here)
+        self.skills = self.skills + (record,)
+        return record
