@@ -1465,6 +1465,7 @@ class AgentLoop:
             self._config,
             tool_call_mode=getattr(getattr(self._llm, "config", None), "tool_call_mode", "native"),
             guardrails=self._read_guardrails(),
+            skills=self._skills,
         )
         return fixed_tokens(self._ctx._token_counter, prompt, schemas)
 
