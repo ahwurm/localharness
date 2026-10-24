@@ -14,7 +14,7 @@ LINE = "The person invoked /{name}{args}. Call skill('{name}') and follow it."
 NOT_LOADED = 'the model did not load /{name}; try again, or say "use the {name} skill"'
 ADDED = "added since start: {name} ({origin}, {path})"
 CHANGED = "changed since first use: {path}; using it"
-FIRST_SENTENCE = re.compile(r".*?[.!?](?=\s|$)")
+FIRST_SENTENCE = re.compile(r".*?[.!?](?=\s+[A-Z]|$)")
 ROW_WIDTH = 80
 
 

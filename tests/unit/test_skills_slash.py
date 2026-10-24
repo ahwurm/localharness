@@ -355,6 +355,11 @@ def test_a_skill_row_cuts_at_a_sentence_end_followed_by_space_or_the_end(descrip
     assert _row(description).description == shown
 
 
+def test_a_skill_row_does_not_cut_at_an_abbreviation():
+    assert _row("Use for e.g. release notes. Second.").description == "Use for e.g. release notes."
+    assert _row("Use for e.g. release notes. Second.", "project").description == "Use for e.g. release notes. (project)"
+
+
 def test_a_skill_row_is_cut_to_eighty_characters_and_the_label_is_not_counted():
     assert _row("é" * 100).description == "é" * 80
     assert _row("a" * 79 + ". tail").description == "a" * 79 + "."
