@@ -254,10 +254,11 @@ def foreign_incumbent_line(
         holder, port=port, form="imperative", served=incumbent.served, target=target.name)
 
 
-async def launch_floor(agent_config: Any) -> int | None:
-    """The root's window floor before the registry exists: base prompt plus the built-in tool schemas, counted offline."""
+async def launch_floor(agent_config: Any, skills: tuple = ()) -> int | None:
+    """The root's window floor before the registry exists: base prompt with the skills listing plus the built-in and skill tool schemas, counted offline."""
     from localharness.agent.loop import base_system_prompt
     from localharness.tools.builtin import register_builtin_tools
+    from localharness.tools.builtin.skill_tool import render_listing, skill_schema
     from localharness.tools.capabilities import apply_root_capability_floor
     from localharness.tools.registry import ToolRegistry
 
@@ -267,9 +268,11 @@ async def launch_floor(agent_config: Any) -> int | None:
     apply_root_capability_floor(tools, registry.global_schemas())
     try:
         schemas = floor_schemas(registry, agent_config.name, agent_config.division or "", tools)
+        if skills:
+            schemas = [*schemas, skill_schema(s.name for s in skills)]
     except Exception:  # noqa: BLE001 — the loop's own count degrades the same way: no schemas
         schemas = []
-    prompt = base_system_prompt(agent_config, tool_call_mode="native", guardrails="")
+    prompt = base_system_prompt(agent_config, tool_call_mode="native", guardrails="", skills=render_listing(skills))
     return harness_floor(fixed_tokens(TokenCounter(offline=True), prompt, schemas), agent_config.max_tokens)
 
 
