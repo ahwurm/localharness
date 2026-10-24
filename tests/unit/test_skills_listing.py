@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from localharness.agent import context, subagent
+from localharness.agent import subagent
 from localharness.agent.context import ContentStore, TokenCounter
 from localharness.agent.task_record import TaskState
 from localharness.agent.loop import _fence_instructions, base_system_prompt
@@ -461,14 +461,6 @@ async def test_the_built_in_role_floors_do_not_move_when_the_root_holds_the_skil
     assert set(after) == {"explore", "web-researcher", "search-verifier"}
 
 
-def test_a_role_floor_prompt_has_no_listing(monkeypatch):
-    seen = []
-    monkeypatch.setattr(context, "fixed_tokens", lambda counter, prompt, schemas: seen.append(prompt) or 1)
-    cfg = AgentConfig(name="explore", role="r", model="inherit")
-    subagent.role_floor(cfg, [], counter=TokenCounter(offline=True), llm=SimpleNamespace(config=None), max_response_tokens=None)
-    assert len(seen) == 1 and "## Skills" not in seen[0]
-
-
 def _start_world(base, monkeypatch, skill=True):
     from tests.unit.test_start_cmd import _stub_nonvllm_start
     from tests.unit.test_start_floor import _capture_agent
@@ -503,6 +495,34 @@ async def test_start_builds_one_skill_set_for_the_floor_the_prompt_and_the_tool(
     tool, task = loop._tools._tools["global"]["skill"], loop._tools._tools["global"]["task"]
     assert isinstance(tool, SkillTool) and tool._state is task._state and tool._store is loop._ctx._content_store
     assert calls[0][1] == loop.floor()
+    registry = loop._tools
+    assert tool._result_cap() == registry.result_size_cap_chars
+    registry.set_result_size_cap(1234)
+    assert tool._result_cap() == 1234
+
+
+async def test_a_late_skill_found_after_start_leaves_the_listing_as_it_was(tmp_path, pkg, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+
+    _, agents = _start_world(tmp_path, monkeypatch)
+    await _start_async(None, False, False, str(tmp_path))
+    (loop,) = agents
+    listing, tool = loop._skills, loop._tools._tools["global"]["skill"]
+    _skill(tmp_path / "skills", "late")
+    assert tool._skills.find("late").name == "late"
+    assert [s.name for s in tool._skills.skills] == ["notes", "late"] and loop._skills == listing
+
+
+async def test_a_root_that_denies_the_skill_tool_is_told_of_no_skills(tmp_path, pkg, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+
+    seen, agents = _start_world(tmp_path, monkeypatch)
+    (tmp_path / "agents").mkdir()
+    (tmp_path / "agents" / "orchestrator.yaml").write_text(
+        "name: orchestrator\nrole: Test role\nmodel: inherit\ntools:\n  deny: [skill]\n")
+    await _start_async(None, False, False, str(tmp_path))
+    (loop,) = agents
+    assert [s.name for s in seen[0]] == ["notes"] and loop._skills == ""
 
 
 async def test_a_start_with_no_skill_has_no_listing_and_no_tool(tmp_path, pkg, monkeypatch):
