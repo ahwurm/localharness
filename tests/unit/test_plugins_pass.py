@@ -690,10 +690,11 @@ async def test_enable_pass_in_batch_puts_the_batch_tail_on_the_trust_question(fo
 async def test_enable_pass_in_an_ignore_launch_says_the_download_cannot_be_stopped_before_it_starts(
         layers, mobile, monkeypatch) -> None:
     mobile.installed = True
-    monkeypatch.setattr(signal, "getsignal", lambda signum: signal.SIG_IGN)
     line = CTRLC_IGNORED.format(step="download")
 
-    await _enable(layers, "mob", Talk(["http://box"], yes=[True]), install="none", console=Console(file=_Tee(), width=400))
+    with monkeypatch.context() as ignoring:
+        ignoring.setattr(signal, "getsignal", lambda signum: signal.SIG_IGN)
+        await _enable(layers, "mob", Talk(["http://box"], yes=[True]), install="none", console=Console(file=_Tee(), width=400))
 
     assert CALLS.count(line) == 1 and CALLS.index(line) < CALLS.index("download")
 
@@ -704,8 +705,9 @@ async def test_enable_pass_prints_no_ignored_line_when_sigint_is_not_ignored_or_
     out = io.StringIO()
 
     await _enable(layers, "mob", Talk(["http://box"], yes=[True]), install="none", console=Console(file=out, width=400))
-    monkeypatch.setattr(signal, "getsignal", lambda signum: signal.SIG_IGN)
-    await _enable(layers, "mob", Talk(["http://box"], yes=[False]), install="none", console=Console(file=out, width=400))
+    with monkeypatch.context() as ignoring:
+        ignoring.setattr(signal, "getsignal", lambda signum: signal.SIG_IGN)
+        await _enable(layers, "mob", Talk(["http://box"], yes=[False]), install="none", console=Console(file=out, width=400))
 
     assert out.getvalue() == ""
 
