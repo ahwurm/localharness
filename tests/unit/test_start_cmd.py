@@ -3393,3 +3393,38 @@ async def test_a_reload_resume_prints_the_reload_line_then_the_plugins_line_and_
     plugins = [i for i, line in enumerate(printed) if "Plugins: sentinel" in line]
     assert len(at) == 1 and len(plugins) == 1 and at[0] < plugins[0]
     assert [line for line in printed if line.startswith("Restarted with ")] == [start_cmd.RESTARTED_RELOAD]
+
+
+async def test_a_resume_status_line_carries_no_control_sequence_from_a_plugin_check(tmp_path, monkeypatch):
+    from localharness.cli import start_cmd
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    printed = _capture_start_console(monkeypatch)
+    hostile = "\x1b]0;evil\x07boom\u009b2J"
+
+    await start_cmd._start_async(None, False, False, str(tmp_path),
+                                 resume=_resume_of(("enable", "x"), failed_check=hostile))
+
+    assert "Restarted with x on. Your conversation continues." in printed
+    (status,) = [line for line in printed if line.startswith("x: on, but its check failed: ")]
+    assert "boom" in status
+    assert not any(c in line for line in printed for c in ("\x1b", "\x07", "\u009b"))
+
+
+@pytest.mark.parametrize("action, tail", [
+    pytest.param(("reload", ""), "after a plugin reload", id="reload"),
+    pytest.param(("enable", "x"), "after enable x", id="verb"),
+])
+async def test_a_resume_logs_what_it_resumes_after(tmp_path, monkeypatch, caplog, action, tail):
+    import logging
+
+    from localharness.cli import start_cmd
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    _capture_start_console(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger="localharness.cli.start_cmd"):
+        await start_cmd._start_async(None, False, False, str(tmp_path), resume=_resume_of(action))
+
+    (line,) = [r.getMessage() for r in caplog.records if " resumes old " in r.getMessage()]
+    assert line.endswith(f"resumes old {tail}")

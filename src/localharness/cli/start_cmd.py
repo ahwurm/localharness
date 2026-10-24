@@ -24,6 +24,7 @@ from rich.prompt import IntPrompt
 from rich.table import Table
 from rich.text import Text
 
+from localharness.channels.base import sanitize_for_display
 from localharness.cli.theme import SITE_DIM, SITE_INK, SITE_TOOL, entity, entity_text
 from localharness.cli.workspace import (
     NO_INPUT_HELP,
@@ -2650,8 +2651,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     _route_memory_logs_to_file(agent_dir)
     sitting_id = str(uuid.uuid4())  # SESS-01: one session per SITTING, minted once
     if resume is not None:  # a rebuild is a new sitting: memory's sessions.id is a primary key
-        log.info("session %s resumes %s after %s %s", sitting_id, resume.previous_sitting_id,
-                 *resume.action)
+        log.info("session %s resumes %s after %s", sitting_id, resume.previous_sitting_id,
+                 "a plugin reload" if is_reload(resume.action) else " ".join(resume.action))
     asleep_file = asleep_path(events_path.parent / "sessions")
     # LLMClient built above with probe-derived tool_call_mode.
 
@@ -3345,7 +3346,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             if _plugins_line is not None:
                 console.print(_plugins_line, soft_wrap=True)
         if resume is not None and not resume.slept and not is_reload(resume.action):
-            console.print(Text(_resume_status(resume, plugin_result)), soft_wrap=True)
+            console.print(Text(sanitize_for_display(_resume_status(resume, plugin_result))), soft_wrap=True)
 
         # --- Verbose output ---
         if verbose:
