@@ -15,7 +15,7 @@ and its reset between the two event loops.
 STUBBED: the LLM probe and the tokenizer (`_stub_start_boundaries` via `_machine`); the model's
 replies (`LLMClient.stream_complete`); the REPL's read loop — `drive` stands in for
 `OrchestratorREPL.run` and sends each scripted line through the real `_dispatch_input`, awaiting
-each turn; the terminal's answers (`plugins_cmd.typer.prompt`); ComfyUI (`_fake_comfy`, an
+each turn; the terminal's answers (typed at a real `prompt_line` on a pipe input); ComfyUI (`_fake_comfy`, an
 `httpx.MockTransport` — no socket); the embedding model (`ResonanceEngine.embed_docs` /
 `embed_query` return fixed vectors, as the memory e2e stubs them — memory's consolidation embeds in
 a worker thread, and with the hermetic home's empty model cache the real one went to fetch the model
@@ -44,11 +44,15 @@ import httpx
 import numpy as np
 import pytest
 import yaml
+from prompt_toolkit.application import create_app_session
+from prompt_toolkit.input.defaults import create_pipe_input
+from prompt_toolkit.output import DummyOutput
+from prompt_toolkit.shortcuts import PromptSession
 from pydantic import BaseModel, Field, SecretStr
 from rich.console import Console
 
 from localharness.channels.terminal import TerminalChannel
-from localharness.cli import doctor_cmd, plugins_cmd, start_cmd
+from localharness.cli import doctor_cmd, interview, plugins_cmd, start_cmd
 from localharness.plugins import builtin
 from localharness.plugins.api import GLOBAL_ONLY, Check, Plugin, PluginManifest, SetupField
 from localharness.plugins.setup import AGENT_PROMPT_LEAD
@@ -58,13 +62,13 @@ from tests.conftest import FakeLLMResponse
 from tests.integration.test_all_plugins_off_e2e import _record
 from tests.integration.test_image_plugin_e2e import _fake_comfy, _machine, _record_dials
 from tests.integration.test_setup_steps_e2e import AR_NEXT, PHONE_Q, WEB_NEXT
-from tests.plugin_prompts import fake_prompts
 from tests.unit.test_restart_primitives import _contend
 from tests.unit.test_start_cmd import _capture_start_console, _read_sessions
 from tests.unit.test_start_plugins import _record_loop
 
 COMFY = "http://comfy.test"
 SECRET = "SENTINEL-52-SECRET"
+CLEAR = "\x15"  # Ctrl-U: the offered default is pre-filled, so a typed answer first clears it
 RESTARTED = "Restarted with image on. Your conversation continues."
 
 
@@ -159,15 +163,18 @@ def run(tmp_path, monkeypatch, fake_home, capfd, caplog):
     def _run(scripts, *, answer=COMFY, at_prompt=None) -> SimpleNamespace:
         scripts = [list(script) for script in scripts]
 
-        def prompt(text, default=None, **kw):
-            s.prompts.append((text, default, kw, s.repl_running))
-            if at_prompt is not None:
-                at_prompt()
-            if isinstance(answer, BaseException):
-                raise answer
-            return answer
+        keys = "\x03" if isinstance(answer, BaseException) else (CLEAR + answer if answer else "") + "\r"
 
-        fake_prompts(monkeypatch, prompt=prompt)
+        class Recording(PromptSession):
+            async def prompt_async(self, *a, **kw):
+                s.prompts.append(("".join(t for _, t in self.message), kw["default"], self.is_password,
+                                  s.repl_running))
+                if at_prompt is not None:
+                    at_prompt()
+                inp.send_text(keys)
+                return await super().prompt_async(*a, **kw)
+
+        monkeypatch.setattr(interview, "PromptSession", Recording)
 
         async def drive(self):  # stands in for OrchestratorREPL.run
             s.runs += 1
@@ -189,9 +196,10 @@ def run(tmp_path, monkeypatch, fake_home, capfd, caplog):
                 s.repl_running = False
 
         monkeypatch.setattr("localharness.cli.repl.OrchestratorREPL.run", drive)
-        start_cmd.start_app(agent=None, verbose=False, debug=False, config_dir=None, channel="terminal",
-                            subagents=False, model=None, list_models=False, no_input=False,
-                            show_reasoning=False)
+        with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+            start_cmd.start_app(agent=None, verbose=False, debug=False, config_dir=None,
+                                channel="terminal", subagents=False, model=None, list_models=False,
+                                no_input=False, show_reasoning=False)
         out, err = capfd.readouterr()
         s.terminal = out + err + caplog.text
         # 52-04's real-terminal finding, now across two event loops: nothing reports a closed loop
@@ -240,7 +248,8 @@ def test_enabling_a_plugin_in_a_session_keeps_the_conversation_and_offers_its_to
     # the REPL said it, and ended
     assert "Restarting with image on — your conversation is kept." in s.said
     # the step: one question, on the plain terminal, while no REPL ran
-    assert [(t, d, r) for t, d, _kw, r in s.prompts] == [("ComfyUI address", "http://127.0.0.1:8188", False)]
+    assert [(t, d, r) for t, d, _hide, r in s.prompts] == [
+        ("ComfyUI address: ", "http://127.0.0.1:8188", False)]
     assert _overrides(s) == {"image": {"enabled": True, "comfyui_url": COMFY}}
     assert "Checking it now:" in s.step.getvalue()
     assert f"✓ image: ComfyUI reachable at {COMFY}" in s.doctor.getvalue()
@@ -318,7 +327,7 @@ def test_web_left_unset_is_on_but_not_set_up_yet(run):
     s = run([["hello there", "/plugins enable mobile"], ["what now"]], answer="")
 
     assert "Restarting with mobile on — your conversation is kept." in s.said
-    assert [(t, d, r) for t, d, _kw, r in s.prompts] == [(PHONE_Q, "", False)]
+    assert [(t, d, r) for t, d, _hide, r in s.prompts] == [(f"{PHONE_Q}: ", "", False)]
     assert _overrides(s) == {"mobile": {"enabled": True}}  # Enter wrote no address
     assert "i  mobile: not enrolled yet" in s.doctor.getvalue()
     step = s.step.getvalue()
@@ -333,9 +342,9 @@ def test_autoresearch_with_no_proposer_is_on_but_not_set_up_yet(run, monkeypatch
     monkeypatch.setattr(setup, "gpu_name", lambda: "NVIDIA GB10")  # its prompt names {machine}
     s = run([["hello there", "/plugins enable autoresearch"], ["what now"]], answer="")
 
-    assert [(t, kw["hide_input"]) for t, _d, kw, _r in s.prompts] == [
-        ("Proposer address (an OpenAI-compatible base URL — a local server or a cloud API)", False),
-        ("Proposer model id", False), ("Proposer API key (leave empty for a local server)", True)]
+    assert [(t, hide) for t, _d, hide, _r in s.prompts] == [
+        ("Proposer address (an OpenAI-compatible base URL — a local server or a cloud API): ", False),
+        ("Proposer model id: ", False), ("Proposer API key (leave empty for a local server): ", True)]
     assert _overrides(s) == {"autoresearch": {"enabled": True}}  # Enter on all three: nothing written
     assert f"i  autoresearch: {NO_PROPOSER}" in s.doctor.getvalue()
     step = s.step.getvalue()
@@ -400,7 +409,7 @@ def test_a_secret_typed_in_the_step_never_reaches_a_session_file(run, monkeypatc
     s = run([["hello there", "/plugins enable secp"], ["hello again"]], answer=SECRET)
 
     # asked once, hidden, on the plain terminal while no REPL ran
-    assert [(t, kw.get("hide_input"), r) for t, _d, kw, r in s.prompts] == [("Token", True, False)]
+    assert [(t, hide, r) for t, _d, hide, r in s.prompts] == [("Token: ", True, False)]
     assert "✓ secp: a token is set" in s.doctor.getvalue()
     assert "secp: on in this session" in s.printed
     # the one place it lands: the machine's overrides.yaml, owner-only
