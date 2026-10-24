@@ -4,17 +4,19 @@ from __future__ import annotations
 import asyncio
 import io
 import os
+import signal
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
+import click
 import pytest
 import yaml
 from rich.console import Console
 
 from localharness.cli import plugins_cmd, plugins_interview
 from localharness.cli.interview import Answer, Unreachable
-from localharness.cli.plugins_cmd import PluginSession, ReloadPlan, Touch, reload_names
+from localharness.cli.plugins_cmd import PassProgress, PluginSession, Refusal, ReloadPlan, Touch, reload_names
 from localharness.cli.plugins_interview import CLOSE_LABELS, PLUGINS_QUESTION, at_close, run
 from localharness.plugins import resolve as resolve_module
 from localharness.plugins.api import PluginManifest
@@ -377,3 +379,240 @@ async def test_asks_pending_with_a_call_parked_a_pending_change_defers_with_the_
     assert await _run(layers, channel, touched={"stub": Touch(False, True, None)}, parked=1) is False
 
     assert not channel.closed and "restart deferred: 1 ask" in channel.asked[0].options[-1].label
+
+
+def _flow(layers) -> plugins_interview.Flow:
+    channel = FakeChannel()
+    return plugins_interview.Flow(channel, _session(layers), _should_reload(), channel.console, lambda: None,
+                                  None, None, ReloadPlan(frozenset(), 0, 0))
+
+
+def press() -> None:
+    os.kill(os.getpid(), signal.SIGINT)
+
+
+async def _hang() -> None:
+    await asyncio.sleep(100)
+
+
+@pytest.mark.parametrize("exc", [KeyboardInterrupt, SystemExit, click.Abort, click.exceptions.Exit, EOFError])
+async def test_guarded_a_stop_is_the_sentinel_and_leaves_the_session_task_alone(layers, exc) -> None:
+    async def node():
+        raise exc()
+
+    assert await plugins_interview.guarded(_flow(layers), node) is plugins_interview._STOP
+    assert asyncio.current_task().cancelling() == 0
+
+
+@pytest.mark.parametrize(("phase", "install"), [("question_installed", "done"), ("question", "none")])
+async def test_guarded_a_refusal_is_the_refused_result(layers, phase, install) -> None:
+    async def node():
+        raise Refusal("no", ())
+
+    got = await plugins_interview.guarded(_flow(layers), node, names=("stub",), progress=PassProgress(phase=phase))
+
+    assert got == plugins_cmd.refused(_session(layers), "stub", "no", install)
+    assert (got.kind, got.install, got.detail) == ("refused", install, "no")
+
+
+async def test_guarded_an_error_is_abandoned_with_its_first_line_only(layers) -> None:
+    async def node():
+        raise RuntimeError("boom\nsecond")
+
+    with pytest.raises(plugins_interview._Abandon) as caught:
+        await plugins_interview.guarded(_flow(layers), node)
+
+    assert caught.value.error == "RuntimeError: boom"
+
+
+async def test_guarded_a_refusal_with_no_name_to_report_is_an_error(layers) -> None:
+    async def node():
+        raise Refusal("no", ())
+
+    with pytest.raises(plugins_interview._Abandon) as caught:
+        await plugins_interview.guarded(_flow(layers), node)
+
+    assert caught.value.error == "Refusal: no"
+
+
+@pytest.mark.usefixtures("default_sigint")
+def test_guarded_one_press_stops_a_hanging_node_and_restores_the_handler(layers) -> None:
+    async def scenario():
+        before = signal.getsignal(signal.SIGINT)
+        task = []
+
+        async def node():
+            task.append(asyncio.current_task())
+            await _hang()
+
+        asyncio.get_running_loop().call_soon(press)
+        got = await plugins_interview.guarded(_flow(layers), node)
+        return got, task[0].cancelled(), signal.getsignal(signal.SIGINT) is before, asyncio.current_task().cancelling()
+
+    assert asyncio.run(scenario()) == (plugins_interview._STOP, True, True, 0)
+
+
+@pytest.mark.usefixtures("default_sigint")
+def test_guarded_a_parent_cancel_propagates_and_restores_the_handler(layers) -> None:
+    async def scenario():
+        before = signal.getsignal(signal.SIGINT)
+        parent = asyncio.ensure_future(plugins_interview.guarded(_flow(layers), _hang))
+        await asyncio.sleep(0.05)
+        parent.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await parent
+        return signal.getsignal(signal.SIGINT) is before
+
+    assert asyncio.run(scenario())
+
+
+@pytest.mark.usefixtures("default_sigint")
+def test_guarded_a_parent_cancel_during_the_root_leaves_run_with_nothing_printed(layers) -> None:
+    async def scenario():
+        before, channel = signal.getsignal(signal.SIGINT), FakeChannel(HANG)
+        parent = asyncio.ensure_future(_run(layers, channel))
+        await asyncio.sleep(0.05)
+        parent.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await parent
+        return channel.text, channel.closed, signal.getsignal(signal.SIGINT) is before
+
+    assert asyncio.run(scenario()) == ("", False, True)
+
+
+@pytest.mark.usefixtures("default_sigint")
+@pytest.mark.parametrize(("touched", "reloads"), [({}, False), ({"stub": Touch(False, True, None)}, True)],
+                         ids=["nothing_touched", "a_plugin_will_load"])
+def test_guarded_an_external_sigint_on_the_root_runs_the_close_time_computation(layers, touched, reloads) -> None:
+    async def scenario():
+        before = signal.getsignal(signal.SIGINT)
+        asyncio.get_running_loop().call_later(0.05, press)
+        got = await _run(layers, FakeChannel(HANG), touched=touched)
+        return got, signal.getsignal(signal.SIGINT) is before
+
+    assert asyncio.run(scenario()) == (reloads, True)
+
+
+async def test_guarded_a_stop_while_resolving_the_root_closes_it(layers, monkeypatch) -> None:
+    def stop(loader, **kw):
+        raise EOFError
+
+    monkeypatch.setattr(resolve_module, "resolve", stop)
+    channel = FakeChannel()
+
+    assert await _run(layers, channel) is False
+
+    assert channel.text == "" and channel.asked == []
+
+
+_TOO_SMALL = "1 plugin change saved, not applied: the window got too small. Enlarge the window, then open /plugins and close it"
+_NO_DRAW = "1 plugin change saved, not applied: the screen could not be drawn. Quit and start localharness again to apply"
+_ONE = {"stub": Touch(False, True, None)}
+
+
+@pytest.mark.parametrize(("answer", "line"), [
+    (Unreached(Unreachable.TOO_SMALL), _TOO_SMALL),
+    (UNREACHED, _NO_DRAW),
+    (Unreached(Unreachable.DUMB), _NO_DRAW),
+], ids=["too_small", "no_tty", "dumb"])
+async def test_not_applied_an_unreached_node_with_changes_prints_the_one_line_before_the_span_exits(
+        layers, answer, line) -> None:
+    channel = FakeChannel(answer)
+
+    assert await _run(layers, channel, touched=dict(_ONE)) is False
+
+    assert channel.lines == [line] and channel.out_at_exit == len(channel.text) and not channel.closed
+
+
+@pytest.mark.parametrize("why", list(Unreachable), ids=lambda why: why.name.lower())
+async def test_unreached_with_no_changes_prints_unavailable_and_returns_false(layers, why) -> None:
+    channel = FakeChannel(Unreached(why))
+
+    assert await _run(layers, channel) is False
+
+    assert channel.lines == [plugins_interview.unavailable(why)]
+
+
+@pytest.mark.parametrize(("why", "line"), [
+    (Unreachable.TOO_SMALL, "Plugins can't be drawn here — enlarge the window, then open /plugins again"),
+    (Unreachable.NO_TTY, "Plugins can't be drawn here — use /plugins enable <name>"),
+    (Unreachable.ERROR, "Plugins can't be drawn here — use /plugins enable <name>"),
+])
+def test_unreached_unavailable_texts(why, line) -> None:
+    assert plugins_interview.unavailable(why) == line
+
+
+@pytest.mark.parametrize(("touched", "parked", "waiting", "line"), [
+    (_ONE, 1, 0, "1 plugin change saved, not applied: a restart would drop 1 ask. "
+                 "Answer the asks in /pending, then open /plugins and close it"),
+    (_ONE, 0, 3, "1 plugin change saved, not applied: a restart would drop 3 asks. "
+                 "Answer the asks shown next, then open /plugins and close it"),
+    (_THREE, 2, 1, "3 plugin changes saved, not applied: a restart would drop 3 asks. "
+                   "Answer the asks in /pending and shown next, then open /plugins and close it"),
+], ids=["parked", "waiting", "both"])
+async def test_not_applied_a_close_with_asks_pending_prints_the_asks_case(layers, touched, parked, waiting, line) -> None:
+    channel = FakeChannel("+close")
+
+    assert await _run(layers, channel, touched=dict(touched), parked=parked, waiting=waiting) is False
+
+    assert channel.lines[-1:] == [line] and not channel.closed
+    assert len([ln for ln in channel.lines if "saved, not applied" in ln]) == 1
+
+
+async def test_not_applied_an_unreached_node_while_asks_are_pending_prints_only_the_unreached_row(layers) -> None:
+    channel = FakeChannel(Unreached(Unreachable.TOO_SMALL))
+
+    await _run(layers, channel, touched=dict(_ONE), parked=1, waiting=2)
+
+    assert [ln for ln in channel.lines if "saved, not applied" in ln] == [_TOO_SMALL]
+    assert "restart would drop" not in channel.text
+
+
+async def test_not_applied_a_close_with_nothing_touched_and_asks_waiting_prints_nothing(layers) -> None:
+    channel = FakeChannel("+close")
+
+    assert await _run(layers, channel, waiting=2) is False
+
+    assert channel.text == ""
+
+
+def _failing(monkeypatch, message: str, exc=RuntimeError) -> None:
+    def fail(loader, **kw):
+        raise exc(message)
+
+    monkeypatch.setattr(resolve_module, "resolve", fail)
+
+
+async def test_closed_on_error_with_changes_prints_the_closed_early_case(layers, monkeypatch) -> None:
+    _failing(monkeypatch, "boom")
+    channel = FakeChannel()
+
+    assert await _run(layers, channel, touched=dict(_ONE)) is False
+
+    assert channel.lines == ["1 plugin change saved, not applied: Plugins closed on an error: RuntimeError: boom. "
+                             "Quit and start localharness again to apply"]
+
+
+async def test_closed_on_error_with_no_changes_prints_one_clean_line(layers, monkeypatch) -> None:
+    _failing(monkeypatch, "boom\x1b]0;t\x07 https://u:p@h.test/x\nsecond")
+    channel = FakeChannel()
+
+    assert await _run(layers, channel) is False
+
+    (line,) = channel.lines
+    assert line.startswith("Plugins closed on an error: RuntimeError: boom") and "https://h.test/x" in line
+    assert not any(bad in line for bad in ("\x1b", "\x07", "u:p@", "second"))
+    assert channel.out_at_exit == len(channel.text)
+
+
+async def test_closed_on_error_an_error_outside_any_node_closes_plugins_with_its_line(layers) -> None:
+    class Broken(FakeChannel):
+        async def run_interview(self, *args, **kw):
+            return None
+
+    channel = Broken()
+
+    assert await _run(layers, channel) is False
+
+    (line,) = channel.lines
+    assert line.startswith("Plugins closed on an error: AttributeError: ")
