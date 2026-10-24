@@ -2683,3 +2683,264 @@ async def test_reload_waits_prints_nothing_when_the_reload_does_not_run(layers, 
     assert await _run(layers, channel, touched={"mob": Touch(False, True, None)}, waiting=1) is False
 
     assert "download still stopping" not in channel.text and not channel.closed
+
+
+class _Counting(FakeChannel):
+    closes = 0
+
+    @asynccontextmanager
+    async def suspended_box(self):
+        async with super().suspended_box() as (output, console, close):
+            def counted() -> None:
+                self.closes += 1
+                close()
+
+            yield output, console, counted
+
+
+def _recorded(running=frozenset(), parked=0, waiting=0):
+    plan, calls = _should_reload(running, parked, waiting), []
+
+    def should_reload(touched):
+        calls.append(plan(touched))
+        return calls[-1]
+
+    return should_reload, calls
+
+
+RESTARTS = "Close — restarts to apply (1 plugin)"
+
+
+async def test_restart_at_close_a_plugin_that_failed_to_load_and_was_not_touched_stays_out(layers) -> None:
+    _on_disk(layers, stub=True)
+    channel = FakeChannel("+close")
+
+    assert await _run(layers, channel, failed={"stub": "import broke"}) is False
+
+    assert _rows(channel.asked[0])[0].hint == "on — did not load (Info shows why)"
+    assert channel.asked[0].options[-1].label == "Close" and not channel.closed
+
+
+async def test_restart_at_close_a_declined_consent_stays_out(layers, mobile, dist, monkeypatch) -> None:
+    Said(monkeypatch, yes=[False])
+    channel = FakeChannel(*_enable_script("mob"))
+
+    assert await _run(layers, channel) is False
+
+    assert channel.asked[-1].options[-1].label == "Close" and not channel.closed and mobile.spawns == []
+
+
+async def test_restart_at_close_an_enable_a_project_layer_holds_off_stays_out(layers) -> None:
+    (layers.ws / "config.yaml").write_text(yaml.safe_dump({"stub": {"enabled": False}}), encoding="utf-8")
+    touched: dict = {}
+    channel = FakeChannel(*_enable_script("stub"))
+
+    assert await _run(layers, channel, touched=touched) is False
+
+    assert touched == {} and "this project" in channel.lines[0] and not (layers.g / "overrides.yaml").exists()
+    assert channel.asked[-1].options[-1].label == "Close" and not channel.closed
+
+
+async def test_restart_at_close_an_enable_whose_questions_were_skipped_stays_out(layers, monkeypatch) -> None:
+    Said(monkeypatch, ["", ""])
+    touched: dict = {}
+    channel = FakeChannel(*_enable_script("ask"))
+
+    assert await _run(layers, channel, touched=touched) is False
+
+    assert touched["ask"].loads is False and channel.asked[-1].options[-1].label == "Close" and not channel.closed
+
+
+async def test_restart_at_close_configure_of_a_running_plugin_is_included(conf) -> None:
+    channel = FakeChannel(*_settings(Label("flag"), Label("on")))
+
+    assert await _run(conf, channel, running={"conf"}) is True
+
+    assert channel.asked[-1].options[-1].label == RESTARTS and channel.closed
+
+
+async def test_restart_at_close_a_rerun_that_wrote_answers_on_a_running_plugin_is_included(layers, monkeypatch) -> None:
+    _on_disk(layers, ask=True)
+    Said(monkeypatch, ["http://box-ok", "tok"])
+    channel = FakeChannel(*_enable_script("ask", "Re-run setup"))
+
+    assert await _run(layers, channel, running={"ask"}) is True
+
+    assert channel.asked[-1].options[-1].label == RESTARTS and channel.closed
+
+
+async def test_restart_at_close_a_rerun_whose_check_moved_from_on_to_failed_on_a_running_plugin_is_included(layers, monkeypatch) -> None:
+    _overlay(layers, "ask", url="box-dead", token="tok")
+    Said(monkeypatch, ["", ""])
+    touched = {"ask": Touch(False, True, ("on", ""))}
+    channel = FakeChannel(*_enable_script("ask", "Re-run setup"))
+
+    assert await _run(layers, channel, running={"ask"}, touched=touched) is True
+
+    assert channel.lines[0].endswith("; stops when you close Plugins") and touched["ask"].loads is False
+    assert channel.asked[-1].options[-1].label == RESTARTS
+
+
+async def test_restart_at_close_a_rerun_on_an_enabled_plugin_that_is_not_running_is_included(layers) -> None:
+    _on_disk(layers, stub=True)
+    channel = FakeChannel(*_enable_script("stub", "Re-run setup"))
+
+    assert await _run(layers, channel) is True
+
+    assert channel.asked[-1].options[-1].label == RESTARTS and channel.closed
+
+
+async def test_restart_at_close_a_rerun_that_only_rechecked_a_healthy_running_plugin_stays_out(layers, monkeypatch) -> None:
+    _overlay(layers, "ask", url="http://box-ok", token="tok")
+    Said(monkeypatch)
+    should_reload, calls = _recorded({"ask"})
+    channel = FakeChannel(*_enable_script("ask", "Re-run setup"))
+
+    assert await run(channel, _session(layers, running=frozenset({"ask"})), should_reload) is False
+
+    assert calls[-1].names == frozenset() and channel.asked[-1].options[-1].label == "Close" and not channel.closed
+
+
+async def test_restart_at_close_disabling_and_enabling_a_running_plugin_again_changes_nothing(layers) -> None:
+    _on_disk(layers, stub=True)
+    touched: dict = {}
+    channel = FakeChannel(Label("stub"), Label("Disable"), Label("stub"), Label("Enable"), "+close")
+
+    assert await _run(layers, channel, running={"stub"}, touched=touched) is False
+
+    assert channel.lines == ["stub: off when you close Plugins", "stub: enabled; already running"]
+    assert channel.asked[-1].options[-1].label == "Close" and not channel.closed
+    assert touched == {"stub": Touch(False, True, None)}
+
+
+async def test_restart_at_close_a_configure_before_the_disable_survives_the_enable(conf) -> None:
+    channel = FakeChannel(Label("conf"), Label("Configure…"), Label("flag"), Label("on"), Label("Done"), Label("Disable"),
+                          Label("conf"), Label("Enable"), "+close")
+
+    assert await _run(conf, channel, running={"conf"}) is True
+
+    assert channel.lines[-1] == "conf: enabled; applies when you close Plugins"
+    assert channel.asked[-1].options[-1].label == RESTARTS and channel.closed
+
+
+async def test_restart_at_close_unfinished_setup_on_a_running_plugin_says_it_stops_at_close(layers, monkeypatch) -> None:
+    _on_disk(layers, ask=True)
+    Said(monkeypatch, ["", ""])
+    channel = FakeChannel(*_enable_script("ask", "Re-run setup"))
+
+    assert await _run(layers, channel, running={"ask"}) is True
+
+    assert channel.lines[0] == "ask: not set up — set ask.url; Re-run setup to finish; stops when you close Plugins"
+    assert channel.asked[-1].options[-1].label == RESTARTS
+
+
+async def test_restart_at_close_a_build_failed_plugin_disabled_and_enabled_again_is_not_loading(layers) -> None:
+    _on_disk(layers, stub=True)
+    channel = FakeChannel(Label("stub"), Label("Disable"), Label("stub"), Label("Enable"), "+close")
+
+    assert await _run(layers, channel, failed={"stub": "import broke"}) is False
+
+    assert channel.lines[-1] == "stub: enabled — not loading: import broke"
+    assert channel.asked[-1].options[-1].label == "Close" and not channel.closed
+
+
+async def test_restart_at_close_a_stopped_rerun_on_a_build_failed_plugin_keeps_what_it_loads(layers, monkeypatch) -> None:
+    async def leave(*a, **kw):
+        raise SystemExit
+
+    monkeypatch.setattr(plugins_cmd, "probe", leave)
+    _overlay(layers, "ask", token="tok")
+    Said(monkeypatch, ["http://box-other", ""])
+    touched = {"ask": Touch(False, False, None)}
+    channel = FakeChannel(*_enable_script("ask", "Re-run setup"))
+
+    assert await _run(layers, channel, failed={"ask": "import broke"}, touched=touched) is False
+
+    assert channel.lines == ["ask: stopped — enabled, but not checked — Re-run setup"] and _written(layers)["ask"]["url"] == "http://box-other"
+    assert touched["ask"].loads is False and channel.asked[-1].options[-1].label == "Close"
+
+
+async def test_restart_at_close_a_running_plugin_stopped_at_its_download_after_a_disable_and_enable_stays_plain(
+        layers, mobile, monkeypatch) -> None:
+    mobile.installed = True
+    _overlay(layers, "mob", url="http://box")
+    Said(monkeypatch, [""], [None])
+    channel = FakeChannel(Label("mob"), Label("Disable"), Label("mob"), Label("Enable"), "+close")
+
+    assert await _run(layers, channel, running={"mob"}) is False
+
+    assert channel.lines[-1].startswith("mob: stopped — enabled, but its download did not finish")
+    assert _rows(channel.asked[-1])[2].hint == "on" and channel.asked[-1].options[-1].label == "Close"
+
+
+async def test_restart_at_close_a_failed_rerun_then_a_passing_one_starts_the_plugin(layers, monkeypatch) -> None:
+    _overlay(layers, "ask", url="box-dead", token="tok")
+    Said(monkeypatch, ["", "", "http://box-ok", ""])
+    touched: dict = {}
+    channel = FakeChannel(Label("ask"), Label("Re-run setup"), Label("ask"), Label("Re-run setup"), "+close")
+
+    assert await _run(layers, channel, touched=touched) is True
+
+    assert touched["ask"].loads is True and touched["ask"].probe[0] == "on"
+    assert _rows(channel.asked[-1])[1].hint == "on — starts when you close Plugins"
+    assert channel.asked[-1].options[-1].label == RESTARTS
+
+
+async def test_restart_at_close_a_rerun_that_passes_for_a_plugin_unconfigured_at_build_shows_it_starting(layers, monkeypatch) -> None:
+    _overlay(layers, "ask", url="http://box-ok", token="tok")
+    Said(monkeypatch, ["", ""])
+    channel = FakeChannel(*_enable_script("ask", "Re-run setup"))
+
+    assert await _run(layers, channel, unconfigured={"ask": "ask.url"}) is True
+
+    assert _rows(channel.asked[-1])[1].hint == "on — starts when you close Plugins"
+
+
+async def test_restart_at_close_should_reload_is_asked_after_every_action_and_at_close(layers) -> None:
+    _on_disk(layers, stub=True)
+    should_reload, calls = _recorded({"stub"})
+    drawn = []
+
+    def root(answer):
+        def draw(options):
+            drawn.append((options[-1].label, calls[-1]))
+            return answer
+        return draw
+
+    channel = FakeChannel(root("0"), Label("Disable"), root("+close"))
+
+    assert await run(channel, _session(layers, running=frozenset({"stub"})), should_reload) is True
+
+    assert len(calls) == 6 and calls[0].names == calls[1].names == calls[2].names == frozenset()
+    assert calls[3].names == calls[4].names == calls[5].names == frozenset({"stub"})
+    assert drawn == [("Close", calls[1]), (RESTARTS, calls[4])]
+
+
+async def test_restart_at_close_waiting_asks_defer_the_restart_and_a_later_open_applies_it(layers) -> None:
+    _on_disk(layers, stub=True)
+    touched: dict = {}
+    first = FakeChannel(Label("stub"), Label("Disable"), "+close")
+
+    assert await _run(layers, first, running={"stub"}, touched=touched, waiting=1) is False
+
+    assert first.asked[-1].options[-1].label == (
+        "Close — restart deferred: 1 ask to answer after closing (shown next), then open and close Plugins")
+    assert first.lines == [
+        "stub: off when you next close Plugins with no asks pending",
+        "1 plugin change saved, not applied: a restart would drop 1 ask. Answer the asks shown next, then open /plugins and close it"]
+    assert not first.closed and touched == {"stub": Touch(False, False, None)}
+    second = FakeChannel("+close")
+
+    assert await _run(layers, second, running={"stub"}, touched=touched) is True
+
+    assert second.asked[0].options[-1].label == RESTARTS and second.closed and second.text == ""
+
+
+async def test_restart_at_close_a_batch_whose_picks_load_restarts_once(layers, monkeypatch) -> None:
+    Said(monkeypatch, ["http://box-ok", "tok"])
+    channel = _Counting(Label("Turn several on…"), _pick("stub", "ask"), "+close")
+
+    assert await _run(layers, channel) is True
+
+    assert channel.closes == 1 and channel.entered == 1
+    assert channel.lines[-1] == "2 of 2 enabled; restarts when you close Plugins"
