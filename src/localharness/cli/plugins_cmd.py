@@ -848,10 +848,11 @@ async def _prepare(s: PassState, *, confirm: Any, report: Any) -> PassState:
     if s.to_workspace and s.workspace is None:
         raise Refusal("no project workspace applies here — run `localharness init --workspace` in the "
                       "project first, or leave out --workspace to change the machine-level setting", ())
-    if s.in_session and s.on and (pair := override_of(s.loader, s.entry, True, s.to_workspace)):
+    rerun = s.progress.rerun
+    if not rerun and s.in_session and s.on and (pair := override_of(s.loader, s.entry, True, s.to_workspace)):
         report("note", override_line(s.name, pair))
         return replace(s, overridden=True)
-    if (s.in_session and s.on and s.ask and not s.entry.bundled
+    if (not rerun and s.in_session and s.on and s.ask and not s.entry.bundled
             and not await _confirmed(confirm, THIRD_PARTY_CONFIRM.format(name=s.name), False, s.trust_tail)):
         report("stays_off", s.name)
         return replace(s, declined=True)
@@ -892,15 +893,19 @@ async def _write(s: PassState, *, report: Any) -> PassState:
     from localharness.config.loader import ConfigLoader
     from localharness.plugins.resolve import resolve
 
-    overlay = load_overlay(s.target)
-    set_value_in_dict(overlay, f"{s.name}.enabled", s.on)
-    values = (_checked_all(s.resolution, s.loader, s.entry, list(s.pairs), s.to_workspace, overlay)
-              if s.pairs else {})
-    atomic_write_overlay(s.target, overlay)
-    s.progress.wrote, s.progress.answered, s.progress.written = True, bool(s.pairs), s.on
-    tail = "" if s.in_session else " — takes effect on the next `localharness start`"
-    shown_values = tuple((path, redact_text(value)) for path, value in values.items())
-    report("wrote", (f"{s.name} {s.verb}d in {s.target}{tail}", shown_values))
+    rerun, shown_values = s.progress.rerun, ()
+    if s.pairs or not rerun:
+        overlay = load_overlay(s.target)
+        if not rerun:
+            set_value_in_dict(overlay, f"{s.name}.enabled", s.on)
+        values = (_checked_all(s.resolution, s.loader, s.entry, list(s.pairs), s.to_workspace, overlay)
+                  if s.pairs else {})
+        atomic_write_overlay(s.target, overlay)
+        s.progress.wrote, s.progress.answered = True, bool(s.pairs)
+        s.progress.written = s.progress.written or (s.on and not rerun)
+        tail = "" if s.in_session else " — takes effect on the next `localharness start`"
+        shown_values = tuple((path, redact_text(value)) for path, value in values.items())
+        report("wrote", (f"{s.name} {'saved' if rerun else s.verb + 'd'} in {s.target}{tail}", shown_values))
     fresh_loader = fresh = after = row = None
     if s.m is not None or s.verify:
         # What was just written, read through a NEW loader over the same layers: ConfigLoader caches
@@ -916,7 +921,7 @@ async def _write(s: PassState, *, report: Any) -> PassState:
     if after is not None and s.m is not None and s.m.requires_extra and after.state == "needs-extra":
         missing = True  # "takes effect on the next start" is not true without its install extra
         report("note", f"{s.name} is missing its install extra — {after.reason}")
-    if pair := override_of(s.loader, s.entry, s.on, s.to_workspace):
+    if not rerun and (pair := override_of(s.loader, s.entry, s.on, s.to_workspace)):
         report("note", override_line(s.name, pair, OVERRIDE_SAVED))
     paths = _paths(fresh_loader, s.workspace) if fresh_loader is not None else None
     return replace(s, values=shown_values, missing=missing, fresh_loader=fresh_loader, fresh=fresh,
@@ -926,7 +931,7 @@ async def _write(s: PassState, *, report: Any) -> PassState:
 async def _act(s: PassState, *, confirm: Any, report: Any) -> PassState:
     from localharness.plugins.lifecycle import DoctorRow, setup_action_rows
 
-    if not (s.step and s.has_action and s.after.state == "on" and (s.pending or s.pairs)):
+    if not (s.step and s.has_action and s.after.state == "on" and (s.pending or s.pairs or s.progress.rerun)):
         return s
     s.progress.phase = "download"
     if s.m.setup_action and s.install != "done" and not await _confirmed(
@@ -944,7 +949,7 @@ async def _check(s: PassState, *, report: Any) -> PassState:
     from localharness.plugins.setup import render_agent_prompt
 
     m, row, failed, skipped, block, paragraphs = s.m, s.row, "", "", False, ()
-    if row is not None or (s.step and (s.setup or s.has_action)):
+    if row is not None or (s.step and (s.setup or s.has_action or s.progress.rerun)):
         s.progress.phase = "check"
         report("checking", None)
         stored = row is not None
@@ -1164,7 +1169,7 @@ async def _install(s: PassState, session: PluginSession, *, confirm: Any, instal
 
 
 def _pass_result(s: PassState, session: PluginSession, prior: Touch) -> PassResult:
-    row, after = s.row, s.after
+    row, after, rerun = s.row, s.after, s.progress.rerun
     answered = tuple(pair.partition("=")[0] for pair in s.pairs)
     questions = "answered" if answered else "skipped" if s.asked else "none"
     detail = ""
@@ -1178,12 +1183,12 @@ def _pass_result(s: PassState, session: PluginSession, prior: Touch) -> PassResu
     elif (row is not None and row.state == "unconfigured") or (row is None and questions == "skipped"):
         kind, detail = "enabled_unconfigured", (row.detail if row else "") or "setup questions skipped"
     elif s.failed:
-        kind = "check_failed"
+        kind = "rerun_failed" if rerun else "check_failed"
     elif s.skipped:
         kind = "check_skipped"
     else:
-        kind = "enabled"
-    loads = kind in ("enabled", "check_failed", "check_skipped") and loads_from_plan(
+        kind = "rerun_ok" if rerun else "enabled"
+    loads = kind in ("enabled", "check_failed", "check_skipped", "rerun_ok", "rerun_failed") and loads_from_plan(
         session, s.name, prior, row, s.fresh)
     rebind = s.name in session.running and (bool(answered) or (
         row is not None and row.state != (prior.probe[0] if prior.probe else "on")))
@@ -1198,10 +1203,13 @@ async def enable_pass(session, name, *, mode: Literal["enable", "rerun"], progre
                       console=console) -> PassResult:
     """Trust, install, questions, download and check for one plugin (`rerun`: the last three), one kind out."""
     from localharness.config.loader import ConfigLoader
+    from localharness.plugins import lifecycle
     from localharness.plugins.resolve import resolve
 
     progress.rerun = mode == "rerun"
     prior = session.touched.get(name) or prior_touch(session, name)
+    if progress.rerun and lifecycle.downloading(name):
+        return PassResult("rerun_blocked", StepOutcome(name, True), detail=lifecycle.DOWNLOAD_RUNNING, loads=prior.loads)
     loader = ConfigLoader(config_dir=session.cfg_path, local_config_dir=session.workspace)
     resolution = resolve(loader)
     if (entry := resolution.plan.entry(name)) is None:
@@ -1217,9 +1225,10 @@ async def enable_pass(session, name, *, mode: Literal["enable", "rerun"], progre
                           loads=loads_from_plan(session, name, prior, None, resolution))
     if state.declined:
         return PassResult("declined", StepOutcome(name, True, stopped=True))
-    state = await _install(state, session, confirm=confirm, install=install, in_batch=in_batch)
-    if isinstance(state, PassResult):
-        return state
+    if not progress.rerun:
+        state = await _install(state, session, confirm=confirm, install=install, in_batch=in_batch)
+        if isinstance(state, PassResult):
+            return state
     if state.halt:
         state = await _write(state, report=report)
         return PassResult(state.halt, StepOutcome(name, True), install=state.install)

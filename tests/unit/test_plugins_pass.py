@@ -50,6 +50,8 @@ class Ask(Plugin):
     ConfigModel = _AskConfig
 
     async def configure(self, ctx):
+        if ctx.config.url.endswith("-dead"):
+            raise RuntimeError("dead")
         return "ready" if ctx.config.url else ("unconfigured", "ask.url")
 
     def doctor(self, ctx):
@@ -715,3 +717,189 @@ def test_the_shell_step_never_prints_the_ignored_line(layers, mobile, monkeypatc
     plugins_cmd._switch("mob", True, [], False, str(layers.g), ask=True, in_session=True)
 
     assert CTRLC_IGNORED.format(step="download") not in out.getvalue() and CALLS == ["download"]
+
+
+def _on(layers, name: str = "ask", **values) -> bytes:
+    path = layers.g / "overrides.yaml"
+    path.write_text(yaml.safe_dump({name: {"enabled": True, **values}}), encoding="utf-8")
+    return path.read_bytes()
+
+
+async def _rerun(layers, name, talk=None, **kw):
+    return await _enable(layers, name, talk, mode="rerun", **kw)
+
+
+async def test_rerun_a_healthy_running_plugin_asks_its_own_download_confirm_and_probes(layers, mobile) -> None:
+    mobile.installed = True
+    CALLS.append("download")
+    before = _on(layers, "mob", url="http://box")
+
+    result, talk = await _rerun(layers, "mob", Talk(yes=[True]), session=_session(layers, running=frozenset({"mob"})))
+
+    assert (result.kind, result.rebind, result.loads, result.questions, result.downloaded) == (
+        "rerun_ok", False, True, "none", True)
+    assert talk.confirmed == [(DOWNLOAD, True, "")] and talk.asked == []
+    assert talk.seen == [("download", True)] and talk.progress.phase == "check" and talk.progress.rerun is True
+    assert (layers.g / "overrides.yaml").read_bytes() == before and talk.progress.wrote is False
+    assert CALLS == ["download", "download"] and result.row.state == "on"
+
+
+async def test_rerun_asks_what_is_pending_and_writes_the_answers_never_the_switch(layers) -> None:
+    (layers.ws / "config.yaml").write_text(yaml.safe_dump({"ask": {"enabled": True}}), encoding="utf-8")
+
+    result, talk = await _rerun(layers, "ask", Talk(["box-ok", "tok"]), session=_session(layers, running=frozenset({"ask"})))
+
+    assert (result.kind, result.answered, result.questions, result.rebind, result.loads) == (
+        "rerun_ok", ("url", "token"), "answered", True, True)
+    assert _written(layers) == {"ask": {"url": "box-ok", "token": "tok"}}
+    assert talk.seen == [("question", True), ("question", True)]
+    assert (talk.progress.wrote, talk.progress.answered, talk.progress.written) == (True, True, True)
+    assert talk.kinds == ["wrote", "checking", "row", "next_steps"]
+
+
+async def test_rerun_asks_no_trust_question_and_no_consent_for_a_plugin_you_installed(folder) -> None:
+    write_folder_plugin(folder.g, "swatch")
+    _on(folder, "swatch")
+
+    result, talk = await _rerun(folder, "swatch", session=_session(folder, running=frozenset({"swatch"})))
+
+    assert (result.kind, talk.confirmed, talk.asked) == ("rerun_ok", [], [])
+
+
+async def test_rerun_failed_names_the_failing_check_and_is_no_rebind_when_nothing_was_written(layers) -> None:
+    _on(layers, url="box-bad")
+
+    result, _ = await _rerun(layers, "ask", Talk(["", ""]), session=_session(layers, running=frozenset({"ask"})))
+
+    assert (result.kind, result.questions, result.step.failed_check, result.rebind, result.loads) == (
+        "rerun_failed", "skipped", "no answer", False, True)
+    assert result.help[0] == "ASK-HELP"
+
+
+async def test_rerun_failed_after_writing_answers_on_a_running_plugin_is_a_rebind(layers) -> None:
+    _on(layers, url="box-bad")
+
+    result, _ = await _rerun(layers, "ask", Talk(["box-worse", "tok"]), session=_session(layers, running=frozenset({"ask"})))
+
+    assert (result.kind, result.rebind, result.answered) == ("rerun_failed", True, ("url", "token"))
+
+
+async def test_rebind_is_false_for_a_plugin_that_is_not_running(layers) -> None:
+    _on(layers, url="box-bad")
+
+    result, _ = await _rerun(layers, "ask", Talk(["box-ok", "tok"]))
+
+    assert (result.kind, result.answered, result.rebind) == ("rerun_ok", ("url", "token"), False)
+
+
+async def test_rebind_when_the_probe_state_differs_from_the_stored_one(layers) -> None:
+    _on(layers, url="box-ok")
+    running = _session(layers, running=frozenset({"ask"}), touched={"ask": Touch(False, False, ("failed", "x"))})
+
+    result, _ = await _rerun(layers, "ask", session=running)
+
+    assert (result.kind, result.rebind, result.loads, result.answered) == ("rerun_ok", True, True, ())
+
+
+async def test_rerun_probe_raises_is_check_failed_noload_never_rerun_ok(layers, monkeypatch) -> None:
+    _on(layers, "stub")
+
+    async def boom(*a, **kw):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(lifecycle, "_doctor_row", boom)
+
+    result, _ = await _rerun(layers, "stub")
+
+    assert result.kind == "check_failed_noload" and result.loads is False
+    assert result.row.detail == "could not check it now: RuntimeError: boom"
+    assert result.detail == result.step.failed_check == result.row.detail
+
+
+async def test_rerun_probe_raises_on_a_running_plugin_whose_stored_probe_was_on_is_a_rebind(layers, monkeypatch) -> None:
+    _on(layers, url="box-ok")
+    real, calls = lifecycle._doctor_row, []
+
+    async def second_raises(*a, **kw):
+        calls.append(1)
+        if len(calls) > 1:
+            raise RuntimeError("boom")
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(lifecycle, "_doctor_row", second_raises)
+    running = _session(layers, running=frozenset({"ask"}), touched={"ask": Touch(False, True, ("on", ""))})
+
+    result, _ = await _rerun(layers, "ask", session=running)
+
+    assert (result.kind, result.rebind, result.loads, result.answered) == ("check_failed_noload", True, False, ())
+
+
+async def test_rerun_resolve_raises_before_the_check_is_the_same_failed_check(layers, monkeypatch) -> None:
+    _on(layers, "stub")
+    calls = []
+
+    def second_raises(loader, *a, **kw):
+        calls.append(loader)
+        if len(calls) == 2:
+            raise RuntimeError("boom")
+        return resolve(loader, *a, **kw)
+
+    monkeypatch.setattr(resolve_module, "resolve", second_raises)
+
+    result, _ = await _rerun(layers, "stub")
+
+    assert (result.kind, result.loads) == ("check_failed_noload", False)
+    assert result.row.detail == "could not check it now: RuntimeError: boom" == result.detail
+
+
+async def test_rerun_on_a_plugin_the_build_failed_whose_probe_still_fails_does_not_load(layers) -> None:
+    _on(layers, url="box-dead")
+
+    result, _ = await _rerun(layers, "ask", Talk(["", ""]), session=_session(layers, failed={"ask": "import broke"}))
+
+    assert (result.kind, result.loads, result.row.state) == ("check_failed_noload", False, "failed")
+    assert result.detail == result.step.failed_check == result.row.detail and "RuntimeError: dead" in result.detail
+
+
+@pytest.mark.parametrize("kw", [
+    {"failed": {"ask": "import broke"}}, {"unconfigured": {"ask": "ask.url"}},
+    {"touched": {"ask": Touch(False, False, ("failed", "x"))}}])
+async def test_rerun_whose_probe_passes_loads_whatever_the_build_or_the_stored_probe_said(layers, kw) -> None:
+    _on(layers, url="box-ok")
+
+    result, _ = await _rerun(layers, "ask", session=_session(layers, **kw))
+
+    assert (result.kind, result.loads) == ("rerun_ok", True)
+
+
+async def test_rerun_with_skipped_questions_and_an_unconfigured_probe_names_what_to_set(layers) -> None:
+    _on(layers)
+
+    result, _ = await _rerun(layers, "ask", Talk(["", ""]))
+
+    assert (result.kind, result.questions, result.loads) == ("enabled_unconfigured", "skipped", False)
+    assert result.detail == result.row.detail == "unconfigured — set ask.url"
+
+
+async def test_rerun_a_plugin_that_is_on_and_not_running_with_no_setup_step_only_probes(layers) -> None:
+    _on(layers, "stub")
+
+    result, talk = await _rerun(layers, "stub")
+
+    assert (result.kind, result.loads, result.rebind, result.questions) == ("rerun_ok", True, False, "none")
+    assert result.row is not None and talk.asked == [] and talk.confirmed == []
+
+
+async def test_rerun_while_a_download_still_runs_is_blocked_before_anything_else(layers, monkeypatch) -> None:
+    monkeypatch.setattr(lifecycle, "_downloading", {"mob"})
+
+    def never(*a, **kw):
+        raise AssertionError("read the plan")
+
+    monkeypatch.setattr(resolve_module, "resolve", never)
+    session = _session(layers, running=frozenset({"mob"}), touched={"mob": Touch(False, False, None)})
+
+    result, talk = await _rerun(layers, "mob", session=session)
+
+    assert (result.kind, result.detail, result.loads) == ("rerun_blocked", lifecycle.DOWNLOAD_RUNNING, False)
+    assert talk.asked == [] and talk.confirmed == [] and talk.reports == []
