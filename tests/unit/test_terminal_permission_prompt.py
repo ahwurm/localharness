@@ -252,8 +252,6 @@ class _Stream:
 
 
 def _streams(monkeypatch, *, stdin: bool, stdout: bool, stderr: bool = True) -> None:
-    import sys
-
     monkeypatch.setattr(sys, "stdin", _Stream(stdin))
     monkeypatch.setattr(sys, "stdout", _Stream(stdout))
     monkeypatch.setattr(sys, "stderr", _Stream(stderr))
@@ -346,8 +344,6 @@ async def test_the_question_is_drawn_under_patch_stdout_and_never_blocks_a_write
        it until a human answers would freeze the whole session behind the dialog — the obvious
        fix and the wrong one.
     """
-    import sys
-
     from prompt_toolkit.patch_stdout import StdoutProxy
 
     async def _tokens():
@@ -565,8 +561,6 @@ async def test_suspend_runs_concurrent_entrants_one_after_the_other():
 
 @pytest.mark.asyncio
 async def test_suspend_holds_the_stdout_patch_for_the_whole_span():
-    import sys
-
     from prompt_toolkit.patch_stdout import StdoutProxy
 
     ch = _channel()
@@ -582,8 +576,6 @@ async def test_suspend_holds_the_stdout_patch_for_the_whole_span():
 
 @pytest.mark.asyncio
 async def test_suspend_on_a_redirected_stdout_yields_the_tty_output_and_leaves_stdout_alone(monkeypatch):
-    import sys
-
     from rich.console import Console
 
     ch = _channel()
@@ -619,8 +611,6 @@ async def test_suspend_starts_no_rich_status():
 
 @pytest.mark.asyncio
 async def test_suspend_touches_no_sigint_handler(monkeypatch):
-    import signal
-
     from tests.unit.test_picker import _fake_box
 
     ch = _channel()
