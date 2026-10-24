@@ -97,7 +97,6 @@ OVERRIDE_LINE = ("{saved}this project turns it {state} ({file}) and that still w
                  "localharness plugins {flip} {name} --workspace changes it")
 # The same literal init's scaffolded plugins/README.md links to (a PyPI install has no examples/).
 _TEMPLATE_URL = "https://github.com/ahwurm/localharness/tree/main/examples/plugin-template"
-# A setup question for a secret that is already stored: what Enter does, and how to clear it.
 SECRET_KEPT = "stored key kept — type none to clear, or paste a new one"
 URL_KEPT = "stored URL kept — type none to clear, or paste a new one"
 SECRET_KEPT_FOR = "stored key for {host} kept — type none to clear, or paste a new one"
@@ -161,7 +160,6 @@ def _where(dotpath: str, file: Path, line: Optional[int]) -> str:
 def _entry(resolution: Resolution, loader: ConfigLoader, name: str, json_output: bool) -> PlanEntry:
     entry = resolution.plan.entry(name)
     if entry is None:
-        # uninstalling leaves the plugin's settings behind; say where, and what to do.
         left = [s for s in loader.unowned_sections() if s[0] in (name, f"agent.{name}")]
         if left:
             _fail(f"Unknown plugin: {name!r} — no installed plugin has that name, but its settings "
@@ -917,7 +915,6 @@ async def _questions(s: PassState, *, prompt: Any) -> PassState:
     s.progress.phase = "question_installed" if s.install == "done" else "question"
     if not (s.ask and s.setup and not s.missing and (s.pending or not s.in_session)):
         return s
-    # the answers go through the one checked write path, as --set values
     pairs = await ask_fields(s.setup, lambda key: _stored(s.resolution, s.loader, s.entry, key),
                              lambda key: _secret_stored(s.resolution, s.loader, s.entry, key),
                              lambda key: _cleared(s.resolution, s.entry, key), prompt=prompt)
