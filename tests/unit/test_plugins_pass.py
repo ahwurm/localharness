@@ -1,21 +1,25 @@
-"""The project override (its one predicate and its one sentence) and the disable producer."""
+"""The project override (its one predicate and its one sentence) and the enable and disable producers."""
 from __future__ import annotations
 
 import inspect
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import yaml
+from pydantic import BaseModel, SecretStr
 
+from localharness.cli import plugins_cmd
 from localharness.cli.plugins_cmd import (
-    OVERRIDE_LINE, OVERRIDE_SAVED, PassProgress, PassResult, PluginSession, Refusal, StepOutcome, Touch,
-    disable_pass, override_line, override_of,
+    CTRLC, CTRLC_DOES, OVERRIDE_LINE, OVERRIDE_SAVED, THIRD_PARTY_CONFIRM, PassProgress, PassResult, PluginSession,
+    Refusal, StepOutcome, Touch, disable_pass, enable_pass, override_line, override_of,
 )
 from localharness.config.loader import ConfigLoader
 from localharness.core.bus import EventBus
-from localharness.plugins import builtin, discovery
+from localharness.plugins import builtin, discovery, lifecycle
 from localharness.plugins import resolve as resolve_module
+from localharness.plugins.api import Check, Plugin, PluginManifest, SetupField
 from localharness.plugins.resolve import resolve
 from tests.unit.test_plugin_resolve import write_folder_plugin
 from tests.unit.test_plugins_bookkeeping import _CONFIG, Stub
@@ -23,9 +27,32 @@ from tests.unit.test_plugins_bookkeeping import _CONFIG, Stub
 _REAL_DISCOVER = discovery.discover
 
 
+class _AskConfig(BaseModel):
+    url: str = ""
+    token: SecretStr = SecretStr("")
+
+
+class Ask(Plugin):
+    """asks an address and a token"""
+
+    manifest = PluginManifest(
+        name="ask", version="0.1.0", kind="tools", enabled_by_default=False,
+        setup=(SetupField(key="url", prompt="Address", default="http://127.0.0.1:1"), SetupField(key="token", prompt="Token", secret=True)),
+        setup_help="ASK-HELP", agent_prompt="Run it at {url}.", next_steps="ASK-NEXT")
+    ConfigModel = _AskConfig
+
+    async def configure(self, ctx):
+        return "ready" if ctx.config.url else ("unconfigured", "ask.url")
+
+    def doctor(self, ctx):
+        url = ctx.config.url
+        status = "pass" if url.endswith("-ok") else "skip" if url.endswith("-skip") else "fail"
+        return [Check(name="ask", status=status, detail={"pass": "answers", "skip": "not paired"}.get(status, "no answer"))]
+
+
 @pytest.fixture
 def layers(tmp_path: Path, monkeypatch) -> SimpleNamespace:
-    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Stub,))
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Stub, Ask))
     monkeypatch.setattr(discovery, "discover", lambda global_config_dir: [])
     g, ws = tmp_path / "g", tmp_path / "proj" / ".localharness"
     g.mkdir()
@@ -119,7 +146,8 @@ def test_the_template_and_the_saved_prefix() -> None:
 
 
 def _session(layers, **kw) -> PluginSession:
-    return PluginSession(layers.g, layers.ws, frozenset(), kw.pop("unconfigured", {}), kw.pop("failed", {}), **kw)
+    return PluginSession(layers.g, layers.ws, kw.pop("running", frozenset()), kw.pop("unconfigured", {}),
+                         kw.pop("failed", {}), **kw)
 
 
 async def _disable(layers, name: str = "stub", **kw):
@@ -201,3 +229,237 @@ async def test_disable_pass_refuses_a_name_the_plan_refused_or_does_not_hold(lay
 def test_disable_pass_is_a_coroutine_with_no_await_in_it() -> None:
     assert inspect.iscoroutinefunction(disable_pass)
     assert "await" not in inspect.getsource(disable_pass)
+
+
+class Talk:
+    """Answers the questions in order and records what was asked, in which phase, and what was reported."""
+
+    def __init__(self, answers=(), yes=()):
+        self.answers, self.yes = list(answers), list(yes)
+        self.progress, self.asked, self.confirmed, self.reports, self.seen = PassProgress(), [], [], [], []
+
+    async def prompt(self, text, *, default="", secret=False):
+        self.asked.append(text)
+        self.seen.append((self.progress.phase, self.progress.written))
+        return self.answers.pop(0)
+
+    async def confirm(self, text, *, default, tail=""):
+        self.confirmed.append((text, default, tail))
+        self.seen.append((self.progress.phase, self.progress.written))
+        return self.yes.pop(0)
+
+    def report(self, kind, payload) -> None:
+        self.reports.append((kind, payload))
+
+    @property
+    def kinds(self) -> list[str]:
+        return [kind for kind, _ in self.reports]
+
+
+async def _enable(layers, name, talk=None, *, session=None, **kw):
+    talk = talk or Talk()
+    kw.setdefault("mode", "enable")
+    result = await enable_pass(session or _session(layers), name, progress=talk.progress, prompt=talk.prompt,
+                               confirm=talk.confirm, report=talk.report, **kw)
+    return result, talk
+
+
+def test_enable_pass_is_a_coroutine_with_keyword_only_options() -> None:
+    params = inspect.signature(enable_pass).parameters
+
+    assert inspect.iscoroutinefunction(enable_pass)
+    assert [p for p in params if params[p].kind is inspect.Parameter.KEYWORD_ONLY] == [
+        "mode", "progress", "prompt", "confirm", "report", "install", "in_batch", "console"]
+    assert (params["install"].default, params["in_batch"].default) == ("own", False)
+
+
+async def test_enable_pass_asks_writes_checks_and_says_what_loads(layers) -> None:
+    result, talk = await _enable(layers, "ask", Talk(["box-ok", "s3cr3t-typed"]))
+
+    assert (result.kind, result.answered, result.questions, result.loads) == ("enabled", ("url", "token"), "answered", True)
+    assert (result.row.state, result.next_steps, result.install, result.help) == ("on", "ASK-NEXT", "none", ())
+    assert result.step == StepOutcome("ask", True)
+    assert yaml.safe_load((layers.g / "overrides.yaml").read_text(encoding="utf-8")) == {
+        "ask": {"enabled": True, "url": "box-ok", "token": "s3cr3t-typed"}}
+    assert talk.seen == [("question", False), ("question", False)]
+    assert (talk.progress.written, talk.progress.wrote, talk.progress.answered, talk.progress.rerun) == (
+        True, True, True, False)
+    assert talk.kinds == ["wrote", "checking", "row", "next_steps"]
+
+
+async def test_enable_pass_results_hold_key_names_never_a_typed_answer(layers) -> None:
+    result, _ = await _enable(layers, "ask", Talk(["box-ok", "s3cr3t-typed"]))
+    bad, _ = await _enable(layers, "ask", Talk(["box-bad", "s3cr3t-typed"]))
+
+    for got in (result, bad):
+        assert "s3cr3t-typed" not in repr(got)
+    assert "box-ok" not in repr(result)
+
+
+async def test_enable_pass_a_failing_check_carries_the_help_and_the_failing_row_text(layers) -> None:
+    result, _ = await _enable(layers, "ask", Talk(["box-bad", "tok"]))
+
+    assert (result.kind, result.loads, result.row.state, result.step.failed_check) == (
+        "check_failed", True, "on", "no answer")
+    assert result.help[0] == "ASK-HELP" and "box-bad" in result.help[1]
+
+
+async def test_enable_pass_a_skipped_check_is_check_skipped(layers) -> None:
+    result, _ = await _enable(layers, "ask", Talk(["box-skip", "tok"]))
+
+    assert (result.kind, result.loads, result.step.skipped_check, result.step.failed_check) == (
+        "check_skipped", True, "not paired", "")
+
+
+async def test_enable_pass_an_unconfigured_probe_is_enabled_unconfigured_with_the_rows_detail(layers) -> None:
+    result, _ = await _enable(layers, "ask", Talk(["", ""]))
+
+    assert (result.kind, result.questions, result.answered, result.loads) == (
+        "enabled_unconfigured", "skipped", (), False)
+    assert result.detail == result.row.detail == "unconfigured — set ask.url"
+
+
+async def test_enable_pass_skipped_questions_with_no_probe_row_are_enabled_unconfigured(layers, monkeypatch) -> None:
+    async def no_check(s, *, report):
+        return s
+
+    monkeypatch.setattr(plugins_cmd, "_check", no_check)
+
+    result, _ = await _enable(layers, "ask", Talk(["", ""]))
+
+    assert (result.kind, result.row, result.detail, result.loads) == (
+        "enabled_unconfigured", None, "setup questions skipped", False)
+
+
+async def test_enable_pass_a_probe_that_raises_is_check_failed_noload(layers, monkeypatch) -> None:
+    real = lifecycle._doctor_row
+
+    async def boom(*a, **kw):
+        if (layers.g / "overrides.yaml").exists():
+            raise RuntimeError("boom")
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(lifecycle, "_doctor_row", boom)
+
+    result, _ = await _enable(layers, "ask", Talk(["box-ok", "tok"]))
+
+    assert result.kind == "check_failed_noload" and result.loads is False
+    assert result.row.detail == "could not check it now: RuntimeError: boom"
+    assert result.detail == result.step.failed_check == result.row.detail
+
+
+async def test_enable_pass_a_resolve_that_raises_after_the_write_is_the_same_failed_check(layers, monkeypatch) -> None:
+    calls = []
+
+    def second_raises(loader, *a, **kw):
+        calls.append(loader)
+        if len(calls) == 2:
+            raise RuntimeError("boom")
+        return resolve(loader, *a, **kw)
+
+    monkeypatch.setattr(resolve_module, "resolve", second_raises)
+
+    result, _ = await _enable(layers, "ask", Talk(["box-ok", "tok"]))
+
+    assert (result.kind, result.loads) == ("check_failed_noload", False)
+    assert result.row.detail == "could not check it now: RuntimeError: boom" == result.detail
+    assert result.help[0] == "ASK-HELP"
+
+
+async def test_enable_pass_a_plugin_with_nothing_to_set_up_runs_no_probe(layers) -> None:
+    result, talk = await _enable(layers, "stub")
+
+    assert (result.kind, result.row, result.loads, result.questions, result.detail) == ("enabled", None, True, "none", "")
+    assert talk.kinds == ["wrote"] and (talk.progress.written, talk.progress.wrote, talk.progress.answered) == (
+        True, True, False)
+
+
+async def test_enable_pass_a_plugin_the_build_failed_is_not_loading_with_the_builds_text(layers) -> None:
+    result, _ = await _enable(layers, "stub", session=_session(layers, failed={"stub": "import broke"}))
+
+    assert (result.kind, result.detail, result.loads) == ("enabled_not_loading", "import broke", False)
+    assert (layers.g / "overrides.yaml").exists()
+
+
+async def test_enable_pass_a_stored_failed_probe_is_the_text_when_the_build_has_none(layers) -> None:
+    touched = {"stub": Touch(False, False, ("failed", "its last check failed"))}
+
+    result, _ = await _enable(layers, "stub", session=_session(layers, touched=touched))
+
+    assert (result.kind, result.detail, result.loads) == ("enabled_not_loading", "its last check failed", False)
+
+
+@pytest.fixture
+def folder(layers, tmp_path, monkeypatch):
+    monkeypatch.setattr(discovery, "discover", lambda g: [f for f in _REAL_DISCOVER(g) if f.source == "folder"])
+    marks = tmp_path / "sentinels"
+    marks.mkdir()
+    monkeypatch.setenv("LH_TEST_SENTINEL_DIR", str(marks))
+    yield layers
+    for name in [m for m in sys.modules if m.startswith("localharness_folder_plugins")]:
+        del sys.modules[name]
+
+
+async def test_enable_pass_a_plugin_you_installed_asks_the_trust_question_first(folder) -> None:
+    write_folder_plugin(folder.g, "swatch")
+
+    result, talk = await _enable(folder, "swatch", Talk(yes=[True]))
+
+    assert talk.confirmed == [(THIRD_PARTY_CONFIRM.format(name="swatch"), False,
+                               CTRLC.format(does=CTRLC_DOES["prompt"]))]
+    assert (result.kind, result.loads) == ("enabled", True)
+    assert yaml.safe_load((folder.g / "overrides.yaml").read_text(encoding="utf-8")) == {"swatch": {"enabled": True}}
+
+
+async def test_enable_pass_a_no_to_the_trust_question_writes_nothing(folder) -> None:
+    write_folder_plugin(folder.g, "swatch")
+
+    result, talk = await _enable(folder, "swatch", Talk(yes=[False]))
+
+    assert (result.kind, result.loads, result.step.stopped) == ("declined", False, True)
+    assert not (folder.g / "overrides.yaml").exists() and talk.progress.wrote is False
+
+
+async def test_enable_pass_a_plugin_you_installed_that_cannot_be_imported_is_not_loading(folder) -> None:
+    write_folder_plugin(folder.g, "swatch", prelude="raise RuntimeError('boom')")
+
+    result, _ = await _enable(folder, "swatch", Talk(yes=[True]))
+
+    assert (result.kind, result.loads) == ("enabled_not_loading", False)
+    assert "could not be imported" in result.detail and "boom" in result.detail
+
+
+async def test_enable_pass_a_plugin_you_installed_that_needs_an_extra_nobody_has_is_not_loading(folder) -> None:
+    write_folder_plugin(folder.g, "swatch", manifest=', requires_extra="nosuchextra"')
+
+    result, talk = await _enable(folder, "swatch", Talk(yes=[True]))
+
+    assert (result.kind, result.loads, talk.asked) == ("enabled_not_loading", False, [])
+    assert "nosuchextra" in result.detail
+
+
+async def test_enable_pass_an_overridden_plugin_prints_its_line_and_does_nothing_else(layers) -> None:
+    _write(layers.ws / "overrides.yaml", False)
+
+    result, talk = await _enable(layers, "stub")
+
+    assert (result.kind, result.install, result.loads, result.override) == (
+        "override", "none", False, ("off", layers.ws / "overrides.yaml"))
+    assert talk.kinds == ["note"] and talk.asked == [] and talk.confirmed == []
+    assert not (layers.g / "overrides.yaml").exists()
+    assert (talk.progress.wrote, talk.progress.phase) == (False, "consent")
+
+
+async def test_enable_pass_refuses_a_name_the_plan_does_not_hold(layers) -> None:
+    with pytest.raises(Refusal):
+        await _enable(layers, "nope")
+
+    assert not (layers.g / "overrides.yaml").exists()
+
+
+async def test_enable_pass_written_starts_from_the_flag_not_from_the_name(layers) -> None:
+    (layers.g / "overrides.yaml").write_text(yaml.safe_dump({"ask": {"enabled": True}}), encoding="utf-8")
+
+    _, talk = await _enable(layers, "ask", Talk(["box-ok", "tok"]))
+
+    assert talk.seen[0] == ("question", True)
