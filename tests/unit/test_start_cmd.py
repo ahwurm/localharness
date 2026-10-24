@@ -3449,3 +3449,112 @@ async def test_a_resume_logs_what_it_resumes_after(tmp_path, monkeypatch, caplog
 
     (line,) = [r.getMessage() for r in caplog.records if " resumes old " in r.getMessage()]
     assert line.endswith(f"resumes old {tail}")
+
+
+def _manage_drive(tmp_path, monkeypatch, *, opens=2, probe=None):
+    """Drives the real `manage` hook `opens` times with `plugins_interview.run` recording what it is handed."""
+    from localharness.cli import plugins_interview
+    from localharness.cli.plugins_cmd import Touch
+
+    seen, answers = [], []
+
+    async def run(channel, session, should_reload):
+        seen.append((channel, session, should_reload, dict(session.touched)))
+        session.touched.setdefault("stub", Touch(False, True, None))
+        return True
+
+    async def repl_run(self):
+        for _ in range(opens):
+            answers.append(await self._on_plugin_switch("manage", ""))
+        if probe is not None:
+            probe(self, seen[0][2])
+
+    monkeypatch.setattr(plugins_interview, "run", run)
+    _stub_start_boundaries(tmp_path, monkeypatch, repl_run=repl_run)
+    return seen, answers
+
+
+async def test_manage_hands_the_flow_the_session_and_one_touched_across_opens(tmp_path, monkeypatch):
+    from localharness.cli import start_cmd
+    from localharness.cli.plugins_cmd import PluginSession, Touch
+    from localharness.plugins import builtin
+    from tests.unit.test_plugins_bookkeeping import Stub
+
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Stub,))
+    (tmp_path / "overrides.yaml").write_text(yaml.safe_dump({"stub": {"enabled": True}}))
+    seen, answers = _manage_drive(tmp_path, monkeypatch)
+
+    await start_cmd._start_async(None, False, False, str(tmp_path))
+
+    assert answers == [True, True]
+    (channel, first, _, before_first), (_, second, _, before_second) = seen
+    assert isinstance(first, PluginSession) and first.touched is second.touched
+    assert first.cfg_path == tmp_path and first.running == frozenset({"stub"})
+    assert first.unconfigured == {} and first.failed == {}
+    assert (before_first, before_second) == ({}, {"stub": Touch(False, True, None)})
+    assert channel.can_switch_plugins
+
+
+async def test_manage_a_rebuilt_session_starts_from_an_empty_touched(tmp_path, monkeypatch):
+    from localharness.cli import start_cmd
+
+    seen, _ = _manage_drive(tmp_path, monkeypatch, opens=1)
+
+    await start_cmd._start_async(None, False, False, str(tmp_path))
+    await start_cmd._start_async(None, False, False, str(tmp_path))
+
+    assert seen[0][1].touched is not seen[1][1].touched and seen[1][3] == {}
+
+
+async def test_manage_hands_the_flow_the_plugin_results_maps(tmp_path, monkeypatch):
+    from localharness.cli import start_cmd
+    from localharness.plugins.lifecycle import LifecycleResult
+
+    async def started(*a, **k):
+        return LifecycleResult(unconfigured={"u": "a.b"}, failed={"f": "boom"})
+
+    monkeypatch.setattr("localharness.plugins.lifecycle.start_plugins", started)
+    seen, _ = _manage_drive(tmp_path, monkeypatch, opens=1)
+
+    await start_cmd._start_async(None, False, False, str(tmp_path))
+
+    session = seen[0][1]
+    assert (session.unconfigured, session.failed, session.running) == ({"u": "a.b"}, {"f": "boom"}, frozenset())
+
+
+async def test_manage_should_reload_counts_the_gates_parked_calls_and_the_channels_waiting_asks(tmp_path, monkeypatch):
+    from localharness.cli import start_cmd
+    from localharness.cli.plugins_cmd import ReloadPlan, Touch
+
+    got = []
+
+    def probe(repl, should_reload):
+        got.append(should_reload({}))
+        repl._gate.pending[1] = object()
+        monkeypatch.setattr(repl._channel, "waiting_asks", lambda: 2)
+        try:
+            got.append(should_reload({"p": Touch(False, True, None)}))
+        finally:
+            repl._gate.pending.pop(1)
+
+    _manage_drive(tmp_path, monkeypatch, opens=1, probe=probe)
+
+    await start_cmd._start_async(None, False, False, str(tmp_path))
+
+    assert got == [ReloadPlan(frozenset(), 0, 0), ReloadPlan(frozenset({"p"}), 1, 2)]
+
+
+async def test_manage_a_flow_that_raises_is_the_hooks_one_line_and_never_a_reload(tmp_path, monkeypatch):
+    from localharness.cli import plugins_interview, start_cmd
+
+    seen, answers = _manage_drive(tmp_path, monkeypatch, opens=1)
+
+    async def broken(channel, session, should_reload):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(plugins_interview, "run", broken)
+
+    await start_cmd._start_async(None, False, False, str(tmp_path))
+
+    (line,) = answers
+    assert line.startswith("/plugins could not read the plugin settings (RuntimeError)")

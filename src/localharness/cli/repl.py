@@ -19,6 +19,7 @@ from rich.protocol import is_renderable
 from localharness.agent.gate_types import MODE_STRICTNESS
 from localharness.channels import input_router
 from localharness.cli.model_ops import _hold_peer_session_key, _launch_key, _peer_session_key
+from localharness.cli.session_resume import RELOAD_ACTION
 from localharness.cli.slash_commands import SlashCommand, find_row, help_text
 from localharness.config.effort import EFFORT_UNENFORCED_LINE, LEVELS, resolve_effort
 from localharness.core.content import ImageError, describe, fit_all, fit_to_tokens
@@ -158,6 +159,7 @@ PLUGINS_TERMINAL_ONLY = ("/plugins works only in a terminal session. From a shel
                          "localharness plugins enable <name>")
 PLUGINS_NO_SESSION = "/plugins needs a session started with `localharness start`."
 PLUGINS_PARKED = "Answer the parked calls first (/pending lists them): a restart would drop them."
+PLUGINS_RELOADING = "Restarting to apply your plugin changes — your conversation is kept."
 PLUGINS_RESTARTING = "Restarting with {name} {state} — your conversation is kept."
 """What `/plugins` answers. A restart drops the gate's parked calls with the session, so it is
 refused while any wait; the other channels cannot restart a session at all (R10)."""
@@ -1584,11 +1586,7 @@ class OrchestratorREPL:
         await run_mcp_slash(self, args)
 
     async def _handle_plugins_cmd(self, arg: str) -> None:
-        """/plugins lists the plugins; /plugins enable|disable <name> switches one in THIS session.
-        The session restarts with the flag changed and the conversation carried over: this REPL ends
-        with restart_request set, start_cmd tears the session down in its usual order, runs the
-        plugin's setup step on the plain terminal — never in the input box — and rebuilds the
-        session from the handle. Only a channel that can_switch_plugins (the terminal) does this."""
+        """/plugins opens Plugins; /plugins enable|disable <name> restarts the session with one switched."""
         info = {"style": "system.info"}
         if not getattr(self._channel, "can_switch_plugins", False):
             await self._channel.send_message(PLUGINS_TERMINAL_ONLY, metadata=info)
@@ -1598,7 +1596,20 @@ class OrchestratorREPL:
             return
         words = arg.split()
         if not words:
-            await self._channel.send_message(await self._on_plugin_switch("list", ""), metadata=info)
+            why = self._channel.can_manage()
+            if why is not None:
+                from localharness.cli.plugins_interview import unavailable
+
+                await self._channel.send_message(await self._on_plugin_switch("list", ""), metadata=info)
+                await self._channel.send_message(unavailable(why), metadata=info)
+                return
+            got = await self._on_plugin_switch("manage", "")
+            if isinstance(got, str):
+                await self._channel.send_message(got, metadata=info)
+            elif got:
+                self.restart_request = RELOAD_ACTION
+                await self._channel.send_message(PLUGINS_RELOADING, metadata=info)
+                raise EOFError()
             return
         if len(words) != 2 or words[0] not in ("enable", "disable"):
             await self._channel.send_message(PLUGINS_USAGE, metadata=info)

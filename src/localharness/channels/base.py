@@ -253,6 +253,12 @@ class ChannelAdapter(ABC):
         """Permission asks queued behind a hosted application; a channel with no host has none."""
         return 0
 
+    def can_manage(self) -> Any:
+        """None when the Plugins flow can draw here; else why not. A channel with no terminal cannot."""
+        from localharness.cli.interview import Unreachable
+
+        return Unreachable.NO_TTY
+
     def begin_stop(self) -> None:
         """The session is ending; a channel with no host has nothing to stop restarting."""
 
