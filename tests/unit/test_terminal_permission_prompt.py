@@ -652,3 +652,59 @@ async def test_suspend_keeps_a_typed_secret_out_of_the_box():
             assert "s3cret" not in ch._box_app.current_buffer.text
         finally:
             await ch.stop_input_box()
+
+
+# ------------------------------------------------- queued asks are counted
+
+@pytest.mark.asyncio
+async def test_waiting_counts_an_ask_queued_behind_an_open_span():
+    ch = _channel()
+    assert ch.waiting_asks() == 0
+    with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+        async with ch.suspended_box():
+            task = asyncio.create_task(ch.ask_permission(_request()))
+            await asyncio.sleep(0.05)
+            assert ch.waiting_asks() == 1
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if ch._suspended:
+                break
+        assert ch.waiting_asks() == 0
+        inp.send_text("y")
+        assert (await asyncio.wait_for(task, timeout=10.0)).kind == "allow_once"
+    assert ch.waiting_asks() == 0
+
+
+@pytest.mark.asyncio
+async def test_waiting_drops_an_ask_cancelled_before_it_drew():
+    ch = _channel()
+    with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+        async with ch.suspended_box():
+            task = asyncio.create_task(ch.ask_permission(_request()))
+            await asyncio.sleep(0.05)
+            assert ch.waiting_asks() == 1
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert ch.waiting_asks() == 0
+    assert ch.waiting_asks() == 0
+
+
+def test_base_channel_counts_no_asks_and_its_begin_stop_is_a_no_op():
+    from localharness.channels.mobile.channel import MobileChannel
+
+    assert ChannelAdapter.waiting_asks(object()) == 0
+    assert ChannelAdapter.begin_stop(object()) is None
+    assert MobileChannel.waiting_asks is ChannelAdapter.waiting_asks
+    assert MobileChannel.begin_stop is ChannelAdapter.begin_stop
+    assert MobileChannel.run_interview is ChannelAdapter.run_interview
+
+
+@pytest.mark.asyncio
+async def test_base_channel_run_interview_reports_nobody_was_reached():
+    from localharness.cli.interview import Answer, Option, Unreachable
+
+    answer = await ChannelAdapter.run_interview(
+        object(), "q?", [Option("a", "A")], default=0, cancel="a"
+    )
+    assert answer == Answer(("a",), True, reached=False, why=Unreachable.NO_TTY)
