@@ -26,7 +26,7 @@ from localharness.cli.plugins_interview import CLOSE_LABELS, PLUGINS_QUESTION, a
 from localharness.cli.update_cmd import InstallRoute, Manual
 from localharness.plugins import lifecycle
 from localharness.plugins import resolve as resolve_module
-from localharness.plugins.api import PluginManifest
+from localharness.plugins.api import PluginManifest, SetupField
 from localharness.plugins.plan import PlanEntry
 from localharness.plugins.setup import AGENT_PROMPT_LEAD
 from tests.unit.interview_support import CANCEL, UNREACHED, Asked
@@ -34,6 +34,7 @@ from tests.unit.test_plugin_resolve import write_folder_plugin
 from tests.unit.test_extra_install import SPEC
 from tests.unit.test_extra_install import dist as _dist
 from tests.unit.test_plugins_pass import DOWNLOAD
+from tests.unit.test_plugins_pass import _on as _overlay
 from tests.unit.test_plugins_pass import folder as _folder
 from tests.unit.test_plugins_pass import layers as _layers
 from tests.unit.test_plugins_pass import mobile as _mobile
@@ -1167,7 +1168,7 @@ class Said:
         answer = script.pop(0)
         if isinstance(answer, BaseException):
             raise answer
-        return answer
+        return answer() if callable(answer) else answer
 
 
 def _written(layers) -> dict:
@@ -1349,3 +1350,185 @@ async def test_enable_install_and_set_up_runs_the_same_pass_for_an_enabled_plugi
     assert _labels(channel.asked[1]) == ["Install and set up", "Disable", "Info"]
     assert len(mobile.spawns) == 1 and len(said.confirmed) == 1
     assert channel.lines[-2:] == ["mob: enabled; starts when you close Plugins", "MOB-NEXT"]
+
+
+def _rerun_entry(**manifest):
+    return PlanEntry("p", True, "on", "built in", "does things", "", PluginManifest(name="p", version="0.1.0", kind="tools", **manifest))
+
+
+_ASKS = dict(setup=(SetupField(key="url", prompt="Address"),))
+
+
+@pytest.mark.parametrize(("manifest", "kw", "offered"), [
+    ({}, dict(running={"p"}), False),
+    ({}, dict(), True),
+    ({}, dict(running={"p"}, touched={"p": Touch(False, True, ("failed", "x"))}), True),
+    ({}, dict(running={"p"}, touched={"p": Touch(False, True, ("on", ""))}), False),
+    ({}, dict(running={"p"}, touched={"p": Touch(False, True, None)}), False),
+    (_ASKS, dict(running={"p"}), True),
+    (dict(setup_action="Download?"), dict(running={"p"}), True),
+], ids=["running_no_step", "not_running", "stored_failed_probe", "stored_passing_probe", "stored_no_probe", "asks", "action"])
+def test_rerun_row_is_offered_for_a_step_a_plugin_not_running_or_a_probe_that_is_not_on(layers, manifest, kw, offered) -> None:
+    session = _session(layers, running=frozenset(kw.get("running", ())), touched=kw.get("touched", {}))
+
+    labels = [o.label for o, _ in plugins_interview.actions_for(_rerun_entry(**manifest), session, None)]
+
+    assert ("Re-run setup" in labels) is offered
+
+
+@pytest.mark.parametrize("state", ["off", "available", "needs-extra", "failed", "refused"])
+def test_rerun_row_is_only_for_a_plugin_that_is_on(layers, state) -> None:
+    entry = replace(_rerun_entry(**_ASKS), state=state)
+
+    assert "Re-run setup" not in [o.label for o, _ in plugins_interview.actions_for(entry, _session(layers), None)]
+
+
+async def test_rerun_a_plugin_that_is_on_and_not_running_probes_and_starts_at_close(layers) -> None:
+    _on_disk(layers, stub=True)
+    touched: dict = {}
+    channel = FakeChannel(*_enable_script("stub", "Re-run setup"))
+
+    assert await _run(layers, channel, touched=touched) is True
+
+    assert channel.lines == ["stub: setup re-run — check passed; starts when you close Plugins"]
+    assert touched["stub"].loads is True and channel.asked[-1].options[-1].label == "Close — restarts to apply (1 plugin)"
+
+
+async def test_rerun_a_healthy_running_plugin_asks_nothing_and_leaves_names_empty(layers, monkeypatch) -> None:
+    _overlay(layers, "ask", url="http://box-ok", token="tok")
+    said = Said(monkeypatch)
+    touched: dict = {}
+    channel = FakeChannel(*_enable_script("ask", "Re-run setup"))
+
+    assert await _run(layers, channel, running={"ask"}, touched=touched) is False
+
+    assert channel.lines == ["ask: setup re-run — check passed", "ASK-NEXT"]
+    assert said.asked == [] and said.confirmed == [] and not channel.closed
+    assert channel.asked[-1].options[-1].label == "Close"
+
+
+async def test_rerun_answers_written_on_a_running_plugin_apply_at_close(layers, monkeypatch) -> None:
+    _on_disk(layers, ask=True)
+    Said(monkeypatch, ["http://box-ok", "tok"])
+    channel = FakeChannel(*_enable_script("ask", "Re-run setup"))
+
+    assert await _run(layers, channel, running={"ask"}) is True
+
+    assert channel.lines[0] == "ask: setup re-run — check passed; applies when you close Plugins"
+    assert _written(layers) == {"ask": {"enabled": True, "url": "http://box-ok", "token": "tok"}}
+
+
+async def test_rerun_with_every_question_skipped_says_what_is_left_to_set(layers, monkeypatch) -> None:
+    _on_disk(layers, ask=True)
+    Said(monkeypatch, ["", ""])
+    touched: dict = {}
+    channel = FakeChannel(*_enable_script("ask", "Re-run setup"))
+
+    await _run(layers, channel, touched=touched)
+
+    assert channel.lines[0] == "ask: enabled, not set up — set ask.url; Re-run setup to finish, then it starts"
+    assert touched["ask"].loads is False and channel.asked[-1].options[-1].label == "Close"
+
+
+async def test_rerun_asks_the_plugins_own_download_confirm(layers, mobile, monkeypatch) -> None:
+    mobile.installed = True
+    _overlay(layers, "mob", url="http://box")
+    said = Said(monkeypatch, ["http://box"], [True])
+    channel = FakeChannel(*_enable_script("mob", "Re-run setup"))
+
+    await _run(layers, channel)
+
+    assert said.confirmed == [(DOWNLOAD, True, "")]
+    assert channel.lines == ["mob: setup re-run — check passed; starts when you close Plugins", "MOB-NEXT"]
+
+
+async def test_rerun_while_a_download_still_stops_hints_it_and_is_blocked_with_nothing_changed(layers, monkeypatch) -> None:
+    monkeypatch.setattr(lifecycle, "downloading", lambda name: True)
+    _on_disk(layers, ask=True)
+    said = Said(monkeypatch)
+    touched: dict = {}
+    channel = FakeChannel(*_enable_script("ask", "Re-run setup"))
+
+    await _run(layers, channel, running={"ask"}, touched=touched)
+
+    (rerun,) = [o for o in channel.asked[1].options if o.label == "Re-run setup"]
+    assert rerun.hint == "download still stopping"
+    assert channel.lines == ["ask: setup not re-run — " + lifecycle.DOWNLOAD_RUNNING]
+    assert channel.lines[0].endswith("quit and restart localharness") and touched == {} and said.asked == []
+
+
+def _break_probe(monkeypatch, layers) -> None:
+    real = lifecycle._doctor_row
+
+    async def boom(*a, **kw):
+        if (layers.g / "overrides.yaml").exists():
+            raise RuntimeError("boom")
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(lifecycle, "_doctor_row", boom)
+
+
+async def test_rerun_a_probe_that_raises_is_a_failed_check_with_no_restart_and_a_failed_row(layers, monkeypatch) -> None:
+    _on_disk(layers, stub=True)
+    _break_probe(monkeypatch, layers)
+    touched: dict = {}
+    channel = FakeChannel(Label("stub"), Label("Re-run setup"), "+close")
+
+    assert await _run(layers, channel, touched=touched) is False
+
+    (line,) = channel.lines
+    assert line == "stub: enabled, but not loading — could not check it now: RuntimeError: boom; Re-run setup to retry"
+    assert touched["stub"].probe[0] == "failed" and touched["stub"].loads is False
+    assert channel.asked[-1].options[0].hint == "on — check failed; Info shows why"
+    assert channel.asked[-1].options[-1].label == "Close"
+
+
+async def test_enable_a_probe_that_raises_is_a_failed_check_with_the_help_and_no_restart(layers, monkeypatch) -> None:
+    Said(monkeypatch, ["http://box-ok", "tok"])
+    _break_probe(monkeypatch, layers)
+    touched: dict = {}
+    channel = FakeChannel(*_enable_script("ask"))
+
+    assert await _run(layers, channel, touched=touched) is False
+
+    assert channel.lines[0] == "ask: enabled, but not loading — could not check it now: RuntimeError: boom; Re-run setup to retry"
+    assert "ASK-HELP" in channel.lines and "  Run it at http://box-ok." in channel.lines and channel.lines[-1] == "ASK-NEXT"
+    assert touched["ask"].probe[0] == "failed" and channel.asked[-1].options[1].hint == "on — check failed; Info shows why"
+
+
+@pytest.mark.parametrize(("label", "enabled"), [("Enable", False), ("Re-run setup", True)])
+async def test_enable_and_rerun_a_write_phase_resolve_that_raises_is_the_same_failed_check(layers, monkeypatch, label, enabled) -> None:
+    if enabled:
+        _on_disk(layers, ask=True)
+    real, armed, fired = resolve_module.resolve, [], []
+
+    def patched(loader, **kw):
+        if armed and not fired:
+            fired.append(1)
+            raise RuntimeError("boom")
+        return real(loader, **kw)
+
+    patched.__kwdefaults__ = real.__kwdefaults__
+    monkeypatch.setattr(resolve_module, "resolve", patched)
+    Said(monkeypatch, ["http://box-ok", lambda: armed.append(1) or "tok"])
+    touched: dict = {}
+    channel = FakeChannel(*_enable_script("ask", label))
+
+    assert await _run(layers, channel, touched=touched) is False
+
+    assert channel.lines[0].startswith("ask: enabled, but not loading — could not check it now: RuntimeError: boom")
+    assert "ASK-HELP" in channel.lines and "  Run it at http://127.0.0.1:1." in channel.lines
+    assert touched["ask"].probe[0] == "failed" and not channel.closed
+
+
+async def test_rerun_a_plugin_the_build_failed_whose_probe_still_fails_does_not_load(layers, monkeypatch) -> None:
+    _overlay(layers, "ask", url="box-dead", token="tok")
+    Said(monkeypatch, ["", ""])
+    touched: dict = {}
+    channel = FakeChannel(*_enable_script("ask", "Re-run setup"))
+
+    assert await _run(layers, channel, failed={"ask": "import broke"}, touched=touched) is False
+
+    assert touched["ask"].loads is False and "check passed" not in channel.text
+    assert channel.lines[0].startswith("ask: enabled, but not loading — ") and "RuntimeError: dead" in channel.lines[0]
+    assert channel.asked[-1].options[-1].label == "Close"
