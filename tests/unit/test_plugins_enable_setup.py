@@ -494,3 +494,64 @@ def test_the_set_receipt_strips_a_credential_and_the_overlay_keeps_it(g, no_prom
     assert "  set stub.url = 'https://ok.test'" in result.output and "user:pw" not in result.output
     assert _overrides(g)["stub"]["url"] == "https://user:pw@ok.test"
     assert "  set stub.url = 'http://ok'" in _enable(g, "stub", "--set", "url=http://ok").output
+
+
+# --- the phases and the one printer ------------------------------------------------------------------
+
+
+def test_shell_report_prints_plugin_text_as_text(capsys) -> None:
+    plugins_cmd.shell_report("help", ("Use [browser] and [/x]", "see \x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\ here"))
+    plugins_cmd.shell_report("note", "a [b] \x1b[2Jc")
+    plugins_cmd.shell_report("next_steps", (True, ("run [x]", "then \x1b]0;title\x07done")))
+    plugins_cmd.shell_report("wrote", ("stub enabled in /t", (("stub.url", "'http://ok'"),)))
+
+    assert capsys.readouterr().out == (
+        "\nUse [browser] and [/x]\n\nsee link here\n  note: a [b] c\n\n  run [x]\n  then done\n"
+        "✓ stub enabled in /t\n  set stub.url = 'http://ok'\n")
+
+
+def _state(g: Path, name: str, **kw):
+    resolution, loader, workspace = plugins_cmd._resolve(str(g), json_output=False)
+    entry = plugins_cmd._entry(resolution, loader, name, False)
+    args = dict(pairs=(), to_workspace=False, ask=True, in_session=True) | kw
+    return plugins_cmd.PassState(name, True, args["pairs"], args["to_workspace"], args["ask"],
+                                 args["in_session"], resolution, loader, workspace, entry)
+
+
+async def test_the_phases_run_in_a_running_loop_and_report_in_print_order(g) -> None:
+    reports, asked = [], []
+
+    async def prompt(text, default="", secret=False):
+        asked.append(text)
+        return "http://ok"
+
+    async def confirm(text, default):
+        raise AssertionError("confirmed")
+
+    done = await plugins_cmd._run_pass(_state(g, "stub"), prompt=prompt, confirm=confirm,
+                                       report=lambda kind, payload: reports.append(kind))
+
+    assert asked == ["Server address: "]
+    assert reports == ["wrote", "checking", "row"]
+    assert done.row.state == "on" and done.failed == "" and not done.declined
+    assert _overrides(g) == {"stub": {"enabled": True, "url": "http://ok"}}
+
+
+async def test_a_refusal_leaves_the_phases_unreported(g) -> None:
+    reports = []
+
+    async def never(*a, **kw):
+        raise AssertionError("asked")
+
+    with pytest.raises(plugins_cmd.Refusal, match="no setting 'nokey'"):
+        await plugins_cmd._run_pass(_state(g, "stub", pairs=("nokey=1",), ask=False), prompt=never,
+                                    confirm=never, report=lambda kind, payload: reports.append(kind))
+
+    assert reports == [] and not (g / "overrides.yaml").exists()
+
+
+def test_a_plugin_with_nothing_to_set_up_prints_only_the_enabled_line(g, no_prompt, monkeypatch) -> None:
+    monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: True)
+    result = _enable(g, "plain")
+
+    assert [line[0] for line in result.output.splitlines()] == ["✓"]
