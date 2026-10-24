@@ -10,7 +10,10 @@ import pytest
 
 from localharness.core.interrupt import sigint_cancels
 
-pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+pytestmark = [
+    pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals"),
+    pytest.mark.usefixtures("default_sigint"),
+]
 SIGINT = signal.SIGINT
 
 

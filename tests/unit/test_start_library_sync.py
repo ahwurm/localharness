@@ -7,7 +7,6 @@ import asyncio
 import json
 import os
 import signal
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -340,10 +339,9 @@ def test_a_verb_restart_still_runs_its_step_and_carries_the_check_into_the_resum
     assert ran.seen[1].failed_check == "boom" and ran.seen[1].action == ("enable", "x")
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+@pytest.mark.usefixtures("default_sigint")
 def test_a_real_sigint_in_the_session_says_goodbye_and_exits_zero(after_first_run, monkeypatch):
     scripted(monkeypatch)
-    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
 
     async def start_async(*args, **kw):
         asyncio.get_running_loop().call_soon(os.kill, os.getpid(), signal.SIGINT)

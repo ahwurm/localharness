@@ -21,6 +21,18 @@ from localharness.bench.runner import resolve_run_path
 from localharness.memory.sqlite import MemoryStore
 
 
+@pytest.fixture
+def default_sigint():
+    """Skip a test that sends itself a real SIGINT unless the process holds Python's default handler."""
+    import signal
+    import sys
+
+    if sys.platform == "win32":
+        pytest.skip("POSIX signals")
+    if signal.getsignal(signal.SIGINT) is not signal.default_int_handler:
+        pytest.skip("SIGINT is not the default handler (an ignored launch, or an earlier test leaked one)")
+
+
 @pytest.fixture(autouse=True)
 def _isolate_memory_logger():
     """#20: the interactive REPL routes the memory subsystem's logs to a file via

@@ -3311,7 +3311,7 @@ async def test_start_moves_corrupt_task_state_aside(tmp_path, monkeypatch):
     assert _read_sessions(tmp_path)[-1][3] == "complete"  # the start still ran to the end
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+@pytest.mark.usefixtures("default_sigint")
 @pytest.mark.parametrize("mid_turn", [False, True], ids=["idle", "mid_turn"])
 def test_an_external_sigint_against_the_live_box_ends_the_session_as_complete(tmp_path, monkeypatch, mid_turn):
     import os
@@ -3327,7 +3327,6 @@ def test_an_external_sigint_against_the_live_box_ends_the_session_as_complete(tm
     from localharness.cli.repl import OrchestratorREPL
     from localharness.cli.start_cmd import _start_async
 
-    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
     turn_started = asyncio.Event()
 
     async def run_turn(self, *_a, **_k):

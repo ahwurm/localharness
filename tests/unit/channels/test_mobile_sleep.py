@@ -412,6 +412,7 @@ async def _serve_real_uvicorn(monkeypatch, tmp_path, *, bring_up, after_started)
         drive.cancel()
 
 
+@pytest.mark.usefixtures("default_sigint")
 async def test_a_stop_signal_puts_the_live_session_to_sleep_through_the_real_uvicorn(
         tmp_path, monkeypatch):
     import os
@@ -441,6 +442,7 @@ async def test_a_stop_signal_puts_the_live_session_to_sleep_through_the_real_uvi
     assert _signal.getsignal(_signal.SIGINT) == before, "the server's handler is gone with it"
 
 
+@pytest.mark.usefixtures("default_sigint")
 async def test_a_second_stop_signal_gives_up_on_the_sleep(tmp_path, monkeypatch, caplog):
     import os
     import signal as _signal
