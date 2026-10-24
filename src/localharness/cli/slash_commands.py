@@ -71,15 +71,15 @@ _plugin_rows: tuple[SlashCommand, ...] = ()
 
 def set_plugin_rows(rows: Iterable[SlashCommand]) -> list[str]:
     """Replace every plugin row (`()` removes them all). A row whose name is already taken — by core
-    or an earlier plugin row — is skipped, and so is one without a callable handler (only core rows
-    name a REPL method). Returns one warning per skipped row, naming its plugin."""
+    or an earlier plugin row — is skipped, and so is one whose handler is neither a REPL method name
+    nor a callable. Returns one warning per skipped row, naming its plugin."""
     global _plugin_rows
     kept: list[SlashCommand] = []
     warnings: list[str] = []
     for row in rows:
         if row.name in {r.name for r in (*SLASH_COMMANDS, *kept)}:
             warnings.append(f"plugin {row.plugin}: slash command {row.name} is already taken — skipped")
-        elif not callable(row.handler):
+        elif not (isinstance(row.handler, str) or callable(row.handler)):
             warnings.append(f"plugin {row.plugin}: slash command {row.name} has no callable handler — skipped")
         else:
             kept.append(row)

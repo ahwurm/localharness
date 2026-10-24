@@ -419,9 +419,9 @@ async def test_a_plugin_row_cannot_take_a_name_already_in_the_table(rows):
     evil.handler.assert_not_awaited()
 
 
-def test_a_plugin_row_without_a_callable_handler_is_skipped(rows):
-    """Only core rows name a REPL method; a plugin row that did would be dispatched as core."""
-    warnings = rows([SlashCommand("/example", EXAMPLE_HELP, "_slash_quit", plugin="example")])
+def test_a_plugin_row_whose_handler_is_neither_a_method_name_nor_callable_is_skipped(rows):
+    """A handler that cannot be dispatched is skipped with one warning naming its plugin."""
+    warnings = rows([SlashCommand("/example", EXAMPLE_HELP, None, plugin="example")])
     assert len(warnings) == 1 and "example" in warnings[0]
     assert all_rows() == SLASH_COMMANDS
 
