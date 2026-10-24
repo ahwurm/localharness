@@ -277,3 +277,11 @@ class SkillSet:
             Path(config_dir),
             project_root,
         )
+
+    def read_body(self, record: Skill) -> str | Skipped:
+        """Return the whole SKILL.md text after repeating every discovery check."""
+        here = record.path.parent
+        for _, lexical, real in _origin_dirs(self.config_dir, self.project_root):
+            if lexical == here.parent:
+                return _load(record.path, lexical, real)
+        return _skip(OUTSIDE, here, dir=here, origin=here.parent)
