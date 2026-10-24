@@ -872,6 +872,7 @@ def test_session_step_a_no_at_the_consent_writes_the_enable_and_stops(g, term, m
     out = capsys.readouterr().out
 
     assert out.count(INSTALL_SKIPPED[0].format(names="mob", why="")) == 1
+    _in_order(out, INSTALL_SKIPPED[0].format(names="mob", why=""), "✓ mob enabled", "MOB-NEXT")
     assert mob.spawns == [] and term.asked == [] and MOB_CALLS == []
     assert _overlay(g) == {"mob": {"enabled": True}}
     assert outcome == plugins_cmd.StepOutcome(name="mob", on=True, stopped=True)

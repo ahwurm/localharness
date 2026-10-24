@@ -574,6 +574,7 @@ async def test_enable_pass_a_declined_install_writes_the_enable_and_stops(layers
 
     assert (result.kind, result.install, result.loads, result.downloaded, result.questions) == (
         "install_skipped", "skipped", False, False, "none")
+    assert result.next_steps == "MOB-NEXT"
     assert len(route.calls) == 1 and route.calls[0][:2] == ({"mobile"}, ["mob"])
     assert talk.asked == [] and talk.confirmed == [] and CALLS == []
     assert _written(layers) == {"mob": {"enabled": True}} and talk.progress.wrote is True
@@ -582,7 +583,7 @@ async def test_enable_pass_a_declined_install_writes_the_enable_and_stops(layers
 async def test_enable_pass_install_skipped_by_a_batch_does_not_run_the_install(layers, mobile, route) -> None:
     result, talk = await _enable(layers, "mob", install="skipped")
 
-    assert (result.kind, result.install, result.loads) == ("install_skipped", "skipped", False)
+    assert (result.kind, result.install, result.loads, result.next_steps) == ("install_skipped", "skipped", False, "MOB-NEXT")
     assert route.calls == [] and talk.asked == [] and talk.confirmed == []
     assert _written(layers) == {"mob": {"enabled": True}}
 
@@ -593,6 +594,7 @@ async def test_enable_pass_a_manual_install_route_writes_the_enable_and_nothing_
     result, talk = await _enable(layers, "mob")
 
     assert (result.kind, result.install, result.loads, result.questions) == ("enabled_manual", "none", False, "none")
+    assert result.next_steps == "MOB-NEXT"
     assert route.calls == [] and talk.asked == [] and talk.confirmed == [] and CALLS == []
     assert _written(layers) == {"mob": {"enabled": True}}
 
