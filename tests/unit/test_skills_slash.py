@@ -5,7 +5,7 @@ import ast
 import inspect
 import textwrap
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -22,6 +22,7 @@ from localharness.config import skills
 from localharness.config.skills import SkillSet
 from localharness.core.bus import EventBus
 from localharness.core.events import Action, TurnCompleted, TurnFailed
+from tests.unit.test_repl_input_box import _pending_turn, _repl as _box_repl
 from tests.unit.test_repl_unknown_slash import RecordingChannel, _build_repl
 from tests.unit.test_skills_discovery import _skill as write_skill
 
@@ -458,9 +459,8 @@ NOTES_LINE = "The person invoked /notes. Call skill('notes') and follow it."
 
 
 class Terminal:
-    def __init__(self, tmp_path, build=_build_repl, names=("notes",)):
-        self.channel = RecordingChannel([])
-        self.repl, self.agent, _ = build(self.channel)
+    def __init__(self, tmp_path, repl, channel, agent, names=("notes",)):
+        self.channel, self.repl, self.agent = channel, repl, agent
         self.repl._bus = EventBus()
         self.cfg = tmp_path / "cfg"
         self.paths = {n: write_skill(self.cfg / "skills", n) for n in names}
@@ -486,7 +486,17 @@ class Terminal:
 
 @pytest.fixture
 def terminal(tmp_path, pkg, rows):
-    yield Terminal(tmp_path)
+    channel = RecordingChannel([])
+    repl, agent, _ = _build_repl(channel)
+    yield Terminal(tmp_path, repl, channel, agent)
+
+
+@pytest.fixture
+async def box(tmp_path, pkg, rows):
+    repl, channel, agent = _box_repl()
+    yield Terminal(tmp_path, repl, channel, agent)
+    if repl._turn_task is not None:
+        repl._turn_task.cancel()
 
 
 async def test_slash_name_at_an_idle_session_is_one_line_the_model_must_load(terminal):
@@ -522,3 +532,65 @@ async def test_a_repl_without_a_session_refuses_an_unknown_word_as_before(rows):
     assert channel.sent == [("Unknown command: /frobnicate — /help lists commands.", {"style": "system.error"})]
     assert await repl._handle_slash("/frobnicate more") is False
     agent.run_turn.assert_not_called()
+
+
+async def test_the_box_starts_the_turn_on_the_verbatim_line_and_says_a_miss_once(box):
+    await box.repl._handle_box_event("submit", "/notes")
+    box.agent.run_turn.assert_called_once()
+    assert box.agent.run_turn.call_args.kwargs["task"] == NOTES_LINE
+    await box.completed()
+    await box.completed()
+    assert box.channel.sent.count(NOT_LOADED_NOTES) == 1
+
+
+async def test_a_slash_name_during_a_turn_nudges_it_once_after_arming_the_name(terminal):
+    order = []
+    arm = terminal.session.arm
+    terminal.session.arm = lambda *a: (order.append("arm"), arm(*a))[1]
+    terminal.agent.push_user_nudge = MagicMock(side_effect=lambda line: order.append("nudge"))
+    await _pending_turn(terminal.repl)
+    try:
+        assert await terminal.repl._handle_slash("/notes now") is True
+        line = "The person invoked /notes with: now. Call skill('notes') and follow it."
+        terminal.agent.push_user_nudge.assert_called_once_with(line)
+        assert order == ["arm", "nudge"]
+        assert terminal.repl._slash_followup is None
+        terminal.agent.run_turn.assert_not_called()
+        await terminal.completed()
+        assert terminal.channel.sent.count(NOT_LOADED_NOTES) == 1
+        terminal.session.arm("notes")
+        await terminal.call("notes")
+        terminal.channel.sent.clear()
+        await terminal.completed()
+        assert terminal.said() == []
+    finally:
+        terminal.repl._turn_task.cancel()
+
+
+async def test_a_cancelled_slash_turn_leaves_the_next_ordinary_turn_unarmed(terminal):
+    task = await terminal.repl._dispatch_input("/notes")
+    task.cancel()
+    await (await terminal.repl._dispatch_input("hello"))
+    await terminal.completed()
+    assert terminal.said() == []
+
+
+async def test_a_changed_body_is_noticed_before_the_turn_starts(terminal):
+    await (await terminal.repl._dispatch_input("/notes"))
+    path = terminal.paths["notes"]
+    path.write_text(path.read_text().replace("Body of notes.", "Body of notes, edited."))
+    terminal.channel.sent.clear()
+    await (await terminal.repl._dispatch_input("/notes"))
+    assert terminal.channel.sent == [(f"changed since first use: {str(path)!r}; using it", {"style": "system.info"})]
+    assert terminal.agent.run_turn.call_count == 2
+    assert "Body of notes" not in terminal.agent.run_turn.call_args.kwargs["task"]
+
+
+async def test_an_unreadable_body_prints_the_skip_line_and_starts_nothing(terminal):
+    terminal.paths["notes"].unlink()
+    assert await terminal.repl._handle_slash("/notes") is True
+    (text, meta), = terminal.channel.sent
+    assert text.startswith("skipped: ") and meta == {"style": "system.error"}
+    assert terminal.repl._slash_followup is None
+    assert await terminal.repl._dispatch_input("/notes") is None
+    terminal.agent.run_turn.assert_not_called()
