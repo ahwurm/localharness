@@ -923,6 +923,23 @@ async def test_menu_a_plugin_that_vanished_sends_the_person_back_to_the_root(lay
     assert [a.question for a in channel.asked] == [PLUGINS_QUESTION] * 2 and channel.text == ""
 
 
+async def test_menu_the_second_of_two_entries_with_one_name_opens_its_own_menu(layers, monkeypatch) -> None:
+    _on_disk(layers, stub=True)
+    real = resolve_module.resolve
+
+    def twice(loader, **kw):
+        found = real(loader, **kw)
+        stub = next(e for e in found.plan.entries if e.name == "stub")
+        return replace(found, plan=replace(found.plan, entries=(stub, _entry("refused", name="stub"))))
+
+    monkeypatch.setattr(resolve_module, "resolve", twice)
+    channel = FakeChannel("1", CANCEL, "+close")
+
+    await _run(layers, channel)
+
+    assert channel.asked[1].question == "stub — refused (Esc = back)"
+
+
 @pytest.mark.parametrize(("state", "enabled", "route", "labels"), [
     ("on", True, None, ["Re-run setup", "Disable", "Info"]),
     ("off", False, None, ["Enable", "Info"]),

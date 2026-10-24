@@ -381,7 +381,8 @@ async def _root(flow: Flow) -> None:
         if answer.keys == (SEVERAL,):
             await _several(flow)
         else:
-            await _menu(flow, names[int(answer.keys[0])])
+            index = int(answer.keys[0])
+            await _menu(flow, index, names[index])
 
 
 def _no_report(kind: str, payload: Any) -> None:
@@ -559,12 +560,10 @@ def actions_for(entry: Any, session: PluginSession, route: Any) -> list[tuple[Op
             for key, label, available, handler in ACTIONS if available(entry, enabled, route, session, settings)]
 
 
-async def _ask_menu(flow: Flow, name: str) -> Any:
-    from localharness.config.loader import ConfigLoader
-    from localharness.plugins.resolve import resolve
-
+async def _ask_menu(flow: Flow, index: int, name: str) -> Any:
     session = flow.session
-    entry = resolve(ConfigLoader(config_dir=session.cfg_path, local_config_dir=session.workspace)).plan.entry(name)
+    entries = _resolved(session)[1]
+    entry = entries[index] if index < len(entries) and entries[index].name == name else None
     if entry is None:
         return None
     flow.plan = flow.should_reload(session.touched)
@@ -575,9 +574,9 @@ async def _ask_menu(flow: Flow, name: str) -> Any:
     return answer, entry, route, {option.key: handler for option, handler in actions}
 
 
-async def _menu(flow: Flow, name: str) -> None:
+async def _menu(flow: Flow, index: int, name: str) -> None:
     while True:
-        got = await guarded(flow, partial(_ask_menu, flow, name))
+        got = await guarded(flow, partial(_ask_menu, flow, index, name))
         if got is _STOP or got is None:
             return
         answer, entry, route, handlers = got
