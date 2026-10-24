@@ -464,6 +464,7 @@ READ_ONLY_SIGNATURES_DEFAULT: frozenset[str] = frozenset({
     "sed -n", "sort", "uniq", "cut", "tr", "basename", "dirname", "realpath", "readlink",
     "id", "whoami", "hostname", "nproc", "free", "uptime", "ps", "ss", "lsof",
     "docker ps", "docker logs", "docker images", "docker inspect", "docker version", "docker info",
+    "localharness skills",
 })
 """PRD §3.1 ALLOW tier for shell. Union of Claude Code's built-in read-only Bash set
 (code.claude.com/docs/en/permissions) and the read-only tokens observed in the 384-session
@@ -472,7 +473,9 @@ lifts those payloads, PRD §3.2 step 5).
 
 The docker row is the other half of narrowing the destructive set below: asking about
 ``docker ps`` is the fatigue the ASK tier exists to avoid (docker-ps(1), docker-logs(1),
-docker-images(1), docker-inspect(1) — all report, none of them start, stop or remove anything)."""
+docker-images(1), docker-inspect(1) — all report, none of them start, stop or remove anything).
+
+``localharness skills`` lists the skills the harness found and changes nothing."""
 
 WINDOWS_DESTRUCTIVE_FLAG_VERBS: dict[str, tuple[str, ...]] = {
     "Remove-Item": ("-Recurse", "-Force"),
@@ -754,12 +757,15 @@ them unfamiliar commands that asked."""
 
 SUBCOMMAND_TOOLS_DEFAULT: frozenset[str] = frozenset({
     "git", "uv", "pip", "pip3", "npm", "npx", "pnpm", "yarn", "docker", "docker-compose",
-    "cargo", "make", "gh", "kubectl",
+    "cargo", "make", "gh", "kubectl", "localharness",
 })
 """PRD §3.2 step 7: the signature includes the first subcommand (``git status`` ≠ ``git push``).
 
 ``docker-compose`` is the old standalone spelling of ``docker compose`` and needs the same
-treatment, or ``docker-compose up`` and ``docker-compose ps`` would share one key."""
+treatment, or ``docker-compose up`` and ``docker-compose ps`` would share one key.
+
+``localharness`` is here so ``localharness skills`` can be a read while every other
+``localharness`` subcommand keeps a key of its own."""
 
 PAYLOAD_COMMANDS_DEFAULT: frozenset[str] = frozenset({"find", "xargs", "parallel"})
 """PRD §3.2 step 5: ``find -exec/-execdir/-ok CMD``, ``xargs CMD`` and ``parallel CMD ::: args``
