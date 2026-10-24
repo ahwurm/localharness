@@ -89,7 +89,7 @@ def _refusal(row: SlashCommand, taken: set[str]) -> str | None:
 
 
 def set_plugin_rows(rows: Iterable[SlashCommand]) -> list[str]:
-    """Replace every plugin-table row (`()` removes them all). A row with a taken name, or
+    """Replace every plugin-table row (`()` removes them all). A row with a taken name, that names no plugin, or
     whose handler is neither a REPL method name nor a callable, is skipped; one warning per skipped
     row, worded by the row's kind."""
     global _plugin_rows
