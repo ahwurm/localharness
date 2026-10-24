@@ -16,9 +16,9 @@ from localharness.cli import plugins_cmd
 from localharness.cli.components_cmd import redact_text
 from localharness.cli.interview import Option, Unreachable, confirm_line, n_of, prompt_line
 from localharness.cli.plugins_cmd import (
-    ACTION_DISABLE, ACTION_ENABLE, ACTION_INFO, ACTION_INSTALL, ACTION_RERUN, ACTION_SHOW_INSTALL, ENABLE_MANUAL,
-    OVERRIDE_LINE, OVERRIDE_SAVED, ROUTE_BACK, Kind, PassProgress, PassResult, PluginSession, Refusal, ReloadPlan, Touch,
-    disable_pass, enable_pass, info_renderable, manual_block, override_line, prior_touch, refused, touch_after_stop,
+    ACTION_DISABLE, ACTION_ENABLE, ACTION_INFO, ACTION_INSTALL, ACTION_RERUN, ACTION_SHOW_INSTALL, CTRLC, CTRLC_DOES,
+    ENABLE_MANUAL, OVERRIDE_LINE, OVERRIDE_SAVED, ROUTE_BACK, Kind, PassProgress, PassResult, PluginSession, Refusal, ReloadPlan, Touch,
+    disable_pass, enable_pass, info_renderable, install_pass, manual_block, override_line, prior_touch, refused, touch_after_stop,
     touch_from,
 )
 from localharness.core.interrupt import sigint_cancels
@@ -58,7 +58,20 @@ NOT_APPLIED_CASES = MappingProxyType({
 })
 CLOSED_ON_ERROR = "Plugins closed on an error: {error}"
 
+SEVERAL = "+several"
 TURN_SEVERAL_ON = "Turn several on…"
+TURN_SEVERAL_ON_HINT = "turn on more than one at once"
+TURN_SEVERAL_ON_WHICH = "Turn on which? (Esc = back)"
+BATCH_PROGRESS = "{i} of {m}: {name}"
+BATCH_STOPPED = "not started: {names}{more} — enable them from the list"
+BATCH_NOTHING_LEFT = "nothing left to start"
+BATCH_MORE = " and {k} more"
+BATCH_SUMMARY = "{done} of {m} enabled{still}{restart}"
+BATCH_STILL = ", install still needed: {k}"
+BATCH_RESTART = "; restarts {at_close}"
+BATCH_ENABLED = frozenset({
+    "enabled", "enabled_unconfigured", "check_failed", "check_failed_noload", "check_skipped", "enabled_manual",
+    "enabled_not_loading"})
 RESULT = "{name}: {outcome}"
 RESULT_OUTCOMES: dict[Kind, str] = {
     "enabled": "enabled{starts}",
@@ -301,16 +314,31 @@ async def _act(flow: Flow, entry: Any, node: Callable, progress: PassProgress, *
     return result
 
 
-async def _ask_root(flow: Flow) -> Any:
+def _resolved(session: PluginSession) -> tuple[Any, tuple[Any, ...]]:
     from localharness.config.loader import ConfigLoader
     from localharness.plugins.resolve import resolve
 
+    loader = ConfigLoader(config_dir=session.cfg_path, local_config_dir=session.workspace)
+    return loader, tuple(resolve(loader).plan.entries)
+
+
+def _switchable_on(entry: Any, loader: Any) -> bool:
+    route = plugins_cmd.install_route_for(entry)
+    installable = route is not None and route.argv is not None
+    return (entry.state in ("off", "available", "needs-extra") and (installable or route is None and entry.state != "needs-extra")
+            and plugins_cmd.override_of(loader, entry, True, False) is None)
+
+
+async def _ask_root(flow: Flow) -> Any:
     session = flow.session
-    entries = resolve(ConfigLoader(config_dir=session.cfg_path, local_config_dir=session.workspace)).plan.entries
+    loader, entries = _resolved(session)
     flow.plan = plan = flow.should_reload(session.touched)
     options = [Option(str(i), entry.name, _row_state(entry, session, plan)) for i, entry in enumerate(entries)]
+    several = sum(_switchable_on(entry, loader) for entry in entries) >= 2
+    if several:
+        options.insert(0, Option(SEVERAL, TURN_SEVERAL_ON, TURN_SEVERAL_ON_HINT))
     options.append(Option(CLOSE, _close_label(plan)))
-    answer = await flow.channel.run_interview(PLUGINS_QUESTION, options, default=0, cancel=CLOSE)
+    answer = await flow.channel.run_interview(PLUGINS_QUESTION, options, default=int(several), cancel=CLOSE)
     return answer, [entry.name for entry in entries]
 
 
@@ -324,7 +352,10 @@ async def _root(flow: Flow) -> None:
             raise _Abandon(why=answer.why)
         if answer.cancelled or answer.keys == (CLOSE,):
             return
-        await _menu(flow, names[int(answer.keys[0])])
+        if answer.keys == (SEVERAL,):
+            await _several(flow)
+        else:
+            await _menu(flow, names[int(answer.keys[0])])
 
 
 def _no_report(kind: str, payload: Any) -> None:
@@ -430,6 +461,71 @@ async def _menu(flow: Flow, name: str) -> None:
             raise _Abandon(why=answer.why)
         if answer.cancelled or not await handlers[answer.keys[0]](flow, entry, route):
             return
+
+
+def _not_started(names: list[str]) -> str:
+    if not names:
+        return BATCH_NOTHING_LEFT
+    more = BATCH_MORE.format(k=len(names) - 3) if len(names) > 3 else ""
+    return BATCH_STOPPED.format(names=", ".join(names[:3]), more=more)
+
+
+def _summary(flow: Flow, picks: list[Any], results: list[tuple[str, PassResult | None]]) -> str:
+    kinds = [result.kind for _, result in results if result is not None]
+    still = kinds.count("install_skipped")
+    return BATCH_SUMMARY.format(
+        done=sum(kind in BATCH_ENABLED for kind in kinds), m=len(picks),
+        still=BATCH_STILL.format(k=still) if still else "",
+        restart=BATCH_RESTART.format(at_close=at_close(flow.plan)) if flow.plan.names else "")
+
+
+async def _enable_pick(flow: Flow, entry: Any, progress: PassProgress, install: str) -> PassResult:
+    return await enable_pass(flow.session, entry.name, mode="enable", progress=progress, prompt=flow.prompt,
+                             confirm=flow.confirm, report=_no_report, install=install, in_batch=True, console=flow.console)
+
+
+async def _install_batch(flow: Flow, picks: list[Any], needs: list[Any]) -> Any:
+    progress = PassProgress()
+
+    async def node() -> frozenset[str]:
+        return await install_pass(flow.session, {plugins_cmd.extra_for(entry) for entry in needs}, [e.name for e in needs],
+                                  progress=progress, confirm=flow.confirm, console=flow.console, in_batch=True)
+
+    return await guarded(flow, node, names=tuple(e.name for e in picks), progress=progress, in_batch=True)
+
+
+async def _batch(flow: Flow, picks: list[Any]) -> None:
+    _say(flow.console, CTRLC.format(does=CTRLC_DOES["batch"]))
+    needs = [entry for entry in picks if plugins_cmd.extra_for(entry)]
+    covered = await _install_batch(flow, picks, needs) if needs else frozenset()
+    results: list[tuple[str, PassResult | None]] = []
+    if covered is _STOP:
+        _say(flow.console, _not_started([entry.name for entry in picks]))
+    else:
+        for i, entry in enumerate(picks, 1):
+            _say(flow.console, BATCH_PROGRESS.format(i=i, m=len(picks), name=entry.name))
+            install = "done" if entry.name in covered else "skipped" if entry in needs else "none"
+            progress = PassProgress()
+            result = await _act(flow, entry, partial(_enable_pick, flow, entry, progress, install), progress, in_batch=True)
+            results.append((entry.name, None if result is _STOP else result))
+            if result is _STOP:
+                _say(flow.console, _not_started([e.name for e in picks[i:]]))
+                break
+    _say(flow.console, _summary(flow, picks, results))
+
+
+async def _several(flow: Flow) -> None:
+    loader, entries = _resolved(flow.session)
+    pool = [entry for entry in entries if _switchable_on(entry, loader)]
+    options = [Option(str(i), entry.name, _row_state(entry, flow.session, flow.plan)) for i, entry in enumerate(pool)]
+    got = await guarded(flow, lambda: flow.channel.run_interview(
+        TURN_SEVERAL_ON_WHICH, options, default=frozenset(), cancel="back", multi=True))
+    if got is _STOP:
+        return
+    if not got.reached:
+        raise _Abandon(why=got.why)
+    if picks := [entry for option, entry in zip(options, pool) if option.key in got.keys and not got.cancelled]:
+        await _batch(flow, picks)
 
 
 def _not_applied(plan: ReloadPlan, why: Unreachable | None, error: str) -> str:

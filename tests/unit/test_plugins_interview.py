@@ -14,6 +14,7 @@ from typing import get_args
 import click
 import pytest
 import yaml
+from pydantic import BaseModel
 from rich.console import Console
 
 from localharness.cli import plugins_cmd, plugins_interview
@@ -26,7 +27,7 @@ from localharness.cli.plugins_interview import CLOSE_LABELS, PLUGINS_QUESTION, a
 from localharness.cli.update_cmd import InstallRoute, Manual
 from localharness.plugins import builtin, lifecycle
 from localharness.plugins import resolve as resolve_module
-from localharness.plugins.api import PluginManifest, SetupField
+from localharness.plugins.api import Check, Plugin, PluginManifest, SetupField
 from localharness.plugins.plan import PlanEntry
 from localharness.plugins.setup import AGENT_PROMPT_LEAD
 from tests.unit.interview_support import CANCEL, UNREACHED, Asked
@@ -34,7 +35,7 @@ from tests.unit.test_plugin_resolve import write_folder_plugin
 from tests.unit.test_extra_install import SPEC, _Proc
 from tests.unit.test_extra_install import dist as _dist
 from tests.unit.test_plugins_bookkeeping import Stub
-from tests.unit.test_plugins_pass import DOWNLOAD, Ask, Mob
+from tests.unit.test_plugins_pass import CALLS, DOWNLOAD, Ask, Mob
 from tests.unit.test_plugins_pass import _on as _overlay
 from tests.unit.test_plugins_pass import folder as _folder
 from tests.unit.test_plugins_pass import layers as _layers
@@ -108,6 +109,10 @@ class FakeChannel:
         if isinstance(answer, (set, frozenset)):
             return Answer(tuple(o.key for o in options if o.key in answer), False)
         return Answer((answer,), False)
+
+
+def _rows(asked) -> list:
+    return [o for o in asked.options if not o.key.startswith("+")]
 
 
 def _session(layers, **kw) -> PluginSession:
@@ -290,7 +295,7 @@ async def test_root_rows_carry_the_row_state_hint(layers) -> None:
 
     await _run(layers, channel)
 
-    assert [o.hint for o in channel.asked[0].options[:3]] == ["on — not running; Re-run setup starts it", "off", "off"]
+    assert [o.hint for o in _rows(channel.asked[0])[:3]] == ["on — not running; Re-run setup starts it", "off", "off"]
 
 
 async def test_root_is_resolved_again_on_every_render(layers) -> None:
@@ -302,7 +307,7 @@ async def test_root_is_resolved_again_on_every_render(layers) -> None:
 
     await _run(layers, channel)
 
-    first, second = (channel.asked[i].options[0].hint for i in (0, 2))
+    first, second = (_rows(channel.asked[i])[0].hint for i in (0, 2))
     assert first == "off" and second == "on — not running; Re-run setup starts it"
 
 
@@ -1196,7 +1201,7 @@ async def test_enable_installs_asks_and_checks_in_one_pass(layers, mobile, dist,
     assert lines[-2:] == ["mob: enabled; starts when you close Plugins", "MOB-NEXT"]
     assert DOWNLOAD not in [text for text, *_ in said.confirmed]
     assert _written(layers) == {"mob": {"enabled": True, "url": "http://box"}}
-    assert channel.asked[-1].options[2].hint == "on — starts when you close Plugins"
+    assert _rows(channel.asked[-1])[2].hint == "on — starts when you close Plugins"
     assert channel.asked[-1].options[-1].label == "Close — restarts to apply (1 plugin)" and channel.closed
     assert touched["mob"].loads is True
 
@@ -1480,7 +1485,7 @@ async def test_rerun_a_probe_that_raises_is_a_failed_check_with_no_restart_and_a
     (line,) = channel.lines
     assert line == "stub: enabled, but not loading — could not check it now: RuntimeError: boom; Re-run setup to retry"
     assert touched["stub"].probe[0] == "failed" and touched["stub"].loads is False
-    assert channel.asked[-1].options[0].hint == "on — check failed; Info shows why"
+    assert _rows(channel.asked[-1])[0].hint == "on — check failed; Info shows why"
     assert channel.asked[-1].options[-1].label == "Close"
 
 
@@ -1494,7 +1499,7 @@ async def test_enable_a_probe_that_raises_is_a_failed_check_with_the_help_and_no
 
     assert channel.lines[0] == "ask: enabled, but not loading — could not check it now: RuntimeError: boom; Re-run setup to retry"
     assert "ASK-HELP" in channel.lines and "  Run it at http://box-ok." in channel.lines and channel.lines[-1] == "ASK-NEXT"
-    assert touched["ask"].probe[0] == "failed" and channel.asked[-1].options[1].hint == "on — check failed; Info shows why"
+    assert touched["ask"].probe[0] == "failed" and _rows(channel.asked[-1])[1].hint == "on — check failed; Info shows why"
 
 
 @pytest.mark.parametrize(("label", "enabled"), [("Enable", False), ("Re-run setup", True)])
@@ -1676,3 +1681,200 @@ async def test_next_steps_and_help_with_markup_and_an_osc_sequence_print_as_text
 
     assert "run localharness[browser] then [/x]" in channel.lines and "see [b]docs[/b]" in channel.lines
     assert "\x1b" not in channel.text and "\x07" not in channel.text and "owned" not in channel.text
+
+
+DOWNLOAD2 = "Fetch the second model?"
+DL_ASK = "Fetch the dl model?"
+BATCH_CTRLC = CTRLC.format(does=CTRLC_DOES["batch"])
+
+
+class _Url(BaseModel):
+    url: str = ""
+
+
+class Mob2(Plugin):
+    """needs the mobile extra, asks a port and downloads a model"""
+
+    manifest = PluginManifest(
+        name="mob2", version="0.1.0", kind="tools", enabled_by_default=False, requires_extra="mobile",
+        setup=(SetupField(key="url", prompt="Port", default="1"),), setup_action=DOWNLOAD2)
+    ConfigModel = _Url
+
+    async def configure(self, ctx):
+        return "ready"
+
+    def setup_action(self, ctx):
+        CALLS.append("mob2")
+        return [Check(name="mob2", status="pass", detail="fetched")]
+
+    def doctor(self, ctx):
+        return [Check(name="mob2", status="pass" if "mob2" in CALLS else "fail", detail="ready")]
+
+
+class Dl(Plugin):
+    """downloads a model and needs no extra"""
+
+    manifest = PluginManifest(name="dl", version="0.1.0", kind="tools", enabled_by_default=False, setup_action=DL_ASK)
+    ConfigModel = Stub.ConfigModel
+
+    def setup_action(self, ctx):
+        CALLS.append("dl")
+        return [Check(name="dl", status="pass", detail="fetched")]
+
+    def doctor(self, ctx):
+        return [Check(name="dl", status="pass" if "dl" in CALLS else "fail", detail="ready")]
+
+
+@pytest.fixture
+def batch(layers, mobile, dist, monkeypatch):
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Stub, Mob, Mob2, Dl))
+    return layers
+
+
+def _pick(*names):
+    return lambda options: {o.key for o in options if o.label in names}
+
+
+def _several(*picks, then="+close"):
+    return (Label("Turn several on…"), _pick(*picks), then)
+
+
+def _plugins(monkeypatch, *classes) -> None:
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", classes)
+
+
+def _numbered(count):
+    return tuple(type(f"P{i}", (Stub,), {"manifest": PluginManifest(
+        name=f"p{i}", version="0.1.0", kind="tools", enabled_by_default=False)}) for i in range(1, count + 1))
+
+
+@pytest.mark.parametrize("classes", [(), (Stub,)], ids=["none", "one"])
+async def test_several_row_is_absent_below_two_switchable_plugins(layers, monkeypatch, classes) -> None:
+    _plugins(monkeypatch, *classes)
+    channel = FakeChannel("+close")
+
+    await _run(layers, channel)
+
+    assert [o.key for o in channel.asked[0].options if o.key.startswith("+")] == ["+close"]
+
+
+async def test_several_row_leads_the_root_at_two_and_the_default_is_the_first_plugin_row(layers, monkeypatch) -> None:
+    _plugins(monkeypatch, Stub, Dl)
+    channel = FakeChannel("+close")
+
+    await _run(layers, channel)
+
+    (asked,) = channel.asked
+    first = asked.options[0]
+    assert (first.key, first.label, first.hint) == ("+several", "Turn several on…", "turn on more than one at once")
+    assert asked.default == 1 and asked.options[asked.default].label == "stub"
+
+
+async def test_several_row_counts_the_plugins_that_can_be_switched_on_here(batch, monkeypatch) -> None:
+    channel = FakeChannel(Label("Turn several on…"), CANCEL, "+close")
+
+    await _run(batch, channel)
+
+    assert [o.label for o in channel.asked[1].options] == ["stub", "mob", "mob2", "dl"]
+
+
+@pytest.mark.parametrize("hold", ["overridden", "manual"])
+async def test_several_row_never_counts_a_project_override_or_a_manual_route(batch, monkeypatch, hold) -> None:
+    if hold == "overridden":
+        (batch.ws / "config.yaml").write_text(yaml.safe_dump({"stub": {"enabled": False}, "dl": {"enabled": False}}), encoding="utf-8")
+    else:
+        real = plugins_cmd.install_route_for
+        monkeypatch.setattr(plugins_cmd, "install_route_for", lambda entry: _MANUAL if entry.name.startswith("mob") else real(entry))
+    channel = FakeChannel(Label("Turn several on…"), CANCEL, "+close")
+
+    await _run(batch, channel)
+
+    assert [o.label for o in channel.asked[1].options] == (["mob", "mob2"] if hold == "overridden" else ["stub", "dl"])
+
+
+async def test_several_row_goes_when_the_only_other_candidate_is_held_off(batch) -> None:
+    (batch.ws / "config.yaml").write_text(yaml.safe_dump({"stub": {"enabled": False}, "mob": {"enabled": False},
+                                                          "mob2": {"enabled": False}}), encoding="utf-8")
+    channel = FakeChannel("+close")
+
+    await _run(batch, channel)
+
+    assert "+several" not in [o.key for o in channel.asked[0].options]
+
+
+async def test_several_which_is_a_multi_select_with_nothing_ticked_and_esc_back(batch) -> None:
+    channel = FakeChannel(Label("Turn several on…"), CANCEL, "+close")
+
+    assert await _run(batch, channel) is False
+
+    asked = channel.asked[1]
+    assert (asked.question, asked.default, asked.cancel, asked.multi) == ("Turn on which? (Esc = back)", frozenset(), "back", True)
+    assert channel.text == "" and len(channel.asked) == 3
+
+
+async def test_several_an_empty_confirmed_set_returns_to_the_root_with_nothing_printed(batch) -> None:
+    channel = FakeChannel(Label("Turn several on…"), _pick(), "+close")
+
+    assert await _run(batch, channel) is False
+
+    assert channel.text == "" and channel.asked[2].question == PLUGINS_QUESTION and not _on_disk_exists(batch)
+
+
+def _on_disk_exists(layers) -> bool:
+    return (layers.g / "overrides.yaml").exists()
+
+
+async def test_several_an_unreached_question_closes_with_the_unreached_line(batch) -> None:
+    channel = FakeChannel(Label("Turn several on…"), Unreached(Unreachable.NO_TTY))
+
+    assert await _run(batch, channel) is False
+
+    assert channel.lines == [plugins_interview.unavailable(Unreachable.NO_TTY)]
+
+
+async def test_batch_one_consent_and_one_install_cover_the_picks_that_need_it(batch, mobile, monkeypatch) -> None:
+    said = Said(monkeypatch, ["http://box", "8080"], [True, True])
+    touched: dict = {}
+    channel = FakeChannel(*_several("mob", "mob2", "dl"))
+
+    assert await _run(batch, channel, touched=touched) is True
+
+    lines = channel.lines
+    assert lines[0] == BATCH_CTRLC and lines.count(BATCH_CTRLC) == 1
+    assert len(mobile.spawns) == 1 and mobile.spawns[0][0][-1] == SPEC
+    assert lines[1] == CONSENT[0].format(names="mob, mob2")
+    assert CONSENT[2].format(name="mob", question=DOWNLOAD) in lines and CONSENT[2].format(name="mob2", question=DOWNLOAD2) in lines
+    assert not any(DL_ASK in line for line in lines)
+    (consent, default, tail), (own, own_default, own_tail) = said.confirmed
+    assert (consent, default) == ("", True) and BATCH_CTRLC in tail
+    assert (own, own_default, own_tail) == (DL_ASK, True, BATCH_CTRLC) and all(DOWNLOAD not in c[0] and DOWNLOAD2 not in c[0] for c in said.confirmed)
+    assert said.asked == [("Address: ", False), ("Port: ", False)]
+    progress = [x for x in lines if x in ("1 of 3: mob", "2 of 3: mob2", "3 of 3: dl")]
+    assert progress == ["1 of 3: mob", "2 of 3: mob2", "3 of 3: dl"]
+    for name, nxt in (("mob", "2 of 3: mob2"), ("mob2", "3 of 3: dl")):
+        assert lines.index(f"{name}: enabled; starts when you close Plugins") < lines.index(nxt)
+    assert lines[-2:] == ["dl: enabled; starts when you close Plugins", "3 of 3 enabled; restarts when you close Plugins"]
+    assert _written(batch) == {"mob": {"enabled": True, "url": "http://box"}, "mob2": {"enabled": True, "url": "8080"},
+                               "dl": {"enabled": True}}
+    assert set(touched) == {"mob", "mob2", "dl"} and channel.closed and channel.entered == 1
+
+
+async def test_batch_the_first_line_is_the_ctrlc_line_even_when_nothing_needs_an_install(batch, monkeypatch) -> None:
+    said = Said(monkeypatch, yes=[True])
+    channel = FakeChannel(*_several("stub", "dl"))
+
+    assert await _run(batch, channel) is True
+
+    lines = channel.lines
+    assert lines == [BATCH_CTRLC, "1 of 2: stub", "stub: enabled; starts when you close Plugins", "2 of 2: dl",
+                     "dl: enabled; starts when you close Plugins", "2 of 2 enabled; restarts when you close Plugins"]
+    assert said.confirmed == [(DL_ASK, True, BATCH_CTRLC)] and not any(CONSENT[0].split("{")[0] in x for x in lines)
+
+
+async def test_batch_picks_run_in_the_order_they_are_listed_not_the_order_ticked(batch, mobile, monkeypatch) -> None:
+    Said(monkeypatch, yes=[True])
+    channel = FakeChannel(*_several("dl", "stub"))
+
+    await _run(batch, channel)
+
+    assert [x for x in channel.lines if x.endswith(("stub", "dl")) and " of 2: " in x] == ["1 of 2: stub", "2 of 2: dl"]
