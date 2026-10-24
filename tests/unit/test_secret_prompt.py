@@ -78,22 +78,23 @@ def typed(monkeypatch):
 
 CLOUD = "https://api.openai.com/v1"
 LOCAL = "http://127.0.0.1:8001/v1"
+CRED = "https://user:pw@api.test/v1"
 SETUP = AutoresearchPlugin.manifest.setup
 
 
-def _ask_over(typed, fields, answers: list[str], *, key_stored: bool = True):
+def _ask_over(typed, fields, answers: list[str], *, key_stored: bool = True, url: str = CLOUD):
     typed.answers.extend(answers)
     typed.feed()
-    stored = {"proposer.base_url": CLOUD, "proposer.model": "gpt-x"}
+    stored = {"proposer.base_url": url, "proposer.model": "gpt-x"}
     return asyncio.run(plugins_cmd.ask_fields(
         fields, lambda key: stored.get(key, ""),
         lambda key: key_stored and key == "proposer.api_key",
-        lambda key: "none" if key == "proposer.api_key" else "",
+        lambda key: {"proposer.api_key": "none", "proposer.base_url": LOCAL}.get(key, ""),
         prompt=partial(prompt_line, console=Console(file=io.StringIO()))))
 
 
-def _ask(typed, answers: list[str], *, key_stored: bool = True):
-    return _ask_over(typed, SETUP, answers, key_stored=key_stored), typed.calls[-1]
+def _ask(typed, answers: list[str], *, key_stored: bool = True, url: str = CLOUD):
+    return _ask_over(typed, SETUP, answers, key_stored=key_stored, url=url), typed.calls[-1]
 
 
 def test_a_stored_key_question_says_enter_keeps_it_and_enter_writes_nothing(typed) -> None:
@@ -129,6 +130,25 @@ def test_with_nothing_stored_the_secret_question_is_the_plain_prompt(typed) -> N
     pairs, question = _ask(typed, [REPLACE + LOCAL, "", ""], key_stored=False)
     assert question == (f"{KEY_Q}: ", "", HIDDEN)
     assert pairs == [f"proposer.base_url={LOCAL}", "proposer.model=gpt-x"]
+
+
+def test_a_stored_credentialed_url_is_never_offered_and_enter_keeps_it(typed) -> None:
+    pairs, _ = _ask(typed, ["", "", ""], url=CRED)
+    assert typed.calls[0] == (f"{SETUP[0].prompt} [{plugins_cmd.URL_KEPT}]: ", "", HIDDEN)
+    assert pairs == ["proposer.model=gpt-x"]
+    assert all("pw" not in text and "pw" not in default for text, default, _ in typed.calls)
+
+
+def test_none_at_a_stored_credentialed_url_writes_the_settings_own_default(typed) -> None:
+    pairs, _ = _ask(typed, ["none", "", ""], url=CRED)
+    assert pairs[0] == f"proposer.base_url={LOCAL}"
+
+
+def test_a_new_url_at_a_stored_credentialed_url_is_written_and_names_the_old_host_at_the_key(typed) -> None:
+    pairs, question = _ask(typed, [LOCAL, "", ""], url=CRED)
+    assert pairs[0] == f"proposer.base_url={LOCAL}"
+    assert question == (
+        f"{KEY_Q} [stored key for api.test kept — type none to clear, or paste a new one]: ", "", HIDDEN)
 
 
 def test_the_questions_come_in_the_manifests_order_offering_what_is_stored(typed) -> None:
