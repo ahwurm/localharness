@@ -23,23 +23,28 @@ Unlike `components set`, these commands emit no ComponentMutated audit event.
 """
 from __future__ import annotations
 
+import asyncio
 import json as _json
 import sys
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Mapping, NoReturn, Optional
 from urllib.parse import urlsplit
 
+import click
 import typer
 from rich.console import Console
 from rich.markup import escape
 from rich.padding import Padding
 from rich.table import Table
 
+from localharness.channels.base import sanitize_for_display
 from localharness.cli.components_cmd import (
     _build_layered_loader, _core_secret_values, _err, _err_config, _serialize_value,
     _validate_overlay, _validation_text, is_secret, scrub, shown, walk_secret_values,
 )
+from localharness.cli.interview import confirm_line, prompt_line
 from localharness.cli.workspace import _stdin_is_a_terminal
 from localharness.config.overlay import atomic_write_overlay, load_overlay
 from localharness.config.plugin_sections import unowned_hint
@@ -402,9 +407,9 @@ def _secret_stored(resolution: Resolution, loader: ConfigLoader, entry: PlanEntr
         return False
 
 
-def _ask_fields(fields: tuple[SetupField, ...], stored: Any, secret_stored: Any = lambda key: False,
-                cleared: Any = lambda key: "") -> list[str]:
-    """Ask each setup question on the terminal; KEY=VALUE for every answer given. A question that
+async def ask_fields(fields: tuple[SetupField, ...], stored: Any, secret_stored: Any = lambda key: False,
+                     cleared: Any = lambda key: "", *, prompt: Any) -> list[str]:
+    """Ask each setup question through `prompt` (None raises click.Abort); KEY=VALUE for every answer given. A question that
     is not secret offers `stored(key)`, the value it holds now, else its default; a secret one
     offers nothing, so a stored token is never shown. When a secret is stored (`secret_stored`), its
     question says so: Enter keeps it and writes nothing (R5), `none` writes `cleared(key)` (the
@@ -415,11 +420,12 @@ def _ask_fields(fields: tuple[SetupField, ...], stored: Any, secret_stored: Any 
     for f in fields:
         was = "" if f.secret else stored(f.key)
         default = "" if f.secret else (was or f.default)
-        prompt = f.prompt
+        text = f.prompt
         if f.secret and secret_stored(f.key):
-            prompt += f" [{SECRET_KEPT_FOR.format(host=changed_from) if changed_from else SECRET_KEPT}]"
-        answer = typer.prompt(prompt, default=default, hide_input=f.secret,
-                              show_default=bool(default)).strip()
+            text += f" [{SECRET_KEPT_FOR.format(host=changed_from) if changed_from else SECRET_KEPT}]"
+        answer = await prompt(sanitize_for_display(f"{text}: "), default=default, secret=f.secret)
+        if answer is None:
+            raise click.Abort()
         if not f.secret and f.key.split(".")[-1].endswith("url") and was and answer and answer != was:
             changed_from = urlsplit(was).hostname or ""
         if f.secret and answer.lower() == "none":
@@ -645,16 +651,29 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
     step is pending — a configured plugin is just switched — and the change takes effect in the
     session that resumes, so the success line does not point at the next start. Either way the
     setup action runs only while the step is pending or when answers were written in this run."""
-    import asyncio
+    resolution, loader, workspace = _resolve(config_dir, json_output=False)
+    entry = _entry(resolution, loader, name, False)
+    return asyncio.run(_switch_body(
+        resolution, loader, workspace, entry, name, on, pairs, to_workspace, ask, in_session,
+        partial(prompt_line, console=console), partial(confirm_line, console=console)))
 
+
+async def _confirmed(confirm: Any, text: str, default: bool) -> bool:
+    answer = await confirm(sanitize_for_display(text), default=default)
+    if answer is None:
+        raise click.Abort()
+    return answer
+
+
+async def _switch_body(resolution: Resolution, loader: ConfigLoader, workspace: Any, entry: PlanEntry,
+                       name: str, on: bool, pairs: list[str], to_workspace: bool, ask: bool,
+                       in_session: bool, prompt: Any, confirm: Any) -> StepOutcome:
     from localharness.cli.doctor_cmd import print_plugin_row
     from localharness.config.loader import ConfigLoader
     from localharness.plugins.lifecycle import DoctorRow, setup_action_rows
     from localharness.plugins.resolve import resolve
     from localharness.plugins.setup import has_setup_action, render_agent_prompt
 
-    resolution, loader, workspace = _resolve(config_dir, json_output=False)
-    entry = _entry(resolution, loader, name, False)
     word, verb = ("on", "enable") if on else ("off", "disable")
     if name not in resolution.enabled:  # a refused NAME (invalid, a core key, taken): its key is
         _fail(f"{name} cannot be turned {word}: {entry.reason}")  # not this plugin's to write
@@ -665,7 +684,7 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
         _fail("no project workspace applies here — run `localharness init --workspace` in the "
               "project first, or leave out --workspace to change the machine-level setting")
     if (in_session and on and ask and not entry.bundled
-            and not typer.confirm(THIRD_PARTY_CONFIRM.format(name=name), default=False)):
+            and not await _confirmed(confirm, THIRD_PARTY_CONFIRM.format(name=name), False)):
         console.print(escape(f"{name} stays off. Your conversation continues."), soft_wrap=True)
         return StepOutcome(name, on, stopped=True)
     # Each layer's overrides.yaml exactly as config/loader.py reads it.
@@ -679,13 +698,13 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
     has_action = m is not None and cls is not None and has_setup_action(cls)
     # Before asking, from what is stored now: does the step still have work? The shell asks every
     # question every time, as it always has; a session asks only while the step is pending.
-    pending = (asyncio.run(step_pending(resolution, loader, entry, _paths(loader, workspace)))
+    pending = (await step_pending(resolution, loader, entry, _paths(loader, workspace))
                if ask and m is not None and not missing and (in_session or has_action) else True)
     if ask and setup and not missing and (pending or not in_session):
         # the answers go through the one checked write path, as --set values
-        pairs = _ask_fields(setup, lambda key: _stored(resolution, loader, entry, key),
-                            lambda key: _secret_stored(resolution, loader, entry, key),
-                            lambda key: _cleared(resolution, entry, key))
+        pairs = await ask_fields(setup, lambda key: _stored(resolution, loader, entry, key),
+                                 lambda key: _secret_stored(resolution, loader, entry, key),
+                                 lambda key: _cleared(resolution, entry, key), prompt=prompt)
     overlay = load_overlay(target)
     set_value_in_dict(overlay, f"{name}.enabled", on)
     values = _checked_all(resolution, loader, entry, pairs, to_workspace, overlay) if pairs else {}
@@ -721,14 +740,14 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
     paths = _paths(fresh_loader, workspace) if fresh_loader is not None else None
     rows: tuple = ()
     if step and has_action and after.state == "on" and (pending or pairs) and (
-            not m.setup_action or typer.confirm(m.setup_action, default=True)):
-        rows = asyncio.run(setup_action_rows(fresh, name, paths))
+            not m.setup_action or await _confirmed(confirm, m.setup_action, True)):
+        rows = await setup_action_rows(fresh, name, paths)
         if rows:
             print_plugin_row(DoctorRow(name, "on", "", rows), [])
     failed, skipped, block = "", "", False
     if step and (setup or has_action):
         console.print("Checking it now:")
-        row = _probe(name, fresh, paths)
+        row = await _probe(name, fresh, paths)
         unanswered = any(not _stored(fresh, fresh_loader, after, f.key) for f in setup)
         not_clean = row is not None and _not_clean(row, unanswered)
         # The setup action's rows count as the check's do: one that failed (a far end that does not
@@ -765,18 +784,16 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
     return StepOutcome(name, on, failed_check=failed, skipped_check=skipped)
 
 
-def _probe(name: str, resolution: Resolution, paths: PluginPaths) -> DoctorRow | None:
+async def _probe(name: str, resolution: Resolution, paths: PluginPaths) -> DoctorRow | None:
     """Run the plugin's doctor check once against `resolution` — read after the write — and print
     it with doctor's own row printer. Returns that row, or None when it could not check. Never
     fails the enable (it wrote)."""
-    import asyncio
-
     from localharness.cli.doctor_cmd import print_plugin_row
     from localharness.plugins.lifecycle import DoctorRow, _doctor_row
 
     try:
         entry = resolution.plan.entry(name)
-        row = (asyncio.run(_doctor_row(resolution, name, paths)) if entry.state == "on"
+        row = (await _doctor_row(resolution, name, paths) if entry.state == "on"
                else DoctorRow(name, entry.state, entry.display, bundled=entry.bundled))
         print_plugin_row(row, [])
         return row
