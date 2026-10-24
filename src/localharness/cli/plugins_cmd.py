@@ -42,6 +42,7 @@ from urllib.parse import urlsplit
 
 import click
 import typer
+from packaging.utils import canonicalize_name
 from rich.console import Console, Group, RenderableType
 from rich.markup import escape
 from rich.padding import Padding
@@ -738,7 +739,7 @@ async def step_pending(resolution: Resolution, loader: ConfigLoader, entry: Plan
 
 
 def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_dir: Optional[str],
-            ask: bool = False, in_session: bool = False) -> StepOutcome:
+            ask: bool = False, in_session: bool = False, install: Literal["own", "none"] = "none") -> StepOutcome:
     """Write `<name>.enabled: <on>`, and any --set values, into one layer's overrides.yaml; turning
     a plugin on, run its setup step around that write. With `ask` (a terminal, no --set): its
     questions are asked first and the answers written as --set values; after the write its setup
@@ -751,17 +752,20 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
     `in_session` (the /plugins restart, via session_step): the questions are asked only while the
     step is pending — a configured plugin is just switched — and the change takes effect in the
     session that resumes, so the success line does not point at the next start. Either way the
-    setup action runs only while the step is pending or when answers were written in this run."""
+    setup action runs only while the step is pending or when answers were written in this run.
+
+    `install="own"` (with `ask`): a missing install extra is installed first, after one consent."""
     resolution, loader, workspace = _resolve(config_dir, json_output=False)
     entry = _entry(resolution, loader, name, False)
     state = PassState(name, on, tuple(pairs), to_workspace, ask, in_session, resolution, loader, workspace, entry)
     try:
         done = asyncio.run(_run_pass(state, prompt=partial(prompt_line, console=console),
-                                     confirm=partial(confirm_line, console=console), report=shell_report))
+                                     confirm=partial(confirm_line, console=console), report=shell_report,
+                                     install=install))
     except Refusal as refusal:
         shell_report("refused", str(refusal))
         raise typer.Exit(code=2)
-    return StepOutcome(name, on, failed_check=done.failed, skipped_check=done.skipped, stopped=done.declined or done.overridden)
+    return StepOutcome(name, on, failed_check=done.failed, skipped_check=done.skipped, stopped=done.declined or done.overridden or done.halt == "install_skipped")
 
 
 def shell_report(kind: ReportKind, payload: Any) -> None:
@@ -855,10 +859,19 @@ async def _confirmed(confirm: Any, text: str, default: bool, tail: str = "") -> 
     return answer
 
 
-async def _run_pass(state: PassState, *, prompt: Any, confirm: Any, report: Any) -> PassState:
+async def _run_pass(state: PassState, *, prompt: Any, confirm: Any, report: Any,
+                    install: Literal["own", "none"] = "none") -> PassState:
     state = await _prepare(state, confirm=confirm, report=report)
     if state.declined or state.overridden:
         return state
+    if install == "own" and state.on and state.ask:
+        session = PluginSession(state.loader.global_config_dir, state.workspace, frozenset(), {}, {})
+        installed = await _install(replace(state, console=console), session, confirm=confirm, install=install, in_batch=False)
+        if isinstance(installed, PassResult):
+            raise Refusal(installed.detail, ())
+        state = replace(installed, console=state.console)
+        if state.halt == "install_skipped":
+            return await _write(state, report=report)
     state = await _questions(state, prompt=prompt)
     state = await _write(state, report=report)
     state = await _act(state, confirm=confirm, report=report)
@@ -1347,7 +1360,7 @@ def session_step(action: tuple[str, str], config_dir: str | None) -> StepOutcome
     verb, name = action
     try:
         return _switch(name, verb == "enable", [], False, config_dir,
-                       ask=_stdin_is_a_terminal(), in_session=True)
+                       ask=_stdin_is_a_terminal(), in_session=True, install="own")
     except (click.exceptions.Abort, click.exceptions.Exit, EOFError, KeyboardInterrupt):
         console.print("Stopped. Your conversation continues.")
         return StepOutcome(name, verb == "enable", stopped=True)
@@ -1383,6 +1396,12 @@ async def switch_decision(name: str, on: bool, running: frozenset[str], global_c
         return None if flag or name in running else f"{name} is already off."
     m = entry.manifest
     if m is not None and _extra_missing(m):
+        route = install_route_for(entry)
+        if route is not None and route.argv is not None and _stdin_is_a_terminal():
+            return None
+        if route is not None and route.manual is not None:
+            return "\n".join((TYPED_NEEDS_EXTRA.format(name=name, extra=f"localharness[{canonicalize_name(m.requires_extra)}]"),
+                              *manual_block([name], route.manual, TYPED_ROUTE)))
         return (f"{name} needs its install extra first: install `localharness[{m.requires_extra}]`, "
                 f"then /plugins enable {name} again")
     if name in running and flag and not await step_pending(resolution, loader, entry,
@@ -1423,7 +1442,7 @@ def plugins_enable(
     On a terminal, with no --set, it first asks the plugin's setup questions, if it declares any.
     """
     _switch(name, True, settings or [], workspace, config_dir,
-            ask=not settings and not no_input and not workspace and _stdin_is_a_terminal())
+            ask=not settings and not no_input and not workspace and _stdin_is_a_terminal(), install="none")
 
 
 @plugins_app.command("disable")

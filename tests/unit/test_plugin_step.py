@@ -26,6 +26,7 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 from localharness.cli import plugins_cmd
+from localharness.cli.plugins_cmd import CONSENT, INSTALL_SKIPPED
 from localharness.cli.app import app
 from localharness.plugins import builtin, discovery, lifecycle, resolve, setup
 from localharness.plugins.api import GLOBAL_ONLY, Check, Plugin, PluginManifest, SetupField
@@ -33,7 +34,10 @@ from localharness.plugins.setup import AGENT_PROMPT_LEAD
 from tests.plugin_prompts import fake_prompts
 from tests.unit.test_doctor_layer_report import _layout
 from tests.unit.test_plugin_sections import _INFO_KEYS
+from tests.unit.test_extra_install import SPEC, dist  # noqa: F401
 from tests.unit.test_plugins_enable_setup import _CONFIG
+from tests.unit.test_plugins_pass import CALLS as MOB_CALLS
+from tests.unit.test_plugins_pass import DOWNLOAD, Mob, mobile  # noqa: F401
 
 runner = CliRunner()
 _REAL_BUILTINS = builtin.BUILTIN_PLUGINS
@@ -831,3 +835,80 @@ def test_dispatch_without_its_extra_asks_nothing(g, real, term, monkeypatch) -> 
     assert term.asked == [] and "Checking it now" not in result.output
     _in_order(result.output, "dispatch is missing its install extra — install `localharness[dispatch]` to use it",
               DISPATCH_NEXT)
+
+
+# --- session_step installs a missing extra after one consent, on a terminal only ----------------------
+
+
+@pytest.fixture
+def mob(monkeypatch, mobile, dist):  # noqa: F811
+    """mob needs the mobile extra, which this distribution provides and the venv lacks until a faked install exits 0."""
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Mob,))
+    MOB_CALLS.clear()
+    return mobile
+
+
+def _overlay(g: Path) -> dict:
+    return yaml.safe_load((g / "overrides.yaml").read_text(encoding="utf-8"))
+
+
+def test_session_step_installs_a_missing_extra_after_one_consent(g, term, mob, capsys) -> None:
+    term.yes[:] = [True]
+    term.answers[:] = ["http://box"]
+    outcome = plugins_cmd.session_step(("enable", "mob"), str(g))
+    out = capsys.readouterr().out
+
+    assert term.confirmed == [("", True)] and term.asked == [("Address", "http://127.0.0.1:1")]
+    assert len(mob.spawns) == 1 and mob.spawns[0][0][-1] == SPEC
+    _in_order(out, CONSENT[0].format(names="mob"), "installing localharness[", "✓ mob enabled", "Checking it now:")
+    assert out.count(DOWNLOAD) == 1 and MOB_CALLS == ["download"]
+    assert _overlay(g) == {"mob": {"enabled": True, "url": "http://box"}}
+    assert outcome == plugins_cmd.StepOutcome(name="mob", on=True)
+
+
+def test_session_step_a_no_at_the_consent_writes_the_enable_and_stops(g, term, mob, capsys) -> None:
+    term.yes[:] = [False]
+    outcome = plugins_cmd.session_step(("enable", "mob"), str(g))
+    out = capsys.readouterr().out
+
+    assert out.count(INSTALL_SKIPPED[0].format(names="mob", why="")) == 1
+    assert mob.spawns == [] and term.asked == [] and MOB_CALLS == []
+    assert _overlay(g) == {"mob": {"enabled": True}}
+    assert outcome == plugins_cmd.StepOutcome(name="mob", on=True, stopped=True)
+
+
+def test_session_step_ctrl_c_at_the_install_consent_writes_nothing(g, term, mob, capsys) -> None:
+    term.yes[:] = [None]
+    outcome = plugins_cmd.session_step(("enable", "mob"), str(g))
+
+    assert "Stopped. Your conversation continues." in capsys.readouterr().out
+    assert mob.spawns == [] and term.asked == [] and not (g / "overrides.yaml").exists()
+    assert outcome == plugins_cmd.StepOutcome(name="mob", on=True, stopped=True)
+
+
+def test_session_step_a_failed_install_writes_the_enable_and_stops(g, term, mob, capsys) -> None:
+    mob.proc.code = 1
+    term.yes[:] = [True]
+    outcome = plugins_cmd.session_step(("enable", "mob"), str(g))
+
+    assert "the install failed (exit 1" in capsys.readouterr().out
+    assert term.asked == [] and _overlay(g) == {"mob": {"enabled": True}}
+    assert outcome == plugins_cmd.StepOutcome(name="mob", on=True, stopped=True)
+
+
+def test_session_step_without_a_terminal_spawns_nothing_and_asks_nothing(g, no_term, mob, capsys) -> None:
+    outcome = plugins_cmd.session_step(("enable", "mob"), str(g))
+
+    assert "mob is missing its install extra" in capsys.readouterr().out
+    assert mob.spawns == [] and _overlay(g) == {"mob": {"enabled": True}}
+    assert outcome == plugins_cmd.StepOutcome(name="mob", on=True)
+
+
+def test_session_step_a_plugin_whose_extra_is_present_installs_nothing(g, term, mob, capsys) -> None:
+    mob.installed = True
+    term.answers[:] = ["http://box"]
+    term.yes[:] = [True]
+    outcome = plugins_cmd.session_step(("enable", "mob"), str(g))
+
+    assert mob.spawns == [] and CONSENT[0].format(names="mob") not in capsys.readouterr().out
+    assert term.confirmed == [(DOWNLOAD, True)] and not outcome.stopped

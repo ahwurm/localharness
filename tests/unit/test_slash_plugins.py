@@ -32,12 +32,16 @@ from rich.console import Console
 from localharness.channels.base import ChannelAdapter
 from localharness.channels.terminal import TerminalChannel
 from localharness.channels.mobile.channel import MobileChannel
-from localharness.cli import plugins_cmd, start_cmd
+from localharness.cli import plugins_cmd, start_cmd, update_cmd
 from localharness.cli.repl import OrchestratorREPL
 from localharness.cli.slash_commands import all_rows, find_row
 from localharness.plugins import builtin, discovery
+from localharness.plugins import resolve as resolve_module
 from tests.plugin_prompts import fake_prompts
+from tests.unit.test_extra_install import SYNC, UV_PREREQ, _checkout, dist  # noqa: F401
 from tests.unit.test_plugin_step import Reach
+from tests.unit.test_plugin_resolve import write_folder_plugin
+from tests.unit.test_plugins_pass import Mob, mobile  # noqa: F401
 from tests.unit.test_plugins_enable_setup import _CONFIG, Needy, Stub
 from tests.unit.test_repl_input_box import FakeBoxChannel, _pending_turn, _repl
 from tests.unit.test_repl_unknown_slash import RecordingChannel, _build_repl
@@ -128,6 +132,92 @@ def test_decision_asks_and_writes_nothing(g, monkeypatch):
     assert _decide("stub", True, {"stub"}, g) is None
     assert _decide("stub", False, {"stub"}, g) is None
     assert sorted(p.name for p in g.iterdir()) == before
+
+
+MOB_LINE = "mob needs its install extra first: install `localharness[mobile]`, then /plugins enable mob again"
+
+
+@pytest.fixture
+def gm(g, mobile, dist, monkeypatch) -> Path:  # noqa: F811
+    """mob (off by default) needs the mobile extra, which this distribution provides and the venv lacks."""
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Stub, Mob))
+    monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: False)
+    return g
+
+
+def _terminal(monkeypatch, is_one: bool = True) -> None:
+    monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: is_one)
+
+
+def test_decision_a_missing_extra_with_an_install_route_on_a_terminal_restarts(gm, monkeypatch):
+    _terminal(monkeypatch)
+    assert _decide("mob", True, set(), gm) is None
+    assert gm.joinpath("overrides.yaml").exists() is False
+
+
+def test_decision_a_missing_extra_with_an_install_route_off_a_terminal_is_todays_line(gm):
+    assert _decide("mob", True, set(), gm) == MOB_LINE
+
+
+def test_decision_a_missing_extra_turned_off_with_an_install_route_restarts(gm, monkeypatch):
+    _terminal(monkeypatch)
+    _overrides(gm, {"mob": {"enabled": False}})
+    assert _decide("mob", True, set(), gm) is None
+
+
+def test_decision_an_extra_the_distribution_does_not_provide_is_todays_line_on_a_terminal(g, monkeypatch, dist):  # noqa: F811
+    _terminal(monkeypatch)
+    assert _decide("needy", True, set(), g) == NEEDY_LINE
+
+
+def test_decision_a_third_party_plugin_missing_its_extra_is_todays_line(gm, monkeypatch, tmp_path):
+    _terminal(monkeypatch)
+    monkeypatch.setenv("LH_TEST_SENTINEL_DIR", str(tmp_path))
+    write_folder_plugin(gm, "outside", manifest=", requires_extra='mobile'")
+    _overrides(gm, {"outside": {"enabled": True}})
+    assert _decide("outside", True, set(), gm) == (
+        "outside needs its install extra first: install `localharness[mobile]`, then /plugins enable outside again")
+
+
+def test_decision_a_source_checkout_prints_the_needs_extra_block_with_the_sync_command(gm, monkeypatch, tmp_path):
+    root = _checkout(monkeypatch, tmp_path)
+    _terminal(monkeypatch)
+    assert _decide("mob", True, set(), gm).splitlines() == [
+        "mob: needs localharness[mobile].",
+        "In another terminal run:",
+        f"cd '{root}' && {SYNC}",
+        "then /plugins enable mob again"]
+
+
+def test_decision_a_uv_tool_install_without_uv_names_uv_first(gm, monkeypatch):
+    monkeypatch.setattr(update_cmd, "_installer_kind", lambda: ("uv-tool", None))
+    lines = _decide("mob", True, set(), gm).splitlines()
+    assert lines[:3] == ["mob: needs localharness[mobile].", UV_PREREQ, "In another terminal run:"]
+    assert lines[3].startswith("uv tool install 'localharness[") and lines[4] == "then /plugins enable mob again"
+
+
+def test_decision_on_windows_with_uv_quits_first_and_quotes_for_the_platform(gm, monkeypatch):
+    monkeypatch.setattr(update_cmd, "_installer_kind", lambda: ("uv-tool", "C:\\uv\\uv.exe"))
+    monkeypatch.setattr(update_cmd, "_is_windows", lambda: True)
+    lines = _decide("mob", True, set(), gm).splitlines()
+    assert lines[:2] == ["mob: needs localharness[mobile].", "Quit localharness first, then run:"]
+    assert lines[2].startswith("uv tool install localharness[") and "'" not in lines[2]
+    assert lines[3] == "then start localharness and /plugins enable mob again"
+
+
+def test_decision_the_needs_extra_block_names_the_canonical_extra(gm, monkeypatch, tmp_path):
+    _checkout(monkeypatch, tmp_path)
+    monkeypatch.setattr(Mob, "manifest", Mob.manifest.model_copy(update={"requires_extra": "Exact_Tokenizer"}))
+    monkeypatch.setitem(resolve_module.resolve.__kwdefaults__, "extra_installed", lambda extra: False)
+    assert _decide("mob", True, set(), gm).splitlines()[0] == "mob: needs localharness[exact-tokenizer]."
+
+
+def test_decision_a_plugin_with_no_extra_keeps_every_answer_on_a_terminal(g, monkeypatch):
+    _terminal(monkeypatch)
+    assert _decide("stub", True, set(), g) is None
+    assert _decide("stub", False, set(), g) == "stub is already off."
+    _overrides(g, {"stub": {"enabled": True, "url": "http://ok"}})
+    assert _decide("stub", True, {"stub"}, g) == "stub is already on."
 
 
 def test_overview_lists_every_plugin_and_how_to_switch_one(g):
