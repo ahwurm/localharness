@@ -1376,7 +1376,8 @@ def session_step(action: tuple[str, str], config_dir: str | None) -> StepOutcome
         console.print("Stopped. Your conversation continues.")
         return StepOutcome(name, verb == "enable", stopped=True)
     except Exception as exc:  # noqa: BLE001 — after teardown a raise would lose the conversation
-        why = (f"{type(exc).__name__}: {exc}".splitlines() or [type(exc).__name__])[0]
+        first = (f"{type(exc).__name__}: {exc}".splitlines() or [type(exc).__name__])[0]
+        why = redact_text(sanitize_for_display(first))
         console.print(escape(f"{name}'s setup hit an error: {why}. Your conversation continues."),
                       soft_wrap=True)
         return StepOutcome(name, verb == "enable", stopped=True)

@@ -649,6 +649,19 @@ def test_session_step_an_error_after_the_teardown_is_one_line(g, term, monkeypat
     assert outcome == plugins_cmd.StepOutcome(name="pro", on=True, stopped=True)
 
 
+def test_session_step_an_error_line_shows_no_url_credential_and_no_escape(g, term, monkeypatch, capsys) -> None:
+    _write(g, {"pro": {"url": "http://ok"}})
+
+    def boom(path, data):
+        raise OSError("down https://user:pw@h.test/x \x1b[31mred")
+    monkeypatch.setattr(plugins_cmd, "atomic_write_overlay", boom)
+    plugins_cmd.session_step(("enable", "pro"), str(g))
+    out = capsys.readouterr().out
+
+    assert "pro's setup hit an error: OSError: down https://h.test/x" in out
+    assert "pw" not in out and "\x1b" not in out
+
+
 def test_session_step_disable_writes_the_switch_off(g, term, capsys) -> None:
     _write(g, {"pro": {"url": "http://ok", "enabled": True}})
     outcome = plugins_cmd.session_step(("disable", "pro"), str(g))
