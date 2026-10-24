@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import re
 from pathlib import Path
 
+from localharness.cli.slash_commands import SlashCommand
 from localharness.core.events import Action, TurnCompleted, TurnFailed
 from localharness.tools.builtin.paths import resolve_user_path
 
@@ -12,10 +14,20 @@ LINE = "The person invoked /{name}{args}. Call skill('{name}') and follow it."
 NOT_LOADED = 'the model did not load /{name}; try again, or say "use the {name} skill"'
 ADDED = "added since start: {name} ({origin}, {path})"
 CHANGED = "changed since first use: {path}; using it"
+FIRST_SENTENCE = re.compile(r".*?[.!?](?=\s|$)")
+ROW_WIDTH = 80
 
 
 def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def skill_row(record) -> SlashCommand:
+    sentence = FIRST_SENTENCE.match(record.description)
+    description = (sentence.group() if sentence else record.description)[:ROW_WIDTH]
+    if record.origin == "project":
+        description += " (project)"
+    return SlashCommand(f"/{record.name}", description, "_slash_skill", takes_args=True, plugin="skill")
 
 
 class SkillSession:

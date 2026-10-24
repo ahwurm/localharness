@@ -4,12 +4,13 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 
 from localharness.cli.repl import OrchestratorREPL
-from localharness.cli.skill_session import SkillSession
+from localharness.cli.skill_session import SkillSession, skill_row
 from localharness.cli.slash_commands import (
     SLASH_COMMANDS,
     SlashCommand,
@@ -332,3 +333,121 @@ async def test_a_write_from_an_earlier_turn_still_suppresses(sitting):
     sitting.session.arm()
     await sitting.completed()
     assert sitting.session.invoke(record, "")[1] == ()
+
+
+def _row(description, origin="machine", name="notes"):
+    return skill_row(skills.Skill(name, description, origin, Path(f"/x/{name}/SKILL.md"), origin == "project"))
+
+
+def test_a_skill_row_carries_the_first_sentence_and_takes_args():
+    row = _row("Use notes when asked. Then more.")
+    assert row == SlashCommand("/notes", "Use notes when asked.", "_slash_skill", takes_args=True, plugin="skill")
+    assert row.terminal_only is False
+    assert _row("Use notes when asked. Then more.", "project").description == "Use notes when asked. (project)"
+
+
+@pytest.mark.parametrize(
+    "description, shown",
+    [("Ship it! Now.", "Ship it!"), ("Is it? Yes.", "Is it?"), ("Uses v1.2 notes", "Uses v1.2 notes"), ("Ends here.", "Ends here.")],
+)
+def test_a_skill_row_cuts_at_a_sentence_end_followed_by_space_or_the_end(description, shown):
+    assert _row(description).description == shown
+
+
+def test_a_skill_row_is_cut_to_eighty_characters_and_the_label_is_not_counted():
+    assert _row("é" * 100).description == "é" * 80
+    assert _row("a" * 79 + ". tail").description == "a" * 79 + "."
+    assert _row("a" * 79 + "!" + " tail").description == "a" * 79 + "!"
+    assert _row("a" * 80 + ". tail").description == "a" * 80
+    assert _row("b" * 90, "project").description == "b" * 80 + " (project)"
+
+
+def test_the_session_is_the_one_caller_of_the_set_find_in_cli():
+    def finds(path):
+        return [
+            n for n in ast.walk(ast.parse(path.read_text()))
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "find"
+            and (getattr(n.func.value, "attr", None) or getattr(n.func.value, "id", "")).endswith("skill_set")
+        ]
+
+    cli = Path(inspect.getfile(SkillSession)).parent
+    assert len(finds(cli / "skill_session.py")) == 1
+    assert [p.name for p in cli.glob("*.py") if p.name != "skill_session.py" and finds(p)] == []
+
+
+def test_the_session_find_returns_what_the_set_returns(sitting):
+    write_skill(sitting.cfg / "skills", "fresh")
+    assert sitting.session.find("notes") is sitting.record()
+    assert sitting.session.find("fresh") is sitting.found.skills[-1]
+    assert sitting.session.find("../x") is None
+    assert sitting.session.find("absent") is None
+
+
+async def test_events_from_a_child_reach_none_of_the_session_handlers(sitting):
+    sitting.session.invoke(sitting.record(), "")
+    sitting.session.arm()
+    await sitting.completed("explore")
+    assert sitting.said == []
+    await sitting.call("notes", agent="explore")
+    await sitting.completed()
+    assert sitting.said == ['the model did not load /notes; try again, or say "use the notes skill"']
+
+
+async def test_a_skill_call_for_another_name_does_not_satisfy_the_arm(tmp_path, pkg):
+    sitting = Sitting(tmp_path / "cfg", ("notes", "notes-two"))
+    sitting.session.invoke(sitting.record(), "")
+    sitting.session.arm()
+    await sitting.call("notes-two")
+    await sitting.completed()
+    assert sitting.said == ['the model did not load /notes; try again, or say "use the notes skill"']
+
+
+async def test_a_cancelled_turn_leaves_nothing_armed_for_the_next(sitting):
+    sitting.session.invoke(sitting.record(), "")
+    sitting.session.arm()
+    sitting.session.arm()
+    await sitting.completed()
+    assert sitting.said == []
+
+
+async def test_a_mid_turn_arm_by_name_ignores_calls_recorded_before_it(sitting):
+    await sitting.call("notes")
+    sitting.session.arm()
+    sitting.session.invoke(sitting.record(), "")
+    sitting.session.arm("notes")
+    await sitting.completed()
+    assert sitting.said == ['the model did not load /notes; try again, or say "use the notes skill"']
+
+
+async def test_nothing_armed_says_nothing_on_either_turn_end(sitting):
+    sitting.session.arm()
+    await sitting.completed()
+    await sitting.failed()
+    assert sitting.said == []
+
+
+async def test_hostile_action_params_record_nothing_and_raise_nothing(sitting):
+    path = sitting.paths["notes"]
+
+    def bus_action(**kw):
+        return sitting.bus.publish(Action(agent_id="orchestrator", session_id="s1", **kw))
+
+    await bus_action(action_type="tool_call", tool_name="skill", tool_params=None)
+    await bus_action(action_type="tool_call", tool_name="skill", tool_params={"name": 3})
+    await bus_action(action_type="llm_response", tool_name="skill", tool_params={"name": "notes"})
+    await sitting.act("write", path="a\x00b", content="x")
+    await sitting.act("write", path=3, content="x")
+    await sitting.act("write", path=str(path), content=None)
+    assert sitting.session._called == set() and sitting.session._written == set()
+    await sitting.act("write", path=str(path), content="\ud800")
+    assert len(sitting.session._written) == 1
+
+
+def test_only_the_turn_end_handler_awaits_and_only_the_say():
+    def awaits(fn):
+        return [n for n in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(fn)))) if isinstance(n, ast.Await)]
+
+    for name in ("invoke", "arm", "find", "on_action", "on_turn_failed"):
+        assert awaits(getattr(SkillSession, name)) == []
+    (only,) = awaits(SkillSession.on_turn_completed)
+    assert ast.unparse(only.value.func) == "self._say"
