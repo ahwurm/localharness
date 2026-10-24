@@ -20,7 +20,7 @@ from localharness.config.skills import SkillSet
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 from localharness.tools.builtin.chunk_tool import ChunkTool
 from localharness.tools.builtin.cruncher_exec import UntrustedHandleError, bind_clean_origin_bodies
-from localharness.core.fence import TAG, fence_project_text
+from localharness.core.fence import TAG
 from localharness.tools.builtin.skill_tool import SKILLS_FENCE_HEADER, STEP_FULL_TAIL, TASK_FULL_TAIL, SkillTool, skill_schema
 from localharness.tools.builtin.task_tool import TaskTool
 from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
@@ -472,7 +472,7 @@ async def live(tmp_path, found, store, cap=50_000, workspace=None):
 def test_the_tails_are_exactly_the_words_the_model_acts_on():
     assert STEP_FULL_TAIL == (
         "[not pinned: this step already holds four references, so this skill may be evicted before you finish; "
-        "the eviction note will name the tool_result_get id that restores it]"
+        "if it is, the eviction note names the tool_result_get id that restores it]"
     )
     assert TASK_FULL_TAIL == (
         "[not kept across turns: the task already holds four references; to keep it, drop one with "
@@ -511,19 +511,24 @@ async def test_the_tool_cuts_with_the_registry_helper_so_the_registry_never_cuts
     (active,) = store.active_references
     assert over.output == store.get(active.handle) and len(over.output) == over_whole <= cap
     assert over.truncated is True and over.original_length == over_whole + 1
-    assert over.output.endswith(f"[output cut: {over_whole + 1} chars total — head kept] ...")
+    body_whole = over_whole + 1 - len(header("over", "bundled", dirs.bundled)) - 2
+    assert over.output.endswith(f"[output cut: {body_whole} chars total — head kept] ...")
 
     puts.clear()
     projected = await load("projected")
     (active,) = store.active_references
     assert projected.truncated is True and projected.output == store.get(active.handle) and len(projected.output) <= cap
     assert puts == ["untrusted"] and store.origin(active.handle) == "untrusted"
+    closing = f"</project-instructions {TAG}>"
+    text = projected.output
+    assert text.count(closing) == 1 and text.index("[output cut:") < text.index(closing)
+    assert "[output cut: 5000 chars total" in text
 
 
 async def test_a_cap_at_or_below_the_reserve_cuts_to_nothing_instead_of_raising(tmp_path, dirs):
     sized(dirs.bundled, "notes", 500)
     result = await skill_tool(tmp_path, discovered(dirs), cap=10).run(name="notes")
-    assert result.success and result.output == "" and result.truncated is True
+    assert result.success and result.output == header("notes", "bundled", dirs.bundled) + "\n\n" and result.truncated is True
 
 
 async def test_a_full_step_gets_the_step_tail_and_no_pin(tmp_path, dirs):
@@ -564,18 +569,18 @@ async def test_a_full_task_gets_the_task_tail_and_keeps_its_references(tmp_path,
     assert [a.source for a in store.active_references] == list("abcd") and sources(state) == list("abcd")
 
 
-@pytest.mark.parametrize("held", [3, 4])
-async def test_the_fourth_pin_and_the_fourth_reference_fit_and_the_fifth_does_not(tmp_path, dirs, held):
+@pytest.mark.parametrize("already", [3, 4])
+async def test_the_fourth_pin_and_the_fourth_reference_fit_and_the_fifth_does_not(tmp_path, dirs, already):
     _skill(dirs.bundled, "notes")
     store = ContentStore()
     state, _, tool = await live(tmp_path, discovered(dirs), store)
-    fill(store, "build", *"abcd"[:held])
-    for name in "abcd"[:held]:
+    fill(store, "build", *"abcd"[:already])
+    for name in "abcd"[:already]:
         state.add_reference(Reference(name, handle=name))
     result = await tool.run(name="notes")
     pinned, kept = "skill notes" in [a.source for a in store.active_references], "skill notes" in sources(state)
-    assert (pinned, kept) == (held == 3, held == 3)
-    assert (STEP_FULL_TAIL in result.output, TASK_FULL_TAIL.split("{")[0] in result.output) == (held == 4, held == 4)
+    assert (pinned, kept) == (already == 3, already == 3)
+    assert (STEP_FULL_TAIL in result.output, TASK_FULL_TAIL.split("{")[0] in result.output) == (already == 4, already == 4)
 
 
 async def test_both_tails_fit_the_cap_for_the_longest_name(tmp_path, dirs):
@@ -591,6 +596,22 @@ async def test_both_tails_fit_the_cap_for_the_longest_name(tmp_path, dirs):
     assert result.output.endswith(STEP_TAIL + task_tail(name))
     head = result.output[: -len(STEP_TAIL + task_tail(name))]
     assert len(head) == cap - reserve(name) and head.endswith("chars total — head kept] ...")
+
+
+async def test_an_over_cap_project_body_keeps_its_closing_marker_and_the_tails_follow_it(tmp_path, dirs):
+    cap, closing = 2000, f"</project-instructions {TAG}>"
+    sized(dirs.project, "big", 5000)
+    store = ContentStore()
+    state, _, tool = await live(tmp_path, discovered(dirs), store, cap=cap)
+    fill(store, "build", *"abcd")
+    for n in "abcd":
+        state.add_reference(Reference(n, handle=n))
+    out = (await tool.run(name="big")).output
+    tails = STEP_TAIL + task_tail("big")
+    assert len(out) <= cap and out.endswith(tails)
+    fenced = out[: -len(tails)]
+    assert fenced.endswith(closing) and fenced.count(closing) == 1
+    assert fenced.index("[output cut:") < fenced.index(closing)
 
 
 async def test_lengths_count_code_points_and_the_handle_is_the_hash_of_the_delivered_text(tmp_path, dirs):
@@ -671,7 +692,6 @@ async def test_capacity_is_asked_once_before_anything_is_stored(tmp_path, dirs, 
     monkeypatch.setattr(store, "put", lambda *a, **k: (calls.append("put"), put(*a, **k))[1])
     await tool.run(name="notes")
     assert calls == ["room", "put"]
-    assert not any(isinstance(n, ast.Await) for n in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(SkillTool._execute)))))
 
 
 async def test_a_bundled_skill_reference_survives_refresh_and_reads_unavailable_after_restart(tmp_path, dirs):

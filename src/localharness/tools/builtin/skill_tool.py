@@ -22,7 +22,7 @@ SKILL_DESCRIPTION = (
 )
 STEP_FULL_TAIL = (
     "[not pinned: this step already holds four references, so this skill may be evicted before you finish; "
-    "the eviction note will name the tool_result_get id that restores it]"
+    "if it is, the eviction note names the tool_result_get id that restores it]"
 )
 TASK_FULL_TAIL = (
     "[not kept across turns: the task already holds four references; to keep it, drop one with "
@@ -92,17 +92,19 @@ class SkillTool(Tool):
                 error_type="not_found",
             )
         body = _body(text)
-        if record.untrusted:
-            body = fence_project_text(SKILLS_FENCE_HEADER, body)
         header = f"skill {name!r} ({record.origin}), directory {str(record.path.parent.absolute())!r}"
-        text = f"{header}\n\n{body}"
+
+        def compose(part: str) -> str:
+            return f"{header}\n\n{fence_project_text(SKILLS_FENCE_HEADER, part) if record.untrusted else part}"
+
+        budget = max(self._result_cap() - len(_tails(name, True, True)) - len(compose("x")) + 1, 0)
+        cut = cut_output(body, budget)
         source = f"skill {name}"
-        cut = cut_output(text, max(self._result_cap() - len(_tails(name, True, True)), 0))
         step, task, has_room = self._state.room(self._store, source)
-        final = cut + _tails(name, not has_room, task == "full")
+        final = compose(cut) + _tails(name, not has_room, task == "full")
         handle = self._store.put(final, origin="untrusted" if record.untrusted else "trusted")
         if has_room:
             self._store.declare_active_reference(step, handle, source)
         if task in ("add", "replace"):
             self._state.add_reference(Reference(source, handle=handle))
-        return self.ok(final, **({"truncated": True, "original_length": len(text)} if cut != text else {}))
+        return self.ok(final, **({"truncated": True, "original_length": len(compose(body))} if cut != body else {}))
