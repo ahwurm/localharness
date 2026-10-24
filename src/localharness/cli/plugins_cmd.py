@@ -121,7 +121,8 @@ INSTALL_SKIPPED_WHY = MappingProxyType({
     "not_writable": " — {dir} is not writable",
     "open": " — {dir} is open to other accounts and could not be made private",
     "no_temp": " — no temp dir under {dir}",
-    "no_start": " — the installer could not start: {error}"})
+    "no_start": " — the installer could not start: {error}",
+    "no_route": " — this install has no route for {extras}"})
 ROUTE_BACK = "{rerun} under /plugins → {names}"
 ENABLE_MANUAL = "{name}: enabled in config; this install must be done by hand."
 TYPED_NEEDS_EXTRA = "{name}: needs {extra}."
@@ -1135,19 +1136,21 @@ async def install_pass(session: PluginSession, extras: set[str], names: list[str
 
     route = update_cmd.install_route(*sorted(extras))
     joined = ", ".join(names)
-    command = update_cmd._quote(route.argv) if route.argv else ""
+    command = update_cmd._quote(route.argv) if route is not None and route.argv else ""
 
     def say(*lines: str) -> None:
         for line in lines:
             console.print(Text(sanitize_for_display(line)), soft_wrap=True)
 
     def skipped(why: str, **fill: Any) -> frozenset[str]:
-        back = (manual_block(names, route.manual, ROUTE_BACK) if route.argv is None else (
+        back = () if route is None else (manual_block(names, route.manual, ROUTE_BACK) if route.argv is None else (
             INSTALL_SKIPPED[1], INSTALL_SKIPPED[2].format(command=command),
             INSTALL_SKIPPED[3].format(route=ROUTE_BACK.format(rerun=ACTION_RERUN, names=joined))))
         say(INSTALL_SKIPPED[0].format(names=joined, why=INSTALL_SKIPPED_WHY[why].format(**fill)), *back)
         return frozenset()
 
+    if route is None:
+        return skipped("no_route", extras=", ".join(sorted(extras)))
     if route.argv is None:
         return skipped("declined")
     plan = resolve(ConfigLoader(config_dir=session.cfg_path, local_config_dir=session.workspace)).plan
