@@ -22,7 +22,7 @@ from collections.abc import Callable, Iterable
 import pytest
 
 from localharness.agent.gate_types import PROTECTED_CONFIG_DIR_ENTRIES
-from localharness.cli.plugins_cmd import CONSENT
+from localharness.cli.plugins_cmd import CONSENT, THIRD_PARTY_CONFIRM
 from localharness.config.loader import (
     AGENT_GLOBAL_ONLY_FIELDS, ASK_GLOBAL_ONLY_FIELDS, HARNESS_GLOBAL_ONLY_FIELDS,
 )
@@ -319,21 +319,29 @@ def test_key_file_doc_bites():
 # ---------------------------------------------------------------- check: what the Plugins sentences say
 
 CONSENT_PHRASES = ("from your package index", "runs its build steps")
+TRUST_PHRASES = ("with your permissions", "in every session")
+NEVER_SHOWN_ANCHORS = ("wherever a command displays it:", "It is never printed:")
 INSTALL_TOKEN = "`localharness[<extras>]==<version>`"
+TRUST_NEEDLES = ("`/plugins enable <name>`", "Enable in Plugins", *TRUST_PHRASES)
 INSTALL_NEEDLES = (INSTALL_TOKEN, "the version you are running", "index your pip or uv configuration names",
                    "unpinned", "no hash checking", *CONSENT_PHRASES)
-RESIDUAL_NEEDLES = ("prompt-injected agent", "`pip.conf`", "`uv.toml`", "`PATH`")
+RESIDUAL_NEEDLES = ("prompt-injected agent", "`pip.conf`", "`uv.toml`", "`PATH`", "`?token=`")
 
 
-def check_plugins_doc(security_text: str, consent: str = CONSENT[1]) -> list[str]:
-    """The `### Plugins` install bullet and residual paragraphs say what the install trusts, and the
-    consent still says each phrase the bullet quotes."""
+def check_plugins_doc(security_text: str, consent: str = CONSENT[1], confirm: str = THIRD_PARTY_CONFIRM) -> list[str]:
+    """The `### Plugins` bullets and paragraphs say what the trust question and the install trust and
+    where a secret is never shown, and the consent and the question still say what the doc quotes."""
+    whole = " ".join(security_text.split())
     body = section(security_text, "### Plugins") or ""
-    install = " ".join(b for _h, b in bullets(body) if INSTALL_TOKEN in b)
-    residual = " ".join(p for p in paragraphs(body) if "What this does NOT cover" in p)
-    seen = [(" ".join(install.split()), INSTALL_NEEDLES), (" ".join(residual.split()), RESIDUAL_NEEDLES)]
-    return ([f"SECURITY.md does not say {n}" for text, needles in seen for n in needles if n not in text]
-            + [f"the consent no longer says {p}" for p in CONSENT_PHRASES if p not in consent])
+    flat = lambda parts: " ".join(" ".join(parts).split())
+    seen = [(flat(b for _h, b in bullets(body) if "it is your trust grant" in b), TRUST_NEEDLES),
+            (flat(b for _h, b in bullets(body) if INSTALL_TOKEN in b), INSTALL_NEEDLES),
+            (flat(p for p in paragraphs(body) if "What this does NOT cover" in p), RESIDUAL_NEEDLES)]
+    return ([f"SECURITY.md's list after {a} does not name {w}" for a in NEVER_SHOWN_ANCHORS
+             for w in ("Plugins", "Configure") if w not in whole.partition(a)[2].split(". ")[0]]
+            + [f"SECURITY.md does not say {n}" for text, needles in seen for n in needles if n not in text]
+            + [f"the consent no longer says {p}" for p in CONSENT_PHRASES if p not in consent]
+            + [f"the trust question no longer says {p}" for p in TRUST_PHRASES if p not in confirm])
 
 
 def test_plugins_doc_live():
@@ -344,10 +352,18 @@ def test_plugins_doc_bites():
     text = _read("SECURITY.md")
     assert check_plugins_doc(text.replace("no hash checking", "")) == ["SECURITY.md does not say no hash checking"]
     assert check_plugins_doc(text.replace("`pip.conf`", "")) == ["SECURITY.md does not say `pip.conf`"]
+    assert check_plugins_doc(text.replace("Enable in Plugins", "")) == ["SECURITY.md does not say Enable in Plugins"]
+    assert check_plugins_doc(text.replace("`?token=`", "")) == ["SECURITY.md does not say `?token=`"]
+    moved = text.replace("Plugins and its Configure, `doctor`", "Plugins, `doctor`").replace(
+        "show `**********`. The token comes only", "show `**********`. Configure too. The token comes only")
+    assert check_plugins_doc(moved) == ["SECURITY.md's list after It is never printed: does not name Configure"]
     assert check_plugins_doc(text, consent=CONSENT[1].replace("from your package index", "from PyPI")) == [
         "the consent no longer says from your package index"]
+    assert check_plugins_doc(text, confirm=THIRD_PARTY_CONFIRM.replace("in every session", "")) == [
+        "the trust question no longer says in every session"]
     nothing = check_plugins_doc("## Nothing\n")
-    assert len(nothing) == len(INSTALL_NEEDLES) + len(RESIDUAL_NEEDLES)
+    assert len(nothing) == (2 * len(NEVER_SHOWN_ANCHORS) + len(TRUST_NEEDLES) + len(INSTALL_NEEDLES)
+                            + len(RESIDUAL_NEEDLES))
     assert nothing == check_plugins_doc("## Nothing\n")
 
 
