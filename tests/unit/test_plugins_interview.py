@@ -19,21 +19,22 @@ from rich.console import Console
 from localharness.cli import plugins_cmd, plugins_interview
 from localharness.cli.interview import Answer, Unreachable
 from localharness.cli.plugins_cmd import (
-    CONSENT, CTRLC, CTRLC_DOES, OVERRIDE_LINE, THIRD_PARTY_CONFIRM, Kind, PassProgress, PassResult, PluginSession, Refusal, ReloadPlan, StepOutcome, TailKey, Touch,
+    CONSENT, CTRLC, CTRLC_DOES, CTRLC_IGNORED, INSTALLING, OVERRIDE_LINE, THIRD_PARTY_CONFIRM, Kind, PassProgress, PassResult, PluginSession, Refusal, ReloadPlan, StepOutcome, TailKey, Touch,
     reload_names,
 )
 from localharness.cli.plugins_interview import CLOSE_LABELS, PLUGINS_QUESTION, at_close, run
 from localharness.cli.update_cmd import InstallRoute, Manual
-from localharness.plugins import lifecycle
+from localharness.plugins import builtin, lifecycle
 from localharness.plugins import resolve as resolve_module
 from localharness.plugins.api import PluginManifest, SetupField
 from localharness.plugins.plan import PlanEntry
 from localharness.plugins.setup import AGENT_PROMPT_LEAD
 from tests.unit.interview_support import CANCEL, UNREACHED, Asked
 from tests.unit.test_plugin_resolve import write_folder_plugin
-from tests.unit.test_extra_install import SPEC
+from tests.unit.test_extra_install import SPEC, _Proc
 from tests.unit.test_extra_install import dist as _dist
-from tests.unit.test_plugins_pass import DOWNLOAD
+from tests.unit.test_plugins_bookkeeping import Stub
+from tests.unit.test_plugins_pass import DOWNLOAD, Ask, Mob
 from tests.unit.test_plugins_pass import _on as _overlay
 from tests.unit.test_plugins_pass import folder as _folder
 from tests.unit.test_plugins_pass import layers as _layers
@@ -1532,3 +1533,146 @@ async def test_rerun_a_plugin_the_build_failed_whose_probe_still_fails_does_not_
     assert touched["ask"].loads is False and "check passed" not in channel.text
     assert channel.lines[0].startswith("ask: enabled, but not loading — ") and "RuntimeError: dead" in channel.lines[0]
     assert channel.asked[-1].options[-1].label == "Close"
+
+
+class _Crashing(_Proc):
+    async def _read(self, n):
+        raise KeyboardInterrupt
+
+
+async def test_stop_at_the_consent_changes_nothing(layers, mobile, dist, monkeypatch) -> None:
+    Said(monkeypatch, yes=[None])
+    touched: dict = {}
+    channel = FakeChannel(*_enable_script("mob"))
+
+    await _run(layers, channel, touched=touched)
+
+    assert channel.lines[-1] == "mob: stopped — nothing changed" and mobile.spawns == []
+    assert touched == {} and not (layers.g / "overrides.yaml").exists()
+
+
+@pytest.mark.parametrize(("enabled", "label", "again"), [
+    (False, "Enable", "Enable"), (True, "Install and set up", "Install and set up")], ids=["enable", "install_row"])
+async def test_stop_in_the_install_terminates_the_child_and_names_the_retry(layers, mobile, dist, monkeypatch, enabled, label, again) -> None:
+    mobile.proc = _Crashing()
+    if enabled:
+        _on_disk(layers, mob=True)
+    Said(monkeypatch, yes=[True])
+    channel = FakeChannel(*_enable_script("mob", label))
+
+    await _run(layers, channel)
+
+    assert channel.lines[-1] == f"mob: stopped — install interrupted — {again} to retry"
+    assert mobile.proc.calls == ["terminate", "wait"] and channel.asked[-1].question == PLUGINS_QUESTION
+
+
+async def test_stop_at_the_first_question_after_the_install_names_the_finish(layers, mobile, dist, monkeypatch) -> None:
+    Said(monkeypatch, [None], [True])
+    touched: dict = {}
+    channel = FakeChannel(*_enable_script("mob"))
+
+    await _run(layers, channel, touched=touched)
+
+    assert channel.lines[-1] == "mob: stopped — package installed, not set up — Enable to finish"
+    assert mobile.installed and touched == {} and not (layers.g / "overrides.yaml").exists()
+
+
+async def test_stop_at_the_first_question_changes_nothing(layers, monkeypatch) -> None:
+    Said(monkeypatch, [None])
+    touched: dict = {}
+    channel = FakeChannel(*_enable_script("ask"))
+
+    await _run(layers, channel, touched=touched)
+
+    assert channel.lines == ["ask: stopped — nothing changed"] and touched == {}
+
+
+@pytest.mark.parametrize(("busy", "retry"), [(False, ""), (True, " in a minute")])
+async def test_stop_at_the_download_confirm_keeps_the_enable_and_names_the_rerun(layers, mobile, monkeypatch, busy, retry) -> None:
+    mobile.installed = True
+    monkeypatch.setattr(lifecycle, "downloading", lambda name: busy)
+    Said(monkeypatch, ["http://box"], [None])
+    touched: dict = {}
+    channel = FakeChannel(*_enable_script("mob"))
+
+    assert await _run(layers, channel, touched=touched) is True
+
+    assert channel.lines[-1] == f"mob: stopped — enabled, but its download did not finish — Re-run setup{retry}"
+    assert touched["mob"].loads is True and _written(layers)["mob"]["enabled"] is True
+    assert channel.asked[-1].options[-1].label == "Close — restarts to apply (1 plugin)"
+
+
+class _StopMob(Mob):
+    def setup_action(self, ctx):
+        raise KeyboardInterrupt
+
+
+async def test_stop_a_keyboard_interrupt_in_the_download_thread_is_one_stop_line_and_the_session_goes_on(layers, mobile, monkeypatch) -> None:
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Stub, Ask, _StopMob))
+    mobile.installed = True
+    Said(monkeypatch, ["http://box"], [True])
+    channel = FakeChannel(*_enable_script("mob"))
+
+    await _run(layers, channel)
+
+    assert channel.lines == ["mob: stopped — enabled, but its download did not finish — Re-run setup"]
+    assert asyncio.current_task().cancelling() == 0 and channel.asked[-1].question == PLUGINS_QUESTION
+
+
+async def test_stop_a_system_exit_in_the_probe_names_the_unchecked_enable(layers, monkeypatch) -> None:
+    async def leave(*a, **kw):
+        raise SystemExit
+
+    monkeypatch.setattr(plugins_cmd, "probe", leave)
+    Said(monkeypatch, ["http://box-ok", "tok"])
+    touched: dict = {}
+    channel = FakeChannel(*_enable_script("ask"))
+
+    await _run(layers, channel, touched=touched)
+
+    assert channel.lines == ["ask: stopped — enabled, but not checked — Re-run setup"] and touched["ask"].loads is True
+    assert asyncio.current_task().cancelling() == 0 and channel.asked[-1].question == PLUGINS_QUESTION
+
+
+async def test_ctrlc_ignored_prints_before_the_install_and_before_the_download_and_nowhere_else(layers, mobile, dist, monkeypatch) -> None:
+    said = Said(monkeypatch, ["http://box"], [True])
+    channel = FakeChannel(*_enable_script("mob"))
+
+    with monkeypatch.context() as ignoring:
+        ignoring.setattr(signal, "getsignal", lambda signum: signal.SIG_IGN)
+        await _run(layers, channel)
+
+    lines = channel.lines
+    install, download = (CTRLC_IGNORED.format(step=step) for step in ("install", "download"))
+    assert lines.count(install) == lines.count(download) == 1
+    assert lines[lines.index(install) + 1].startswith(INSTALLING.format(installer="pip", spec=SPEC))
+    assert lines.index(install) < lines.index(download) < lines.index("mob: enabled; starts when you close Plugins")
+    assert [x for x in lines if "Ctrl-C is ignored" in x] == [install, download]
+    assert CTRLC.format(does=CTRLC_DOES["prompt"]) in said.confirmed[0][2]
+
+
+async def test_ctrlc_ignored_prints_nothing_for_a_declined_install_or_a_question_only_enable(layers, mobile, dist, monkeypatch) -> None:
+    Said(monkeypatch, ["http://box-ok", "tok"], [False])
+    channel = FakeChannel(*_enable_script("mob"), *_enable_script("ask"))
+
+    with monkeypatch.context() as ignoring:
+        ignoring.setattr(signal, "getsignal", lambda signum: signal.SIG_IGN)
+        await _run(layers, channel)
+
+    assert "Ctrl-C is ignored" not in channel.text
+
+
+class _Hostile(Ask):
+    manifest = Ask.manifest.model_copy(update={
+        "next_steps": "run localharness[browser] then [/x]\x1b]0;owned\x07", "setup_help": "see [b]docs[/b]\x1b[31m"})
+
+
+async def test_next_steps_and_help_with_markup_and_an_osc_sequence_print_as_text_with_it_stripped(layers, monkeypatch) -> None:
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Stub, _Hostile, Mob))
+    Said(monkeypatch, ["http://box", "tok"])
+    channel = FakeChannel(*_enable_script("ask"))
+
+    await _run(layers, channel)
+
+    assert "run localharness[browser] then [/x]" in channel.lines and "see [b]docs[/b]" in channel.lines
+    assert "\x1b" not in channel.text and "\x07" not in channel.text and "owned" not in channel.text
