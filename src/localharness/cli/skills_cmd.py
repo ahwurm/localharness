@@ -10,10 +10,13 @@ DROPPED = "description dropped from the listing ({length} characters; the listin
 AGENTS_ONLY = "{dir} is not read: no .localharness/ here; localharness init --workspace creates it, adds files to this repository, and then loads these skills"
 
 
-def agents_only(cwd: Path) -> list[str]:
+def agents_only(cwd: Path | None = None) -> list[str]:
     from localharness.config.paths import discover_workspace_dir
 
-    here = cwd / ".agents" / "skills"
+    try:
+        here = (cwd or Path.cwd()) / ".agents" / "skills"
+    except OSError:
+        return []
     return [AGENTS_ONLY.format(dir=repr(str(here)))] if here.is_dir() and discover_workspace_dir(cwd) is None else []
 
 
@@ -38,7 +41,7 @@ def skills(
     cfg_path = resolve_config_dir(config_dir)
     workspace = resolve_workspace_layer(config_dir, interactive=False)
     found = SkillSet.discover(cfg_path, workspace.parent if workspace is not None else None)
-    for line in agents_only(Path.cwd()):
+    for line in agents_only():
         typer.echo(line)
     for s, (_, _, text, fit) in zip(found.skills, shown(found.skills)):
         mark = DROPPED.format(length=len(s.description), budget=LISTING_BUDGET_CHARS, fit=fit) if text is None else None
