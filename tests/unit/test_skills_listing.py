@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from localharness.config.skills import LISTING_BUDGET_CHARS, Skill, shown
+from localharness.config import skills
+from localharness.config.skills import LISTING_BUDGET_CHARS, Skill, SkillSet, shown
 
 
 def _sk(name, length, origin="machine", char="d"):
@@ -131,3 +132,34 @@ def test_two_calls_on_equal_input_return_equal_rows():
 
 def test_shown_takes_the_start_set_and_nothing_else():
     assert list(inspect.signature(shown).parameters) == ["skills"]
+
+
+@pytest.fixture
+def pkg(tmp_path, monkeypatch):
+    monkeypatch.setattr(skills, "PACKAGE_DIR", tmp_path / "pkg")
+    return tmp_path / "pkg"
+
+
+def _write(origin_dir, name, length):
+    path = origin_dir / name / "SKILL.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"---\nname: {name}\ndescription: {'d' * length}\n---\nBody of {name}.\n")
+
+
+def test_a_discovered_tree_over_budget_drops_the_projects_descriptions_and_keeps_the_rest(tmp_path, pkg):
+    cfg, proj = tmp_path / "cfg", tmp_path / "proj"
+    (proj / ".localharness").mkdir(parents=True)
+    _write(pkg / "assets" / "skills", "helper", 200)
+    _write(cfg / "skills", "notes", 500)
+    _write(proj / ".localharness" / "skills", "alpha", 1000)
+    _write(proj / ".agents" / "skills", "beta", 1000)
+
+    rows = shown(SkillSet.discover(cfg, proj).skills)
+
+    assert rows == (
+        ("alpha", "project", None, 600),
+        ("beta", "project", None, 600),
+        ("notes", "machine", "d" * 500, 1100),
+        ("helper", "bundled", "d" * 200, 800),
+    )
+    assert sum(len(row[2]) for row in rows if row[2]) == 700
