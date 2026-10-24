@@ -1805,6 +1805,31 @@ class TerminalChannel(ChannelAdapter):
             except (KeyboardInterrupt, EOFError):
                 return None
 
+    async def run_interview(
+        self, question: str, options: Sequence[Any], *, default: Any, cancel: str, multi: bool = False
+    ) -> Any:
+        """Draw one interview node inside the caller's open span; a terminal that cannot draw it reaches nobody."""
+        from localharness.cli.interview import Answer, build_interview, can_draw
+
+        output = self._tty_output()
+        why = can_draw(output)
+        if why is not None:
+            return Answer((cancel,), True, reached=False, why=why)
+        app = build_interview(
+            question, options, default=default, cancel=cancel, multi=multi,
+            output=output, erase_when_done=ERASE_APPLICATIONS_WHEN_DONE,
+        )
+        try:
+            return await app.run_async(handle_sigint=False)
+        except (KeyboardInterrupt, EOFError):
+            return Answer((cancel,), True)
+
+    def can_manage(self) -> Any:
+        """None when the Plugins flow can draw its nodes; else the reason it cannot."""
+        from localharness.cli.interview import Unreachable, can_draw
+
+        return Unreachable.NO_TTY if cannot_ask_reason() is not None else can_draw(self._tty_output())
+
     def _note_newline_chord(self, name: str) -> None:
         """The input apps call this each time a newline chord fires as a line break. Only a
         Shift+Enter counts: a `shift-enter` nudge chord never calls it, and another chord's line
