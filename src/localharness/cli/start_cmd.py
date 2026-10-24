@@ -1628,7 +1628,7 @@ def _skill_start_lines(skill_set) -> list[str]:
     from localharness.config.skills import SHADOWED, shown, skip_line
 
     def origin(skipped):
-        return next((l for l, lexical, _ in skill_set.origins if lexical in (skipped.path, skipped.path.parent)), "project")
+        return next((label for label, lexical, _ in skill_set.origins if lexical in (skipped.path, skipped.path.parent)), "project")
 
     kept = [(s, origin(s)) for s in skill_set.skipped if s.fix != SHADOWED[1]]
     projects = sum(label == "project" for _, label in kept)
@@ -2065,7 +2065,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.tools.builtin.skill_tool import render_listing
     skill_set = SkillSet.discover(cfg_path, workspace.parent if workspace is not None else None)
     skill_listing = render_listing(skill_set.skills)
-    for line in _skill_start_lines(skill_set) + agents_only(Path.cwd()):
+    for line in _skill_start_lines(skill_set) + agents_only():
         console.print(line, style="yellow", markup=False, soft_wrap=True)
     _live_floor = await start_serving.launch_floor(agent_config, skill_set.skills)
     from localharness.provider.lifecycle import cached_floor, raised_floor
