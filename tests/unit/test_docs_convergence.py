@@ -22,6 +22,7 @@ from collections.abc import Callable, Iterable
 import pytest
 
 from localharness.agent.gate_types import PROTECTED_CONFIG_DIR_ENTRIES
+from localharness.cli.plugins_cmd import CONSENT
 from localharness.config.loader import (
     AGENT_GLOBAL_ONLY_FIELDS, ASK_GLOBAL_ONLY_FIELDS, HARNESS_GLOBAL_ONLY_FIELDS,
 )
@@ -313,6 +314,41 @@ def test_key_file_doc_bites():
     assert check_key_file_doc(text.replace("doctor never opens a key file", "doctor opens")) == [
         "SECURITY.md does not say doctor never opens it"]
     assert len(check_key_file_doc("## Nothing\n")) == 7
+
+
+# ---------------------------------------------------------------- check: what the Plugins sentences say
+
+CONSENT_PHRASES = ("from your package index", "runs its build steps")
+INSTALL_TOKEN = "`localharness[<extras>]==<version>`"
+INSTALL_NEEDLES = (INSTALL_TOKEN, "the version you are running", "index your pip or uv configuration names",
+                   "unpinned", "no hash checking", *CONSENT_PHRASES)
+RESIDUAL_NEEDLES = ("prompt-injected agent", "`pip.conf`", "`uv.toml`", "`PATH`")
+
+
+def check_plugins_doc(security_text: str, consent: str = CONSENT[1]) -> list[str]:
+    """The `### Plugins` install bullet and residual paragraphs say what the install trusts, and the
+    consent still says each phrase the bullet quotes."""
+    body = section(security_text, "### Plugins") or ""
+    install = " ".join(b for _h, b in bullets(body) if INSTALL_TOKEN in b)
+    residual = " ".join(p for p in paragraphs(body) if "What this does NOT cover" in p)
+    seen = [(" ".join(install.split()), INSTALL_NEEDLES), (" ".join(residual.split()), RESIDUAL_NEEDLES)]
+    return ([f"SECURITY.md does not say {n}" for text, needles in seen for n in needles if n not in text]
+            + [f"the consent no longer says {p}" for p in CONSENT_PHRASES if p not in consent])
+
+
+def test_plugins_doc_live():
+    assert check_plugins_doc(_read("SECURITY.md")) == []
+
+
+def test_plugins_doc_bites():
+    text = _read("SECURITY.md")
+    assert check_plugins_doc(text.replace("no hash checking", "")) == ["SECURITY.md does not say no hash checking"]
+    assert check_plugins_doc(text.replace("`pip.conf`", "")) == ["SECURITY.md does not say `pip.conf`"]
+    assert check_plugins_doc(text, consent=CONSENT[1].replace("from your package index", "from PyPI")) == [
+        "the consent no longer says from your package index"]
+    nothing = check_plugins_doc("## Nothing\n")
+    assert len(nothing) == len(INSTALL_NEEDLES) + len(RESIDUAL_NEEDLES)
+    assert nothing == check_plugins_doc("## Nothing\n")
 
 
 # ---------------------------------------------------------------- check 4: three declaration readers
