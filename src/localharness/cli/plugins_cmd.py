@@ -182,7 +182,7 @@ def plugins_list(json_output: Json = False, config_dir: ConfigDir = None) -> Non
     """Every plugin: what it does, whether it is on (and how to turn it on), and where it is from."""
     resolution, loader, _ = _resolve(config_dir, json_output=json_output)
     _warn(resolution)
-    for dotpath, file, line in loader.unowned_sections():  # never silent about a leftover
+    for dotpath, file, line in loader.unowned_sections():
         hint = unowned_hint(dotpath.removeprefix("agent."), under_agent=dotpath.startswith("agent."))
         err_console.print("[yellow]⚠[/yellow] " + escape(f"{_where(dotpath, file, line)}: {hint}"),
                           soft_wrap=True)
@@ -193,7 +193,7 @@ def plugins_list(json_output: Json = False, config_dir: ConfigDir = None) -> Non
                                  "enable_command": e.enable_command} for e in entries], indent=2))
         return
     if not entries:
-        console.print(escape(  # where it looked, and a URL a PyPI install can reach
+        console.print(escape(
             f"No plugins found in this Python environment ({sys.prefix}) or in "
             f"{loader.global_config_dir / 'plugins'}/. To write one, copy the example plugin: "
             f"{_TEMPLATE_URL}"), soft_wrap=True)
@@ -244,7 +244,7 @@ def _info_settings(resolution: Resolution, loader: ConfigLoader, entry: PlanEntr
     settings = [(e.path, e.type_name, e.current_value, e.winning_layer, e.path in machine)
                 for e in sorted(_catalogue(loader, rows).values(), key=lambda e: e.path) if e.plugin == name]
     note = None
-    if not settings and name in resolution.enabled:  # nothing of it loaded to list: its switch only
+    if not settings and name in resolution.enabled:
         settings = [(f"{name}.enabled", "bool", resolution.enabled[name],
                      _switch_layer(loader, name, entry.bundled), not entry.bundled)]
         note = ("Its other settings are listed once it is enabled." if entry.state == "available"
@@ -287,7 +287,7 @@ def info_renderable(session, entry) -> RenderableType:
                                    Text("Settings:"), Padding(table, (0, 0, 0, 2), expand=False)]
     if note:
         parts.append(Text(f"  {note}"))
-    if m is not None and m.sections:  # a bundled plugin's claimed core sections (PluginManifest.sections)
+    if m is not None and m.sections:
         *rest, last_section = [f"{s}:" for s in m.sections]
         parts.append(_info_text(f"  {', '.join(rest)} and {last_section} keep their pre-plugin names" if rest
                                 else f"  {last_section} keeps its pre-plugin name"))
@@ -1006,7 +1006,7 @@ async def _check(s: PassState, *, report: Any) -> PassState:
                 m.agent_prompt, _prompt_values(s.fresh or s.resolution, s.fresh_loader or s.loader,
                                                s.after or s.entry, m.agent_prompt))) if m.agent_prompt else "")
                                if p) if m is not None else ()
-            if paragraphs:  # the one place it prints
+            if paragraphs:
                 report("help", paragraphs)
             block = bool(paragraphs)
     elif not s.ask and m is not None:
@@ -1017,7 +1017,7 @@ async def _check(s: PassState, *, report: Any) -> PassState:
         if lines:
             report("next_steps", (False, lines))
     if m is not None and m.next_steps:
-        report("next_steps", (block, tuple(m.next_steps.splitlines())))  # a blank line ends the text to paste
+        report("next_steps", (block, tuple(m.next_steps.splitlines())))
     return replace(s, row=row, failed=failed, skipped=skipped, help=paragraphs)
 
 
