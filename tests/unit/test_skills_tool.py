@@ -1,4 +1,4 @@
-"""The skill tool's seams and, from the next phase, the tool: task capacity, the reference commit and the registry's cut."""
+"""The skill tool's seams: task capacity, the reference commit and the registry's cut."""
 import pytest
 
 from localharness.agent.context import ContentStore
@@ -71,6 +71,18 @@ async def test_the_task_tool_keeps_its_refusal_and_its_record_file_on_a_refusal(
     assert sources(state) == list("abcd") and state.path.read_bytes() == full
     ok = await tool.run(action="reference", source="a", handle="h2")
     assert ok.output == "Reference a declared; it is kept in view from the next request."
+
+
+async def test_a_refused_start_leaves_a_paused_task_paused(tmp_path):
+    state, tool = tool_for(tmp_path)
+    await start(tool)
+    state.paused = True
+    for name in "abcde":
+        (tmp_path / f"{name}.md").write_text(name)
+    five = [{"source": name, "path": f"{name}.md"} for name in "abcde"]
+    assert refused(await tool.run(action="start", objective="Other", assignment="Outline", references=five),
+                   "limited to four")
+    assert state.paused and state.current.context.objective == "Tide pool report"
 
 
 def fill(store, step, *names):
