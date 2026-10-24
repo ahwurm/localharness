@@ -1878,3 +1878,136 @@ async def test_batch_picks_run_in_the_order_they_are_listed_not_the_order_ticked
     await _run(batch, channel)
 
     assert [x for x in channel.lines if x.endswith(("stub", "dl")) and " of 2: " in x] == ["1 of 2: stub", "2 of 2: dl"]
+
+
+def _skipped(names, why="") -> str:
+    return f"{names}: enabled in config, package not installed{why}"
+
+
+async def test_batch_a_declined_install_prints_one_skipped_block_and_still_runs_the_pick_that_needed_none(batch, mobile, monkeypatch) -> None:
+    said = Said(monkeypatch, yes=[False, True])
+    touched: dict = {}
+    channel = FakeChannel(*_several("mob", "mob2", "dl"))
+
+    assert await _run(batch, channel, touched=touched) is True
+
+    lines = channel.lines
+    assert [x for x in lines if x.startswith(_skipped("mob, mob2"))] == [_skipped("mob, mob2")]
+    assert mobile.spawns == [] and said.asked == [] and [c[0] for c in said.confirmed] == ["", DL_ASK]
+    assert _written(batch) == {"mob": {"enabled": True}, "mob2": {"enabled": True}, "dl": {"enabled": True}}
+    assert lines[-1] == "1 of 3 enabled, install still needed: 2; restarts when you close Plugins"
+    assert touched["mob"].loads is False and touched["dl"].loads is True
+
+
+async def test_batch_a_declined_install_with_nothing_else_to_start_has_no_restart_part(batch, mobile, monkeypatch) -> None:
+    Said(monkeypatch, yes=[False])
+    channel = FakeChannel(*_several("mob", "mob2"))
+
+    assert await _run(batch, channel) is False
+
+    assert channel.lines[-1] == "0 of 2 enabled, install still needed: 2" and channel.asked[-1].options[-1].label == "Close"
+
+
+async def test_batch_a_failed_install_gives_the_same_shape_with_the_reason(batch, mobile, monkeypatch) -> None:
+    mobile.proc = _Proc([b"boom\n"], code=1)
+    Said(monkeypatch, yes=[True, True])
+    channel = FakeChannel(*_several("mob", "mob2", "dl"))
+
+    await _run(batch, channel)
+
+    lines = channel.lines
+    why = " — the install failed (exit 1; see the output above)"
+    assert [x for x in lines if x.startswith(_skipped("mob, mob2"))] == [_skipped("mob, mob2", why)] and "boom" in lines
+    assert lines[-1] == "1 of 3 enabled, install still needed: 2; restarts when you close Plugins"
+
+
+async def test_batch_a_stop_in_the_shared_install_names_every_pick_and_terminates_the_child(batch, mobile, monkeypatch) -> None:
+    mobile.proc = _Crashing()
+    Said(monkeypatch, yes=[True])
+    touched: dict = {}
+    channel = FakeChannel(*_several("mob", "mob2", "dl"))
+
+    assert await _run(batch, channel, touched=touched) is False
+
+    assert channel.lines[-3:] == [
+        "mob, mob2, dl: stopped — install interrupted — pick them again under Turn several on…",
+        "not started: mob, mob2, dl — enable them from the list", "0 of 3 enabled"]
+    assert mobile.proc.calls == ["terminate", "wait"] and touched == {} and not _on_disk_exists(batch)
+    assert channel.asked[-1].question == PLUGINS_QUESTION
+
+
+async def test_batch_a_stop_at_the_shared_consent_changes_nothing(batch, mobile, monkeypatch) -> None:
+    Said(monkeypatch, yes=[None])
+    channel = FakeChannel(*_several("mob", "mob2", "dl"))
+
+    await _run(batch, channel)
+
+    assert channel.lines[-3:] == ["mob, mob2, dl: stopped — nothing changed",
+                                  "not started: mob, mob2, dl — enable them from the list", "0 of 3 enabled"]
+    assert mobile.spawns == [] and not _on_disk_exists(batch)
+
+
+async def test_batch_a_stop_at_a_picks_question_after_the_install_names_the_finish_and_what_did_not_start(batch, mobile, monkeypatch) -> None:
+    Said(monkeypatch, ["http://box", None], [True])
+    touched: dict = {}
+    channel = FakeChannel(*_several("mob", "mob2", "dl"))
+
+    assert await _run(batch, channel, touched=touched) is True
+
+    assert channel.lines[-3:] == [
+        "mob2: stopped — package installed, not set up — Enable to finish",
+        "not started: dl — enable them from the list", "1 of 3 enabled; restarts when you close Plugins"]
+    assert set(touched) == {"mob"} and "3 of 3: dl" not in channel.lines and _written(batch) == {"mob": {"enabled": True, "url": "http://box"}}
+
+
+def _stop_at(monkeypatch, name) -> None:
+    real = plugins_interview.enable_pass
+
+    async def wrapped(session, picked, **kw):
+        if picked == name:
+            raise KeyboardInterrupt
+        return await real(session, picked, **kw)
+
+    monkeypatch.setattr(plugins_interview, "enable_pass", wrapped)
+
+
+@pytest.mark.parametrize(("stopped", "tail", "summary"), [
+    ("p1", "not started: p2, p3, p4 and 2 more — enable them from the list", "0 of 6 enabled"),
+    ("p3", "not started: p4, p5, p6 — enable them from the list", "2 of 6 enabled; restarts when you close Plugins"),
+    ("p5", "not started: p6 — enable them from the list", "4 of 6 enabled; restarts when you close Plugins"),
+    ("p6", "nothing left to start", "5 of 6 enabled; restarts when you close Plugins"),
+], ids=["first", "three-left", "one-left", "last"])
+async def test_batch_a_stop_inside_a_pass_names_the_picks_after_it(layers, monkeypatch, stopped, tail, summary) -> None:
+    _plugins(monkeypatch, *_numbered(6))
+    _stop_at(monkeypatch, stopped)
+    channel = FakeChannel(Label("Turn several on…"), _pick(*(f"p{i}" for i in range(1, 7))), "+close")
+
+    await _run(layers, channel)
+
+    assert channel.lines[-3:] == [f"{stopped}: stopped — nothing changed", tail, summary]
+
+
+async def test_batch_names_with_an_escape_sequence_print_without_it(layers) -> None:
+    flow, channel = _flow_for(layers)
+    picks = [SimpleNamespace(name=name, manifest=None, bundled=True) for name in ("p\x1b[31m1", "q\x1b]0;owned\x07", "r")]
+
+    async def stopping(session, name, **kw):
+        raise KeyboardInterrupt
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(plugins_interview, "enable_pass", stopping)
+        await plugins_interview._batch(flow, picks)
+
+    assert "\x1b" not in channel.text and "\x07" not in channel.text and "owned" not in channel.text
+    assert channel.lines[-4:] == ["1 of 3: p1", "p1: stopped — nothing changed", "not started: q, r — enable them from the list", "0 of 3 enabled"]
+
+
+async def test_batch_summary_counts_the_enabled_kinds_and_never_an_install_skipped_pass(layers) -> None:
+    flow, _ = _flow_for(layers)
+    results = [(k, PassResult(k, StepOutcome(k, True))) for k in plugins_interview.BATCH_ENABLED | {"install_skipped", "declined", "refused"}]
+    results.append(("stopped", None))
+
+    done = len(plugins_interview.BATCH_ENABLED)
+    assert plugins_interview._summary(flow, [None] * len(results), results) == f"{done} of {len(results)} enabled, install still needed: 1"
+    assert plugins_interview.BATCH_ENABLED == {"enabled", "enabled_unconfigured", "check_failed", "check_failed_noload",
+                                               "check_skipped", "enabled_manual", "enabled_not_loading"}
