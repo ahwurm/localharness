@@ -406,6 +406,16 @@ def test_install_pass_on_pip_runs_isolated_pip_and_adds_no_with_sentence(h):
     assert list(argv) == PIP_ARGV
 
 
+@pytest.mark.parametrize(("kind", "with_loss"), [(("uv-tool", "/usr/bin/uv"), True), (("pip", None), False)],
+                         ids=["uv", "pip"])
+def test_the_consent_says_package_index_and_build_steps_and_the_with_loss_only_on_uv(h, monkeypatch, kind, with_loss):
+    monkeypatch.setattr(update_cmd, "_installer_kind", lambda: kind)
+    h.run()
+    assert "from your package index" in h.lines[1] and "runs its build steps" in h.lines[1]
+    assert ("Packages added with uv tool install --with are dropped." in h.lines[1]) is with_loss
+    assert ("--with" in "\n".join(h.lines)) is with_loss
+
+
 def test_install_pass_in_a_batch_names_the_batch_stop(h):
     h.run(in_batch=True)
     assert h.asked[0][2].endswith("Ctrl-C stops the batch")
