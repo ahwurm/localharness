@@ -166,7 +166,6 @@ async def test_begin_stop_is_per_instance():
 
 async def _box_session_ended_mid_legend(tmp_path, *, answer, grace, end, observed=None):
     """A real box session whose turn is parked on a permission legend when `end(run_task)` ends it."""
-    import sys
     from io import StringIO
     from types import SimpleNamespace
 
