@@ -871,7 +871,10 @@ async def _run_pass(state: PassState, *, prompt: Any, confirm: Any, report: Any,
             raise Refusal(installed.detail, ())
         state = replace(installed, console=state.console)
         if state.halt == "install_skipped":
-            return await _write(state, report=report)
+            state = await _write(state, report=report)
+            if state.m is not None and state.m.next_steps:
+                report("next_steps", (False, tuple(state.m.next_steps.splitlines())))
+            return state
     state = await _questions(state, prompt=prompt)
     state = await _write(state, report=report)
     state = await _act(state, confirm=confirm, report=report)
@@ -1271,7 +1274,8 @@ async def enable_pass(session, name, *, mode: Literal["enable", "rerun"], progre
             return state
     if state.halt:
         state = await _write(state, report=report)
-        return PassResult(state.halt, StepOutcome(name, True), install=state.install)
+        return PassResult(state.halt, StepOutcome(name, True), install=state.install,
+                          next_steps=state.m.next_steps if state.m is not None else "")
     state = await _write(await _questions(state, prompt=prompt), report=report)
     state = await _check(await _act(state, confirm=confirm, report=report), report=report)
     return _pass_result(state, session, prior)
