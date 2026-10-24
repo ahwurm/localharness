@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -3308,3 +3309,57 @@ async def test_start_moves_corrupt_task_state_aside(tmp_path, monkeypatch):
     assert path.with_name("task.json.corrupt").exists() and not path.exists()
     assert seen[-1]["task_context"].current is None and len(seen) == 2
     assert _read_sessions(tmp_path)[-1][3] == "complete"  # the start still ran to the end
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+@pytest.mark.parametrize("mid_turn", [False, True], ids=["idle", "mid_turn"])
+def test_an_external_sigint_against_the_live_box_ends_the_session_as_complete(tmp_path, monkeypatch, mid_turn):
+    import os
+    import signal
+    from io import StringIO
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input.defaults import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+    from rich.console import Console
+
+    from localharness.channels.terminal import TERMINAL_THEME
+    from localharness.cli.repl import OrchestratorREPL
+    from localharness.cli.start_cmd import _start_async
+
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    turn_started = asyncio.Event()
+
+    async def run_turn(self, *_a, **_k):
+        turn_started.set()
+        await asyncio.sleep(100)
+
+    monkeypatch.setattr("localharness.agent.loop.AgentLoop.run_turn", run_turn)
+
+    async def box_run(self):
+        ch = self._channel
+        ch._console, ch._err_console = (
+            Console(file=StringIO(), force_terminal=True, width=120, theme=TERMINAL_THEME, highlight=False)
+            for _ in range(2)
+        )
+        self._exit_grace_seconds = 0.1
+        with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+            run = asyncio.ensure_future(OrchestratorREPL._run_with_box(self))
+            for _ in range(400):
+                if ch._box_active:
+                    break
+                await asyncio.sleep(0.005)
+            if mid_turn:
+                inp.send_text("go\r")
+                await asyncio.wait_for(turn_started.wait(), 5)
+            asyncio.get_running_loop().call_soon(os.kill, os.getpid(), signal.SIGINT)
+            await asyncio.wait_for(run, 5)
+
+    _stub_start_boundaries(tmp_path, monkeypatch, repl_run=box_run)
+    before = sys.stdout
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            asyncio.run(_start_async(None, False, False, str(tmp_path)))
+    finally:
+        sys.stdout = before
+    assert _read_sessions(tmp_path)[0][3] == "complete"

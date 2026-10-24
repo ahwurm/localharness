@@ -1700,7 +1700,7 @@ class TerminalChannel(ChannelAdapter):
         )
         self._box_patch = patch_stdout(raw=True)
         self._box_patch.__enter__()
-        self._box_task = asyncio.create_task(self._box_app.run_async())
+        self._box_task = asyncio.create_task(self._box_app.run_async(handle_sigint=False))
         self._box_ticker = asyncio.create_task(self._box_tick())
 
     def _tty_output(self) -> Any:

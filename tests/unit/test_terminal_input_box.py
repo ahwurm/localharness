@@ -1252,3 +1252,54 @@ class TestKeysOnTheChannel:
             if depth == 0:
                 break
         assert "keys=harness.terminal.keys" in source[start:end]
+
+
+class _KwApp:
+    is_running = False
+
+    def __init__(self):
+        self.kw = None
+
+    async def run_async(self, **kw):
+        self.kw = kw
+        return ""
+
+    def exit(self, *_a, **_k):
+        pass
+
+    def invalidate(self):
+        pass
+
+
+async def test_the_box_app_runs_with_handle_sigint_false(monkeypatch):
+    stub = _KwApp()
+    monkeypatch.setattr(terminal_module, "_build_persistent_input_app", lambda *a, **k: stub)
+    ch = _keyed_channel()
+    await ch.start_input_box(asyncio.Queue(), on_interrupt=lambda: None)
+    try:
+        await asyncio.sleep(0)
+    finally:
+        await ch.stop_input_box()
+    assert stub.kw == {"handle_sigint": False}
+
+
+async def test_the_read_app_keeps_the_default_sigint_handling(monkeypatch):
+    stub = _KwApp()
+    monkeypatch.setattr(terminal_module, "_build_input_app", lambda *a, **k: stub)
+    assert await _keyed_channel().read_input() == ""
+    assert stub.kw == {}
+
+
+async def test_a_typed_ctrl_c_on_the_empty_box_calls_on_interrupt_once():
+    ch = _keyed_channel()
+    hits: list[bool] = []
+    seen = asyncio.Event()
+    with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+        await ch.start_input_box(asyncio.Queue(), on_interrupt=lambda: (hits.append(True), seen.set()))
+        try:
+            inp.send_text("\x03")
+            await asyncio.wait_for(seen.wait(), timeout=10.0)
+            await asyncio.sleep(0.05)
+        finally:
+            await ch.stop_input_box()
+    assert hits == [True]
