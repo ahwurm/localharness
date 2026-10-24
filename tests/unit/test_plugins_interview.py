@@ -6,6 +6,7 @@ import io
 import os
 import signal
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import get_args
@@ -22,6 +23,7 @@ from localharness.cli.plugins_cmd import (
     reload_names,
 )
 from localharness.cli.plugins_interview import CLOSE_LABELS, PLUGINS_QUESTION, at_close, run
+from localharness.cli.update_cmd import InstallRoute, Manual
 from localharness.plugins import lifecycle
 from localharness.plugins import resolve as resolve_module
 from localharness.plugins.api import PluginManifest
@@ -130,8 +132,8 @@ async def test_reload_root_asks_one_row_per_plugin_then_close_and_prints_nothing
     assert asked.cancel == "+close" and asked.default == [o.key for o in asked.options].index("0")
 
 
-async def test_reload_a_picked_plugin_row_draws_the_root_again(layers) -> None:
-    channel = FakeChannel("1", Label("ask"), "+close")
+async def test_reload_a_picked_plugin_row_opens_its_menu_and_back_draws_the_root_again(layers) -> None:
+    channel = FakeChannel("1", CANCEL, "+close")
 
     assert await _run(layers, channel) is False
 
@@ -289,11 +291,11 @@ async def test_root_is_resolved_again_on_every_render(layers) -> None:
         (layers.g / "overrides.yaml").write_text(yaml.safe_dump({"stub": {"enabled": True}}), encoding="utf-8")
         return "1"
 
-    channel = FakeChannel(enable, "+close")
+    channel = FakeChannel(enable, CANCEL, "+close")
 
     await _run(layers, channel)
 
-    first, second = (asked.options[0].hint for asked in channel.asked)
+    first, second = (channel.asked[i].options[0].hint for i in (0, 2))
     assert first == "off" and second == "on — not running; Re-run setup starts it"
 
 
@@ -363,11 +365,11 @@ async def test_close_label(layers, touched, parked, waiting, label) -> None:
     (3, "3 asks parked — answer in /pending after closing; the keys that answer asks are off here"),
 ])
 async def test_asks_pending_prints_once_at_open_and_never_again_in_that_open(layers, parked, line) -> None:
-    channel = FakeChannel("1", "1", "+close")
+    channel = FakeChannel("1", CANCEL, "1", CANCEL, "+close")
 
     await _run(layers, channel, parked=parked)
 
-    assert channel.lines == [line] and len(channel.asked) == 3
+    assert channel.lines == [line] and len(channel.asked) == 5
 
 
 async def test_asks_pending_is_silent_with_nothing_parked_even_when_asks_wait(layers) -> None:
@@ -822,3 +824,317 @@ def test_stop_tail_a_stop_line_joins_every_name() -> None:
 
     assert plugins_interview.STOP_LINE.format(names="a, b", tail=tail) == (
         "a, b: stopped — install interrupted — pick them again under Turn several on…")
+
+
+_MANUAL = InstallRoute("x", None, Manual("", False, "uv sync --extra mobile"))
+_ARGV = InstallRoute("x", ["pip", "install", "x"], None)
+
+
+def _patched(monkeypatch, *, states=None, enabled=None, extra=()) -> None:
+    real = resolve_module.resolve
+
+    def patched(loader, **kw):
+        found = real(loader, **kw)
+        entries = tuple(replace(e, state=states[e.name]) if e.name in (states or {}) else e
+                        for e in found.plan.entries) + tuple(extra)
+        return replace(found, plan=replace(found.plan, entries=entries), enabled={**found.enabled, **(enabled or {})})
+
+    monkeypatch.setattr(resolve_module, "resolve", patched)
+
+
+def _on_disk(layers, **flags) -> None:
+    (layers.g / "overrides.yaml").write_text(yaml.safe_dump({n: {"enabled": v} for n, v in flags.items()}), encoding="utf-8")
+
+
+def _labels(asked) -> list[str]:
+    return [o.label for o in asked.options]
+
+
+async def test_menu_a_picked_row_asks_its_state_with_back_and_distinct_keys(layers) -> None:
+    _on_disk(layers, stub=True)
+    channel = FakeChannel("0", CANCEL, "+close")
+
+    await _run(layers, channel)
+
+    menu = channel.asked[1]
+    assert menu.question == "stub — on — not running; Re-run setup starts it (Esc = back)"
+    assert (menu.default, menu.cancel) == (0, "back")
+    assert _labels(menu) == ["Disable", "Info"] and len({o.key for o in menu.options}) == 2
+    assert channel.asked[2].question == PLUGINS_QUESTION
+
+
+async def test_menu_is_resolved_again_when_entered(layers) -> None:
+    def enable_ask(options):
+        _on_disk(layers, ask=True)
+        return "1"
+
+    channel = FakeChannel(enable_ask, CANCEL, "+close")
+
+    await _run(layers, channel)
+
+    assert channel.asked[0].options[1].hint == "off"
+    assert channel.asked[1].question == "ask — on — not running; Re-run setup starts it (Esc = back)"
+
+
+async def test_menu_a_plugin_that_vanished_sends_the_person_back_to_the_root(layers, monkeypatch) -> None:
+    real, calls = resolve_module.resolve, []
+
+    def vanish(loader, **kw):
+        found = real(loader, **kw)
+        calls.append(1)
+        if len(calls) == 1:
+            return found
+        return replace(found, plan=replace(found.plan, entries=tuple(e for e in found.plan.entries if e.name != "stub")))
+
+    monkeypatch.setattr(resolve_module, "resolve", vanish)
+    channel = FakeChannel("0", "+close")
+
+    assert await _run(layers, channel) is False
+
+    assert [a.question for a in channel.asked] == [PLUGINS_QUESTION] * 2 and channel.text == ""
+
+
+@pytest.mark.parametrize(("state", "enabled", "route", "labels"), [
+    ("on", True, None, ["Disable", "Info"]),
+    ("off", False, None, ["Info"]),
+    ("available", False, None, ["Info"]),
+    ("needs-extra", True, _MANUAL, ["Show install step", "Disable", "Info"]),
+    ("needs-extra", True, None, ["Disable", "Info"]),
+    ("needs-extra", True, _ARGV, ["Disable", "Info"]),
+    ("failed", True, None, ["Disable", "Info"]),
+    ("refused", False, None, ["Info"]),
+    ("skipped", False, None, ["Info"]),
+])
+def test_menu_actions_follow_the_state_the_flag_and_the_route(layers, monkeypatch, state, enabled, route, labels) -> None:
+    _patched(monkeypatch, enabled={"stub": enabled})
+    actions = plugins_interview.actions_for(_entry(state, name="stub"), _session(layers), route)
+
+    assert [o.label for o, _ in actions] == labels
+    assert len({o.key for o, _ in actions}) == len(actions)
+
+
+async def test_menu_a_third_party_plugin_that_needs_an_extra_offers_disable_and_info_only(layers, monkeypatch) -> None:
+    _on_disk(layers, mob=True)
+    _patched(monkeypatch, states={"mob": "needs-extra"})
+    monkeypatch.setattr(plugins_cmd, "install_route_for", lambda entry: None)
+    channel = FakeChannel("2", CANCEL, "+close")
+
+    await _run(layers, channel)
+
+    assert _labels(channel.asked[1]) == ["Disable", "Info"]
+
+
+async def test_disable_a_running_plugin_says_off_at_close_and_the_close_label_restarts(layers) -> None:
+    _on_disk(layers, stub=True)
+    touched: dict = {}
+    channel = FakeChannel("0", Label("Disable"), "+close")
+
+    assert await _run(layers, channel, running={"stub"}, touched=touched) is True
+
+    assert channel.lines == ["stub: off when you close Plugins"] and channel.closed
+    assert touched == {"stub": Touch(rebind=False, loads=False, probe=None)}
+    assert channel.asked[-1].options[-1].label == "Close — restarts to apply (1 plugin)"
+    assert yaml.safe_load((layers.g / "overrides.yaml").read_text(encoding="utf-8")) == {"stub": {"enabled": False}}
+
+
+async def test_disable_a_plugin_that_is_not_running_says_off_and_the_close_label_stays(layers) -> None:
+    _on_disk(layers, stub=True)
+    channel = FakeChannel("0", Label("Disable"), "+close")
+
+    assert await _run(layers, channel) is False
+
+    assert channel.lines == ["stub: off"] and not channel.closed
+    assert channel.asked[-1].options[-1].label == "Close"
+
+
+async def test_disable_under_a_project_that_turns_it_on_saves_and_says_which_file_wins(layers) -> None:
+    (layers.ws / "config.yaml").write_text(yaml.safe_dump({"stub": {"enabled": True}}), encoding="utf-8")
+    touched: dict = {}
+    channel = FakeChannel("0", Label("Disable"), "+close")
+
+    assert await _run(layers, channel, running={"stub"}, touched=touched) is False
+
+    assert channel.lines == [
+        f"stub: saved on this machine, but this project turns it on ({layers.ws / 'config.yaml'}) and that "
+        "still wins — localharness plugins disable stub --workspace changes it"]
+    assert touched["stub"].loads is True and channel.asked[-1].options[-1].label == "Close"
+
+
+async def test_disable_a_stop_changes_nothing_and_stores_no_touch(layers, monkeypatch) -> None:
+    async def stop(*args, **kw):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(plugins_interview, "disable_pass", stop)
+    _on_disk(layers, stub=True)
+    before, touched = (layers.g / "overrides.yaml").read_bytes(), {}
+    channel = FakeChannel("0", Label("Disable"), "+close")
+
+    await _run(layers, channel, running={"stub"}, touched=touched)
+
+    assert channel.lines == ["stub: stopped — nothing changed"] and touched == {}
+    assert (layers.g / "overrides.yaml").read_bytes() == before
+    assert channel.asked[-1].options[-1].label == "Close"
+
+
+async def test_disable_a_refusal_prints_one_line_and_leaves_the_close_label(layers, monkeypatch) -> None:
+    async def refuse(*args, **kw):
+        raise Refusal("stub cannot be turned off: x", ())
+
+    monkeypatch.setattr(plugins_interview, "disable_pass", refuse)
+    _on_disk(layers, stub=True)
+    touched: dict = {}
+    channel = FakeChannel("0", Label("Disable"), "+close")
+
+    await _run(layers, channel, running={"stub"}, touched=touched)
+
+    assert channel.lines == ["stub: settings not changed — stub cannot be turned off: x"] and touched == {}
+    assert channel.asked[-1].options[-1].label == "Close"
+
+
+async def test_disable_prints_no_next_steps(layers) -> None:
+    _on_disk(layers, ask=True)
+    channel = FakeChannel("1", Label("Disable"), "+close")
+
+    await _run(layers, channel)
+
+    assert channel.lines == ["ask: off"] and "ASK-NEXT" not in channel.text
+
+
+async def test_info_prints_the_builds_failure_and_asks_the_same_menu_again(layers) -> None:
+    _on_disk(layers, stub=True)
+    channel = FakeChannel("0", Label("Info"), CANCEL, "+close")
+
+    await _run(layers, channel, failed={"stub": "import broke"})
+
+    assert "import broke" in channel.text
+    assert len(channel.asked) == 4 and channel.asked[1].question == channel.asked[2].question
+
+
+async def test_info_prints_the_last_probe_detail(layers) -> None:
+    _on_disk(layers, stub=True)
+    channel = FakeChannel("0", Label("Info"), CANCEL, "+close")
+
+    await _run(layers, channel, touched={"stub": Touch(False, False, ("failed", "no answer"))})
+
+    assert "no answer" in channel.text
+
+
+async def test_info_on_a_refused_entry_prints_its_name_without_the_escape_sequence(layers, monkeypatch) -> None:
+    evil = PlanEntry("evil\x1b[31mx", False, "refused", "entry point", "(not loaded)", "bad \x1b[31m reason")
+    _patched(monkeypatch, extra=(evil,))
+    channel = FakeChannel("3", Label("Info"), CANCEL, "+close")
+
+    await _run(layers, channel)
+
+    assert _labels(channel.asked[1]) == ["Info"]
+    assert "evil" in channel.text and "\x1b" not in channel.text
+
+
+async def test_show_install_prints_the_manual_block_and_writes_nothing(layers, monkeypatch) -> None:
+    _on_disk(layers, mob=True)
+    _patched(monkeypatch, states={"mob": "needs-extra"})
+    monkeypatch.setattr(plugins_cmd, "install_route_for", lambda entry: _MANUAL)
+    before, touched = (layers.g / "overrides.yaml").read_bytes(), {}
+    channel = FakeChannel("2", Label("Show install step"), "+close")
+
+    await _run(layers, channel, touched=touched)
+
+    assert channel.asked[1].question == "mob — needs localharness[mobile] — Show install step (Esc = back)"
+    assert channel.lines == ["mob: enabled in config; this install must be done by hand.", "In another terminal run:",
+                             "uv sync --extra mobile", "then Re-run setup under /plugins → mob"]
+    assert (layers.g / "overrides.yaml").read_bytes() == before and touched == {}
+
+
+def _flow_for(layers, *, running=(), touched=None):
+    channel = FakeChannel()
+    session = _session(layers, running=frozenset(running), touched={} if touched is None else touched)
+    flow = plugins_interview.Flow(channel, session, _should_reload(running), channel.console, lambda: None, None, None,
+                                  ReloadPlan(frozenset(), 0, 0))
+    return flow, channel
+
+
+async def test_stop_path_a_written_edit_records_the_touch_then_says_when_it_applies(layers) -> None:
+    touched: dict = {}
+    flow, channel = _flow_for(layers, running={"stub"}, touched=touched)
+    progress = PassProgress()
+
+    async def node():
+        progress.phase, progress.wrote = "edit", True
+        raise KeyboardInterrupt
+
+    got = await plugins_interview.guarded(flow, node, names=("stub",), progress=progress, key="color")
+
+    assert got is plugins_interview._STOP and touched["stub"] == Touch(True, True, None)
+    assert channel.lines == ["stub: stopped — color saved — applies when you close Plugins; the audit entry may be missing"]
+    after = FakeChannel("+close")
+    await run(after, _session(layers, running=frozenset({"stub"}), touched=touched), _should_reload({"stub"}))
+    assert after.asked[0].options[-1].label == "Close — restarts to apply (1 plugin)"
+
+
+@pytest.mark.parametrize("phase", ["consent", "question", "edit", "disable"])
+async def test_stop_path_before_a_write_stores_no_touch(layers, phase) -> None:
+    flow, channel = _flow_for(layers, running={"stub"})
+    progress = PassProgress(phase=phase)
+
+    async def node():
+        raise EOFError
+
+    await plugins_interview.guarded(flow, node, names=("stub",), progress=progress)
+
+    assert channel.lines == ["stub: stopped — nothing changed"] and flow.session.touched == {}
+
+
+async def test_stop_path_a_batch_install_stop_names_every_pick(layers) -> None:
+    flow, channel = _flow_for(layers)
+    progress = PassProgress(phase="install")
+
+    async def node():
+        raise click.Abort
+
+    await plugins_interview.guarded(flow, node, names=("a", "b"), progress=progress, in_batch=True)
+
+    assert channel.lines == ["a, b: stopped — install interrupted — pick them again under Turn several on…"]
+
+
+async def test_stop_path_a_node_with_no_holder_prints_nothing(layers) -> None:
+    flow, channel = _flow_for(layers)
+
+    async def node():
+        raise EOFError
+
+    assert await plugins_interview.guarded(flow, node) is plugins_interview._STOP
+    assert channel.text == ""
+
+
+def test_stop_path_stopping_line_prints_for_the_install_phase_only() -> None:
+    console = Console(file=io.StringIO(), width=400)
+
+    plugins_interview.stopping_line(console, ("a", "b"), PassProgress(phase="download"))
+    assert console.file.getvalue() == ""
+    plugins_interview.stopping_line(console, ("a", "b"), PassProgress(phase="install"))
+
+    assert console.file.getvalue() == "a, b: stopping — pressing Ctrl-C two more times quits localharness\n"
+
+
+@pytest.mark.usefixtures("default_sigint")
+@pytest.mark.parametrize(("unwind", "lines"), [
+    (0, ["stub: stopped — install interrupted — Enable to retry"]),
+    (1.3, ["stub: stopping — pressing Ctrl-C two more times quits localharness",
+           "stub: stopped — install interrupted — Enable to retry"]),
+], ids=["quick", "slow"])
+def test_stop_path_stopping_prints_only_when_an_install_stop_outlasts_a_second(layers, unwind, lines) -> None:
+    async def scenario():
+        flow, channel = _flow_for(layers)
+
+        async def node():
+            try:
+                await _hang()
+            except asyncio.CancelledError:
+                await asyncio.sleep(unwind)
+                raise
+
+        asyncio.get_running_loop().call_soon(press)
+        await plugins_interview.guarded(flow, node, names=("stub",), progress=PassProgress(phase="install"))
+        return channel.lines
+
+    assert asyncio.run(scenario()) == lines
