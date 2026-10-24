@@ -249,6 +249,21 @@ class ChannelAdapter(ABC):
     false` locks out of `unattended` and "always". False is the safe default: a new channel that
     says nothing is treated as remote."""
 
+    def waiting_asks(self) -> int:
+        """Permission asks queued behind a hosted application; a channel with no host has none."""
+        return 0
+
+    def begin_stop(self) -> None:
+        """The session is ending; a channel with no host has nothing to stop restarting."""
+
+    async def run_interview(
+        self, question: str, options: Any, *, default: Any, cancel: str, multi: bool = False
+    ) -> Any:
+        """Ask one question; a channel with no terminal reaches nobody."""
+        from localharness.cli.interview import Answer, Unreachable
+
+        return Answer((cancel,), True, reached=False, why=Unreachable.NO_TTY)
+
     async def ask_permission(self, request: Any) -> Any:
         """Render one ASK verdict and return the human's `Decision` (PRD §3.5).
 

@@ -1167,6 +1167,7 @@ class TerminalChannel(ChannelAdapter):
         self._box_active: bool = False           # True while the long-lived box owns the terminal
         self._suspended: bool = False            # True inside a suspended_box span
         self._stopping: bool = False             # begin_stop(): the session is ending
+        self._waiting: int = 0                   # asks queued behind a suspended_box span
         # (ctrl_queue, on_interrupt) from start_input_box — ask_permission suspends the box for
         # one keystroke and needs these to put it back exactly as it was.
         self._box_restart_args: tuple[Any, Any] | None = None
@@ -1710,6 +1711,10 @@ class TerminalChannel(ChannelAdapter):
 
         return create_output(always_prefer_tty=True)
 
+    def waiting_asks(self) -> int:
+        """Permission asks queued behind an open suspension, not yet drawn."""
+        return self._waiting
+
     def begin_stop(self) -> None:
         """The session is ending: a suspension closing from now on restarts no box."""
         self._stopping = True
@@ -1757,22 +1762,30 @@ class TerminalChannel(ChannelAdapter):
         options = getattr(request, "options_legend", None) or (
             PERMISSION_OPTIONS_GRANTABLE if request.grantable else PERMISSION_OPTIONS_UNGRANTABLE
         )
-        async with self.suspended_box() as (output, console, _close):
-            async with self._output_lock:
-                console.print(
-                    f"[system.info]{PERMISSION_PROMPT_LABEL}:[/system.info] "
-                    f"{escape(sanitize_for_display(request.display))}"
+        queued = True
+        self._waiting += 1
+        try:
+            async with self.suspended_box() as (output, console, _close):
+                self._waiting -= 1
+                queued = False
+                async with self._output_lock:
+                    console.print(
+                        f"[system.info]{PERMISSION_PROMPT_LABEL}:[/system.info] "
+                        f"{escape(sanitize_for_display(request.display))}"
+                    )
+                try:
+                    kind = await _build_permission_app(options, request.grantable, output).run_async()
+                except (KeyboardInterrupt, EOFError):
+                    kind = PERMISSION_DEFAULT_DECISION
+                kind = kind or PERMISSION_DEFAULT_DECISION
+                lines = PERMISSION_ANSWER_LINES_BY_CLASS.get(
+                    getattr(request, "klass", ""), PERMISSION_ANSWER_LINES
                 )
-            try:
-                kind = await _build_permission_app(options, request.grantable, output).run_async()
-            except (KeyboardInterrupt, EOFError):
-                kind = PERMISSION_DEFAULT_DECISION
-            kind = kind or PERMISSION_DEFAULT_DECISION
-            lines = PERMISSION_ANSWER_LINES_BY_CLASS.get(
-                getattr(request, "klass", ""), PERMISSION_ANSWER_LINES
-            )
-            async with self._output_lock:
-                console.print(f"[system.info]{lines[kind]}[/system.info]")
+                async with self._output_lock:
+                    console.print(f"[system.info]{lines[kind]}[/system.info]")
+        finally:
+            if queued:
+                self._waiting -= 1
         return Decision(kind=kind)
 
     async def run_picker(self, options: Sequence[str], current: str | None) -> str | None:
