@@ -20,7 +20,7 @@ from localharness.agent.gate_types import MODE_STRICTNESS
 from localharness.channels import input_router
 from localharness.cli.model_ops import _hold_peer_session_key, _launch_key, _peer_session_key
 from localharness.cli.session_resume import RELOAD_ACTION
-from localharness.cli.skill_session import skill_row
+from localharness.cli.skill_session import SkillSession, skill_row
 from localharness.cli.slash_commands import SlashCommand, add_plugin_row, find_row, help_text
 from localharness.config.effort import EFFORT_UNENFORCED_LINE, LEVELS, resolve_effort
 from localharness.config.skills import Skipped, skip_line
@@ -304,7 +304,7 @@ class OrchestratorREPL:
     detected, drives the AgentCreationWorkflow state machine through conversation.
     All other input is dispatched to the agent loop.
     """
-    _skills: Any = None
+    _skills: SkillSession | None = None
 
     def __init__(
         self,
@@ -325,7 +325,7 @@ class OrchestratorREPL:
         machine_trust: Any = None,
         serving_heavy: tuple[Any, str] | None = None,
         unit_state: Any = None,
-        skills: Any = None,
+        skills: SkillSession | None = None,
     ) -> None:
         from localharness.cli.workspace import MachineTrust
         self._orchestrator = orchestrator
@@ -518,15 +518,7 @@ class OrchestratorREPL:
                 log.debug("relaunch reports could not be drained at exit", exc_info=True)
 
     def _subscribe_pending(self) -> None:
-        """Watch the staging queue change, so the row under the input box can follow it.
-
-        The ROW is the REPL's to draw and nothing else is: it shows the whole queue, oldest
-        first, and the gate is the only thing that knows what is left after an answer — an object
-        `channels` deliberately cannot import. The transcript LINE stays the channel's own,
-        drawn from the channel's own PermissionStaged subscription like every other event a
-        person reads, so a channel that already says it (Discord, ACP) never says it twice
-        because the REPL is hosting it.
-        """
+        """Subscribe the pending-permission row and the skill session to the bus."""
         self._pending_handles = [
             self._bus.subscribe(PermissionStaged, self._on_pending_changed),
             self._bus.subscribe(PermissionResolved, self._on_pending_changed),
