@@ -5,6 +5,7 @@ import asyncio
 import os
 import re
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Sequence
@@ -1147,6 +1148,7 @@ class TerminalChannel(ChannelAdapter):
         # for the next input bubble / the empty box and is cleared at the next submit.
         self._instructions_status: str = ""
         self._output_lock: asyncio.Lock = asyncio.Lock()
+        self._suspend_lock: asyncio.Lock = asyncio.Lock()
         self._thinking: Status | None = None  # rich Status while the model is generating (REPL-02)
         self._dreaming: Status | None = None  # rich Status while a background memory pass runs (#20)
         self._burst: _Burst | None = None  # open family-burst consolidation (display-only)
@@ -1163,6 +1165,8 @@ class TerminalChannel(ChannelAdapter):
         self.model_names_fn: Callable[[], list[str]] | None = None
         # --- Persistent type-anytime input box (start_input_box); all inert until then ---
         self._box_active: bool = False           # True while the long-lived box owns the terminal
+        self._suspended: bool = False            # True inside a suspended_box span
+        self._stopping: bool = False             # begin_stop(): the session is ending
         # (ctrl_queue, on_interrupt) from start_input_box — ask_permission suspends the box for
         # one keystroke and needs these to put it back exactly as it was.
         self._box_restart_args: tuple[Any, Any] | None = None
@@ -1698,142 +1702,95 @@ class TerminalChannel(ChannelAdapter):
         self._box_task = asyncio.create_task(self._box_app.run_async())
         self._box_ticker = asyncio.create_task(self._box_tick())
 
-    async def ask_permission(self, request: Any) -> Any:
-        """Put one permission question to the person at the keyboard (PRD §3.5).
+    def _tty_output(self) -> Any:
+        """None while stdout is the box's; else the terminal a redirected stdout cannot reach."""
+        if self.can_run_input_box():
+            return None
+        from prompt_toolkit.output.defaults import create_output
 
-        The question is printed through the ordinary console path — so it lands above the
-        persistent input box like every other line, wrapped and themed — and only the one-line
-        option legend is a prompt_toolkit application. The box is suspended for the keystroke
-        and restarted afterwards: two live applications cannot share one terminal, and
-        suspending rather than tearing down keeps the REPL's queue and interrupt callbacks
-        intact. Ctrl+C, Escape and Enter all answer "no, this once" (fail closed).
+        return create_output(always_prefer_tty=True)
 
-        What the keystroke LEAVES on screen is the question and one confirmation line
-        (:data:`PERMISSION_ANSWER_LINES`) — nothing else. Both applications erase their own
-        drawing on exit (:data:`ERASE_APPLICATIONS_WHEN_DONE`), which is what the owner asked
-        for on 2026-09-11: "I don't like how it persists a chat box every time I answer (a) (y)
-        or whatever; it should just record my input." Before that, one answer left a dead input
-        box, a dead legend and then a new live box in the scrollback, three times per prompt.
+    def begin_stop(self) -> None:
+        """The session is ending: a suspension closing from now on restarts no box."""
+        self._stopping = True
 
-        When stdout is redirected (`| tee`, `> file`) the question and its legend go to stderr
-        instead, so the person at the keyboard still sees what they are answering — defect D6:
-        `can_ask` follows stdin, and a question drawn into a pipe would be a question nobody
-        can answer on a channel that now holds its dialog open forever.
-
-        The question and the legend run under `patch_stdout(raw=True)`, the same protection
-        `start_input_box` holds for the box's whole life. A turn does not stop while a human
-        thinks: subagents keep streaming, and every one of those writes goes through the ordinary
-        console path. Without the patch they landed straight on the terminal the legend was
-        painting, and the line the person answers from was the corrupted one. The patch cannot be
-        the `_output_lock` instead: that lock is held by whichever task is writing, so holding it
-        across `run_async()` would stall every writer until a human answered — and `run_async`
-        is exactly the wait that can last minutes. The lock stays where it belongs, around the
-        print alone; `patch_stdout` is what makes concurrent writers safe, by rendering them
-        ABOVE the running application instead of through it.
-
-        The patch is stdout-only on purpose. It replaces `sys.stderr` as well and routes both
-        into the app session's output, which on the redirected path is the pipe — the exact
-        place this question must never be drawn.
-        """
+    @asynccontextmanager
+    async def suspended_box(self) -> AsyncIterator[tuple[Any, Console, Callable[[], None]]]:
+        """Stop the box for one hosted application; restart it after unless closed or stopping."""
         from contextlib import nullcontext
 
         from prompt_toolkit.patch_stdout import patch_stdout
 
+        async with self._suspend_lock:
+            restart = self._box_restart_args if self._box_active else None
+            if restart is not None:
+                await self.stop_input_box()
+            closed = False
+
+            def close() -> None:
+                nonlocal closed
+                closed = True
+
+            try:
+                # _output_lock never spans the hosted app: every writer takes it and the app waits on a person.
+                async with self._output_lock:
+                    self._stop_thinking()
+                    self._close_burst()
+                self._suspended = True
+                output = self._tty_output()
+                console = self._console if output is None else self._err_console
+                # stdout only: the patch also takes stderr, which on the redirected path is the pipe.
+                with (patch_stdout(raw=True) if output is None else nullcontext()):
+                    yield output, console, close
+            finally:
+                try:
+                    if restart is not None and not closed and not self._stopping:
+                        await self.start_input_box(*restart)
+                finally:
+                    self._suspended = False
+
+    async def ask_permission(self, request: Any) -> Any:
+        """Put one permission question to the person at the keyboard; every unclear key means no, once."""
         from localharness.agent.gate_types import Decision
 
-        restart = self._box_restart_args if self._box_active else None
-        if restart is not None:
-            await self.stop_input_box()
-        try:
+        # The workspace-trust question carries its own legend: its answer is remembered.
+        options = getattr(request, "options_legend", None) or (
+            PERMISSION_OPTIONS_GRANTABLE if request.grantable else PERMISSION_OPTIONS_UNGRANTABLE
+        )
+        async with self.suspended_box() as (output, console, _close):
             async with self._output_lock:
-                self._stop_thinking()
-                self._close_burst()
-            on_stdout = self.can_run_input_box()
-            console = self._console if on_stdout else self._err_console
-            # A request may carry its own legend (the workspace-trust question does — its answer
-            # IS remembered, which the ungrantable legend's tail says the opposite of).
-            options = getattr(request, "options_legend", None) or (
-                PERMISSION_OPTIONS_GRANTABLE if request.grantable
-                else PERMISSION_OPTIONS_UNGRANTABLE
-            )
-            output = None
-            if not on_stdout:
-                from prompt_toolkit.output.defaults import create_output
-
-                output = create_output(always_prefer_tty=True)
-            with (patch_stdout(raw=True) if on_stdout else nullcontext()):
-                async with self._output_lock:
-                    console.print(
-                        f"[system.info]{PERMISSION_PROMPT_LABEL}:[/system.info] "
-                        f"{escape(sanitize_for_display(request.display))}"
-                    )
-                try:
-                    kind = await _build_permission_app(
-                        options, request.grantable, output
-                    ).run_async()
-                except (KeyboardInterrupt, EOFError):
-                    kind = PERMISSION_DEFAULT_DECISION
-                kind = kind or PERMISSION_DEFAULT_DECISION
-                # The keystroke erased the legend; this is what replaces it. Printed INSIDE the
-                # patch, before the box is restarted, so it lands in the scrollback directly
-                # under the question it answers rather than above a freshly redrawn box.
-                lines = PERMISSION_ANSWER_LINES_BY_CLASS.get(
-                    getattr(request, "klass", ""), PERMISSION_ANSWER_LINES
+                console.print(
+                    f"[system.info]{PERMISSION_PROMPT_LABEL}:[/system.info] "
+                    f"{escape(sanitize_for_display(request.display))}"
                 )
-                async with self._output_lock:
-                    console.print(f"[system.info]{lines[kind]}[/system.info]")
-            return Decision(kind=kind)
-        finally:
-            if restart is not None:
-                await self.start_input_box(*restart)
+            try:
+                kind = await _build_permission_app(options, request.grantable, output).run_async()
+            except (KeyboardInterrupt, EOFError):
+                kind = PERMISSION_DEFAULT_DECISION
+            kind = kind or PERMISSION_DEFAULT_DECISION
+            lines = PERMISSION_ANSWER_LINES_BY_CLASS.get(
+                getattr(request, "klass", ""), PERMISSION_ANSWER_LINES
+            )
+            async with self._output_lock:
+                console.print(f"[system.info]{lines[kind]}[/system.info]")
+        return Decision(kind=kind)
 
     async def run_picker(self, options: Sequence[str], current: str | None) -> str | None:
-        """The one-line arrow-key picker, drawn where a permission legend is drawn (spec 16 7.1).
-
-        Same suspension as :meth:`ask_permission`: the persistent box is stopped for the
-        keystrokes and restarted afterwards, even when the picker raises, because two live
-        applications cannot share one terminal. The chosen option comes back, or ``None`` when the
-        person pressed Esc or Ctrl+C, or when no terminal could draw the picker at all. Nothing is
-        printed either way: the caller says what it did with the answer.
-
-        The picker's style is :data:`~localharness.cli.picker.PICKER_STYLE` merged under
-        :data:`INPUT_STYLE`: ``INPUT_STYLE`` has no ``selected`` class, so without the merge the
-        highlight would only be "not dim" on a real terminal, and listing it last keeps this
-        channel's own ``hint`` and ``frame`` colours.
-        """
-        from contextlib import nullcontext
-
-        from prompt_toolkit.patch_stdout import patch_stdout
-
+        """The one-line arrow-key picker; None on Esc, Ctrl+C or when no terminal can draw it."""
         from localharness.cli.picker import PICKER_STYLE, pick
 
         if cannot_ask_reason() is not None:
             return None
-        restart = self._box_restart_args if self._box_active else None
-        if restart is not None:
-            await self.stop_input_box()
-        try:
-            async with self._output_lock:
-                self._stop_thinking()
-                self._close_burst()
-            on_stdout = self.can_run_input_box()
-            output = None
-            if not on_stdout:
-                from prompt_toolkit.output.defaults import create_output
-
-                output = create_output(always_prefer_tty=True)
-            with (patch_stdout(raw=True) if on_stdout else nullcontext()):
-                try:
-                    return await pick(
-                        list(options), current, output=output,
-                        style=merge_styles([PICKER_STYLE, INPUT_STYLE]),
-                        erase_when_done=ERASE_APPLICATIONS_WHEN_DONE,
-                    )
-                except (KeyboardInterrupt, EOFError):
-                    return None
-        finally:
-            if restart is not None:
-                await self.start_input_box(*restart)
+        async with self.suspended_box() as (output, _console, _close):
+            try:
+                # INPUT_STYLE has no `selected` class; listing it last keeps this channel's hint and frame colours.
+                return await pick(
+                    list(options), current, output=output,
+                    style=merge_styles([PICKER_STYLE, INPUT_STYLE]),
+                    erase_when_done=ERASE_APPLICATIONS_WHEN_DONE,
+                )
+            except (KeyboardInterrupt, EOFError):
+                return None
 
     def _note_newline_chord(self, name: str) -> None:
         """The input apps call this each time a newline chord fires as a line break. Only a
@@ -2194,7 +2151,7 @@ class TerminalChannel(ChannelAdapter):
         text = self._burst_text(burst, final=False)
         if burst.status is not None:
             burst.status.update(text)
-        elif self._console.is_terminal and self._state == "IDLE":
+        elif self._console.is_terminal and self._state == "IDLE" and not self._suspended:
             try:
                 burst.status = self._console.status(text, spinner="dots")
                 burst.status.start()
@@ -2230,6 +2187,8 @@ class TerminalChannel(ChannelAdapter):
         IDLE-only: never over the input bubble, a streaming panel, an open burst
         counter (the burst spinner is already the live indicator), or the dreaming
         status (rich allows one live display \u2014 a turn beginning stops it first)."""
+        if self._suspended:
+            return
         if self._box_active:
             # Box mode: in-frame glyph, never a rich Status (freeze-safe under patch_stdout).
             self.box_notify_working(True)
@@ -2274,6 +2233,8 @@ class TerminalChannel(ChannelAdapter):
         pass runs (#20). Extends _start_thinking: same console.status, IDLE-only \u2014 so it can
         never draw over the input bubble (WAITING_INPUT) or a stream, and never opens a second
         live display alongside the thinking spinner or a burst counter."""
+        if self._suspended:
+            return
         if self._box_active:
             # box mode: no rich Status (freeze-safe). Animate it in the status row above the
             # box instead — closes the v0.9.10 v1 gap where dreaming had no box-mode indicator.
