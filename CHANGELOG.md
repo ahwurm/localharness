@@ -4,6 +4,27 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.21.0] — 2026-10-24
+
+`/plugins` opens Plugins inside the session, and two Ctrl-C behaviors change.
+
+### Changed
+- **A stop signal sent to localharness from outside — an IDE stop button, a supervisor,
+  `kill -INT` — now quits localharness as `/quit` does instead of being ignored (on Linux or
+  macOS; not when the signal was already being ignored when it started).** A turn in flight is
+  cancelled. If you need such a signal to be ignored, start localharness from a script that runs
+  `trap '' INT` first (`nohup` does not help — it ignores a different signal). Inside Plugins the
+  same signal only cancels the current step; a second signal during the shutdown aborts the
+  shutdown.
+- **In a plain-terminal or piped run, where Ctrl-C is the only input, pressing it a third time
+  while a turn is still stopping now quits localharness; before, it showed 'Turn cancelled.' again
+  and kept running.** In the normal input-box session Ctrl-C is a key and is unchanged.
+- **/plugins on a terminal now opens Plugins instead of printing the list: pick a plugin to enable
+  (it installs what it needs after one consent and asks its setup questions in one go), configure,
+  re-run setup, or disable.** Closing Plugins restarts the session once if a running plugin
+  changed — your conversation is kept. The typed `/plugins enable NAME` now also installs a
+  missing package after a consent, and `localharness plugins` still works.
+
 ## [0.20.5] — 2026-10-21
 
 One Plugins line: loaded, unconfigured, and not-enabled plugins all share a single banner.
