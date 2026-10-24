@@ -52,7 +52,8 @@ from localharness.channels.base import sanitize_for_display
 from localharness.cli import update_cmd
 from localharness.cli.components_cmd import (
     Refusal, _build_layered_loader, _core_secret_values, _err, _err_config, _serialize_value,
-    _validate_overlay, _validation_text, is_secret, redact_text, shown, walk_secret_values, workspace_file_of,
+    _validate_overlay, _validation_text, audit_value, is_secret, redact_text, shown, walk_secret_values,
+    workspace_file_of, write_value,
 )
 from localharness.cli.interview import confirm_line, prompt_line
 from localharness.cli.workspace import _stdin_is_a_terminal
@@ -70,6 +71,7 @@ if TYPE_CHECKING:
     from localharness.plugins.lifecycle import DoctorRow
     from localharness.plugins.plan import PlanEntry
     from localharness.plugins.resolve import Resolution
+    from localharness.registry.catalogue import ComponentEntry, PluginRows
 
 plugins_app = typer.Typer(name="plugins", help="See, enable and disable plugins.", no_args_is_help=True)
 
@@ -1235,6 +1237,52 @@ async def enable_pass(session, name, *, mode: Literal["enable", "rerun"], progre
     state = await _write(await _questions(state, prompt=prompt), report=report)
     state = await _check(await _act(state, confirm=confirm, report=report), report=report)
     return _pass_result(state, session, prior)
+
+
+def _catalogue(loader: ConfigLoader, rows: tuple[PluginRows, ...]) -> dict[str, ComponentEntry]:
+    return layered_catalogue(loader.global_config_dir, loader._local_dir, loader=loader, plugins=rows)[0]
+
+
+def _own_rows(catalogue: dict[str, ComponentEntry], name: str) -> tuple[ComponentEntry, ...]:
+    return tuple(e for e in sorted(catalogue.values(), key=lambda e: e.path)
+                 if e.plugin == name and e.path != f"{name}.enabled" and not e.path.startswith("agent."))
+
+
+def settings_rows(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry) -> tuple[ComponentEntry, ...]:
+    """The catalogue's rows for this plugin's own settings; () when nothing of it is loaded to list."""
+    if entry.name not in resolution.classes:
+        return ()
+    return _own_rows(_catalogue(loader, plugin_catalogue_rows(resolution)), entry.name)
+
+
+async def configure_one(session, row, raw, *, progress, report) -> PassResult:
+    """Write one of a plugin's settings to the machine overlay through the checked path, then audit it."""
+    from localharness.config.loader import ConfigLoader
+    from localharness.plugins.resolve import resolve
+
+    progress.phase = "edit"
+    name = row.plugin or ""
+    loader = ConfigLoader(config_dir=session.cfg_path, local_config_dir=session.workspace)
+    resolution = resolve(loader)
+    plugins = plugin_catalogue_rows(resolution)
+    catalogue = _catalogue(loader, plugins)
+    if (own := next((r for r in _own_rows(catalogue, name) if r.path == row.path), None)) is None:
+        return refused(session, name, f"{row.path} is not one of {row.plugin or 'a plugin'}'s settings", "none")
+    project = workspace_file_of(loader, own.winning_layer)
+    progress.overridden = project is not None
+    try:
+        written = write_value(loader, catalogue, plugins, row.path, raw)
+    except Refusal as refusal:
+        return refused(session, name, str(refusal), "none")
+    progress.wrote = True
+    text = redact_text(shown(written.after, written.annotation))
+    report("wrote", (f"{row.path} saved in {written.overlay_path}", ((row.path, text),)))
+    await audit_value(written)
+    prior = session.touched.get(name) or prior_touch(session, name)
+    step = StepOutcome(name, True)
+    if project is not None:
+        return PassResult("saved_overridden", step, loads=prior.loads, override=(None, project), shown=text)
+    return PassResult("saved", step, loads=prior.loads, rebind=name in session.running, shown=text)
 
 
 async def disable_pass(session, name, *, progress, report) -> PassResult:
