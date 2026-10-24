@@ -10,7 +10,8 @@ import pytest
 
 from localharness.cli import start_cmd
 from localharness.cli.session_resume import (
-    ASLEEP_FILE, SLEEP_ACTION, Resume, asleep_path, sleeping_sitting, take_asleep, write_asleep,
+    ASLEEP_FILE, RELOAD_ACTION, SLEEP_ACTION, Resume, asleep_path, is_reload, sleeping_sitting, take_asleep,
+    write_asleep,
 )
 
 CONVERSATION = (
@@ -171,3 +172,13 @@ def test_a_settled_thread_wakes_exactly_as_it_slept(tmp_path, caplog):
         assert _wake(tmp_path, (SYSTEM,)) == (SYSTEM,)
         assert _wake(tmp_path, ()) == ()
     assert "waking without" not in caplog.text
+
+
+def test_reload_action_is_the_marker_and_nothing_else_is():
+    assert RELOAD_ACTION == ("reload", "") and is_reload(RELOAD_ACTION)
+    for other in (SLEEP_ACTION, ("enable", "reload"), ("disable", "reload"), ("reload", "x"), ("", "")):
+        assert not is_reload(other)
+
+
+def test_a_reload_resume_is_not_asleep():
+    assert not _resume(action=RELOAD_ACTION).slept

@@ -3363,3 +3363,33 @@ def test_an_external_sigint_against_the_live_box_ends_the_session_as_complete(tm
     finally:
         sys.stdout = before
     assert _read_sessions(tmp_path)[0][3] == "complete"
+
+
+def _resume_of(action, **kw):
+    from localharness.cli.session_resume import Resume
+
+    return Resume(action=action, agent_name="orchestrator", conversation=(), prior_context="",
+                  eviction_store=None, queued=(), gate_mode="auto", previous_sitting_id="old", **kw)
+
+
+async def test_a_reload_resume_prints_the_reload_line_then_the_plugins_line_and_no_status(tmp_path, monkeypatch):
+    from rich.text import Text
+
+    from localharness.cli import start_cmd
+    from localharness.cli.session_resume import RELOAD_ACTION
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    printed = _capture_start_console(monkeypatch)
+    monkeypatch.setattr(start_cmd, "_plugins_text", lambda *a, **k: Text("  Plugins: sentinel"))
+
+    def no_status(*a, **k):
+        raise AssertionError("a reload prints no per-plugin status")
+
+    monkeypatch.setattr(start_cmd, "_resume_status", no_status)
+
+    await start_cmd._start_async(None, False, False, str(tmp_path), resume=_resume_of(RELOAD_ACTION))
+
+    at = [i for i, line in enumerate(printed) if line == start_cmd.RESTARTED_RELOAD]
+    plugins = [i for i, line in enumerate(printed) if "Plugins: sentinel" in line]
+    assert len(at) == 1 and len(plugins) == 1 and at[0] < plugins[0]
+    assert [line for line in printed if line.startswith("Restarted with ")] == [start_cmd.RESTARTED_RELOAD]
