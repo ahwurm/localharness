@@ -255,7 +255,7 @@ async def test_disabled_dispatch_refuses_discord(tmp_path, monkeypatch):
     fake = install_fake_discord(monkeypatch)
     _extra(monkeypatch)
     cfg = _global(tmp_path, monkeypatch, SETTINGS)
-    off = CliRunner().invoke(app, ["plugins", "disable", "dispatch", "--config-dir", cfg])
+    off = await asyncio.to_thread(CliRunner().invoke, app, ["plugins", "disable", "dispatch", "--config-dir", cfg])
     assert off.exit_code == 0, off.output
     starts = _record_plugin_start(monkeypatch)
 
