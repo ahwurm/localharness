@@ -803,3 +803,115 @@ def test_read_body_leaves_the_set_unchanged(cfg):
     for _ in range(3):
         found.read_body(found.skills[0])
     assert (found.skills, found.skipped) == before
+
+
+BAD_NAMES = ["../x", "/etc", "X", "Alpha", "a\n", "", "a" * 65, "a--b", "-a", None]
+
+
+@pytest.mark.parametrize("name", BAD_NAMES, ids=[repr(n)[:12] for n in BAD_NAMES])
+def test_find_returns_none_for_a_bad_name_before_any_scan(name, cfg, monkeypatch):
+    _write(cfg, None)
+    found = SkillSet.discover(cfg, None)
+
+    def boom(*args):
+        raise AssertionError("scanned")
+
+    monkeypatch.setattr(skills, "_scan", boom)
+    assert found.find(name) is None
+
+
+def test_find_returns_a_skill_added_since_start_once(cfg):
+    _write(cfg, None, entry="old")
+    found = SkillSet.discover(cfg, None)
+    before = (found.skills, found.skipped)
+    _write(cfg, None, entry="new")
+    result = found.find("new")
+    assert isinstance(result, skills.Skill) and result.origin in {label for label, _ in skills.ORIGINS}
+    assert (result.origin, result.name) == ("machine", "new")
+    assert found.skills[-1] is result and found.skills[:-1] == before[0] and found.skipped == before[1]
+    assert found.find("new") is result and len(found.skills) == 2
+
+
+def test_find_prefers_the_start_set_over_a_later_higher_origin(cfg, proj):
+    machine = _write(cfg, None, entry="x")
+    found = SkillSet.discover(cfg, proj)
+    _skill(proj / ".localharness" / "skills", "x")
+    assert found.find("x") is found.skills[0] and found.skills[0].path == machine
+
+
+def test_find_applies_the_shadow_rule_to_a_fresh_pair(cfg, proj):
+    found = SkillSet.discover(cfg, proj)
+    top = _skill(proj / ".localharness" / "skills", "y")
+    _skill(proj / ".agents" / "skills", "y")
+    result = found.find("y")
+    assert result.path == top and found.skills == (result,) and found.skipped == ()
+
+
+def test_find_returns_the_first_skip_when_every_match_is_skipped(cfg, proj):
+    found = SkillSet.discover(cfg, proj)
+    first = _skill(proj / ".localharness" / "skills", "x", _fm("other"))
+    _skill(proj / ".agents" / "skills", "x", _fm("other"))
+    result = found.find("x")
+    assert skip_line(result) == _expect(skills.NAME_DIR, path=first, name="other")
+    assert found.skills == () and found.skipped == ()
+
+
+def test_find_returns_the_skip_for_an_invalid_new_directory(cfg):
+    found = SkillSet.discover(cfg, None)
+    path = _write(cfg, _fm("other"), entry="bad")
+    assert skip_line(found.find("bad")) == _expect(skills.NAME_DIR, path=path, name="other")
+    assert found.skills == () and found.skipped == ()
+
+
+def test_find_returns_none_for_a_name_no_origin_holds(cfg):
+    _write(cfg, None, entry="a")
+    (cfg / "skills" / "empty").mkdir()
+    found = SkillSet.discover(cfg, None)
+    assert found.find("nothing-here") is None and found.find("empty") is None
+
+
+@pytest.mark.parametrize("added", ["zz-new", "a-new"])
+def test_find_keeps_the_total_cap_on_the_live_set(added, cfg, proj):
+    for i in range(32):
+        _skill(proj / ".localharness" / "skills", f"p{i:02d}")
+        _write(cfg, None, entry=f"m{i:02d}")
+    found = SkillSet.discover(cfg, proj)
+    new = _write(cfg, None, entry=added)
+    assert skip_line(found.find(added)) == _expect(skills.CAP_TOTAL, dir=new.parent)
+    assert len(found.skills) == 64 and found.skipped == ()
+
+
+def test_find_keeps_the_project_cap_on_the_live_set(cfg, proj):
+    for i in range(32):
+        _skill(proj / ".localharness" / "skills", f"p{i:02d}")
+    found = SkillSet.discover(cfg, proj)
+    new = _skill(proj / ".localharness" / "skills", "p-new")
+    assert skip_line(found.find("p-new")) == _expect(skills.CAP_PROJECT, dir=new.parent)
+    assert len(found.skills) == 32
+
+
+def test_find_reuses_the_start_time_workspace_decision(cfg, proj):
+    found = SkillSet.discover(cfg, None)
+    _skill(proj / ".localharness" / "skills", "proj-only")
+    assert found.find("proj-only") is None and found.skills == ()
+
+
+def _snapshot(root):
+    return {
+        str(p.relative_to(root)): (p.lstat().st_size, p.lstat().st_mtime_ns) for p in sorted(root.rglob("*"))
+    }
+
+
+def test_discover_find_and_read_body_write_and_print_nothing(tmp_path, cfg, proj, capsys):
+    _write(cfg, None, entry="m")
+    _skill(proj / ".localharness" / "skills", "p")
+    _write(cfg, _fm("other"), entry="bad")
+    _write(cfg, None, entry="late")
+    before = _snapshot(tmp_path)
+    found = SkillSet.discover(cfg, proj)
+    found.find("late"), found.find("bad"), found.find("m"), found.find("../x"), found.find("none")
+    for record in found.skills:
+        found.read_body(record)
+    assert _snapshot(tmp_path) == before
+    captured = capsys.readouterr()
+    assert (captured.out, captured.err) == ("", "")
