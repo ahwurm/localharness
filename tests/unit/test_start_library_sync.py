@@ -3,8 +3,11 @@ loads, and never twice; `start` walks, asks and writes nothing without a person,
 config directory cannot be written. Each GGUF is a real header under a faked HOME; `_start_async` is a recorder."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import signal
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -280,6 +283,22 @@ def test_the_plugins_restart_pass_does_not_sync_again(after_first_run, monkeypat
     _exited(result, 0)
     assert len(seen) == 2 and seen[0] is None and seen[1] is not None
     assert len(calls) == 1 and calls[0]["scope"] == "new"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_a_real_sigint_in_the_session_says_goodbye_and_exits_zero(after_first_run, monkeypatch):
+    scripted(monkeypatch)
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+    async def start_async(*args, **kw):
+        asyncio.get_running_loop().call_soon(os.kill, os.getpid(), signal.SIGINT)
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(start_cmd, "_start_async", start_async)
+    result = CliRunner().invoke(app, ["start", "--config-dir", str(after_first_run.cfg)])
+
+    _exited(result, 0)
+    assert "Goodbye." in _flat(result)
 
 
 def test_a_library_that_fails_with_an_oserror_says_one_line_and_the_session_still_starts(after_first_run, monkeypatch):
