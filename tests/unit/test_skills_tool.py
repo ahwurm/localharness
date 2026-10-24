@@ -1,11 +1,17 @@
-"""The skill tool's seams: task capacity, the reference commit and the registry's cut."""
+"""The skill tool and its seams: schema, results, retention, taint and task references."""
+from types import SimpleNamespace
+
 import pytest
 
 from localharness.agent.context import ContentStore
 from localharness.agent.task_record import Reference, TaskState, TooManyReferences
+from localharness.config import skills
 from localharness.config.models import ToolConfig
+from localharness.config.skills import SkillSet
 from localharness.tools.base import Tool, ToolResult, ToolSchema
+from localharness.tools.builtin.skill_tool import SkillTool, skill_schema
 from localharness.tools.registry import ToolRegistry, cut_output
+from tests.unit.test_skills_discovery import _skill
 from tests.unit.test_task_tool import refused, start, tool_for
 
 
@@ -207,3 +213,48 @@ async def test_the_registry_dispatches_through_cut_output():
     result = await registry.dispatch("big", {}, "agent-1", "div-1", ToolConfig(inherit=["global"]))
     assert result.output == cut_output("x" * 2000, 500)
     assert result.truncated is True and result.original_length == 2000
+
+
+@pytest.fixture
+def dirs(tmp_path, monkeypatch):
+    monkeypatch.setattr(skills, "PACKAGE_DIR", tmp_path / "pkg")
+    (tmp_path / "proj" / ".localharness").mkdir(parents=True)
+    return SimpleNamespace(
+        cfg=tmp_path / "cfg", proj=tmp_path / "proj", bundled=tmp_path / "pkg" / "assets" / "skills",
+        machine=tmp_path / "cfg" / "skills", project=tmp_path / "proj" / ".localharness" / "skills",
+    )
+
+
+def discovered(dirs):
+    return SkillSet.discover(dirs.cfg, dirs.proj)
+
+
+def skill_tool(tmp_path, found, cap=50_000):
+    return SkillTool(found, ContentStore(), TaskState(tmp_path / "task.json", workspace=str(tmp_path)), lambda: cap)
+
+
+async def test_the_skill_tool_loads_a_bundled_body_without_its_frontmatter(tmp_path, dirs):
+    _skill(dirs.bundled, "notes")
+    result = await skill_tool(tmp_path, discovered(dirs)).run(name="notes")
+    assert result.success is True
+    assert result.output == f"skill 'notes' (bundled), directory {str(dirs.bundled / 'notes')!r}\n\nBody of notes."
+
+
+def test_the_schema_carries_the_task_declarations_and_the_start_set_enum(tmp_path, dirs):
+    _skill(dirs.bundled, "notes")
+    _skill(dirs.project, "release-notes")
+    schema = skill_tool(tmp_path, discovered(dirs)).info()
+    assert schema == skill_schema(["notes", "release-notes"])
+    assert (schema.name, schema.group, schema.gate_family, schema.ingest, schema.host, schema.result_origin) == (
+        "skill", "skill", "allow", "none", "safe", "trusted")
+    assert schema.parameters == {
+        "type": "object",
+        "properties": {"name": {"type": "string", "enum": ["notes", "release-notes"]}},
+        "required": ["name"],
+    }
+    assert schema.description == (
+        "Load a procedure by name and follow it. The Skills list in your instructions says what each one is for; "
+        "call this before starting work that one covers. Files in the skill's directory are read with read; "
+        "its scripts run with bash_exec."
+    )
+    assert not hasattr(SkillTool, "bound_to")
