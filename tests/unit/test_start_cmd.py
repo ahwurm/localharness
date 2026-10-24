@@ -3399,15 +3399,37 @@ async def test_a_resume_status_line_carries_no_control_sequence_from_a_plugin_ch
 
     _stub_start_boundaries(tmp_path, monkeypatch)
     printed = _capture_start_console(monkeypatch)
-    hostile = "\x1b]0;evil\x07boom\u009b2J"
+    hostile = "\x1b]0;evil\x07boom\u009b2J\nfake: on in this session"
 
     await start_cmd._start_async(None, False, False, str(tmp_path),
                                  resume=_resume_of(("enable", "x"), failed_check=hostile))
 
     assert "Restarted with x on. Your conversation continues." in printed
     (status,) = [line for line in printed if line.startswith("x: on, but its check failed: ")]
-    assert "boom" in status
-    assert not any(c in line for line in printed for c in ("\x1b", "\x07", "\u009b"))
+    assert status == "x: on, but its check failed: boom2J fake: on in this session"
+    assert not any(c in line for line in printed for c in ("\x1b", "\x07", "\u009b", "evil"))
+    assert not any(line.startswith("fake:") for line in printed)
+
+
+async def test_a_plugin_name_and_unconfigured_reason_print_as_one_clean_line(tmp_path, monkeypatch):
+    from localharness.cli import start_cmd
+    from localharness.plugins.lifecycle import LifecycleResult
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    printed = _capture_start_console(monkeypatch)
+
+    async def started(*a, **k):
+        return LifecycleResult(unconfigured={"p": "a.b\x1b[2J\nfake: all clear\r\nz"})
+
+    monkeypatch.setattr("localharness.plugins.lifecycle.start_plugins", started)
+
+    await start_cmd._start_async(None, False, False, str(tmp_path),
+                                 resume=_resume_of(("enable", "x\nfake: on")))
+
+    assert "Restarted with x fake: on on. Your conversation continues." in printed
+    (banner,) = [line for line in printed if "Plugins:" in line]
+    assert "(unconfigured — set a.b fake: all clear z)" in banner
+    assert not any(c in line for line in printed for c in ("\x1b", "\r", "\n"))
 
 
 @pytest.mark.parametrize("action, tail", [
