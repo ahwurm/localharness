@@ -6,22 +6,25 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import Any, Literal, get_args, get_origin
 
 import click
 from rich.text import Text
 
 from localharness.channels.base import sanitize_for_display
 from localharness.cli import plugins_cmd
-from localharness.cli.components_cmd import redact_text
+from localharness.cli.components_cmd import redact_text, shown, userinfo_present, workspace_file_of
 from localharness.cli.interview import Option, Unreachable, confirm_line, n_of, prompt_line
 from localharness.cli.plugins_cmd import (
-    ACTION_DISABLE, ACTION_ENABLE, ACTION_INFO, ACTION_INSTALL, ACTION_RERUN, ACTION_SHOW_INSTALL, CTRLC, CTRLC_DOES,
+    ACTION_CONFIGURE, ACTION_DISABLE, ACTION_ENABLE, ACTION_INFO, ACTION_INSTALL, ACTION_RERUN, ACTION_SHOW_INSTALL, CTRLC, CTRLC_DOES,
     ENABLE_MANUAL, OVERRIDE_LINE, OVERRIDE_SAVED, ROUTE_BACK, Kind, PassProgress, PassResult, PluginSession, Refusal, ReloadPlan, Touch,
     disable_pass, enable_pass, info_renderable, install_pass, manual_block, override_line, prior_touch, refused, touch_after_stop,
     touch_from,
 )
+from localharness.config.redact import is_secret
 from localharness.core.interrupt import sigint_cancels
+from localharness.plugins.api import SetupField
+from localharness.registry.paths import unwrap_optional
 
 PLUGINS_QUESTION = "Plugins — Esc or Ctrl-C closes"
 CLOSE = "+close"
@@ -106,6 +109,12 @@ STOP_TAILS = MappingProxyType({
     "disable": "nothing changed",
 })
 RERUN_HINT = "download still stopping"
+CONFIGURE_QUESTION = "{name} — settings (Esc = back)"
+BOOL_QUESTION = "{key}: on or off?"
+LITERAL_QUESTION = "{key}: which?"
+SCALAR_PROMPT = "{key} [{shown}]"
+READ_ONLY = "read-only here — edit {path} in {file}"
+DONE = "Done"
 NEXT_STEPS_KINDS = frozenset({
     "enabled", "enabled_unconfigured", "check_failed", "check_failed_noload", "check_skipped", "enabled_not_loading",
     "rerun_ok", "rerun_failed", "install_skipped", "enabled_manual"})
@@ -255,6 +264,8 @@ async def _contained(flow: Flow, node: Callable, names: tuple[str, ...], progres
         return await node()
     except _STOPS:
         return _STOP
+    except _Abandon:
+        raise
     except Exception as exc:  # noqa: BLE001 — a node never ends the session
         if isinstance(exc, Refusal) and names and progress is not None:
             return refused(flow.session, names[0], str(exc), "done" if progress.phase == "question_installed" else "none")
@@ -314,12 +325,17 @@ async def _act(flow: Flow, entry: Any, node: Callable, progress: PassProgress, *
     return result
 
 
-def _resolved(session: PluginSession) -> tuple[Any, tuple[Any, ...]]:
+def _loaded(session: PluginSession) -> tuple[Any, Any]:
     from localharness.config.loader import ConfigLoader
     from localharness.plugins.resolve import resolve
 
     loader = ConfigLoader(config_dir=session.cfg_path, local_config_dir=session.workspace)
-    return loader, tuple(resolve(loader).plan.entries)
+    return loader, resolve(loader)
+
+
+def _resolved(session: PluginSession) -> tuple[Any, tuple[Any, ...]]:
+    loader, resolution = _loaded(session)
+    return loader, tuple(resolution.plan.entries)
 
 
 def _switchable_on(entry: Any, loader: Any) -> bool:
@@ -397,42 +413,140 @@ async def _info(flow: Flow, entry: Any, route: Any) -> bool:
     return True
 
 
-def _argv_route(entry: Any, enabled: bool | None, route: Any, session: PluginSession) -> bool:
+def _key(row: Any) -> str:
+    return row.path.removeprefix(f"{row.plugin}.")
+
+
+def _value(row: Any) -> str:
+    return _clean(shown(row.current_value, row.annotation))
+
+
+async def _read_only(flow: Flow, row: Any, loader: Any) -> None:
+    _say(flow.console, READ_ONLY.format(path=row.path, file=loader.user_overlay_path))
+
+
+async def _secret(flow: Flow, row: Any, loader: Any) -> str | None:
+    key, value, secret = _key(row), row.current_value, is_secret(row.annotation)
+    pairs = await plugins_cmd.ask_fields(
+        (SetupField(key=key, prompt=key, secret=secret),), lambda k: str(value), lambda k: bool(value),
+        lambda k: "none" if unwrap_optional(row.annotation) is not row.annotation else "", prompt=flow.prompt)
+    return pairs[0].removeprefix(f"{key}=") if pairs else None
+
+
+async def _pick(flow: Flow, question: str, choices: tuple[str, ...], current: str) -> str | None:
+    answer = await flow.channel.run_interview(
+        question, [Option(c, c) for c in choices], default=choices.index(current) if current in choices else 0, cancel="back")
+    if not answer.reached:
+        raise _Abandon(why=answer.why)
+    return None if answer.cancelled else answer.keys[0]
+
+
+async def _bool(flow: Flow, row: Any, loader: Any) -> str | None:
+    return await _pick(flow, BOOL_QUESTION.format(key=_key(row)), ("on", "off"), "on" if row.current_value else "off")
+
+
+async def _literal(flow: Flow, row: Any, loader: Any) -> str | None:
+    choices = tuple(map(str, get_args(unwrap_optional(row.annotation))))
+    return await _pick(flow, LITERAL_QUESTION.format(key=_key(row)), choices, str(row.current_value))
+
+
+async def _scalar(flow: Flow, row: Any, loader: Any) -> str | None:
+    key = _key(row)
+    text = SCALAR_PROMPT.format(key=key, shown=_value(row)) + ": "
+    if (raw := await flow.prompt(text, default="", secret=key.endswith("url"))) is None:
+        raise click.Abort()
+    return raw or None
+
+
+EDITORS: tuple[tuple[Callable[[Any], bool], Callable[[Flow, Any, Any], Awaitable[str | None]]], ...] = (
+    (lambda row: get_origin(unwrap_optional(row.annotation)) not in (None, Literal), _read_only),
+    (lambda row: is_secret(row.annotation) or userinfo_present(row.current_value), _secret),
+    (lambda row: unwrap_optional(row.annotation) is bool, _bool),
+    (lambda row: get_origin(unwrap_optional(row.annotation)) is Literal, _literal),
+    (lambda row: unwrap_optional(row.annotation) in (str, int, float), _scalar),
+    (lambda row: True, _read_only),
+)
+
+
+async def _edit(flow: Flow, entry: Any, loader: Any, row: Any) -> None:
+    editor = next(handler for matches, handler in EDITORS if matches(row))
+    key, file, progress = _key(row), workspace_file_of(loader, row.winning_layer), PassProgress(phase="edit")
+
+    async def write() -> PassResult:
+        return await plugins_cmd.configure_one(flow.session, row, raw, progress=progress, report=_no_report)
+
+    while True:
+        raw = await guarded(flow, partial(editor, flow, row, loader), names=(entry.name,), progress=progress)
+        if raw is _STOP or raw is None:
+            return
+        result = await _act(flow, entry, write, progress, key=key, file=file)
+        if result is _STOP or result.kind != "refused":
+            return
+
+
+async def _ask_settings(flow: Flow, name: str) -> Any:
+    loader, resolution = _loaded(flow.session)
+    entry = resolution.plan.entry(name)
+    rows = plugins_cmd.settings_rows(resolution, loader, entry) if entry is not None else ()
+    if not rows:
+        return None
+    options = [Option(str(i), _key(row), f"{_value(row)} · {row.winning_layer}") for i, row in enumerate(rows)]
+    answer = await flow.channel.run_interview(
+        CONFIGURE_QUESTION.format(name=sanitize_for_display(name)), [*options, Option("done", DONE)], default=0, cancel="done")
+    return answer, loader, rows
+
+
+async def _configure(flow: Flow, entry: Any, route: Any) -> bool:
+    while True:
+        got = await guarded(flow, partial(_ask_settings, flow, entry.name))
+        if got is _STOP or got is None:
+            return True
+        answer, loader, rows = got
+        if not answer.reached:
+            raise _Abandon(why=answer.why)
+        if answer.cancelled or answer.keys == ("done",):
+            return True
+        await _edit(flow, entry, loader, rows[int(answer.keys[0])])
+
+
+def _argv_route(entry: Any, enabled: bool | None, route: Any, session: PluginSession, settings: bool) -> bool:
     return entry.state == "needs-extra" and route is not None and route.argv is not None
 
 
-def _manual_route(entry: Any, enabled: bool | None, route: Any, session: PluginSession) -> bool:
+def _manual_route(entry: Any, enabled: bool | None, route: Any, session: PluginSession, settings: bool) -> bool:
     return entry.state == "needs-extra" and route is not None and route.manual is not None
 
 
-def _rerun_offered(entry: Any, enabled: bool | None, route: Any, session: PluginSession) -> bool:
+def _rerun_offered(entry: Any, enabled: bool | None, route: Any, session: PluginSession, settings: bool) -> bool:
     touch, m = session.touched.get(entry.name), entry.manifest
     return entry.state == "on" and (
         bool(m is not None and (m.setup or m.setup_action)) or entry.name not in session.running
         or (touch is not None and touch.probe is not None and touch.probe[0] != "on"))
 
 
-ACTIONS: tuple[tuple[str, str, Callable[[Any, bool | None, Any, PluginSession], bool],
+ACTIONS: tuple[tuple[str, str, Callable[[Any, bool | None, Any, PluginSession, bool], bool],
                      Callable[[Flow, Any, Any], Awaitable[bool | None]]], ...] = (
-    ("enable", ACTION_ENABLE, lambda entry, enabled, route, session: entry.state in ("off", "available"), _pass_handler("enable")),
+    ("enable", ACTION_ENABLE, lambda entry, enabled, route, session, settings: entry.state in ("off", "available"),
+     _pass_handler("enable")),
     ("install", ACTION_INSTALL, _argv_route, _pass_handler("enable")),
     ("show_install", ACTION_SHOW_INSTALL, _manual_route, _show_install),
+    ("configure", ACTION_CONFIGURE, lambda entry, enabled, route, session, settings: settings, _configure),
     ("rerun", ACTION_RERUN, _rerun_offered, _pass_handler("rerun")),
-    ("disable", ACTION_DISABLE, lambda entry, enabled, route, session: enabled is True, _disable),
-    ("info", ACTION_INFO, lambda entry, enabled, route, session: True, _info),
+    ("disable", ACTION_DISABLE, lambda entry, enabled, route, session, settings: enabled is True, _disable),
+    ("info", ACTION_INFO, lambda entry, enabled, route, session, settings: True, _info),
 )
 
 
 def actions_for(entry: Any, session: PluginSession, route: Any) -> list[tuple[Option, Callable]]:
     """The menu rows a plugin's state allows, each with its handler; a handler answering True keeps the menu open."""
-    from localharness.config.loader import ConfigLoader
     from localharness.plugins import lifecycle
-    from localharness.plugins.resolve import resolve
 
-    enabled = resolve(ConfigLoader(config_dir=session.cfg_path, local_config_dir=session.workspace)).enabled.get(entry.name)
+    loader, resolution = _loaded(session)
+    enabled = resolution.enabled.get(entry.name)
+    settings = entry.state == "on" and bool(plugins_cmd.settings_rows(resolution, loader, entry))
     hint = RERUN_HINT if lifecycle.downloading(entry.name) else ""
     return [(Option(key, label, hint if key == "rerun" else ""), handler)
-            for key, label, available, handler in ACTIONS if available(entry, enabled, route, session)]
+            for key, label, available, handler in ACTIONS if available(entry, enabled, route, session, settings)]
 
 
 async def _ask_menu(flow: Flow, name: str) -> Any:

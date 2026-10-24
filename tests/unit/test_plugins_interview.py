@@ -9,12 +9,12 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import get_args
+from typing import Literal, get_args
 
 import click
 import pytest
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from rich.console import Console
 
 from localharness.cli import plugins_cmd, plugins_interview
@@ -34,7 +34,7 @@ from tests.unit.interview_support import CANCEL, UNREACHED, Asked
 from tests.unit.test_plugin_resolve import write_folder_plugin
 from tests.unit.test_extra_install import SPEC, _Proc
 from tests.unit.test_extra_install import dist as _dist
-from tests.unit.test_plugins_bookkeeping import Stub
+from tests.unit.test_plugins_bookkeeping import _CONFIG, Stub
 from tests.unit.test_plugins_pass import CALLS, DOWNLOAD, Ask, Mob
 from tests.unit.test_plugins_pass import _on as _overlay
 from tests.unit.test_plugins_pass import folder as _folder
@@ -2011,3 +2011,255 @@ async def test_batch_summary_counts_the_enabled_kinds_and_never_an_install_skipp
     assert plugins_interview._summary(flow, [None] * len(results), results) == f"{done} of {len(results)} enabled, install still needed: 1"
     assert plugins_interview.BATCH_ENABLED == {"enabled", "enabled_unconfigured", "check_failed", "check_failed_noload",
                                                "check_skipped", "enabled_manual", "enabled_not_loading"}
+
+
+class _ConfConfig(BaseModel):
+    flag: bool = False
+    mode: Literal["a", "b"] = "a"
+    count: int = 0
+    label: str | None = None
+    items: list[str] = []
+
+    @field_validator("label")
+    @classmethod
+    def _not_banned(cls, value: str | None) -> str | None:
+        if value and "banned" in value:
+            raise ValueError(f"label {value!r} is banned")
+        return value
+
+
+class Conf(Plugin):
+    """has a switch, a choice, a number, a label and a list"""
+
+    manifest = PluginManifest(name="conf", version="0.1.0", kind="tools", enabled_by_default=False)
+    ConfigModel = _ConfConfig
+
+
+@pytest.fixture
+def conf(layers, monkeypatch):
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Stub, Conf))
+    layers.audit = layers.g / "audit.jsonl"
+    (layers.g / "config.yaml").write_text(yaml.safe_dump(_CONFIG | {"org": {"audit_log_path": str(layers.audit)}}), encoding="utf-8")
+    _on_disk(layers, conf=True)
+    return layers
+
+
+def _typing(monkeypatch, *answers):
+    """Replaces the module's prompt: answers in order, records (text, default, secret)."""
+    asked, script = [], list(answers)
+
+    async def prompt(text, *, console, default="", secret=False):
+        asked.append((text, default, secret))
+        answer = script.pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(plugins_interview, "prompt_line", prompt)
+    return asked
+
+
+def _settings(*edits):
+    return (Label("conf"), Label("Configure…"), *edits, CANCEL, CANCEL, "+close")
+
+
+def _audit_lines(layers) -> list[str]:
+    return layers.audit.read_text(encoding="utf-8").splitlines() if layers.audit.exists() else []
+
+
+_STATES = [
+    ("on", True, None, False, ["Configure…", "Re-run setup", "Disable", "Info"]),
+    ("on", True, None, True, ["Configure…", "Disable", "Info"]),
+    ("off", False, None, False, ["Enable", "Info"]),
+    ("available", False, None, False, ["Enable", "Info"]),
+    ("needs-extra", True, _ARGV, False, ["Install and set up", "Disable", "Info"]),
+    ("needs-extra", True, _MANUAL, False, ["Show install step", "Disable", "Info"]),
+    ("needs-extra", True, None, False, ["Disable", "Info"]),
+    ("failed", True, None, False, ["Disable", "Info"]),
+    ("failed", False, None, False, ["Info"]),
+    ("refused", False, None, False, ["Info"]),
+    ("skipped", True, None, False, ["Disable", "Info"]),
+    ("skipped", False, None, False, ["Info"]),
+]
+
+
+@pytest.mark.parametrize(("state", "enabled", "route", "running", "labels"), _STATES)
+def test_actions_table_per_state_for_a_plugin_with_settings(conf, monkeypatch, state, enabled, route, running, labels) -> None:
+    _patched(monkeypatch, enabled={"conf": enabled})
+    session = _session(conf, running=frozenset({"conf"}) if running else frozenset())
+
+    actions = plugins_interview.actions_for(_entry(state, name="conf"), session, route)
+
+    assert [o.label for o, _ in actions] == labels
+    assert len({o.key for o, _ in actions}) == len(actions)
+
+
+def test_actions_table_a_failed_probe_on_a_running_plugin_offers_rerun_after_configure(conf) -> None:
+    session = _session(conf, running=frozenset({"conf"}), touched={"conf": Touch(False, True, ("failed", "x"))})
+
+    labels = [o.label for o, _ in plugins_interview.actions_for(_entry("on", name="conf"), session, None)]
+
+    assert labels == ["Configure…", "Re-run setup", "Disable", "Info"]
+
+
+def test_actions_table_configure_is_absent_without_settings_and_present_with(conf) -> None:
+    session = _session(conf, running=frozenset({"conf", "stub"}))
+
+    assert "Configure…" not in [o.label for o, _ in plugins_interview.actions_for(_entry("on", name="stub"), session, None)]
+    assert "Configure…" in [o.label for o, _ in plugins_interview.actions_for(_entry("on", name="conf"), session, None)]
+
+
+async def test_configure_lists_the_plugins_settings_with_value_and_layer_then_done(conf) -> None:
+    (conf.g / "overrides.yaml").write_text(yaml.safe_dump({"conf": {"enabled": True, "count": 7}}), encoding="utf-8")
+    channel = FakeChannel(*_settings())
+
+    await _run(conf, channel)
+
+    asked = channel.asked[2]
+    assert asked.question == "conf — settings (Esc = back)" and (asked.default, asked.cancel) == (0, "done")
+    rows = {o.label: o.hint for o in asked.options}
+    assert list(rows) == ["count", "flag", "items", "label", "mode", "Done"]
+    assert rows["count"] == "7 · global-overrides" and rows["flag"] == "False · default" and rows["label"] == "None · default"
+    assert rows["items"] == "[] · default" and rows["mode"] == "'a' · default" and rows["Done"] == ""
+    assert [o.key for o in asked.options] == ["0", "1", "2", "3", "4", "done"]
+    assert channel.text == ""
+
+
+@pytest.mark.parametrize("leave", [Label("Done"), CANCEL], ids=["done", "esc"])
+async def test_configure_done_and_esc_return_to_the_plugins_menu(conf, leave) -> None:
+    channel = FakeChannel(Label("conf"), Label("Configure…"), leave, CANCEL, "+close")
+
+    await _run(conf, channel)
+
+    assert channel.asked[3].question.startswith("conf — on") and channel.asked[3].question.endswith("(Esc = back)")
+    assert channel.text == ""
+
+
+@pytest.mark.parametrize(("running", "applies"), [(False, "when it starts"), (True, "when you close Plugins")])
+async def test_configure_a_switch_goes_through_on_off_and_says_when_it_applies(conf, running, applies) -> None:
+    channel = FakeChannel(*_settings(Label("flag"), Label("on")))
+
+    assert await _run(conf, channel, running={"conf"} if running else frozenset()) is running
+
+    ask = channel.asked[3]
+    assert (ask.question, [o.label for o in ask.options], ask.default) == ("flag: on or off?", ["on", "off"], 1)
+    assert channel.lines == [f"conf: flag saved — applies {applies}"]
+    assert _written(conf) == {"conf": {"enabled": True, "flag": True}} and len(_audit_lines(conf)) == 1
+
+
+async def test_configure_a_choice_asks_which_over_its_values_with_the_current_one_ahead(conf) -> None:
+    channel = FakeChannel(*_settings(Label("mode"), Label("b")))
+
+    await _run(conf, channel)
+
+    ask = channel.asked[3]
+    assert (ask.question, [o.label for o in ask.options], ask.default) == ("mode: which?", ["a", "b"], 0)
+    assert _written(conf)["conf"]["mode"] == "b" and channel.lines == ["conf: mode saved — applies when it starts"]
+
+
+async def test_configure_a_number_is_typed_at_a_prompt_that_shows_its_value_and_is_written_as_a_number(conf, monkeypatch) -> None:
+    asked = _typing(monkeypatch, "7")
+    channel = FakeChannel(*_settings(Label("count")))
+
+    await _run(conf, channel)
+
+    assert asked == [("count [0]: ", "", False)]
+    assert _written(conf)["conf"]["count"] == 7 and len(_audit_lines(conf)) == 1
+
+
+async def test_configure_a_refused_number_prints_one_line_and_asks_again(conf, monkeypatch) -> None:
+    asked = _typing(monkeypatch, "x", "8")
+    channel = FakeChannel(*_settings(Label("count")))
+
+    await _run(conf, channel)
+
+    assert len(asked) == 2 and len(channel.lines) == 2
+    assert channel.lines[0].startswith("conf: settings not changed — Cannot coerce 'x' to int")
+    assert channel.lines[1] == "conf: count saved — applies when it starts"
+    assert _written(conf)["conf"]["count"] == 8 and len(_audit_lines(conf)) == 1
+
+
+async def test_configure_an_optional_text_takes_a_value_and_none_clears_it(conf, monkeypatch) -> None:
+    _typing(monkeypatch, "hello", "none")
+    channel = FakeChannel(*_settings(Label("label"), Label("label")))
+
+    await _run(conf, channel)
+
+    assert _written(conf)["conf"]["label"] is None and len(_audit_lines(conf)) == 2
+    assert channel.lines == ["conf: label saved — applies when it starts"] * 2
+
+
+async def test_configure_a_list_is_read_only_and_names_the_path_and_the_machine_file(conf, monkeypatch) -> None:
+    before = (conf.g / "overrides.yaml").read_bytes()
+    asked = _typing(monkeypatch)
+    channel = FakeChannel(*_settings(Label("items")))
+
+    await _run(conf, channel)
+
+    assert channel.lines == [f"read-only here — edit conf.items in {conf.g / 'overrides.yaml'}"]
+    assert asked == [] and (conf.g / "overrides.yaml").read_bytes() == before and _audit_lines(conf) == []
+
+
+@pytest.mark.parametrize("row", ["count", "label"])
+async def test_configure_enter_on_a_prompt_keeps_the_stored_value_and_writes_nothing(conf, monkeypatch, row) -> None:
+    before = (conf.g / "overrides.yaml").read_bytes()
+    _typing(monkeypatch, "")
+    channel = FakeChannel(*_settings(Label(row)))
+
+    await _run(conf, channel)
+
+    assert channel.text == "" and (conf.g / "overrides.yaml").read_bytes() == before and _audit_lines(conf) == []
+
+
+async def test_configure_a_value_the_plugins_own_model_refuses_writes_nothing(conf, monkeypatch) -> None:
+    before = (conf.g / "overrides.yaml").read_bytes()
+    asked = _typing(monkeypatch, "banned!", "")
+    channel = FakeChannel(*_settings(Label("label")))
+
+    await _run(conf, channel)
+
+    assert len(asked) == 2 and len(channel.lines) == 1
+    assert channel.lines[0].startswith("conf: settings not changed — Validation failed for conf.label") and "banned" in channel.lines[0]
+    assert (conf.g / "overrides.yaml").read_bytes() == before and _audit_lines(conf) == []
+
+
+@pytest.mark.parametrize("row", ["flag", "mode"])
+async def test_configure_esc_at_a_choice_is_no_edit(conf, row) -> None:
+    before = (conf.g / "overrides.yaml").read_bytes()
+    channel = FakeChannel(*_settings(Label(row), CANCEL))
+
+    await _run(conf, channel)
+
+    assert channel.text == "" and (conf.g / "overrides.yaml").read_bytes() == before and _audit_lines(conf) == []
+
+
+async def test_configure_a_choice_nobody_could_be_asked_closes_plugins_with_the_unavailable_line(conf) -> None:
+    channel = FakeChannel(Label("conf"), Label("Configure…"), Label("flag"), Unreached(Unreachable.NO_TTY))
+
+    assert await _run(conf, channel) is False
+
+    assert channel.lines == [plugins_interview.unavailable(Unreachable.NO_TTY)] and _audit_lines(conf) == []
+
+
+async def test_configure_the_workspace_file_that_wins_a_setting_stays_as_it_was(conf, monkeypatch) -> None:
+    project = conf.ws / "overrides.yaml"
+    project.write_text(yaml.safe_dump({"conf": {"count": 9}}), encoding="utf-8")
+    before, touched = project.read_bytes(), {}
+    _typing(monkeypatch, "7")
+    channel = FakeChannel(*_settings(Label("count")))
+
+    assert await _run(conf, channel, running={"conf"}, touched=touched) is False
+
+    assert channel.lines == [f"conf: count saved on this machine, but this project's {project} still wins here"]
+    assert touched["conf"].rebind is False and project.read_bytes() == before
+    assert _written(conf)["conf"]["count"] == 7
+
+
+async def test_configure_settings_are_read_again_after_every_edit(conf, monkeypatch) -> None:
+    _typing(monkeypatch, "7")
+    channel = FakeChannel(*_settings(Label("count")))
+
+    await _run(conf, channel)
+
+    first, second = (channel.asked[2], channel.asked[3])
+    assert first.options[0].hint == "0 · default" and second.options[0].hint == "7 · global-overrides"
