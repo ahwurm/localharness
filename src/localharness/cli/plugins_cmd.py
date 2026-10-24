@@ -1179,7 +1179,7 @@ async def install_pass(session: PluginSession, extras: set[str], names: list[str
         return skipped("no_temp", dir=cfg)
     code, tail = ran
     if code:
-        say(*tail)
+        say(*map(redact_text, tail))
         return skipped("failed", code=code)
     importlib.invalidate_caches()
     return frozenset(names)

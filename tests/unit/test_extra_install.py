@@ -472,6 +472,12 @@ def test_install_pass_exit_code_shows_the_last_thirty_lines_then_one_skipped_blo
     assert h.buf.getvalue().count("installing") == 1 and h.proc.calls == ["wait"]
 
 
+def test_install_pass_failure_output_never_shows_a_url_credential(h):
+    h.proc = _Proc([b"Looking in indexes: https://user:pw@idx.test/simple\nboom\n"], code=1)
+    assert h.run() == frozenset()
+    assert "Looking in indexes: https://idx.test/simple" in h.lines and "pw" not in h.buf.getvalue()
+
+
 def test_install_pass_silent_success_prints_installing_once_and_nothing_else(h):
     assert h.run() == frozenset({"a"})
     assert h.lines[-1] == f"pip installing {SPEC} — output is shown only if it fails"
