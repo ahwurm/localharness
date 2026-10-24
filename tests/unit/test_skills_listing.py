@@ -7,10 +7,12 @@ from pathlib import Path
 
 import pytest
 
+from localharness.agent.loop import _fence_instructions, base_system_prompt
 from localharness.config import skills
 from localharness.config.skills import LISTING_BUDGET_CHARS, Skill, SkillSet, shown
 from localharness.core.fence import TAG
 from localharness.tools.builtin.skill_tool import LISTING_HEADER, SKILLS_FENCE_HEADER, render_listing
+from tests.unit.test_loop_project_instructions import _FakeHandle, _build
 from tests.unit.test_skills_discovery import _skill
 
 
@@ -238,3 +240,35 @@ def test_descriptions_enter_their_rows_verbatim():
         Skill("c", "same", "machine", Path("/x/c/SKILL.md"), False),
     )
     assert render_listing(found).split("\n")[2:] == ["- a: Résumé — it's \"fine\" \\ {x}", "- b: same", "- c: same"]
+
+
+def _listing(tmp_path, pkg):
+    cfg, proj = tmp_path / "cfg", tmp_path / "proj"
+    (proj / ".localharness").mkdir(parents=True)
+    _skill(pkg / "assets" / "skills", "notes")
+    _skill(proj / ".localharness" / "skills", "release-notes")
+    return render_listing(SkillSet.discover(cfg, proj).skills)
+
+
+@pytest.mark.asyncio
+async def test_the_listing_sits_after_the_guardrails_and_before_the_project_instructions(bus, tmp_path, pkg):
+    listing = _listing(tmp_path, pkg)
+    handle = _FakeHandle(script=[("Use tabs.\n", None)])
+    loop, llm = _build(bus, handle, guardrails="No pushes.", tmp_path=tmp_path, skills=listing)
+    await loop.run_turn("hi")
+    role = llm.roles[0]
+    assert "## Guardrails\nNo pushes.\n\n" + listing + "\n\n## Project instructions\n" in role
+    assert role.count(listing) == 1
+    expected = base_system_prompt(
+        loop._config, tool_call_mode="native", guardrails="No pushes.", skills=listing
+    ) + "\n\n" + _fence_instructions("Use tabs.\n", "CLAUDE.md")
+    assert role == expected
+
+
+@pytest.mark.asyncio
+async def test_without_guardrails_the_listing_ends_the_base_prompt(bus, tmp_path, pkg):
+    listing = _listing(tmp_path, pkg)
+    loop, llm = _build(bus, None, skills=listing)
+    await loop.run_turn("hi")
+    assert llm.roles[0].endswith("\n\n" + listing)
+    assert llm.roles[0].count(listing) == 1
