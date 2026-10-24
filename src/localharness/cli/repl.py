@@ -22,6 +22,7 @@ from localharness.cli.model_ops import _hold_peer_session_key, _launch_key, _pee
 from localharness.cli.session_resume import RELOAD_ACTION
 from localharness.cli.slash_commands import SlashCommand, find_row, help_text
 from localharness.config.effort import EFFORT_UNENFORCED_LINE, LEVELS, resolve_effort
+from localharness.config.skills import Skipped, skip_line
 from localharness.core.content import ImageError, describe, fit_all, fit_to_tokens
 from localharness.core.events import (
     PENDING_APPROVED_NUDGE,
@@ -322,6 +323,7 @@ class OrchestratorREPL:
         machine_trust: Any = None,
         serving_heavy: tuple[Any, str] | None = None,
         unit_state: Any = None,
+        skills: Any = None,
     ) -> None:
         from localharness.cli.workspace import MachineTrust
         self._orchestrator = orchestrator
@@ -384,6 +386,7 @@ class OrchestratorREPL:
         # once the command has been handled (`/approve` on an idle session). Consumed and
         # cleared by _dispatch_input; None the rest of the time.
         self._slash_followup: Optional[str] = None
+        self._skills = skills
         # Pictures attached for the NEXT turn (/image, Ctrl+V, a dropped path), consumed by
         # _start_user_turn together with whatever the channel's own transport carried.
         self._staged_images: list[dict] = []
@@ -526,6 +529,12 @@ class OrchestratorREPL:
             self._bus.subscribe(PermissionStaged, self._on_pending_changed),
             self._bus.subscribe(PermissionResolved, self._on_pending_changed),
         ]
+        if self._skills is not None:
+            self._pending_handles += self._skills.subscribe(
+                self._bus,
+                self._agent._config.name,
+                lambda text: self._channel.send_message(text, metadata={"style": "system.info"}),
+            )
         # A channel that answers a parked call out of band (a Discord reaction) gets the same
         # path the hotkeys take, so the gate records it and the model hears it as words.
         if getattr(self._channel, "_pending_resolver", "absent") is None:
@@ -717,6 +726,8 @@ class OrchestratorREPL:
         an idle session is a sentence the model has to run a turn on, and it must enter the
         session by exactly the path every other typed line does (memory pipeline included), not
         by a private shortcut into `run_turn`."""
+        if self._skills is not None:
+            self._skills.arm()
         # Publish user message for memory pipeline. channel_id is the adapter's class
         # attribute ("terminal", a chat platform's id, ...) — history rows carry the REAL channel.
         ch_id = getattr(self._channel, "channel_id", None)
@@ -1506,6 +1517,20 @@ class OrchestratorREPL:
 
         # Not a command — pass through to the orchestrator (natural language / paths).
         return False
+
+    async def _slash_skill(self, row: SlashCommand, args: str) -> None:
+        result = self._skills.invoke(self._skills.find(row.name[1:]), args)
+        if isinstance(result, Skipped):
+            await self._channel.send_message(skip_line(result), metadata={"style": "system.error"})
+            return
+        line, notices = result
+        for notice in notices:
+            await self._channel.send_message(notice, metadata={"style": "system.info"})
+        if self._turn_running():
+            self._skills.arm(row.name[1:])
+            self._agent.push_user_nudge(line)
+        else:
+            self._slash_followup = line
 
     async def _run_plugin_slash(self, row: SlashCommand, args: str) -> None:
         """A plugin's slash row (PAPI-11). Its failure — an exception, a sys.exit(), or a reply
