@@ -186,3 +186,28 @@ def test_can_manage_on_the_redirected_path_asks_about_the_tty_output(monkeypatch
 
     assert _channel(force_terminal=False).can_manage() is None
     assert asked == [SENTINEL]
+
+
+def _raising_create_output(monkeypatch):
+    import prompt_toolkit.output.defaults as defaults
+
+    def boom(**kw):
+        raise OSError("no tty")
+
+    monkeypatch.setattr(defaults, "create_output", boom)
+
+
+async def test_run_interview_reaches_nobody_when_the_tty_output_cannot_be_built(monkeypatch):
+    _raising_create_output(monkeypatch)
+    calls = _stub_build(monkeypatch, _App(Answer(("a",), False)))
+
+    got = await _channel(force_terminal=False).run_interview("q?", OPTIONS, default=0, cancel="x")
+
+    assert got == Answer(("x",), True, reached=False, why=Unreachable.ERROR) and calls == []
+
+
+def test_can_manage_reports_error_when_the_tty_output_cannot_be_built(monkeypatch):
+    _raising_create_output(monkeypatch)
+    monkeypatch.setattr(terminal_mod, "cannot_ask_reason", lambda: None)
+
+    assert _channel(force_terminal=False).can_manage() is Unreachable.ERROR
