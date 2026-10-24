@@ -139,12 +139,23 @@ def _read(path: Path) -> str | tuple[str, str]:
         return UNREADABLE
 
 
+def _control(text: str) -> bool:
+    return any(unicodedata.category(c)[0] == "C" or unicodedata.category(c) in ("Zl", "Zp") for c in text)
+
+
 def _load(skill_md: Path, lexical_dir: Path, real_dir: Path) -> str | Skipped:
     try:
-        regular = stat.S_ISREG(os.lstat(skill_md).st_mode)
+        info = os.lstat(skill_md)
     except OSError:
-        regular = False
-    result = _read(skill_md) if regular else NOT_REGULAR
+        info = None
+    if info is None or not stat.S_ISREG(info.st_mode):
+        result = NOT_REGULAR
+    elif _control(str(skill_md)):
+        result = CONTROL_PATH
+    elif info.st_size > MAX_REFERENCE_BYTES:
+        result = TOO_LARGE
+    else:
+        result = _read(skill_md)
     return _skip(result, skill_md.parent, path=skill_md) if isinstance(result, tuple) else result
 
 
@@ -155,10 +166,16 @@ def _parse(text: str) -> dict | tuple[str, str]:
     close = next((i for i, line in enumerate(lines[1:], 1) if line.rstrip() == "---"), None)
     if close is None:
         return NO_FRONTMATTER
+    front = "\n".join(lines[1:close])
     try:
-        data = yaml.safe_load("\n".join(lines[1:close]))
+        data = yaml.safe_load(front)
+        # yaml.scan took 9.2 s on 40,000 open brackets where safe_load raised RecursionError on
+        # 100,000 in 0.4 s (PyYAML 6.0.3, Python 3.12); safe_load shares aliased objects, so loading first expands nothing
+        anchored = any(isinstance(t, (yaml.AnchorToken, yaml.AliasToken)) for t in yaml.scan(front))
     except Exception:
         return UNPARSEABLE
+    if anchored:
+        return ANCHORS
     if not isinstance(data, dict):
         return NOT_MAPPING
     if any(data.get(key) is not None and not isinstance(data[key], str) for key in ("name", "description")):
@@ -179,12 +196,23 @@ def _check(label: str, lexical_dir: Path, real_dir: Path, entry: str) -> Skill |
     name = data.get("name")
     if name is None:
         return _skip(NO_NAME, skill_md.parent, path=skill_md)
+    cut = name[:MAX_NAME]
+    if not NAME.fullmatch(name):
+        return _skip(BAD_NAME, skill_md.parent, path=skill_md, name=cut)
+    if len(name) > MAX_NAME:
+        return _skip(LONG_NAME, skill_md.parent, path=skill_md, name=cut)
     if name != entry:
-        return _skip(NAME_DIR, skill_md.parent, path=skill_md, name=name[:MAX_NAME])
-    description = data.get("description")
-    if description is None:
+        return _skip(NAME_DIR, skill_md.parent, path=skill_md, name=cut)
+    description = (data.get("description") or "").removesuffix("\n")
+    if description.strip() == "":
         return _skip(NO_DESCRIPTION, skill_md.parent, path=skill_md)
-    return Skill(name, description.removesuffix("\n"), label, skill_md, label == "project")
+    if len(description) > MAX_DESCRIPTION:
+        return _skip(LONG_DESCRIPTION, skill_md.parent, path=skill_md)
+    if description.splitlines() != [description]:
+        return _skip(MULTILINE_DESCRIPTION, skill_md.parent, path=skill_md)
+    if _control(description):
+        return _skip(CONTROL_DESCRIPTION, skill_md.parent, path=skill_md)
+    return Skill(name, description, label, skill_md, label == "project")
 
 
 @dataclass
