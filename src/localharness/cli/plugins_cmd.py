@@ -25,9 +25,9 @@ from __future__ import annotations
 
 import json as _json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, NoReturn, Optional
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Mapping, NoReturn, Optional
 from urllib.parse import urlsplit
 
 import typer
@@ -486,6 +486,108 @@ class StepOutcome:
     failed_check: str = ""
     skipped_check: str = ""
     stopped: bool = False
+
+
+Kind = Literal[
+    "enabled", "enabled_unconfigured", "check_failed", "check_failed_noload", "check_skipped",
+    "enabled_not_loading", "rerun_ok", "rerun_failed", "rerun_blocked", "disabled", "saved",
+    "saved_overridden", "override", "declined", "refused", "install_skipped", "enabled_manual"]
+Phase = Literal["consent", "install", "question", "question_installed", "download", "check", "edit",
+                "disable"]
+TailKey = Phase | Literal["install_batch", "edit_written"]
+ReportKind = Literal["wrote", "note", "checking", "row", "help", "next_steps", "stays_off", "refused"]
+
+ACTION_ENABLE = "Enable"
+ACTION_INSTALL = "Install and set up"
+ACTION_SHOW_INSTALL = "Show install step"
+ACTION_CONFIGURE = "Configure…"
+ACTION_RERUN = "Re-run setup"
+ACTION_DISABLE = "Disable"
+ACTION_INFO = "Info"
+
+
+@dataclass
+class PassProgress:
+    """The one mutable holder: the producer it is handed sets these as it goes."""
+    phase: Phase = "consent"
+    written: bool = False
+    wrote: bool = False
+    answered: bool = False
+    overridden: bool = False
+    rerun: bool = False
+
+
+@dataclass(frozen=True)
+class PassResult:
+    """What one pass did; `answered` holds setting keys, never the typed values."""
+    kind: Kind
+    step: StepOutcome
+    install: Literal["done", "skipped", "none"] = "none"
+    questions: Literal["answered", "skipped", "none"] = "none"
+    answered: tuple[str, ...] = ()
+    downloaded: bool = False
+    row: DoctorRow | None = None
+    loads: bool = False
+    rebind: bool = False
+    override: tuple[Literal["on", "off"] | None, Path] | None = None
+    shown: str = ""
+    detail: str = ""
+    next_steps: str = ""
+    help: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Touch:
+    rebind: bool
+    loads: bool
+    probe: tuple[str, str] | None
+
+
+@dataclass(frozen=True)
+class ReloadPlan:
+    names: frozenset[str]
+    parked: int
+    waiting: int
+
+    @property
+    def reload(self) -> bool:
+        return bool(self.names) and self.parked == self.waiting == 0
+
+
+@dataclass(frozen=True)
+class PluginSession:
+    cfg_path: Path
+    workspace: Path | None
+    running: frozenset[str]
+    unconfigured: Mapping[str, str]
+    failed: Mapping[str, str]
+    touched: dict[str, Touch] = field(default_factory=dict)
+
+
+def prior_touch(session: PluginSession, name: str) -> Touch:
+    """The seed for a plugin nothing has touched this session."""
+    return Touch(rebind=False, loads=name in session.running, probe=None)
+
+
+def refused(session, name, text, install) -> PassResult:
+    prior = session.touched.get(name) or prior_touch(session, name)
+    return PassResult("refused", StepOutcome(name, False), install=install, loads=prior.loads, detail=text)
+
+
+def loads_from_plan(session: PluginSession, name: str, prior: Touch, probe: DoctorRow | None,
+                    resolution: Resolution | None = None) -> bool:
+    """Will the next build load it: the plan reads `on` and the last known check did not fail."""
+    if resolution is None:
+        from localharness.config.loader import ConfigLoader
+        from localharness.plugins.resolve import resolve
+        resolution = resolve(ConfigLoader(config_dir=session.cfg_path, local_config_dir=session.workspace))
+    entry = resolution.plan.entry(name)
+    if entry is None or entry.state != "on":
+        return False
+    if probe is not None:
+        return probe.state == "on"
+    return ((prior.probe is None or prior.probe[0] == "on")
+            and name not in session.failed and name not in session.unconfigured)
 
 
 async def step_pending(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry,
