@@ -680,3 +680,41 @@ async def test_the_listing_and_the_enum_stay_as_start_fixed_them(terminal, monke
         m.setattr(skill_tool, "skill_schema", lambda *_: pytest.fail("the schema was rebuilt"))
         assert await terminal.repl._handle_slash("/fresh go") is True
     assert tool.info().parameters["properties"]["name"]["enum"] == ["notes"]
+
+
+def _watch_run(monkeypatch, *lines):
+    seen = {"followups": []}
+
+    async def run(self):
+        seen.update(rows=all_rows(), session=self._skills, tool=self._agent._tools._tools["global"].get("skill"))
+        for line in lines:
+            await self._handle_slash(line)
+            seen["followups"].append(self._slash_followup)
+            self._slash_followup = None
+
+    monkeypatch.setattr(OrchestratorREPL, "run", run)
+    return seen
+
+
+async def test_a_skill_at_start_is_a_row_that_asks_the_model_to_load_it(tmp_path, pkg, rows, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+    from tests.unit.test_skills_listing import _start_world
+
+    seen_set, _ = _start_world(tmp_path, monkeypatch)
+    seen = _watch_run(monkeypatch, "/notes draft")
+    await _start_async(None, False, False, str(tmp_path))
+    (notes,) = seen_set[0]
+    assert seen["rows"][-1] == skill_row(notes)
+    assert seen["followups"] == ["The person invoked /notes with: draft. Call skill('notes') and follow it."]
+    assert seen["session"].skill_set is seen["tool"]._skills
+    assert all_rows() == SLASH_COMMANDS
+
+
+async def test_a_start_with_no_skill_has_no_skill_row_and_no_session(tmp_path, pkg, rows, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+    from tests.unit.test_skills_listing import _start_world
+
+    _start_world(tmp_path, monkeypatch, skill=False)
+    seen = _watch_run(monkeypatch)
+    await _start_async(None, False, False, str(tmp_path))
+    assert seen["session"] is None and not [r for r in seen["rows"] if r.plugin == "skill"]
