@@ -58,6 +58,7 @@ from tests.conftest import FakeLLMResponse
 from tests.integration.test_all_plugins_off_e2e import _record
 from tests.integration.test_image_plugin_e2e import _fake_comfy, _machine, _record_dials
 from tests.integration.test_setup_steps_e2e import AR_NEXT, PHONE_Q, WEB_NEXT
+from tests.plugin_prompts import fake_prompts
 from tests.unit.test_restart_primitives import _contend
 from tests.unit.test_start_cmd import _capture_start_console, _read_sessions
 from tests.unit.test_start_plugins import _record_loop
@@ -166,7 +167,7 @@ def run(tmp_path, monkeypatch, fake_home, capfd, caplog):
                 raise answer
             return answer
 
-        monkeypatch.setattr(plugins_cmd.typer, "prompt", prompt)
+        fake_prompts(monkeypatch, prompt=prompt)
 
         async def drive(self):  # stands in for OrchestratorREPL.run
             s.runs += 1
