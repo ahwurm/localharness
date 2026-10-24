@@ -525,6 +525,26 @@ async def test_a_root_that_denies_the_skill_tool_is_told_of_no_skills(tmp_path, 
     assert [s.name for s in seen[0]] == ["notes"] and loop._skills == ""
 
 
+async def test_a_floor_schemas_that_raises_leaves_start_running_with_the_listing(tmp_path, pkg, monkeypatch):
+    from localharness.agent import context
+    from localharness.cli.start_cmd import _start_async
+
+    seen, agents = _start_world(tmp_path, monkeypatch)
+
+    real, calls = context.floor_schemas, []
+
+    def boom_once(*a, **k):
+        calls.append(a)
+        if len(calls) == 1:
+            raise RuntimeError("tool info failed")
+        return real(*a, **k)
+
+    monkeypatch.setattr(context, "floor_schemas", boom_once)
+    await _start_async(None, False, False, str(tmp_path))
+    (loop,) = agents
+    assert calls and loop._skills == render_listing(seen[0]) and "- notes:" in loop._skills
+
+
 async def test_a_start_with_no_skill_has_no_listing_and_no_tool(tmp_path, pkg, monkeypatch):
     from localharness.cli.start_cmd import _start_async
 

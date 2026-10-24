@@ -3167,8 +3167,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 SkillTool(skill_set, eviction_store, task_state, result_cap=lambda: tool_registry.result_size_cap_chars),
                 scope="global")
             from localharness.agent.context import floor_schemas
-            held = floor_schemas(tool_registry, agent_config.name, agent_config.division or "", agent_config.tools)
-            skill_listing = skill_listing if any(t.name == "skill" for t in held) else ""
+            try:
+                held = floor_schemas(tool_registry, agent_config.name, agent_config.division or "", agent_config.tools)
+                skill_listing = skill_listing if any(t.name == "skill" for t in held) else ""
+            except Exception:  # noqa: BLE001 — the loop's own resolution degrades the same way: keep the listing
+                pass
 
         # --- 10. Agent loop ---
         # #35: resolve the kill-file value against THIS config dir (a bare default 'KILL' lands at
