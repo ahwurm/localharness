@@ -9,18 +9,24 @@ from typing import get_args
 import pytest
 
 from localharness.agent import verdict
-from localharness.agent.context import ContentStore, ContextManager
+import localharness.agent.subagent as subagent
+from localharness.agent.context import ContentStore, ContextManager, _evict_large_tool_results
 from localharness.agent.gate import tool_meta_from_schema
 from localharness.agent.gate_types import GateSettings, Mode, Verdict
 from localharness.agent.task_record import Reference, TaskState, TooManyReferences
 from localharness.config import skills
-from localharness.config.models import ToolConfig
+from localharness.config.models import AgentConfig, ToolConfig
 from localharness.config.skills import SkillSet
 from localharness.tools.base import Tool, ToolResult, ToolSchema
+from localharness.tools.builtin.chunk_tool import ChunkTool
+from localharness.tools.builtin.cruncher_exec import UntrustedHandleError, bind_clean_origin_bodies
 from localharness.core.fence import TAG, fence_project_text
 from localharness.tools.builtin.skill_tool import SKILLS_FENCE_HEADER, STEP_FULL_TAIL, TASK_FULL_TAIL, SkillTool, skill_schema
 from localharness.tools.builtin.task_tool import TaskTool
+from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
+from localharness.tools.capabilities import GrantTargetError
 from localharness.tools.registry import ToolRegistry, cut_output
+from tests.unit.test_capabilities import _production_registry
 from tests.unit.test_skills_discovery import _skill
 from tests.unit.test_task_context import make_loop
 from tests.unit.test_task_references import capture, is_restore, scripted
@@ -685,3 +691,133 @@ async def test_a_bundled_skill_reference_survives_refresh_and_reads_unavailable_
     restarted = TaskState.load(state.path, str(workspace))[0]
     restarted.refresh_references(ContentStore())
     assert restarted.current.references[0].status == "unavailable; read it again"
+
+
+async def both_loaded(tmp_path, dirs, store):
+    sized(dirs.bundled, "notes", 600, char="b")
+    sized(dirs.project, "release-notes", 600, char="p")
+    tool = skill_tool(tmp_path, discovered(dirs), store=store)
+    loaded = {}
+    for name in ("notes", "release-notes"):
+        result = await tool.run(name=name)
+        loaded[name] = (result.output, store.active_references[0].handle)
+    return loaded
+
+
+def call_and_result(text):
+    call = {"id": "c1", "type": "function", "function": {"name": "skill", "arguments": '{"name": "x"}'}}
+    return [
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "content": None, "tool_calls": [call]},
+        {"role": "tool", "tool_call_id": "c1", "content": text},
+    ]
+
+
+async def test_after_the_human_turn_a_skill_body_evicts_and_restores_under_its_handle(tmp_path, dirs):
+    store = ContentStore()
+    loaded = await both_loaded(tmp_path, dirs, store)
+    assert loaded["notes"][1] != loaded["release-notes"][1]
+    ContextManager(max_context_tokens=32768, eviction_store=store).reset_compaction_guard()
+    assert store.active_references == ()
+    for text, handle in loaded.values():
+        messages, evicted = _evict_large_tool_results(
+            call_and_result(text), store, threshold_chars=10, keep_last=0, result_origin=lambda name: "trusted")
+        assert evicted == 1 and f"tool_result_get('{handle}')" in messages[2]["content"]
+        assert (await ToolResultGetTool(store).run(id=handle)).output == text
+
+
+async def test_a_project_body_stays_untrusted_through_eviction_and_a_trusted_reput(tmp_path, dirs):
+    store = ContentStore()
+    loaded = await both_loaded(tmp_path, dirs, store)
+    for text, _ in loaded.values():
+        _evict_large_tool_results(
+            call_and_result(text), store, threshold_chars=10, keep_last=0, result_origin=lambda name: "trusted")
+        assert store.put(text, origin="trusted") == ContentStore().put(text)
+    assert {name: store.origin(handle) for name, (_, handle) in loaded.items()} == {
+        "notes": "trusted", "release-notes": "untrusted"}
+
+
+async def test_a_text_stored_trusted_earlier_becomes_untrusted_when_a_project_skill_stores_it(tmp_path, dirs):
+    _skill(dirs.project, "release-notes")
+    text = (await skill_tool(tmp_path, discovered(dirs)).run(name="release-notes")).output
+    store = ContentStore()
+    handle = store.put(text, origin="trusted")
+    assert store.origin(handle) == "trusted"
+    await skill_tool(tmp_path, discovered(dirs), store=store).run(name="release-notes")
+    assert store.origin(handle) == "untrusted" and store.active_references[0].handle == handle
+
+
+async def test_a_frontmatter_only_project_skill_is_stored_untrusted(tmp_path, dirs):
+    _skill(dirs.project, "barep", "---\nname: barep\ndescription: Use it.\n---\n")
+    store = ContentStore()
+    await skill_tool(tmp_path, discovered(dirs), store=store).run(name="barep")
+    assert store.origin(store.active_references[0].handle) == "untrusted"
+
+
+async def test_the_cruncher_bind_refuses_a_project_handle_and_binds_a_bundled_one(tmp_path, dirs):
+    store = ContentStore()
+    loaded = await both_loaded(tmp_path, dirs, store)
+    with pytest.raises(UntrustedHandleError):
+        bind_clean_origin_bodies(store, [loaded["release-notes"][1]])
+    text, handle = loaded["notes"]
+    assert bind_clean_origin_bodies(store, [handle])["h0"] == text
+
+
+async def test_chunk_pieces_inherit_the_handle_origin(tmp_path, dirs):
+    store = ContentStore()
+    loaded = await both_loaded(tmp_path, dirs, store)
+    for name, expected in (("release-notes", "untrusted"), ("notes", "trusted")):
+        result = await ChunkTool(store).run(id=loaded[name][1], max_chars=200)
+        pieces = result.metadata["chunk_handles"]
+        assert result.metadata["origin"] == expected and len(pieces) > 1
+        assert {store.origin(h) for h in pieces} == {expected}
+
+
+async def test_a_granted_child_reads_the_project_handle_as_untrusted(tmp_path, dirs, monkeypatch):
+    store = ContentStore()
+    loaded = await both_loaded(tmp_path, dirs, store)
+    handle = loaded["release-notes"][1]
+    assert ContentStore(parent=store, granted=frozenset({handle})).origin(handle) == "untrusted"
+
+    captured = {}
+
+    async def spy(task, **kwargs):
+        captured.update(kwargs)
+        return "ok"
+
+    monkeypatch.setattr(subagent, "dispatch_config_subagent", spy)
+    runner = subagent.make_explore_agent_runner(
+        llm=object(), bus=object(), base_registry=await _production_registry(),
+        permission_evaluator=object(), get_parent_session_id=lambda: "sid",
+        load_agent=lambda n: AgentConfig(name="doc-reader", role="r", tools=ToolConfig(add=["tool_result_get"])),
+        parent_store=store,
+    )
+    await runner("doc-reader", "read it", grant_handles=[handle])
+    child = captured["context_manager"]._content_store
+    assert child.origin(handle) == "untrusted" and child.get(handle) == loaded["release-notes"][0]
+
+
+@pytest.mark.parametrize("name", ["notes", "release-notes"])
+async def test_a_grant_to_a_host_dangerous_child_is_refused_for_any_skill_handle(tmp_path, dirs, monkeypatch, name):
+    store = ContentStore()
+    loaded = await both_loaded(tmp_path, dirs, store)
+
+    async def never(task, **kwargs):
+        raise AssertionError("dispatch must not run when the grant target is host-dangerous")
+
+    monkeypatch.setattr(subagent, "dispatch_config_subagent", never)
+    runner = subagent.make_explore_agent_runner(
+        llm=object(), bus=object(), base_registry=await _production_registry(),
+        permission_evaluator=object(), get_parent_session_id=lambda: "sid",
+        load_agent=lambda n: AgentConfig(name="bash-child", role="r", tools=ToolConfig(add=["bash_exec", "read"])),
+        parent_store=store,
+    )
+    with pytest.raises(GrantTargetError):
+        await runner("bash-child", "use it", grant_handles=[loaded[name][1]])
+
+
+async def test_a_project_load_adds_no_banner_and_no_refusal(tmp_path, dirs):
+    _skill(dirs.project, "release-notes")
+    result = await skill_tool(tmp_path, discovered(dirs)).run(name="release-notes")
+    assert result.success is True
+    assert result.output == header("release-notes", "project", dirs.project) + "\n\n" + fenced("Body of release-notes.")
