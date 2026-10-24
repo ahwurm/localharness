@@ -594,3 +594,89 @@ async def test_an_unreadable_body_prints_the_skip_line_and_starts_nothing(termin
     assert terminal.repl._slash_followup is None
     assert await terminal.repl._dispatch_input("/notes") is None
     terminal.agent.run_turn.assert_not_called()
+
+
+def fresh_line(args="go"):
+    return f"The person invoked /fresh with: {args}. Call skill('fresh') and follow it."
+
+
+async def test_a_skill_written_after_start_gets_its_notice_and_its_row_at_its_first_name(terminal):
+    path = write_skill(terminal.cfg / "skills", "fresh")
+    assert await terminal.repl._handle_slash("/fresh go") is True
+    assert terminal.channel.sent == [(f"added since start: fresh (machine, {str(path)!r})", {"style": "system.info"})]
+    fresh = next(s for s in terminal.session.skill_set.skills if s.name == "fresh")
+    assert all_rows()[-1] == skill_row(fresh)
+    assert terminal.repl._slash_followup == fresh_line()
+    terminal.channel.sent.clear()
+    await terminal.repl._dispatch_input("/fresh again")
+    assert terminal.channel.sent == []
+    assert [r.name for r in all_rows()].count("/fresh") == 1
+
+
+async def test_a_skill_that_cannot_load_after_start_prints_its_skip_line_and_adds_no_row(terminal):
+    write_skill(terminal.cfg / "skills", "broken", "no frontmatter")
+    before = all_rows()
+    assert await terminal.repl._handle_slash("/broken") is True
+    (text, meta), = terminal.channel.sent
+    assert text.startswith("skipped: ") and meta == {"style": "system.error"}
+    assert all_rows() == before
+    assert terminal.repl._slash_followup is None
+
+
+async def test_only_a_bare_unknown_word_is_refused(terminal):
+    assert await terminal.repl._handle_slash("/nothing") is True
+    assert terminal.channel.sent == [("Unknown command: /nothing — /help lists commands.", {"style": "system.error"})]
+    assert await terminal.repl._handle_slash("/nothing more words") is False
+
+
+@pytest.mark.parametrize("word, handled", [
+    ("/tmp/x", False), ("/../x", False), ("/a/b", False), ("/Bad_Name", True), ("/", False), ("/ x", False), ("/nötes", False),
+])
+async def test_a_hostile_word_never_reaches_the_disk(terminal, monkeypatch, word, handled):
+    def boom(*_):
+        raise AssertionError("a path was built")
+
+    monkeypatch.setattr(skills, "_hits", boom)
+    assert await terminal.repl._handle_slash(word) is handled
+
+
+async def test_the_word_is_lower_cased_on_the_live_path_too(terminal):
+    write_skill(terminal.cfg / "skills", "fresh")
+    assert await terminal.repl._handle_slash("/FRESH go") is True
+    assert terminal.repl._slash_followup == fresh_line()
+    terminal.repl._slash_followup = None
+    assert await terminal.repl._handle_slash("/NOTES") is True
+    assert terminal.repl._slash_followup == NOTES_LINE
+
+
+async def test_a_word_longer_than_a_row_name_is_looked_up_and_a_row_backed_word_is_not(terminal, monkeypatch):
+    asked = []
+    find = terminal.session.find
+    monkeypatch.setattr(terminal.session, "find", lambda name: (asked.append(name), find(name))[1])
+    assert await terminal.repl._handle_slash("/notes x") is True
+    assert asked == ["notes"]
+    asked.clear()
+    assert await terminal.repl._handle_slash("/notesx") is True
+    assert asked == ["notesx"]
+    asked.clear()
+    write_skill(terminal.cfg / "skills", "help")
+    assert await terminal.repl._handle_slash("/help x") is False
+    assert asked == []
+    terminal.agent.run_turn.assert_not_called()
+
+
+async def test_the_listing_and_the_enum_stay_as_start_fixed_them(terminal, monkeypatch, tmp_path):
+    from localharness.agent.context import ContentStore
+    from localharness.agent.task_record import TaskState
+    from localharness.tools.builtin import skill_tool
+
+    tool = skill_tool.SkillTool(
+        terminal.found, ContentStore(), TaskState(tmp_path / "task.json", workspace=str(tmp_path)), lambda: 10_000,
+    )
+    assert tool.info().parameters["properties"]["name"]["enum"] == ["notes"]
+    write_skill(terminal.cfg / "skills", "fresh")
+    with monkeypatch.context() as m:
+        m.setattr(skill_tool, "render_listing", lambda *_: pytest.fail("the listing was rebuilt"))
+        m.setattr(skill_tool, "skill_schema", lambda *_: pytest.fail("the schema was rebuilt"))
+        assert await terminal.repl._handle_slash("/fresh go") is True
+    assert tool.info().parameters["properties"]["name"]["enum"] == ["notes"]
