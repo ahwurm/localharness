@@ -143,6 +143,13 @@ def _control(text: str) -> bool:
     return any(unicodedata.category(c)[0] == "C" or unicodedata.category(c) in ("Zl", "Zp") for c in text)
 
 
+def _inside(directory: Path, real_dir: Path) -> bool:
+    try:
+        return directory.resolve().is_relative_to(real_dir)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
 def _load(skill_md: Path, lexical_dir: Path, real_dir: Path) -> str | Skipped:
     try:
         info = os.lstat(skill_md)
@@ -150,6 +157,8 @@ def _load(skill_md: Path, lexical_dir: Path, real_dir: Path) -> str | Skipped:
         info = None
     if info is None or not stat.S_ISREG(info.st_mode):
         result = NOT_REGULAR
+    elif not _inside(skill_md.parent, real_dir):
+        return _skip(OUTSIDE, skill_md.parent, dir=skill_md.parent, origin=lexical_dir)
     elif _control(str(skill_md)):
         result = CONTROL_PATH
     elif info.st_size > MAX_REFERENCE_BYTES:
