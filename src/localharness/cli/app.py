@@ -17,6 +17,7 @@ from localharness.cli.model_cmd import model
 from localharness.cli.plugin_mount import PluginCommandGroup
 from localharness.cli.plugins_cmd import plugins_app
 from localharness.cli.serve_cmd import serve
+from localharness.cli.skills_cmd import skills
 from localharness.cli.start_cmd import start_app
 from localharness.cli.update_cmd import update
 from localharness.cli.validate_cmd import validate
@@ -35,6 +36,7 @@ app = typer.Typer(
 app.command("init")(init_app)
 app.command("start")(start_app)
 app.command("doctor")(doctor)
+app.command("skills")(skills)
 app.command("validate")(validate)
 app.command("model")(model)
 app.command("update")(update)

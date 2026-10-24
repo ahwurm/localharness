@@ -1,12 +1,18 @@
 """How the model's shell gate classifies the localharness skills verb."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+from typer.testing import CliRunner
 
 from localharness.agent.gate_types import Verdict
 from localharness.agent.shell_classify import classify_shell
 from localharness.agent.verdict import evaluate
+from localharness.cli.app import app
+from localharness.config import skills as skills_config
 from tests.unit.agent.test_verdict import SETTINGS, SHELL_META, granting, make_ctx
+from tests.unit.test_skills_discovery import _skill
 
 MODES = ("guarded", "trusted", "auto", "read-only", "unattended")
 
@@ -134,3 +140,31 @@ def test_a_redirect_from_localharness_skills_is_a_write(ws):
     assert shell.segments[0].write_targets
     result = evaluate("bash_exec", {"command": command}, SHELL_META, make_ctx(ws, mode="read-only"), SETTINGS)
     assert result.verdict is Verdict.DENY
+
+
+@pytest.fixture
+def pkg(tmp_path, monkeypatch):
+    monkeypatch.setattr(skills_config, "PACKAGE_DIR", tmp_path / "pkg")
+    return tmp_path / "pkg"
+
+
+def test_the_verb_lists_a_machine_skill_with_its_origin_and_quoted_path(fake_home, pkg, monkeypatch):
+    home = fake_home()
+    path = _skill(home / ".localharness" / "skills", "notes")
+    (home / "proj").mkdir()
+    monkeypatch.chdir(home / "proj")
+    result = CliRunner().invoke(app, ["skills"])
+    assert result.exit_code == 0
+    assert result.output == f"notes (machine, {str(path)!r})\n"
+
+
+def test_the_verb_takes_config_dir_after_the_word(fake_home, pkg, monkeypatch, tmp_path):
+    home = fake_home()
+    _skill(home / ".localharness" / "skills", "notes")
+    other = tmp_path / "other"
+    path = _skill(other / "skills", "beta")
+    (home / "proj").mkdir()
+    monkeypatch.chdir(home / "proj")
+    result = CliRunner().invoke(app, ["skills", "--config-dir", str(other)])
+    assert result.exit_code == 0
+    assert result.output == f"beta (machine, {str(path)!r})\n"
