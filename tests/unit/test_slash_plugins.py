@@ -315,6 +315,15 @@ async def test_plugins_on_a_channel_that_cannot_switch_is_one_line_and_never_cal
     assert repl.restart_request is None
 
 
+async def test_bare_plugins_on_a_channel_that_cannot_switch_is_terminal_only_and_never_calls_the_hook():
+    hook = AsyncMock(return_value=None)
+    channel = RecordingChannel(["/plugins"])
+    repl, _ = _classic(channel, on_plugin_switch=hook)
+    await repl.run()
+    assert channel.sent == [(TERMINAL_ONLY, INFO)]
+    hook.assert_not_awaited()
+
+
 async def test_plugins_without_a_session_hook_says_so():
     channel = Terminalish(["/plugins enable image"])
     repl, _ = _classic(channel)
