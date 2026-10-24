@@ -1156,8 +1156,8 @@ def _assemble_role(cfg) -> str:
     return "\n\n".join([base, *extra])
 
 
-def base_system_prompt(cfg, *, tool_call_mode: str, guardrails: str) -> str:
-    """The turn-invariant system prompt: role, facts, rules and guardrails; no instructions or memory."""
+def base_system_prompt(cfg, *, tool_call_mode: str, guardrails: str, skills: str = "") -> str:
+    """The turn-invariant system prompt: role, facts, rules, guardrails and the skills listing; no instructions or memory."""
     system_prompt = _assemble_role(cfg)
     # Date only (no clock time) so the vLLM prefix cache churns daily, not per-turn.
     _now = datetime.now().astimezone()
@@ -1191,6 +1191,8 @@ def base_system_prompt(cfg, *, tool_call_mode: str, guardrails: str) -> str:
         )
     if guardrails:
         system_prompt += "\n\n## Guardrails\n" + guardrails
+    if skills:
+        system_prompt += "\n\n" + skills
     return system_prompt
 
 
@@ -1221,6 +1223,7 @@ class AgentLoop:
         budget_labels: BudgetLabels | None = None,
         unattended_max_actions: int | None = None,
         project_instructions: "ProjectInstructions | None" = None,
+        skills: str = "",
     ) -> None:
         self._config = config
         self._llm = llm
@@ -1307,6 +1310,7 @@ class AgentLoop:
         # tests). The loop calls only its `candidates`, `mark_pending` and `section` and never reads,
         # hashes or writes the file (D-03); the handle owns the store.
         self._project_instructions = project_instructions
+        self._skills = skills
         # The reconnect seam: a supplier of the shared ServerRecovery pair for this loop's server (None
         # when the caller has none); a loop with no usable pair keeps one loop-local poll-only pair.
         self._server_recovery = server_recovery
@@ -1983,7 +1987,10 @@ class AgentLoop:
             getattr(self._llm, "config", None), "tool_call_mode", "native"
         )
         system_prompt = base_system_prompt(
-            self._config, tool_call_mode=tool_call_mode, guardrails=self._read_guardrails()
+            self._config,
+            tool_call_mode=tool_call_mode,
+            guardrails=self._read_guardrails(),
+            skills=self._skills,
         )
         # D-37: the project's own file, fenced, directly after Guardrails and ahead of the memory slot.
         # The role is built once per turn, so this is the one call at assembly (the turn-end check is
