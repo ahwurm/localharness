@@ -8,8 +8,10 @@ from pathlib import Path
 import pytest
 
 from localharness.agent.loop import _fence_instructions, base_system_prompt
-from localharness.cli import start_serving
+from localharness.cli import model_cmd, start_serving
+from localharness.cli.workspace import MachineTrust
 from localharness.config import skills
+from localharness.config.loader import ConfigLoader
 from localharness.config.models import AgentConfig, PermissionConfig
 from localharness.config.skills import LISTING_BUDGET_CHARS, Skill, SkillSet, shown
 from localharness.core.fence import TAG
@@ -398,3 +400,46 @@ async def test_one_skill_raises_the_unrounded_fixed_part_and_never_lowers_the_fl
     assert await start_serving.launch_floor(_ROOT, found.skills) > await start_serving.launch_floor(_ROOT)
     monkeypatch.setattr(start_serving, "harness_floor", rounded)
     assert await start_serving.launch_floor(_ROOT, found.skills) >= await start_serving.launch_floor(_ROOT)
+
+
+def _swap_world(tmp_path, monkeypatch, floor=None):
+    cfg, proj = tmp_path / "cfg", tmp_path / "proj"
+    cfg.mkdir()
+    _skill(proj / ".localharness" / "skills", "proj")
+    monkeypatch.chdir(proj)
+    monkeypatch.setattr(ConfigLoader, "load_agent", lambda self, name: name)
+    seen = []
+
+    async def spy(agent, skills=()):
+        seen.append(skills)
+        return 1_000 if floor is None else floor
+
+    monkeypatch.setattr(start_serving, "launch_floor", spy)
+    return cfg, seen
+
+
+def test_the_swap_floor_prices_bundled_and_machine_skills_only(tmp_path, pkg, monkeypatch):
+    cfg, seen = _swap_world(tmp_path, monkeypatch)
+    _skill(cfg / "skills", "notes")
+    assert model_cmd._swap_floor(MachineTrust(), cfg) == 1_000
+    assert [s.name for s in seen[0]] == ["notes"]
+
+
+def test_the_swap_floor_with_no_skills_passes_none(tmp_path, pkg, monkeypatch):
+    cfg, seen = _swap_world(tmp_path, monkeypatch)
+    model_cmd._swap_floor(MachineTrust(), cfg)
+    assert seen == [()]
+
+
+def test_a_failed_discovery_in_the_swap_floor_falls_back_to_the_cache(tmp_path, pkg, monkeypatch):
+    from localharness.provider import lifecycle
+
+    cfg, seen = _swap_world(tmp_path, monkeypatch)
+    lifecycle.record_floor(cfg, 7_000, {})
+
+    def boom(config_dir, project_root):
+        raise OSError("unreadable")
+
+    monkeypatch.setattr(SkillSet, "discover", staticmethod(boom))
+    assert model_cmd._swap_floor(MachineTrust(), cfg) == 7_000
+    assert seen == []

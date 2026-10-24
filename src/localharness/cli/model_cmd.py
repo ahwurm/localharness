@@ -329,10 +329,12 @@ def _answers_now(harness, machine_trust: MachineTrust, record) -> bool:
 def _swap_floor(machine_trust: MachineTrust, config_dir: Path) -> int | None:
     """The floor `start` would price for its default root agent, else the last start's cached one."""
     try:
+        from localharness.config.skills import SkillSet
+
         agent = ConfigLoader(
             config_dir=config_dir, local_config_dir=None, machine_withheld=machine_trust.withheld
         ).load_agent("orchestrator")
-        live = asyncio.run(start_serving.launch_floor(agent))
+        live = asyncio.run(start_serving.launch_floor(agent, SkillSet.discover(config_dir, None).skills))
     except Exception:  # noqa: BLE001 — no loadable root: the cache alone
         live = None
     return lifecycle.raised_floor(live, lifecycle.cached_floor(config_dir))
