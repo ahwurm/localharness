@@ -1,6 +1,6 @@
 [project]
 name = "localharness"
-version = "0.20.5"
+version = "0.21.0"
 description = "Open-source agent harness for local LLMs: YAML agents with tools and a permission gate, on vLLM, llama.cpp, Ollama or LM Studio"
 requires-python = ">=3.12"
 license = { text = "MIT" }
