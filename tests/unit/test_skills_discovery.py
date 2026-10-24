@@ -4,7 +4,9 @@ from __future__ import annotations
 import ast
 import dataclasses
 import os
+import signal
 import time
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -294,9 +296,86 @@ def test_each_per_skill_rule_skips_with_its_exact_line(pair, build, tmp_path, cf
     assert pair in skills.RULES and expected.endswith(f". {pair[1]}.")
 
 
-def test_the_rules_run_in_rules_order():
-    order = [skills.RULES.index(pair) for pair, _ in CASES]
-    assert order == sorted(order)
+def _link_and_file(cfg, proj, pkg):
+    real = cfg.parent / "dotfiles" / "x"
+    _skill(cfg.parent / "dotfiles", "x")
+    (real / "SKILL.md").unlink()
+    (real / "other.md").write_text(_fm("x"))
+    (real / "SKILL.md").symlink_to(real / "other.md")
+    return _link(cfg / "skills" / "x", real) / "SKILL.md", {}
+
+
+def _outside_and_control(cfg, proj, pkg):
+    _skill(cfg.parent / "dotfiles", "x")
+    link = _link(cfg / "skills" / "a\nb", cfg.parent / "dotfiles" / "x")
+    return link, {"dir": link, "origin": cfg / "skills"}
+
+
+def _bundled_and(entry, text):
+    def build(cfg, proj, pkg):
+        _skill(pkg / "assets" / "skills", "skill-creator")
+        return _write(cfg, text, entry=entry), {"name": "skill-creator"}
+
+    return build
+
+
+def _project_cap_and_control(cfg, proj, pkg):
+    for i in range(32):
+        _skill(proj / ".localharness" / "skills", f"s{i:02d}")
+    return _skill(proj / ".localharness" / "skills", "s32", _fm("s32", '"a\\tb"')), {}
+
+
+def _total_cap_and_shadow(cfg, proj, pkg):
+    for i in range(32):
+        _skill(proj / ".localharness" / "skills", "zz-dup" if i == 31 else f"p{i:02d}")
+        _write(cfg, None, entry=f"m{i:02d}")
+    return _write(cfg, None, entry="zz-dup"), {"dir": cfg / "skills" / "zz-dup"}
+
+
+def _plain(text, entry="a", **fields):
+    return lambda cfg, proj, pkg: (_write(cfg, text, entry=entry), fields)
+
+
+LONG_A = "A" * 65
+PAIRS = [
+    (skills.NOT_REGULAR, skills.OUTSIDE, _link_and_file),
+    (skills.OUTSIDE, skills.CONTROL_PATH, _outside_and_control),
+    (skills.CONTROL_PATH, skills.TOO_LARGE, _plain(b"x" * 204_801, entry="a\nb")),
+    (skills.TOO_LARGE, skills.UNREADABLE, _plain(b"\xff" * 204_801)),
+    (skills.UNREADABLE, skills.NO_FRONTMATTER, _plain(b"\xff")),
+    (skills.NO_FRONTMATTER, skills.UNPARSEABLE, _plain("name: [a\n")),
+    (skills.UNPARSEABLE, skills.ANCHORS, _plain("---\nname: &n a\ndescription: [x\n---\n")),
+    (skills.ANCHORS, skills.NOT_MAPPING, _plain("---\n- &a x\n- *a\n---\n")),
+    (skills.NOT_MAPPING, skills.NO_NAME, _plain("---\ndescription: 7\n---\n")),
+    (skills.BAD_NAME, skills.LONG_NAME, _plain(_fm(LONG_A), entry=LONG_A, name="A" * 64)),
+    (skills.LONG_NAME, skills.NAME_DIR, _plain(_fm("a" * 65), name="a" * 64)),
+    (skills.NAME_DIR, skills.BUNDLED_NAME, _bundled_and("other", _fm("skill-creator"))),
+    (skills.BUNDLED_NAME, skills.NO_DESCRIPTION, _bundled_and("skill-creator", "---\nname: skill-creator\n---\n")),
+    (skills.NO_DESCRIPTION, skills.LONG_DESCRIPTION, _plain(_fm(description='"' + " " * 1025 + '"'))),
+    (skills.LONG_DESCRIPTION, skills.MULTILINE_DESCRIPTION, _plain(_fm(description=f'"{"d" * 1025}\\nx"'))),
+    (skills.MULTILINE_DESCRIPTION, skills.CONTROL_DESCRIPTION, _plain(_fm(description='"a\\nb"'))),
+    (skills.CONTROL_DESCRIPTION, skills.CAP_PROJECT, _project_cap_and_control),
+    (skills.CAP_TOTAL, skills.SHADOWED, _total_cap_and_shadow),
+]
+UNREACHABLE = [
+    (skills.OVER_256, skills.NOT_REGULAR),
+    (skills.NO_NAME, skills.BAD_NAME),
+    (skills.CAP_PROJECT, skills.CAP_TOTAL),
+]
+
+
+@pytest.mark.parametrize("earlier,later,build", PAIRS, ids=[f"rule{skills.RULES.index(e)}-before-rule{skills.RULES.index(nxt)}" for e, nxt, _ in PAIRS])
+def test_a_skill_breaking_two_adjacent_rules_reports_the_earlier(earlier, later, build, cfg, proj, tmp_path):
+    path, fields = build(cfg, proj, tmp_path / "pkg")
+    fields.setdefault("path", path)
+    expected = _expect(earlier, **fields)
+    assert skills.RULES.index(later) == skills.RULES.index(earlier) + 1
+    assert [skip_line(s) for s in SkillSet.discover(cfg, proj).skipped] == [expected]
+
+
+def test_every_adjacent_pair_is_tested_or_cannot_hold_at_once():
+    pairs = {(e, nxt) for e, nxt, _ in PAIRS} | set(UNREACHABLE)
+    assert pairs == set(zip(skills.RULES, skills.RULES[1:]))
 
 
 def test_byte_description_and_name_caps_are_exact(cfg):
@@ -377,7 +456,7 @@ def test_an_escape_in_a_name_is_visible_in_the_quote(cfg):
     assert "\\x1b" in line
 
 
-@pytest.mark.parametrize("char", [" ", "\u0085"])
+@pytest.mark.parametrize("char", ["\u2028", "\u0085"])
 def test_line_separators_in_a_description_are_multiline(cfg, char):
     path = _write(cfg, _fm(description=f'"a{char.encode("unicode_escape").decode()}b"'))
     assert _only(cfg) == [_expect(skills.MULTILINE_DESCRIPTION, path=path)]
@@ -817,6 +896,7 @@ def test_find_returns_none_for_a_bad_name_before_any_scan(name, cfg, monkeypatch
         raise AssertionError("scanned")
 
     monkeypatch.setattr(skills, "_scan", boom)
+    monkeypatch.setattr(skills, "_hits", boom)
     assert found.find(name) is None
 
 
@@ -890,10 +970,107 @@ def test_find_keeps_the_project_cap_on_the_live_set(cfg, proj):
     assert len(found.skills) == 32
 
 
-def test_find_reuses_the_start_time_workspace_decision(cfg, proj):
-    found = SkillSet.discover(cfg, None)
-    _skill(proj / ".localharness" / "skills", "proj-only")
-    assert found.find("proj-only") is None and found.skills == ()
+def test_find_reuses_the_start_time_workspace_decision(tmp_path, cfg):
+    bare = tmp_path / "bare"
+    _skill(bare / ".agents" / "skills", "y")
+    found = SkillSet.discover(cfg, bare)
+    (bare / ".localharness").mkdir()
+    assert found.find("y") is None and found.skills == ()
+
+
+def test_read_body_reuses_the_start_time_workspace_decision(cfg, proj):
+    record = _skill(proj / ".localharness" / "skills", "p")
+    found = SkillSet.discover(cfg, proj)
+    (proj / ".localharness" / "skills" / "p").rename(proj / "moved")
+    (proj / ".localharness" / "skills").rmdir()
+    (proj / ".localharness").rmdir()
+    assert skip_line(found.read_body(found.skills[0])) == _expect(skills.NOT_REGULAR, path=record)
+
+
+def test_find_counts_the_live_total_not_the_fresh_scan(cfg, proj):
+    for i in range(32):
+        _skill(proj / ".localharness" / "skills", f"p{i:02d}")
+    for i in range(30):
+        _write(cfg, None, entry=f"m{i:02d}")
+    found = SkillSet.discover(cfg, proj)
+    assert len(found.skills) == 62
+    new = {name: _write(cfg, None, entry=name) for name in ("m30", "m31", "m32")}
+    assert isinstance(found.find("m32"), skills.Skill) and isinstance(found.find("m31"), skills.Skill)
+    assert skip_line(found.find("m30")) == _expect(skills.CAP_TOTAL, dir=new["m30"].parent)
+    assert len(found.skills) == 64
+
+
+def test_find_counts_the_live_project_skills_not_the_fresh_scan(cfg, proj):
+    for i in range(30):
+        _skill(proj / ".localharness" / "skills", f"p{i:02d}")
+    found = SkillSet.discover(cfg, proj)
+    new = {name: _skill(proj / ".localharness" / "skills", name) for name in ("p30", "p31", "p32")}
+    assert isinstance(found.find("p32"), skills.Skill) and isinstance(found.find("p31"), skills.Skill)
+    assert skip_line(found.find("p30")) == _expect(skills.CAP_PROJECT, dir=new["p30"].parent)
+    assert len(found.skills) == 32
+
+
+def test_find_validates_only_the_directories_named_like_the_typed_name(cfg, proj, monkeypatch):
+    for entry in ("a", "b", "c"):
+        _write(cfg, "not a skill", entry=entry)
+        _skill(proj / ".localharness" / "skills", entry, "also not")
+    _skill(proj / ".localharness" / "skills", "x")
+    _write(cfg, None, entry="x")
+    found = SkillSet.discover(cfg, proj)
+    seen = []
+    real = skills._check
+    monkeypatch.setattr(skills, "_check", lambda *a: seen.append(a[3]) or real(*a))
+    assert found.find("nothing") is None and seen == []
+    assert found.find("a") is not None and set(seen) == {"a"}
+
+
+def _timeout(seconds=3):
+    def fire(*_):
+        raise TimeoutError("blocked")
+
+    signal.signal(signal.SIGALRM, fire)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+
+
+@pytest.fixture
+def alarm():
+    yield _timeout
+    signal.setitimer(signal.ITIMER_REAL, 0)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
+def test_read_opens_a_fifo_without_blocking_and_refuses_it(tmp_path, alarm):
+    fifo = tmp_path / "f"
+    os.mkfifo(fifo)
+    alarm()
+    assert skills._read(fifo) == skills.NOT_REGULAR
+
+
+def test_read_refuses_a_directory_and_a_symlink(tmp_path):
+    (tmp_path / "d").mkdir()
+    (tmp_path / "t").write_text("x")
+    (tmp_path / "l").symlink_to(tmp_path / "t")
+    assert skills._read(tmp_path / "d") == skills.NOT_REGULAR
+    assert skills._read(tmp_path / "l") == skills.NOT_REGULAR
+    assert skills._read(tmp_path / "gone") == skills.UNREADABLE
+
+
+def test_read_refuses_a_file_over_the_cap_by_its_own_size(tmp_path):
+    big = tmp_path / "big"
+    big.write_bytes(b"x" * (skills.MAX_REFERENCE_BYTES + 1))
+    assert skills._read(big) == skills.TOO_LARGE
+
+
+def test_read_refuses_a_file_that_grew_after_the_size_check(tmp_path, monkeypatch):
+    big = tmp_path / "big"
+    big.write_bytes(b"x" * (skills.MAX_REFERENCE_BYTES + 10))
+    real = os.fstat
+    monkeypatch.setattr(os, "fstat", lambda fd: SimpleNamespace(st_mode=real(fd).st_mode, st_size=1))
+    got = []
+    real_read = os.read
+    monkeypatch.setattr(os, "read", lambda fd, n: got.append(real_read(fd, n)) or got[-1])
+    assert skills._read(big) == skills.TOO_LARGE
+    assert sum(map(len, got)) == skills.MAX_REFERENCE_BYTES + 1
 
 
 def _snapshot(root):

@@ -229,8 +229,8 @@ def _check(label: str, lexical_dir: Path, real_dir: Path, entry: str, bundled: f
     return Skill(name, description, label, skill_md, label == "project")
 
 
-def _scan(config_dir, project_root) -> tuple[tuple[str | None, Skill | Skipped], ...]:
-    listed = [(label, lexical, real, *_entries(lexical)) for label, lexical, real in _origin_dirs(config_dir, project_root)]
+def _scan(origins) -> tuple[tuple[str | None, Skill | Skipped], ...]:
+    listed = [(label, lexical, real, *_entries(lexical)) for label, lexical, real in origins]
 
     def outcomes(row, bundled):
         label, lexical, real, names, _ = row
@@ -261,27 +261,33 @@ def _scan(config_dir, project_root) -> tuple[tuple[str | None, Skill | Skipped],
     return tuple(scanned)
 
 
+def _hits(origins, name: str) -> list[Skill | Skipped]:
+    """Outcomes for the directories called name, in origin order, validated alone."""
+    named = [o for o in origins if name in _entries(o[1])[0]]
+    reserved = any(o[0] == "bundled" and isinstance(_check(*o, name, frozenset()), Skill) for o in named)
+    return [r for o in named if (r := _check(*o, name, frozenset({name}) if reserved else frozenset())) is not None]
+
+
 @dataclass
 class SkillSet:
     skills: tuple[Skill, ...]
     skipped: tuple[Skipped, ...]
-    config_dir: Path
-    project_root: Path | None
+    origins: tuple[tuple[str, Path, Path], ...]
 
     @classmethod
     def discover(cls, config_dir, project_root) -> SkillSet:
-        scanned = [item for _, item in _scan(config_dir, project_root)]
+        origins = _origin_dirs(config_dir, project_root)
+        scanned = [item for _, item in _scan(origins)]
         return cls(
             tuple(i for i in scanned if isinstance(i, Skill)),
             tuple(i for i in scanned if isinstance(i, Skipped)),
-            Path(config_dir),
-            project_root,
+            origins,
         )
 
     def read_body(self, record: Skill) -> str | Skipped:
         """Return the whole SKILL.md text after repeating every discovery check."""
         here = record.path.parent
-        for _, lexical, real in _origin_dirs(self.config_dir, self.project_root):
+        for _, lexical, real in self.origins:
             if lexical == here.parent:
                 return _load(record.path, lexical, real)
         return _skip(OUTSIDE, here, dir=here, origin=here.parent)
@@ -293,7 +299,7 @@ class SkillSet:
         live = next((s for s in self.skills if s.name == name), None)
         if live is not None:
             return live
-        hits = [item for entry, item in _scan(self.config_dir, self.project_root) if entry == name]
+        hits = _hits(self.origins, name)
         record = next((i for i in hits if isinstance(i, Skill)), None)
         if record is None:
             return hits[0] if hits else None
