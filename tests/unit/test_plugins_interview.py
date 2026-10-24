@@ -1608,7 +1608,8 @@ async def test_stop_at_the_download_confirm_keeps_the_enable_and_names_the_rerun
 
     assert await _run(layers, channel, touched=touched) is True
 
-    assert channel.lines[-1] == f"mob: stopped — enabled, but its download did not finish — Re-run setup{retry}"
+    waits = _waits("mob") if busy else []
+    assert channel.lines[-1 - len(waits):] == [f"mob: stopped — enabled, but its download did not finish — Re-run setup{retry}", *waits]
     assert touched["mob"].loads is True and _written(layers)["mob"]["enabled"] is True
     assert channel.asked[-1].options[-1].label == "Close — restarts to apply (1 plugin)"
 
@@ -2529,7 +2530,7 @@ def _on_terminal(layers, monkeypatch, *, nodes, lines=(), confirms=(), during=No
                 if side is not None:
                     side.cancel()
                 await ch.stop_input_box()
-        return SimpleNamespace(got=got, ch=ch, box=box, lines=ch._console.file.getvalue().splitlines(),
+        return SimpleNamespace(got=got, ch=ch, box=box, before=before, lines=ch._console.file.getvalue().splitlines(),
                                unwinding=me.cancelling(), handler_kept=signal.getsignal(signal.SIGINT) is before)
 
     return asyncio.run(scenario())
@@ -2576,3 +2577,109 @@ def test_real_terminal_a_secret_typed_at_an_enable_question_never_reaches_the_bo
         f.read_text(encoding="utf-8") for f in layers.g.rglob("*") if f.is_file())
     assert done.box == "" and "s3cret" not in "".join(done.ch._history.get_strings()) + "\n".join(done.lines)
     assert done.handler_kept and done.unwinding == 0
+
+
+_WAIT = ("{}: download still stopping — the restart waits for it.",
+         "Ctrl-C quits localharness now instead (a stuck download may need a second Ctrl-C); saved changes are kept.")
+
+
+@pytest.mark.usefixtures("default_sigint", "drawn")
+@pytest.mark.parametrize(("proc", "grace", "slow"), [
+    (lambda: _Proc(blocked=True), 5.0, False),
+    (lambda: _Proc(blocked=True, hangs=True), 1.5, True),
+], ids=["quick", "slow"])
+def test_sigint_after_the_consent_stops_the_install_and_leaves_the_handler_as_it_was(
+        layers, mobile, dist, monkeypatch, proc, grace, slow) -> None:
+    mobile.proc = child = proc()
+    monkeypatch.setattr(plugins_cmd, "_TERMINATE_GRACE", grace)
+    during: list = []
+
+    async def interrupt() -> None:
+        await child.reading.wait()
+        during.append(signal.getsignal(signal.SIGINT))
+        press()
+
+    done = _on_terminal(layers, monkeypatch, nodes=[Label("mob"), Label("Enable"), "\x03"], confirms=["y\r"], during=interrupt)
+
+    stopped, stopping = "mob: stopped — install interrupted — Enable to retry", "mob: stopping — pressing Ctrl-C two more times quits localharness"
+    assert done.lines[-1] == stopped and (stopping in done.lines) is slow
+    assert slow is False or done.lines.index(stopping) == len(done.lines) - 2
+    assert child.calls == (["terminate", "wait", "kill", "wait"] if slow else ["terminate", "wait"])
+    assert during[0] is not done.before and done.handler_kept and done.unwinding == 0 and done.got is False
+
+
+@pytest.mark.usefixtures("default_sigint", "drawn")
+def test_sigint_an_ignore_launch_adds_no_handler_and_the_install_runs_with_the_ignore_in_place(
+        layers, mobile, dist, monkeypatch) -> None:
+    from asyncio.unix_events import _UnixSelectorEventLoop as Loop
+
+    handlers, seen = [], []
+    for method in ("add_signal_handler", "remove_signal_handler"):
+        monkeypatch.setattr(Loop, method, lambda self, sig, *a, _real=getattr(Loop, method), _m=method: (
+            handlers.append(_m) if sig == signal.SIGINT else None, _real(self, sig, *a))[1])
+    spawn = asyncio.create_subprocess_exec
+
+    async def watched(*argv, **kw):
+        seen.append(signal.getsignal(signal.SIGINT))
+        return await spawn(*argv, **kw)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", watched)
+    original = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        done = _on_terminal(layers, monkeypatch, nodes=[Label("mob"), Label("Enable"), "\x03"], confirms=["y\r"],
+                            lines=["http://box\r"])
+    finally:
+        signal.signal(signal.SIGINT, original)
+
+    install = CTRLC_IGNORED.format(step="install")
+    assert done.lines[done.lines.index(install) + 1].startswith(INSTALLING.format(installer="pip", spec=SPEC))
+    assert handlers == [] and seen == [signal.SIG_IGN] and done.before is signal.SIG_IGN and done.handler_kept
+    assert mobile.installed and mobile.proc.returncode == 0 and done.got is True
+
+
+@pytest.mark.usefixtures("default_sigint", "drawn")
+def test_cancelled_from_outside_while_a_node_is_open_propagates_with_nothing_printed(layers, monkeypatch) -> None:
+    async def scenario():
+        ch, before = _terminal(), signal.getsignal(signal.SIGINT)
+        ch._history = InMemoryHistory()
+        with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+            await ch.start_input_box(asyncio.Queue(), on_interrupt=lambda: None)
+            try:
+                task = asyncio.ensure_future(_run(layers, ch))
+                await asyncio.sleep(0.2)
+                waiting = not task.done()
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            finally:
+                await ch.stop_input_box()
+        return waiting, ch._console.file.getvalue(), signal.getsignal(signal.SIGINT) is before
+
+    assert asyncio.run(scenario()) == (True, "", True)
+
+
+def _waits(*names):
+    return [line for name in names for line in (_WAIT[0].format(name), _WAIT[1])]
+
+
+@pytest.mark.parametrize(("touched", "downloading", "lines"), [
+    ({"mob": Touch(False, True, None)}, {"mob"}, _waits("mob")),
+    ({n: Touch(False, True, None) for n in ("mob", "stub", "ask")}, {"stub", "mob"}, _waits("mob", "stub")),
+    ({"mob": Touch(False, True, None)}, set(), []),
+], ids=["one", "two_in_name_order", "none_alive"])
+async def test_reload_waits_prints_once_per_live_download_inside_the_span_on_a_reload_exit(layers, monkeypatch, touched, downloading, lines) -> None:
+    monkeypatch.setattr(lifecycle, "downloading", lambda name: name in downloading)
+    channel = FakeChannel("+close")
+
+    assert await _run(layers, channel, touched=touched) is True
+
+    assert channel.lines == lines and channel.closed and channel.out_at_exit == len(channel.text)
+
+
+async def test_reload_waits_prints_nothing_when_the_reload_does_not_run(layers, monkeypatch) -> None:
+    monkeypatch.setattr(lifecycle, "downloading", lambda name: True)
+    channel = FakeChannel("+close")
+
+    assert await _run(layers, channel, touched={"mob": Touch(False, True, None)}, waiting=1) is False
+
+    assert "download still stopping" not in channel.text and not channel.closed

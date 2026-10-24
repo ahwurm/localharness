@@ -38,12 +38,14 @@ from localharness.cli.plugins_interview import unavailable
 from localharness.cli.repl import PLUGINS_RELOADING, OrchestratorREPL
 from localharness.cli.session_resume import RELOAD_ACTION
 from localharness.cli.slash_commands import all_rows, find_row
-from localharness.plugins import builtin, discovery
+from localharness.cli.plugins_cmd import Touch
+from localharness.plugins import builtin, discovery, lifecycle
 from localharness.plugins import resolve as resolve_module
 from tests.plugin_prompts import fake_prompts
 from tests.unit.test_extra_install import SYNC, UV_PREREQ, _checkout, dist  # noqa: F401
 from tests.unit.test_plugin_step import Reach
 from tests.unit.test_plugin_resolve import write_folder_plugin
+from tests.unit.test_plugins_interview import FakeChannel, _run, layers  # noqa: F401
 from tests.unit.test_plugins_pass import Mob, mobile  # noqa: F401
 from tests.unit.test_plugins_enable_setup import _CONFIG, Needy, Stub
 from tests.unit.test_repl_input_box import FakeBoxChannel, _pending_turn, _repl
@@ -475,6 +477,40 @@ async def test_manage_true_reloads_and_ends_the_repl_without_reading_on(line):
     assert repl.restart_request == RELOAD_ACTION
     assert channel._inputs == ["never read"]
     agent.run_turn.assert_not_called()
+
+
+class _Events(io.StringIO):
+    def __init__(self, events):
+        super().__init__()
+        self.events = events
+
+    def write(self, text):
+        self.events.extend(line for line in text.splitlines() if line)
+        return super().write(text)
+
+
+async def test_manage_reload_waits_come_before_the_reloading_line(layers, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(lifecycle, "downloading", lambda name: name == "mob")
+    events: list[str] = []
+
+    class Evented(Terminalish):
+        async def send_message(self, text, agent_id=None, metadata=None):
+            events.append(text)
+
+    flow_channel = FakeChannel("+close")
+    flow_channel.console = Console(file=_Events(events), width=400)
+
+    async def hook(verb, arg):
+        return await _run(layers, flow_channel, touched={"mob": Touch(False, True, None)})
+
+    channel = Evented(["/plugins"])
+    channel.why = None
+    repl, _ = _classic(channel, on_plugin_switch=hook)
+    await repl.run()
+    assert events == ["mob: download still stopping — the restart waits for it.",
+                      "Ctrl-C quits localharness now instead (a stuck download may need a second Ctrl-C); saved changes are kept.",
+                      PLUGINS_RELOADING]
+    assert repl.restart_request == RELOAD_ACTION
 
 
 async def test_manage_false_says_nothing_and_reads_the_next_input():
