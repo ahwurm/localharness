@@ -902,15 +902,6 @@ class ContextConfig(BaseModel):
         ),
     )
 
-    microagents: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Names of microagent prompt files to inject into context (keyword-triggered, v2). "
-            "Each microagent is a .md file in ~/.localharness/microagents/. "
-            "v1: all listed microagents are always injected."
-        ),
-    )
-
     def resolve_budget(self, model: str | None) -> tuple[int, bool]:
         """Effective context budget for `model` as (tokens, pinned).
 
