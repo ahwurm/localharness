@@ -97,11 +97,14 @@ def _origin_dirs(config_dir, project_root) -> tuple[tuple[str, Path, Path], ...]
     return tuple(found)
 
 
-def _entries(lexical_dir: Path) -> list[str] | tuple[()]:
+def _entries(lexical_dir: Path) -> tuple[list[str], Skipped | None]:
     try:
-        return sorted(os.listdir(lexical_dir))
+        names = sorted(os.listdir(lexical_dir))
     except OSError:
-        return ()
+        return [], None
+    if len(names) <= MAX_ENTRIES:
+        return names, None
+    return names[:MAX_ENTRIES], _skip(OVER_256, lexical_dir, origin=lexical_dir)
 
 
 def _read(path: Path) -> str | tuple[str, str]:
@@ -192,7 +195,7 @@ def _parse(text: str) -> dict | tuple[str, str]:
     return data
 
 
-def _check(label: str, lexical_dir: Path, real_dir: Path, entry: str) -> Skill | Skipped | None:
+def _check(label: str, lexical_dir: Path, real_dir: Path, entry: str, bundled: frozenset[str]) -> Skill | Skipped | None:
     skill_md = lexical_dir / entry / "SKILL.md"
     if not os.path.lexists(skill_md):
         return None
@@ -212,6 +215,8 @@ def _check(label: str, lexical_dir: Path, real_dir: Path, entry: str) -> Skill |
         return _skip(LONG_NAME, skill_md.parent, path=skill_md, name=cut)
     if name != entry:
         return _skip(NAME_DIR, skill_md.parent, path=skill_md, name=cut)
+    if label != "bundled" and name in bundled:
+        return _skip(BUNDLED_NAME, skill_md.parent, path=skill_md, name=cut)
     description = (data.get("description") or "").removesuffix("\n")
     if description.strip() == "":
         return _skip(NO_DESCRIPTION, skill_md.parent, path=skill_md)
@@ -224,6 +229,38 @@ def _check(label: str, lexical_dir: Path, real_dir: Path, entry: str) -> Skill |
     return Skill(name, description, label, skill_md, label == "project")
 
 
+def _scan(config_dir, project_root) -> tuple[tuple[str | None, Skill | Skipped], ...]:
+    listed = [(label, lexical, real, *_entries(lexical)) for label, lexical, real in _origin_dirs(config_dir, project_root)]
+
+    def outcomes(row, bundled):
+        label, lexical, real, names, _ = row
+        return [(e, r) for e in names if (r := _check(label, lexical, real, e, bundled)) is not None]
+
+    done = {i: outcomes(row, frozenset()) for i, row in enumerate(listed) if row[0] == "bundled"}
+    bundled = frozenset(e for found in done.values() for e, r in found if isinstance(r, Skill))
+    rows: list[tuple[str | None, Skill | Skipped]] = []
+    for i, row in enumerate(listed):
+        rows += [(None, row[4])] if row[4] else []
+        rows += done[i] if i in done else outcomes(row, bundled)
+    kept: dict[str, Path] = {}
+    project = 0
+    scanned = []
+    for entry, item in rows:
+        if isinstance(item, Skill):
+            here = item.path.parent
+            if item.origin == "project" and project >= MAX_PROJECT:
+                item = _skip(CAP_PROJECT, here, dir=here)
+            elif len(kept) >= MAX_SKILLS:
+                item = _skip(CAP_TOTAL, here, dir=here)
+            elif entry in kept:
+                item = _skip(SHADOWED, here, dir=here, other=kept[entry])
+            else:
+                kept[entry] = here
+                project += item.origin == "project"
+        scanned.append((entry, item))
+    return tuple(scanned)
+
+
 @dataclass
 class SkillSet:
     skills: tuple[Skill, ...]
@@ -233,13 +270,10 @@ class SkillSet:
 
     @classmethod
     def discover(cls, config_dir, project_root) -> SkillSet:
-        skills: list[Skill] = []
-        skipped: list[Skipped] = []
-        for label, lexical_dir, real_dir in _origin_dirs(config_dir, project_root):
-            for entry in _entries(lexical_dir):
-                result = _check(label, lexical_dir, real_dir, entry)
-                if isinstance(result, Skill):
-                    skills.append(result)
-                elif result is not None:
-                    skipped.append(result)
-        return cls(tuple(skills), tuple(skipped), Path(config_dir), project_root)
+        scanned = [item for _, item in _scan(config_dir, project_root)]
+        return cls(
+            tuple(i for i in scanned if isinstance(i, Skill)),
+            tuple(i for i in scanned if isinstance(i, Skipped)),
+            Path(config_dir),
+            project_root,
+        )
