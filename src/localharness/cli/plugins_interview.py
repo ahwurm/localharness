@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
 from types import MappingProxyType
@@ -16,8 +16,9 @@ from localharness.cli import plugins_cmd
 from localharness.cli.components_cmd import redact_text
 from localharness.cli.interview import Option, Unreachable, confirm_line, n_of, prompt_line
 from localharness.cli.plugins_cmd import (
-    ACTION_ENABLE, ACTION_INSTALL, ACTION_RERUN, ACTION_SHOW_INSTALL, OVERRIDE_LINE, OVERRIDE_SAVED, Kind, PassProgress,
-    PassResult, PluginSession, Refusal, ReloadPlan, Touch, override_line, prior_touch, refused,
+    ACTION_DISABLE, ACTION_ENABLE, ACTION_INFO, ACTION_INSTALL, ACTION_RERUN, ACTION_SHOW_INSTALL, ENABLE_MANUAL,
+    OVERRIDE_LINE, OVERRIDE_SAVED, ROUTE_BACK, Kind, PassProgress, PassResult, PluginSession, Refusal, ReloadPlan, Touch,
+    disable_pass, info_renderable, manual_block, override_line, prior_touch, refused, touch_after_stop, touch_from,
 )
 from localharness.core.interrupt import sigint_cancels
 
@@ -242,20 +243,51 @@ async def _contained(flow: Flow, node: Callable, names: tuple[str, ...], progres
         return _Escape(_first_line(exc))
 
 
-async def guarded(flow: Flow, node: Callable, *, names: tuple[str, ...] = (), progress: Any = None) -> Any:
+async def guarded(flow: Flow, node: Callable, *, names: tuple[str, ...] = (), progress: Any = None,
+                  in_batch: bool = False, key: str = "", file: Any = None) -> Any:
     """The node's value, or `_STOP` for a user stop; an error the node let out raises `_Abandon`."""
+    seam = progress is not None and bool(names)
+    priors = {n: flow.session.touched.get(n) or prior_touch(flow.session, n) for n in names} if seam else {}
     task = asyncio.ensure_future(_contained(flow, node, names, progress))
-    async with sigint_cancels(task) as cancelled:
+    on_stopping = partial(stopping_line, flow.console, names, progress) if seam else None
+    async with sigint_cancels(task, on_stopping=on_stopping) as cancelled:
         try:
             got = await task
         except asyncio.CancelledError:
             if not cancelled():
                 task.cancel()
                 raise
-            return _STOP
+            got = _STOP
+    if got is _STOP and seam:
+        _stopped(flow, names, progress, priors, in_batch=in_batch, key=key, file=file)
     if isinstance(got, _Escape):
         raise _Abandon(error=got.error)
     return got
+
+
+def _stopped(flow: Flow, names: tuple[str, ...], progress: PassProgress, priors: Mapping[str, Touch], **tail: Any) -> None:
+    """Record what the stopped pass wrote, recompute the plan from it, then say what state the stop left."""
+    for name in names:
+        if (touch := touch_after_stop(flow.session, name, progress, priors[name])) is not None:
+            flow.session.touched[name] = touch
+    flow.plan = flow.should_reload(flow.session.touched)
+    _say(flow.console, STOP_LINE.format(names=", ".join(names), tail=stop_tail(names, progress, flow.session, flow.plan, **tail)))
+
+
+async def _act(flow: Flow, entry: Any, node: Callable, progress: PassProgress, *, in_batch: bool = False, key: str = "",
+               file: Any = None) -> Any:
+    """Run a seam node, store the touch its result leaves, recompute the plan and print the result line."""
+    name = entry.name
+    prior = flow.session.touched.get(name) or prior_touch(flow.session, name)
+    result = await guarded(flow, node, names=(name,), progress=progress, in_batch=in_batch, key=key, file=file)
+    if result is _STOP:
+        return result
+    if (touch := touch_from(flow.session, name, result, prior)) is not None:
+        flow.session.touched[name] = touch
+    flow.plan = flow.should_reload(flow.session.touched)
+    if (outcome := result_line(name, result, flow.session, flow.plan, progress, key=key)) is not None:
+        _say(flow.console, RESULT.format(name=name, outcome=outcome))
+    return result
 
 
 async def _ask_root(flow: Flow) -> Any:
@@ -267,17 +299,90 @@ async def _ask_root(flow: Flow) -> Any:
     flow.plan = plan = flow.should_reload(session.touched)
     options = [Option(str(i), entry.name, _row_state(entry, session, plan)) for i, entry in enumerate(entries)]
     options.append(Option(CLOSE, _close_label(plan)))
-    return await flow.channel.run_interview(PLUGINS_QUESTION, options, default=0, cancel=CLOSE)
+    answer = await flow.channel.run_interview(PLUGINS_QUESTION, options, default=0, cancel=CLOSE)
+    return answer, [entry.name for entry in entries]
 
 
 async def _root(flow: Flow) -> None:
     while True:
-        answer = await guarded(flow, partial(_ask_root, flow))
-        if answer is _STOP:
+        got = await guarded(flow, partial(_ask_root, flow))
+        if got is _STOP:
             return
+        answer, names = got
         if not answer.reached:
             raise _Abandon(why=answer.why)
         if answer.cancelled or answer.keys == (CLOSE,):
+            return
+        await _menu(flow, names[int(answer.keys[0])])
+
+
+def _no_report(kind: str, payload: Any) -> None:
+    return None
+
+
+async def _show_install(flow: Flow, entry: Any, route: Any) -> None:
+    _say(flow.console, ENABLE_MANUAL.format(name=entry.name), *manual_block([entry.name], route.manual, ROUTE_BACK))
+
+
+async def _disable(flow: Flow, entry: Any, route: Any) -> None:
+    progress = PassProgress(phase="disable")
+
+    async def node() -> PassResult:
+        return await disable_pass(flow.session, entry.name, progress=progress, report=_no_report)
+
+    await _act(flow, entry, node, progress)
+
+
+async def _info(flow: Flow, entry: Any, route: Any) -> bool:
+    flow.console.print(info_renderable(flow.session, entry), soft_wrap=True)
+    return True
+
+
+def _manual_route(entry: Any, enabled: bool | None, route: Any) -> bool:
+    return entry.state == "needs-extra" and route is not None and route.manual is not None
+
+
+ACTIONS: tuple[tuple[str, str, Callable[[Any, bool | None, Any], bool], Callable[[Flow, Any, Any], Awaitable[bool | None]]], ...] = (
+    ("show_install", ACTION_SHOW_INSTALL, _manual_route, _show_install),
+    ("disable", ACTION_DISABLE, lambda entry, enabled, route: enabled is True, _disable),
+    ("info", ACTION_INFO, lambda entry, enabled, route: True, _info),
+)
+
+
+def actions_for(entry: Any, session: PluginSession, route: Any) -> list[tuple[Option, Callable]]:
+    """The menu rows a plugin's state allows, each with its handler; a handler answering True keeps the menu open."""
+    from localharness.config.loader import ConfigLoader
+    from localharness.plugins.resolve import resolve
+
+    enabled = resolve(ConfigLoader(config_dir=session.cfg_path, local_config_dir=session.workspace)).enabled.get(entry.name)
+    return [(Option(key, label), handler) for key, label, available, handler in ACTIONS if available(entry, enabled, route)]
+
+
+async def _ask_menu(flow: Flow, name: str) -> Any:
+    from localharness.config.loader import ConfigLoader
+    from localharness.plugins.resolve import resolve
+
+    session = flow.session
+    entry = resolve(ConfigLoader(config_dir=session.cfg_path, local_config_dir=session.workspace)).plan.entry(name)
+    if entry is None:
+        return None
+    flow.plan = flow.should_reload(session.touched)
+    route = plugins_cmd.install_route_for(entry)
+    actions = actions_for(entry, session, route)
+    question = f"{sanitize_for_display(name)} — {_row_state(entry, session, flow.plan)} (Esc = back)"
+    answer = await flow.channel.run_interview(question, [option for option, _ in actions], default=0, cancel="back")
+    return answer, entry, route, {option.key: handler for option, handler in actions}
+
+
+async def _menu(flow: Flow, name: str) -> None:
+    while True:
+        got = await guarded(flow, partial(_ask_menu, flow, name))
+        if got is _STOP or got is None:
+            return
+        answer, entry, route, handlers = got
+        if not answer.reached:
+            raise _Abandon(why=answer.why)
+        if answer.cancelled or not await handlers[answer.keys[0]](flow, entry, route):
             return
 
 
