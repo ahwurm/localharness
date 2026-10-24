@@ -6,7 +6,8 @@ via `find_row`), `/help` (`help_text`), the input completion menu
 `commands[]`). Each reads `all_rows()` when it is used, so rows added after import show everywhere.
 Order here is the display order in all of them; plugin rows follow the core rows.
 
-Plugins append rows through the session lifecycle (`set_plugin_rows`) — never by editing this file.
+Plugins append rows through the session lifecycle (`set_plugin_rows`, and `add_plugin_row` for a row added
+after start) — never by editing this file.
 """
 from __future__ import annotations
 
@@ -20,9 +21,10 @@ class SlashCommand:
     """One row of the slash table. Unpacks as (name, description) — the display pair every consumer
     of the old two-tuple list reads, so /help, the completer and the phone read rows unchanged.
 
-    `handler` is an OrchestratorREPL method name for a core row, and a bound async callable for a
-    plugin row (called with the text after the name; the text — or rich renderable — it returns is
-    shown to the user).
+    `handler` is an OrchestratorREPL method name for a core row (`plugin` None), called with the text after
+    the name as typed and lower-cased. A plugin-table row names a REPL method called with the row and the
+    stripped text, or carries a bound async callable called with the stripped text; the text — or rich
+    renderable — the callable returns is shown to the user.
     `takes_args` rows claim "name ..." as well as "name".
     `terminal_only` rows are left out of the phone's menu; typed on another channel they answer one line."""
 
@@ -69,22 +71,45 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
 _plugin_rows: tuple[SlashCommand, ...] = ()
 
 
+_KINDS: dict[str, tuple[str, str]] = {
+    "skill": ("skill {bare}", 'say "use the {bare} skill", or rename it'),
+}
+
+
+def _refusal(row: SlashCommand, taken: set[str]) -> str | None:
+    who, fix = _KINDS.get(row.plugin, ("plugin {plugin}", "skipped"))
+    who, fix = (t.format(plugin=row.plugin, bare=row.name[1:]) for t in (who, fix))
+    if row.name in taken:
+        return f"{who}: slash command {row.name} is already taken — {fix}"
+    if not (isinstance(row.handler, str) or callable(row.handler)):
+        return f"{who}: slash command {row.name} has no callable handler — skipped"
+    return None
+
+
 def set_plugin_rows(rows: Iterable[SlashCommand]) -> list[str]:
-    """Replace every plugin row (`()` removes them all). A row whose name is already taken — by core
-    or an earlier plugin row — is skipped, and so is one whose handler is neither a REPL method name
-    nor a callable. Returns one warning per skipped row, naming its plugin."""
+    """Replace every plugin-table row (`()` removes them all). A row with a taken name, or
+    whose handler is neither a REPL method name nor a callable, is skipped; one warning per skipped
+    row, worded by the row's kind."""
     global _plugin_rows
     kept: list[SlashCommand] = []
     warnings: list[str] = []
     for row in rows:
-        if row.name in {r.name for r in (*SLASH_COMMANDS, *kept)}:
-            warnings.append(f"plugin {row.plugin}: slash command {row.name} is already taken — skipped")
-        elif not (isinstance(row.handler, str) or callable(row.handler)):
-            warnings.append(f"plugin {row.plugin}: slash command {row.name} has no callable handler — skipped")
-        else:
+        warning = _refusal(row, {r.name for r in (*SLASH_COMMANDS, *kept)})
+        if warning is None:
             kept.append(row)
+        else:
+            warnings.append(warning)
     _plugin_rows = tuple(kept)
     return warnings
+
+
+def add_plugin_row(row: SlashCommand) -> str | None:
+    """Append one row after start under the same check as `set_plugin_rows`; the warning, or None."""
+    global _plugin_rows
+    warning = _refusal(row, {r.name for r in all_rows()})
+    if warning is None:
+        _plugin_rows = (*_plugin_rows, row)
+    return warning
 
 
 def all_rows() -> tuple[SlashCommand, ...]:
