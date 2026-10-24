@@ -8,7 +8,7 @@ from typing import get_args
 import pytest
 
 from localharness.agent import verdict
-from localharness.agent.context import ContentStore
+from localharness.agent.context import ContentStore, ContextManager
 from localharness.agent.gate import tool_meta_from_schema
 from localharness.agent.gate_types import GateSettings, Mode, Verdict
 from localharness.agent.task_record import Reference, TaskState, TooManyReferences
@@ -21,6 +21,8 @@ from localharness.tools.builtin.skill_tool import SKILLS_FENCE_HEADER, SkillTool
 from localharness.tools.builtin.task_tool import TaskTool
 from localharness.tools.registry import ToolRegistry, cut_output
 from tests.unit.test_skills_discovery import _skill
+from tests.unit.test_task_context import make_loop
+from tests.unit.test_task_references import capture, is_restore, scripted
 from tests.unit.test_task_tool import refused, start, tool_for
 
 
@@ -238,8 +240,8 @@ def discovered(dirs):
     return SkillSet.discover(dirs.cfg, dirs.proj)
 
 
-def skill_tool(tmp_path, found, cap=50_000):
-    return SkillTool(found, ContentStore(), TaskState(tmp_path / "task.json", workspace=str(tmp_path)), lambda: cap)
+def skill_tool(tmp_path, found, cap=50_000, store=None):
+    return SkillTool(found, store or ContentStore(), TaskState(tmp_path / "task.json", workspace=str(tmp_path)), lambda: cap)
 
 
 async def test_the_skill_tool_loads_a_bundled_body_without_its_frontmatter(tmp_path, dirs):
@@ -387,3 +389,53 @@ def test_the_skill_tool_is_read_tier_in_every_mode(tmp_path):
 def test_the_execute_body_never_awaits():
     tree = ast.parse(textwrap.dedent(inspect.getsource(SkillTool._execute)))
     assert not any(isinstance(node, ast.Await) for node in ast.walk(tree))
+
+
+class Registry:
+    def __init__(self, **tools):
+        self.tools = tools
+
+    def get_tools_for_agent(self, *args):
+        return {}
+
+    async def dispatch(self, name, args, *rest):
+        if name in self.tools:
+            return await self.tools[name].run(**args)
+        return ToolResult(output="filler " * 500)
+
+
+def held(messages, text):
+    return sum(
+        m.get("role") == "tool" and (m.get("content") == text or (m.get("content") or "").startswith(text + "\n\n[budget:"))
+        for m in messages
+    )
+
+
+async def test_a_loaded_skill_reaches_the_model_once_and_stays_pinned_for_the_turn(tmp_path, dirs, bus, mock_llm_client):
+    _skill(dirs.bundled, "notes")
+    store = ContentStore()
+    tool = skill_tool(tmp_path, discovered(dirs), store=store)
+    llm = scripted(mock_llm_client, ("skill", {"name": "notes"}), "Done.")
+    seen = capture(llm)
+    ctx = ContextManager(max_context_tokens=32768, eviction_store=store)
+    loop = make_loop(llm, bus, tmp_path, registry=Registry(skill=tool), ctx=ctx)
+    assert await loop.run_turn("Write the release notes.") == "Done."
+    text = header("notes", "bundled", dirs.bundled) + "\n\nBody of notes."
+    assert held(seen[-1], text) == 1
+    assert not any(is_restore(m) for m in seen[-1])
+    (active,) = store.active_references
+    assert (active.source, store.get(active.handle), store.active_step) == ("skill notes", text, "skill notes")
+
+
+async def test_a_project_body_is_stored_untrusted_and_a_bundled_body_trusted(tmp_path, dirs):
+    _skill(dirs.bundled, "notes")
+    _skill(dirs.project, "release-notes")
+    store = ContentStore()
+    tool = skill_tool(tmp_path, discovered(dirs), store=store)
+    origins = {}
+    for name in ("notes", "release-notes"):
+        result = await tool.run(name=name)
+        (active,) = [a for a in store.active_references if a.source == f"skill {name}"]
+        assert store.get(active.handle) == result.output
+        origins[name] = store.origin(active.handle)
+    assert origins == {"notes": "trusted", "release-notes": "untrusted"}
