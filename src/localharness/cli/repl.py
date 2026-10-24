@@ -162,7 +162,7 @@ PLUGINS_PARKED = "Answer the parked calls first (/pending lists them): a restart
 PLUGINS_RELOADING = "Restarting to apply your plugin changes — your conversation is kept."
 PLUGINS_RESTARTING = "Restarting with {name} {state} — your conversation is kept."
 """What `/plugins` answers. A restart drops the gate's parked calls with the session, so it is
-refused while any wait; the other channels cannot restart a session at all (R10)."""
+refused while any wait; the other channels cannot restart a session at all."""
 
 CLEAR_DONE = "Conversation cleared; the next message starts fresh."
 CLEAR_DROPPED = "{n} parked call(s) dropped. " + CLEAR_DONE
