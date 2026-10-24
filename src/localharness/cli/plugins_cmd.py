@@ -53,8 +53,8 @@ from localharness.channels.base import sanitize_for_display
 from localharness.cli import update_cmd
 from localharness.cli.components_cmd import (
     Refusal, _build_layered_loader, _core_secret_values, _err, _err_config, _serialize_value,
-    _validate_overlay, _validation_text, audit_value, is_secret, redact_text, shown, walk_secret_values,
-    workspace_file_of, write_value,
+    _validate_overlay, _validation_text, audit_value, is_secret, redact_text, shown, userinfo_present,
+    walk_secret_values, workspace_file_of, write_value,
 )
 from localharness.cli.interview import confirm_line, prompt_line
 from localharness.cli.workspace import _stdin_is_a_terminal
@@ -99,6 +99,7 @@ OVERRIDE_LINE = ("{saved}this project turns it {state} ({file}) and that still w
 _TEMPLATE_URL = "https://github.com/ahwurm/localharness/tree/main/examples/plugin-template"
 # A setup question for a secret that is already stored (#28): what Enter does, and how to clear it.
 SECRET_KEPT = "stored key kept — type none to clear, or paste a new one"
+URL_KEPT = "stored URL kept — type none to clear, or paste a new one"
 SECRET_KEPT_FOR = "stored key for {host} kept — type none to clear, or paste a new one"
 CTRLC = "Ctrl-C {does}"
 CTRLC_DOES = MappingProxyType({"prompt": "cancels this enable — nothing is written", "batch": "stops the batch"})
@@ -498,26 +499,24 @@ def _secret_stored(resolution: Resolution, loader: ConfigLoader, entry: PlanEntr
 
 async def ask_fields(fields: tuple[SetupField, ...], stored: Any, secret_stored: Any = lambda key: False,
                      cleared: Any = lambda key: "", *, prompt: Any) -> list[str]:
-    """Ask each setup question through `prompt` (None raises click.Abort); KEY=VALUE for every answer given. A question that
-    is not secret offers `stored(key)`, the value it holds now, else its default; a secret one
-    offers nothing, so a stored token is never shown. When a secret is stored (`secret_stored`), its
-    question says so: Enter keeps it and writes nothing (R5), `none` writes `cleared(key)` (the
-    setting's own default), anything else is the new value; and when an address asked earlier in
-    the same step was just changed, the question names the host the stored key was for."""
+    """KEY=VALUE per answer to each setup question; a stored secret or credentialed URL is never offered."""
     pairs = []
     changed_from = ""
     for f in fields:
         was = "" if f.secret else stored(f.key)
-        default = "" if f.secret else (was or f.default)
+        hidden = f.secret or userinfo_present(was)
+        default = "" if hidden else (was or f.default)
         text = f.prompt
         if f.secret and secret_stored(f.key):
             text += f" [{SECRET_KEPT_FOR.format(host=changed_from) if changed_from else SECRET_KEPT}]"
-        answer = await prompt(sanitize_for_display(f"{text}: "), default=default, secret=f.secret)
+        elif hidden and not f.secret:
+            text += f" [{URL_KEPT}]"
+        answer = await prompt(sanitize_for_display(f"{text}: "), default=default, secret=hidden)
         if answer is None:
             raise click.Abort()
         if not f.secret and f.key.split(".")[-1].endswith("url") and was and answer and answer != was:
             changed_from = urlsplit(was).hostname or ""
-        if f.secret and answer.lower() == "none":
+        if hidden and answer.lower() == "none":
             pairs.append(f"{f.key}={cleared(f.key)}")
         elif answer:  # an empty answer is not written: Enter on a question with nothing to offer skips it
             pairs.append(f"{f.key}={answer}")
