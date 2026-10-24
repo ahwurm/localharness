@@ -109,6 +109,9 @@ STOP_TAILS = MappingProxyType({
     "disable": "nothing changed",
 })
 RERUN_HINT = "download still stopping"
+RELOAD_WAITS = (
+    "{name}: download still stopping — the restart waits for it.",
+    "Ctrl-C quits localharness now instead (a stuck download may need a second Ctrl-C); saved changes are kept.")
 CONFIGURE_QUESTION = "{name} — settings (Esc = back)"
 BOOL_QUESTION = "{key}: on or off?"
 LITERAL_QUESTION = "{key}: which?"
@@ -655,9 +658,14 @@ def _not_applied(plan: ReloadPlan, why: Unreachable | None, error: str) -> str:
 
 
 def _finish(flow: Flow, *, closing: bool, why: Unreachable | None = None, error: str = "") -> bool:
+    from localharness.plugins import lifecycle
+
     plan = flow.should_reload(flow.session.touched)
     if closing and plan.reload:
         flow.close()
+        for name in sorted(flow.session.touched):
+            if lifecycle.downloading(name):
+                _say(flow.console, *(line.format(name=name) for line in RELOAD_WAITS))
         return True
     if plan.names:
         _say(flow.console, _not_applied(plan, why, error))
