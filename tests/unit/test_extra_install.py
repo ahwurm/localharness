@@ -435,7 +435,8 @@ def test_the_install_strings_are_the_spec_text():
         "declined": "", "failed": " — the install failed (exit {code}; see the output above)",
         "not_writable": " — {dir} is not writable",
         "open": " — {dir} is open to other accounts and could not be made private",
-        "no_temp": " — no temp dir under {dir}", "no_start": " — the installer could not start: {error}"}
+        "no_temp": " — no temp dir under {dir}", "no_start": " — the installer could not start: {error}",
+        "no_route": " — this install has no route for {extras}"}
     assert p.ROUTE_BACK == "{rerun} under /plugins → {names}"
     assert p.ENABLE_MANUAL == "{name}: enabled in config; this install must be done by hand."
     assert p.TYPED_NEEDS_EXTRA == "{name}: needs {extra}."
@@ -506,6 +507,12 @@ def test_install_pass_a_manual_route_asks_nothing_and_prints_its_block(h, monkey
         "a, b: enabled in config, package not installed", "Install uv first (https://docs.astral.sh/uv/).",
         "In another terminal run:", f"uv tool install {shlex.quote(SPEC)}",
         "then Re-run setup under /plugins → a, b"]
+    assert h.asked == [] and h.spawns == []
+
+
+def test_install_pass_with_no_route_prints_one_skipped_line_and_asks_nothing(h):
+    assert h.run(("a",), ("nope", "mobile")) == frozenset()
+    assert h.lines == ["a: enabled in config, package not installed — this install has no route for mobile, nope"]
     assert h.asked == [] and h.spawns == []
 
 
