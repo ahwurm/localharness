@@ -77,6 +77,8 @@ _KINDS: dict[str, tuple[str, str]] = {
 
 
 def _refusal(row: SlashCommand, taken: set[str]) -> str | None:
+    if not row.plugin:
+        return f"slash command {row.name} names no plugin — skipped"
     who, fix = _KINDS.get(row.plugin, ("plugin {plugin}", "skipped"))
     who, fix = (t.format(plugin=row.plugin, bare=row.name[1:]) for t in (who, fix))
     if row.name in taken:
