@@ -611,6 +611,10 @@ def _home_protected_bases(raw: str) -> list[Path]:
     return bases
 
 
+# Sits in the workspace under no config dir, so the config-dir entry list cannot reach it.
+AGENTS_SKILLS = (".agents", "skills")
+
+
 def _protected(path: Path, ctx: GateContext, settings: GateSettings) -> bool:
     """Does this resolved target land on a protected path? (PRD §3.1 ``protected-path``.)
 
@@ -622,7 +626,7 @@ def _protected(path: Path, ctx: GateContext, settings: GateSettings) -> bool:
       project" would include ``/etc/hosts``;
     * absolute home paths (``~/.ssh``, the credential files, the shell rc files);
     * the few behaviour-deciding entries inside a harness config directory — the global one and
-      any in-project ``.localharness/`` (:func:`_config_dir_verdict`);
+      any in-project ``.localharness/`` (:func:`_config_dir_verdict`), and ``.agents/skills``;
     * names matched at any depth inside the workspace (``.git``, ``.env*``, ``*.pem``), where a
       directory entry protects its subtree so ``.git/hooks/pre-commit`` is protected via ``.git``.
 
@@ -658,6 +662,8 @@ def _protected(path: Path, ctx: GateContext, settings: GateSettings) -> bool:
         if not _within(container, path):
             continue
         relative = path.relative_to(container).parts
+        if relative[:2] == AGENTS_SKILLS:
+            return True
         if WORKSPACE_DIR_NAME in relative:
             # An in-project `.localharness/` is the same kind of thing as the global config dir
             # and answers by the same list, at whatever depth it appears.
@@ -671,7 +677,7 @@ def _protected(path: Path, ctx: GateContext, settings: GateSettings) -> bool:
 
 def _below_config_folder(path: Path, ctx: GateContext) -> Optional[tuple[str, ...]]:
     """The parts of ``path`` BELOW a harness config folder (the global one, the session's
-    ``--config-dir``, or a project's ``.localharness/``), or None when it is not inside one. The
+    ``--config-dir``, a project's ``.localharness/`` or its ``.agents/``), or None when it is not inside one. The
     empty tuple is the folder itself."""
     for config_dir in _config_dirs(ctx):
         if _within(config_dir, path):
@@ -685,6 +691,8 @@ def _below_config_folder(path: Path, ctx: GateContext) -> Optional[tuple[str, ..
         relative = path.relative_to(container).parts
         if WORKSPACE_DIR_NAME in relative:
             return relative[relative.index(WORKSPACE_DIR_NAME) + 1:]
+        if relative[:1] == AGENTS_SKILLS[:1]:
+            return relative[1:]
     return None
 
 

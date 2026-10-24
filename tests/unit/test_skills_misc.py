@@ -9,7 +9,7 @@ from localharness.agent.gate_types import PROTECTED_CONFIG_DIR_ENTRIES, Verdict
 from localharness.agent.verdict import evaluate
 from localharness.config.loader import ConfigLoader, ConfigValidationError
 from localharness.config.models import ContextConfig
-from tests.unit.agent.test_auto_mode import SETTINGS, WRITE, _ctx
+from tests.unit.agent.test_auto_mode import SETTINGS, SHELL, WRITE, _ctx, _shell, _verdict
 from tests.unit.test_leftover_plugin_section import _CONFIG, _agent_file
 
 
@@ -96,3 +96,57 @@ def test_a_write_under_localharness_skills_is_an_ungrantable_protected_ask(proje
     assert decision.request.klass == "protected-path"
     assert decision.request.grantable is False
     assert decision.request.reason.startswith("writes a protected path ("), decision.request.reason
+
+
+@pytest.mark.parametrize(
+    "tail,verdict",
+    [
+        pytest.param(".agents/skills/release/SKILL.md", Verdict.ASK, id="below-agents-skills"),
+        pytest.param(".agents/skills", Verdict.ASK, id="agents-skills-itself"),
+        pytest.param(".agents/skills/.localharness/x", Verdict.ASK, id="nested-localharness-cannot-reopen"),
+        pytest.param(".agents", Verdict.ALLOW, id="agents-itself"),
+        pytest.param(".agents/skillsx/x", Verdict.ALLOW, id="longer-name"),
+        pytest.param(".agents/skill/x", Verdict.ALLOW, id="shorter-name"),
+        pytest.param(".agents/notes.md", Verdict.ALLOW, id="sibling-file"),
+        pytest.param("sub/.agents/skills/x", Verdict.ALLOW, id="not-at-a-container-root"),
+        pytest.param(".agents/./skills/x/SKILL.md", Verdict.ASK, id="dot-part"),
+        pytest.param(".agents//skills/x/SKILL.md", Verdict.ASK, id="doubled-slash"),
+        pytest.param(".agents/skills/../notes.md", Verdict.ALLOW, id="dotdot-out"),
+        pytest.param(".Agents/Skills/x", Verdict.ALLOW, id="case-is-exact"),
+    ],
+)
+def test_agents_skills_is_protected_exactly_at_a_container_root(project, global_dir, tail, verdict) -> None:
+    assert _verdict("write", {"path": f"{project}/{tail}"}, _ctx(project), WRITE) is verdict
+
+
+def test_agents_skills_is_protected_from_the_workspace_and_from_the_boundary(project, global_dir) -> None:
+    target = {"path": str(project / ".agents/skills/release/SKILL.md")}
+
+    assert _verdict("write", target, _ctx(project, workspace=project / "sub"), WRITE) is Verdict.ASK
+    assert _verdict("write", target, _ctx(project, boundary=None), WRITE) is Verdict.ASK
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "mv .agents away",
+        "rm -rf .agents",
+        "rm -rf .agents/skills",
+        "mv .agents/skills elsewhere",
+        "rm .agents/skills/release/SKILL.md",
+        "rm .agents/plugins",
+    ],
+)
+def test_moving_or_deleting_agents_skills_or_its_parent_asks(project, global_dir, command) -> None:
+    decision = evaluate("bash_exec", {"command": command}, SHELL, _ctx(project), SETTINGS)
+
+    assert decision.verdict is Verdict.ASK, command
+    assert "deletes or moves a protected config entry" in decision.request.reason, decision.request.reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["rm .agents/notes.md", "mv .agents/notes.md .agents/n.md", "rm -rf skills", "rm -rf docs/skills"],
+)
+def test_other_children_of_agents_and_plain_skills_folders_do_not_ask(project, global_dir, command) -> None:
+    assert _shell(command, _ctx(project)) is Verdict.ALLOW, command
