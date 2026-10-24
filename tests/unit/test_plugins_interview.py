@@ -14,7 +14,7 @@ from typing import Literal, get_args
 import click
 import pytest
 import yaml
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, SecretStr, field_validator
 from rich.console import Console
 
 from localharness.cli import plugins_cmd, plugins_interview
@@ -2059,8 +2059,8 @@ def _typing(monkeypatch, *answers):
     return asked
 
 
-def _settings(*edits):
-    return (Label("conf"), Label("Configure…"), *edits, CANCEL, CANCEL, "+close")
+def _settings(*edits, name="conf"):
+    return (Label(name), Label("Configure…"), *edits, CANCEL, CANCEL, "+close")
 
 
 def _audit_lines(layers) -> list[str]:
@@ -2263,3 +2263,193 @@ async def test_configure_settings_are_read_again_after_every_edit(conf, monkeypa
 
     first, second = (channel.asked[2], channel.asked[3])
     assert first.options[0].hint == "0 · default" and second.options[0].hint == "7 · global-overrides"
+
+
+SECRET = "s3cret"
+CRED_URL = "https://user:pass@h.test/x"
+SECRET_KEPT = plugins_cmd.SECRET_KEPT
+URL_KEPT = plugins_cmd.URL_KEPT
+
+
+class _Server(BaseModel):
+    host: str = ""
+    key: SecretStr = SecretStr("")
+
+
+class _SecConfig(BaseModel):
+    token: SecretStr = SecretStr("")
+    api_key: SecretStr | None = None
+    url: str = ""
+    items: list[str] = []
+    servers: list[_Server] = []
+
+    @field_validator("token")
+    @classmethod
+    def _not_bad(cls, value: SecretStr) -> SecretStr:
+        if value.get_secret_value() == "badsecret":
+            raise ValueError("token badsecret is not allowed")
+        return value
+
+
+class Sec(Plugin):
+    """holds a token, a key, an address and two lists"""
+
+    manifest = PluginManifest(name="sec", version="0.1.0", kind="tools", enabled_by_default=False)
+    ConfigModel = _SecConfig
+
+
+_PLANTED = {"sec": {"enabled": True, "token": SECRET, "api_key": SECRET, "url": CRED_URL, "items": [CRED_URL],
+                    "servers": [{"host": CRED_URL, "key": SECRET}]}}
+
+
+@pytest.fixture
+def sec(layers, monkeypatch):
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Stub, Conf, Sec))
+    layers.audit = layers.g / "audit.jsonl"
+    (layers.g / "config.yaml").write_text(yaml.safe_dump(_CONFIG | {"org": {"audit_log_path": str(layers.audit)}}), encoding="utf-8")
+    (layers.g / "overrides.yaml").write_text(yaml.safe_dump(_PLANTED | _ON_CONF), encoding="utf-8")
+    return layers
+
+
+_ON_CONF = {"conf": {"enabled": True}}
+
+
+def _leaks(text: str) -> bool:
+    return SECRET in text or "user:pass" in text
+
+
+def _everything(channel, asked=()) -> str:
+    drawn = [channel.text, *(f"{a.question} {o.key} {o.label} {o.hint}" for a in channel.asked for o in a.options)]
+    return "\n".join([*drawn, *(f"{text} {default}" for text, default, _ in asked)])
+
+
+async def test_configure_stored_secrets_and_credentialed_urls_are_in_no_hint_prompt_default_or_line(sec, monkeypatch) -> None:
+    asked = _typing(monkeypatch, "", "", "", "", "")
+    rows = ("api_key", "items", "servers", "token", "url")
+    channel = FakeChannel(*_settings(*(Label(r) for r in rows), name="sec"))
+
+    await _run(sec, channel)
+
+    hints = {o.label: o.hint for o in channel.asked[2].options}
+    assert list(hints) == [*rows, "Done"] and hints["url"].startswith("'https://h.test/x' · ")
+    assert hints["token"].startswith("'") and hints["servers"].startswith("'") and not _leaks(_everything(channel, asked))
+    assert len(asked) == 3 and all(secret for _, _, secret in asked) and {d for _, d, _ in asked} == {""}
+    assert [t for t, _, _ in asked] == [f"api_key [{SECRET_KEPT}]: ", f"token [{SECRET_KEPT}]: ", f"url [{URL_KEPT}]: "]
+    assert len(channel.lines) == 2 and all(line.startswith("read-only here") for line in channel.lines)
+
+
+async def test_configure_info_for_a_plugin_holding_secrets_and_credentialed_urls_shows_none(sec) -> None:
+    channel = FakeChannel(Label("sec"), Label("Info"), CANCEL, "+close")
+
+    await _run(sec, channel)
+
+    assert channel.text and not _leaks(channel.text)
+
+
+@pytest.mark.parametrize(("row", "answer", "written"), [
+    ("token", "", SECRET), ("token", "none", ""), ("token", "n3w", "n3w"),
+    ("api_key", "", SECRET), ("api_key", "none", None), ("api_key", "n3w", "n3w"),
+], ids=["token-keep", "token-clear", "token-new", "key-keep", "key-clear", "key-new"])
+async def test_configure_a_stored_secret_is_kept_cleared_or_replaced_and_the_value_never_prints(sec, monkeypatch, row, answer, written) -> None:
+    asked = _typing(monkeypatch, answer)
+    channel = FakeChannel(*_settings(Label(row), name="sec"))
+
+    await _run(sec, channel)
+
+    assert asked == [(f"{row} [{SECRET_KEPT}]: ", "", True)]
+    assert _written(sec)["sec"][row] == written
+    assert len(channel.lines) == (0 if answer == "" else 1)
+    assert not _leaks(_everything(channel, asked)) and "n3w" not in _everything(channel, asked)
+    assert not any(SECRET in line or "n3w" in line for line in _audit_lines(sec))
+
+
+@pytest.mark.parametrize(("answer", "written"), [
+    ("", CRED_URL), ("none", ""), ("http://other.test/y", "http://other.test/y"),
+], ids=["keep", "clear", "new"])
+async def test_configure_a_credentialed_url_is_kept_cleared_or_replaced_with_no_default_and_a_hidden_prompt(sec, monkeypatch, answer, written) -> None:
+    asked = _typing(monkeypatch, answer)
+    channel = FakeChannel(*_settings(Label("url"), name="sec"))
+
+    await _run(sec, channel)
+
+    assert asked == [(f"url [{URL_KEPT}]: ", "", True)]
+    assert _written(sec)["sec"]["url"] == written
+    assert not _leaks(_everything(channel, asked))
+    assert not any("user:pass" in line for line in _audit_lines(sec))
+
+
+async def test_configure_a_rejected_secret_refusal_lacks_the_value(sec, monkeypatch) -> None:
+    before = (sec.g / "overrides.yaml").read_bytes()
+    asked = _typing(monkeypatch, "badsecret", "")
+    channel = FakeChannel(*_settings(Label("token"), name="sec"))
+
+    await _run(sec, channel)
+
+    assert len(asked) == 2 and len(channel.lines) == 1
+    assert channel.lines[0].startswith("sec: settings not changed — Validation failed for sec.token")
+    assert "badsecret" not in channel.text and not _leaks(channel.text)
+    assert (sec.g / "overrides.yaml").read_bytes() == before and _audit_lines(sec) == []
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["no-project-file", "project-file"])
+async def test_configure_a_secret_edit_writes_only_the_machine_overlay(sec, monkeypatch, held) -> None:
+    project = sec.ws / "overrides.yaml"
+    if held:
+        project.write_text(yaml.safe_dump({"sec": {"url": "http://p.test"}}), encoding="utf-8")
+    before = project.read_bytes() if held else None
+    _typing(monkeypatch, "n3w")
+    channel = FakeChannel(*_settings(Label("token"), name="sec"))
+
+    await _run(sec, channel)
+
+    assert _written(sec)["sec"]["token"] == "n3w"
+    assert (project.read_bytes() if project.exists() else None) == before
+    assert not (sec.ws / "config.yaml").exists()
+
+
+async def test_configure_a_stop_at_the_prompt_says_nothing_changed_and_writes_nothing(conf, monkeypatch) -> None:
+    before, touched = (conf.g / "overrides.yaml").read_bytes(), {}
+    _typing(monkeypatch, None)
+    channel = FakeChannel(*_settings(Label("count")))
+
+    await _run(conf, channel, running={"conf"}, touched=touched)
+
+    assert channel.lines == ["conf: stopped — nothing changed"] and touched == {}
+    assert (conf.g / "overrides.yaml").read_bytes() == before and _audit_lines(conf) == []
+    assert channel.asked[-1].options[-1].label == "Close"
+
+
+async def test_configure_a_stop_inside_the_audit_says_the_value_was_saved_and_the_close_restarts(conf, monkeypatch) -> None:
+    async def interrupted(written):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(plugins_cmd, "audit_value", interrupted)
+    _typing(monkeypatch, "7")
+    touched: dict = {}
+    channel = FakeChannel(*_settings(Label("count")))
+
+    assert await _run(conf, channel, running={"conf"}, touched=touched) is True
+
+    assert channel.lines == ["conf: stopped — count saved — applies when you close Plugins; the audit entry may be missing"]
+    assert _written(conf)["conf"]["count"] == 7 and touched["conf"].rebind is True
+    assert channel.asked[-1].options[-1].label == "Close — restarts to apply (1 plugin)"
+
+
+async def test_configure_a_stop_inside_the_audit_for_a_leaf_the_project_wins_names_the_file(conf, monkeypatch) -> None:
+    project = conf.ws / "overrides.yaml"
+    project.write_text(yaml.safe_dump({"conf": {"count": 9}}), encoding="utf-8")
+    before = project.read_bytes()
+
+    async def interrupted(written):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(plugins_cmd, "audit_value", interrupted)
+    _typing(monkeypatch, "7")
+    touched: dict = {}
+    channel = FakeChannel(*_settings(Label("count")))
+
+    assert await _run(conf, channel, running={"conf"}, touched=touched) is False
+
+    assert channel.lines == [
+        f"conf: stopped — count saved on this machine, but this project's {project} still wins here; the audit entry may be missing"]
+    assert _written(conf)["conf"]["count"] == 7 and project.read_bytes() == before and touched["conf"].rebind is False
