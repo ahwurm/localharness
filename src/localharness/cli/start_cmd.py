@@ -261,6 +261,10 @@ from localharness.cli.session_resume import (  # noqa: E402 — the handle lives
 )
 
 
+def _one_line(text: str) -> str:
+    return " ".join(sanitize_for_display(text.replace("\r", " ")).split())
+
+
 def _resume_status(resume: Resume, result: Any) -> str:
     """The indicator's last line after a /plugins restart: did the plugin come up, and how?"""
     verb, name = resume.action
@@ -3260,7 +3264,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             console.print(Text(RESTARTED_RELOAD), soft_wrap=True)
         else:  # R3: no wordmark mid-conversation — one line, then the plugin lines and the status
             console.print(Text(RESTARTED_LINE.format(
-                name=resume.action[1], state="on" if resume.action[0] == "enable" else "off")),
+                name=_one_line(resume.action[1]), state="on" if resume.action[0] == "enable" else "off")),
                 soft_wrap=True)
         if instructions_handle is not None and hasattr(channel, "instructions_on_delivered"):
             # D-47: delivery is the receipt. The channel calls this once its own checked send / hint
@@ -3340,13 +3344,14 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             available = ([e.name for e in plugin_resolution.plan.entries if e.state == "available"]
                          if plugin_resolution is not None else [])
             _plugins_line = _plugins_text(
-                plugin_result.loaded_names if plugin_result is not None else [],
-                _unconfigured, available,
+                [_one_line(n) for n in plugin_result.loaded_names] if plugin_result is not None else [],
+                {_one_line(n): _one_line(d) for n, d in _unconfigured.items()},
+                [_one_line(n) for n in available],
             )
             if _plugins_line is not None:
                 console.print(_plugins_line, soft_wrap=True)
         if resume is not None and not resume.slept and not is_reload(resume.action):
-            console.print(Text(sanitize_for_display(_resume_status(resume, plugin_result))), soft_wrap=True)
+            console.print(Text(_one_line(_resume_status(resume, plugin_result))), soft_wrap=True)
 
         # --- Verbose output ---
         if verbose:
