@@ -4,10 +4,11 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 
 from localharness.agent.context import ContentStore
-from localharness.agent.task_record import TaskState
+from localharness.agent.task_record import Reference, TaskState
 from localharness.config.skills import MAX_NAME, NAME, Skill, SkillSet, Skipped, shown
 from localharness.core.fence import fence_project_text
 from localharness.tools.base import Tool, ToolResult, ToolSchema
+from localharness.tools.registry import cut_output
 
 LISTING_HEADER = "## Skills\nProcedures. When a request matches one, call skill(name) before starting the work it covers."
 SKILLS_FENCE_HEADER = (
@@ -18,6 +19,14 @@ SKILL_DESCRIPTION = (
     "Load a procedure by name and follow it. The Skills list in your instructions says what each one is for; "
     "call this before starting work that one covers. Files in the skill's directory are read with read; "
     "its scripts run with bash_exec."
+)
+STEP_FULL_TAIL = (
+    "[not pinned: this step already holds four references, so this skill may be evicted before you finish; "
+    "the eviction note will name the tool_result_get id that restores it]"
+)
+TASK_FULL_TAIL = (
+    "[not kept across turns: the task already holds four references; to keep it, drop one with "
+    "task(action=\"reference\", source=\"<source>\", drop=true), then call skill('{name}') again]"
 )
 
 
@@ -55,6 +64,10 @@ def _body(text: str) -> str:
     return "\n".join(lines).strip("\r\n")
 
 
+def _tails(name: str, step_full: bool, task_full: bool) -> str:
+    return ("\n\n" + STEP_FULL_TAIL if step_full else "") + ("\n\n" + TASK_FULL_TAIL.format(name=name) if task_full else "")
+
+
 class SkillTool(Tool):
     def __init__(self, skills: SkillSet, store: ContentStore, state: TaskState, result_cap: Callable[[], int]) -> None:
         self._skills = skills
@@ -84,8 +97,12 @@ class SkillTool(Tool):
         header = f"skill {name!r} ({record.origin}), directory {str(record.path.parent.absolute())!r}"
         text = f"{header}\n\n{body}"
         source = f"skill {name}"
-        step, _, has_room = self._state.room(self._store, source)
-        handle = self._store.put(text, origin="untrusted" if record.untrusted else "trusted")
+        cut = cut_output(text, max(self._result_cap() - len(_tails(name, True, True)), 0))
+        step, task, has_room = self._state.room(self._store, source)
+        final = cut + _tails(name, not has_room, task == "full")
+        handle = self._store.put(final, origin="untrusted" if record.untrusted else "trusted")
         if has_room:
             self._store.declare_active_reference(step, handle, source)
-        return self.ok(text)
+        if task in ("add", "replace"):
+            self._state.add_reference(Reference(source, handle=handle))
+        return self.ok(final, **({"truncated": True, "original_length": len(text)} if cut != text else {}))
