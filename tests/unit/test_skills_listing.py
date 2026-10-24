@@ -522,3 +522,96 @@ async def test_the_listing_and_the_schema_raise_the_floor_a_start_records(tmp_pa
     _, without = _start_world(tmp_path / "b", monkeypatch, skill=False)
     await _start_async(None, False, False, str(tmp_path / "b"))
     assert with_skill[0].fixed_tokens() > without[0].fixed_tokens()
+
+
+PROJECT_SKIPS = "{} project skills skipped; localharness skills says why"
+NAME_ONLY = "{} skills listed by name only; localharness skills says why"
+
+
+def _world(tmp_path):
+    return tmp_path / "cfg" / "skills", tmp_path / "proj" / ".localharness" / "skills"
+
+
+def _found(tmp_path):
+    return SkillSet.discover(tmp_path / "cfg", tmp_path / "proj")
+
+
+def _long(origin_dir, name, length):
+    return _skill(origin_dir, name, f"---\nname: {name}\ndescription: {'d' * length}\n---\nBody.\n")
+
+
+def test_start_lines_print_machine_skips_and_count_the_projects(tmp_path, pkg):
+    from localharness.cli.start_cmd import _skill_start_lines
+
+    machine, project = _world(tmp_path)
+    _skill(machine, "plain", "no frontmatter")
+    _skill(machine, "dup")
+    _skill(project, "dup")
+    _skill(project, "broken-one", "no frontmatter")
+    _skill(project, "broken-two", "no frontmatter")
+    found = _found(tmp_path)
+    (machine_skip,) = (s for s in found.skipped if s.path == machine / "plain")
+    lines = _skill_start_lines(found)
+    assert lines == [skills.skip_line(machine_skip), PROJECT_SKIPS.format(2)]
+    assert not any("dup" in line for line in lines)
+
+
+def test_one_project_skip_and_none(tmp_path, pkg):
+    from localharness.cli.start_cmd import _skill_start_lines
+
+    machine, project = _world(tmp_path)
+    _skill(machine, "notes")
+    assert _skill_start_lines(_found(tmp_path)) == []
+    _skill(project, "broken", "no frontmatter")
+    assert _skill_start_lines(_found(tmp_path)) == ["1 project skills skipped; localharness skills says why"]
+
+
+def test_the_name_only_line_counts_bundled_and_machine_rows_only(tmp_path, pkg):
+    from localharness.cli.start_cmd import _skill_start_lines
+
+    machine, project = _world(tmp_path)
+    _long(machine, "aa", 900)
+    _long(machine, "bb", 900)
+    assert _skill_start_lines(_found(tmp_path)) == ["1 skills listed by name only; localharness skills says why"]
+    _long(project, "cc", 1_000)
+    found = _found(tmp_path)
+    assert next(row for row in shown(found.skills) if row[1] == "project")[2] is None
+    assert _skill_start_lines(found) == [NAME_ONLY.format(1)]
+
+
+def test_an_over_full_project_origin_counts_once(tmp_path, pkg):
+    from localharness.cli.start_cmd import _skill_start_lines
+
+    _, project = _world(tmp_path)
+    for i in range(257):
+        (project / f"d{i:03d}").mkdir(parents=True, exist_ok=True)
+    assert _skill_start_lines(_found(tmp_path)) == [PROJECT_SKIPS.format(1)]
+
+
+def test_no_skills_no_start_lines(tmp_path, pkg):
+    from localharness.cli.start_cmd import _skill_start_lines
+
+    assert _skill_start_lines(SkillSet.discover(tmp_path / "cfg", None)) == []
+
+
+async def test_start_prints_its_skill_lines_once_with_markup_off(tmp_path, pkg, monkeypatch):
+    import io
+
+    from rich.console import Console
+
+    from localharness.cli import start_cmd
+    from localharness.cli.start_cmd import _start_async
+
+    out, at_launch = io.StringIO(), []
+    seen, _ = _start_world(tmp_path, monkeypatch, skill=False)
+    _skill(tmp_path / "skills", "[old]", "no frontmatter")
+    monkeypatch.setattr(start_cmd, "console", Console(file=out, width=400))
+
+    async def spy(agent_config, skills=()):
+        at_launch.append(out.getvalue())
+        return 256
+
+    monkeypatch.setattr(start_serving, "launch_floor", spy)
+    await _start_async(None, False, False, str(tmp_path))
+    assert "[old]" in at_launch[0] and at_launch[0].count("has no frontmatter") == 1
+    assert out.getvalue().count("has no frontmatter") == 1
