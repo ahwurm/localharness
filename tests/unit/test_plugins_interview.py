@@ -14,9 +14,14 @@ from typing import Literal, get_args
 import click
 import pytest
 import yaml
+from prompt_toolkit.application import create_app_session
+from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.input.defaults import create_pipe_input
+from prompt_toolkit.output import DummyOutput
 from pydantic import BaseModel, SecretStr, field_validator
 from rich.console import Console
 
+from localharness.cli import interview as interview_mod
 from localharness.cli import plugins_cmd, plugins_interview
 from localharness.cli.interview import Answer, Unreachable
 from localharness.cli.plugins_cmd import (
@@ -40,6 +45,7 @@ from tests.unit.test_plugins_pass import _on as _overlay
 from tests.unit.test_plugins_pass import folder as _folder
 from tests.unit.test_plugins_pass import layers as _layers
 from tests.unit.test_plugins_pass import mobile as _mobile
+from tests.unit.test_terminal_run_interview import _channel as _terminal
 
 layers, folder, dist, mobile = _layers, _folder, _dist, _mobile
 HANG = object()
@@ -2474,3 +2480,99 @@ async def test_abandon_an_unreached_node_deep_inside_plugins_prints_exactly_one_
     saved = _TOO_SMALL if why is Unreachable.TOO_SMALL else _NO_DRAW
     assert channel.lines == [saved if changes else plugins_interview.unavailable(why)]
     assert ("saved, not applied" in channel.text) is not ("can't be drawn here" in channel.text)
+
+
+@pytest.fixture
+def drawn(monkeypatch):
+    monkeypatch.setattr(interview_mod, "can_draw", lambda output=None: None)
+
+
+def _keyed(ch, inp, monkeypatch, nodes, lines, confirms) -> None:
+    """Send each node's keys to the pipe right before the real node reads them, so no typed-ahead key meets the wrong node."""
+    nodes, lines, confirms = list(nodes), list(lines), list(confirms)
+    real_node, real_line, real_confirm = ch.run_interview, plugins_interview.prompt_line, plugins_interview.confirm_line
+
+    async def node(question, options, *, default, cancel, multi=False):
+        keys = nodes.pop(0)
+        if isinstance(keys, Label):
+            at = next(i for i, o in enumerate(options) if o.label == keys.label)
+            keys = ("\x1b[B" if at > default else "\x1b[A") * abs(at - default) + "\r"
+        inp.send_text(keys)
+        return await real_node(question, options, default=default, cancel=cancel, multi=multi)
+
+    async def line(text, *, console, default="", secret=False):
+        inp.send_text(lines.pop(0))
+        return await real_line(text, console=console, default=default, secret=secret)
+
+    async def confirm(text, *, console, default, tail=""):
+        inp.send_text(confirms.pop(0))
+        return await real_confirm(text, console=console, default=default, tail=tail)
+
+    ch.run_interview = node
+    monkeypatch.setattr(plugins_interview, "prompt_line", line)
+    monkeypatch.setattr(plugins_interview, "confirm_line", confirm)
+
+
+def _on_terminal(layers, monkeypatch, *, nodes, lines=(), confirms=(), during=None, **run_kw) -> SimpleNamespace:
+    """Plugins on the real TerminalChannel over a pipe input; what it returned, printed and left behind."""
+    async def scenario():
+        ch, me = _terminal(), asyncio.current_task()
+        ch._history, before = InMemoryHistory(), signal.getsignal(signal.SIGINT)
+        with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+            await ch.start_input_box(asyncio.Queue(), on_interrupt=lambda: None)
+            _keyed(ch, inp, monkeypatch, nodes, lines, confirms)
+            side = asyncio.ensure_future(during()) if during is not None else None
+            try:
+                got = await asyncio.wait_for(_run(layers, ch, **run_kw), 15)
+                box = ch._box_app.current_buffer.text if ch._box_app is not None else None
+            finally:
+                if side is not None:
+                    side.cancel()
+                await ch.stop_input_box()
+        return SimpleNamespace(got=got, ch=ch, box=box, lines=ch._console.file.getvalue().splitlines(),
+                               unwinding=me.cancelling(), handler_kept=signal.getsignal(signal.SIGINT) is before)
+
+    return asyncio.run(scenario())
+
+
+@pytest.mark.usefixtures("default_sigint", "drawn")
+def test_real_terminal_ctrl_c_at_the_root_closes_plugins(layers, monkeypatch) -> None:
+    done = _on_terminal(layers, monkeypatch, nodes=["\x03"])
+
+    assert done.got is False and done.lines == [] and done.unwinding == 0 and done.handler_kept
+
+
+@pytest.mark.usefixtures("default_sigint", "drawn")
+def test_real_terminal_ctrl_c_at_an_enable_question_stops_with_nothing_changed(layers, monkeypatch) -> None:
+    done = _on_terminal(layers, monkeypatch, nodes=[Label("ask"), Label("Enable"), "\x03"], lines=["\x03"])
+
+    assert done.got is False and done.lines == ["ask: stopped — nothing changed"]
+    assert done.unwinding == 0 and done.handler_kept and not (layers.g / "overrides.yaml").exists()
+
+
+@pytest.mark.usefixtures("default_sigint", "drawn")
+def test_real_terminal_ctrl_c_at_the_consent_stops_with_nothing_changed_and_installs_nothing(layers, mobile, dist, monkeypatch) -> None:
+    done = _on_terminal(layers, monkeypatch, nodes=[Label("mob"), Label("Enable"), "\x03"], confirms=["\x03"])
+
+    assert done.lines[-1] == "mob: stopped — nothing changed" and mobile.spawns == []
+    assert done.got is False and done.unwinding == 0 and done.handler_kept and not (layers.g / "overrides.yaml").exists()
+
+
+@pytest.mark.usefixtures("default_sigint", "drawn")
+def test_real_terminal_a_secret_typed_at_an_enable_question_never_reaches_the_box(layers, monkeypatch) -> None:
+    sessions: list = []
+
+    class Recording(interview_mod.PromptSession):
+        def __init__(self, *args, **kw) -> None:
+            super().__init__(*args, **kw)
+            sessions.append(self)
+
+    monkeypatch.setattr(interview_mod, "PromptSession", Recording)
+    done = _on_terminal(layers, monkeypatch, nodes=[Label("ask"), Label("Enable"), "\x03"],
+                        lines=["http://box\r", "s3cret\r"], parked=1)
+
+    assert len(sessions) == 2 and sessions[0] is not sessions[1]
+    assert any(line.startswith("ask: enabled") for line in done.lines) and "s3cret" in "".join(
+        f.read_text(encoding="utf-8") for f in layers.g.rglob("*") if f.is_file())
+    assert done.box == "" and "s3cret" not in "".join(done.ch._history.get_strings()) + "\n".join(done.lines)
+    assert done.handler_kept and done.unwinding == 0
