@@ -3,6 +3,9 @@ import pytest
 
 from localharness.agent.context import ContentStore
 from localharness.agent.task_record import Reference, TaskState, TooManyReferences
+from localharness.config.models import ToolConfig
+from localharness.tools.base import Tool, ToolResult, ToolSchema
+from localharness.tools.registry import ToolRegistry, cut_output
 from tests.unit.test_task_tool import refused, start, tool_for
 
 
@@ -152,3 +155,43 @@ async def test_room_changes_nothing_and_repeats(tmp_path):
     assert state.room(store, "skill x") == first
     assert seen == (store.active_step, store.active_references, list(state.current.references),
                     state.path.read_bytes())
+
+
+MARKER = "\n... [output cut: 2000 chars total — head kept] ..."
+
+
+def test_cut_output_is_exactly_the_cap_with_the_marker_inside_it():
+    assert cut_output("x" * 2000, 500) == "x" * (500 - len(MARKER)) + MARKER
+    assert len(cut_output("x" * 2000, 500)) == 500
+    assert cut_output("x" * 500, 500) == "x" * 500
+    one_over = cut_output("x" * 501, 500)
+    assert len(one_over) == 500 and one_over.endswith("[output cut: 501 chars total — head kept] ...")
+
+
+def test_cut_output_below_the_marker_cuts_plainly():
+    m = len(MARKER)
+    assert cut_output("x" * 2000, m) == "x" * m
+    assert cut_output("x" * 2000, m + 1) == "x" + MARKER
+    assert cut_output("", 0) == ""
+
+
+def test_cut_output_counts_code_points_not_bytes():
+    cut = cut_output("é" * 2000, 500)
+    assert len(cut) == 500 and "2000 chars total" in cut
+
+
+async def test_the_registry_dispatches_through_cut_output():
+    class Big(Tool):
+        def info(self) -> ToolSchema:
+            return ToolSchema(name="big", description="Returns 2000 characters.",
+                              parameters={"type": "object", "properties": {}, "required": []},
+                              ingest="none", host="safe")
+
+        async def _execute(self, **kwargs) -> ToolResult:
+            return self.ok("x" * 2000)
+
+    registry = ToolRegistry(result_size_cap=500)
+    await registry.register(Big(), scope="global")
+    result = await registry.dispatch("big", {}, "agent-1", "div-1", ToolConfig(inherit=["global"]))
+    assert result.output == cut_output("x" * 2000, 500)
+    assert result.truncated is True and result.original_length == 2000
