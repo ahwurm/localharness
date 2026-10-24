@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import inspect
 import io
 import signal
@@ -17,7 +18,7 @@ from rich.console import Console
 from localharness.cli import plugins_cmd
 from localharness.cli.plugins_cmd import (
     CONSENT, CTRLC, CTRLC_DOES, CTRLC_IGNORED, OVERRIDE_LINE, OVERRIDE_SAVED, THIRD_PARTY_CONFIRM, PassProgress, PassResult, PluginSession,
-    Refusal, StepOutcome, Touch, configure_one, disable_pass, enable_pass, override_line, override_of, settings_rows,
+    Refusal, StepOutcome, Touch, configure_one, disable_pass, enable_pass, info_renderable, override_line, override_of, settings_rows,
 )
 from localharness.config.loader import ConfigLoader
 from localharness.core.bus import EventBus
@@ -1065,3 +1066,56 @@ async def test_configure_one_sets_wrote_and_overridden_before_the_audit_awaits(c
 
     assert seen == [(True, True)]
     assert yaml.safe_load((cfg.g / "overrides.yaml").read_text(encoding="utf-8")) == {"cfg": {"port": 7}}
+
+
+def _info(layers, name: str, entry=None, **kw) -> str:
+    loader = ConfigLoader(config_dir=layers.g, local_config_dir=layers.ws)
+    out = io.StringIO()
+    Console(file=out, width=400, color_system=None).print(
+        info_renderable(_session(layers, **kw), entry or resolve(loader).plan.entry(name)), soft_wrap=True)
+    return out.getvalue()
+
+
+def test_info_renderable_is_the_text_body_of_plugins_info(layers) -> None:
+    text = _info(layers, "ask")
+
+    assert text.splitlines()[:5] == ["ask", "  state:        off — turn on: localharness plugins enable ask",
+                                     "  what it does: asks an address and a token", "  from:         built in",
+                                     "  version:      0.1.0"]
+    assert "Settings:" in text and "ask.url" in text and "Or paste this into your coding agent" in text
+
+
+def test_info_renderable_says_why_a_plugin_did_not_load_or_is_not_set_up(layers) -> None:
+    assert "  did not load: import broke\n" in _info(layers, "ask", failed={"ask": "import broke"})
+    assert "  not set up:   ask.url\n" in _info(layers, "ask", unconfigured={"ask": "ask.url"})
+    plain = _info(layers, "ask")
+    assert "did not load" not in plain and "not set up" not in plain and "last check" not in plain
+
+
+def test_info_renderable_says_what_the_last_check_found_unless_it_was_on(layers) -> None:
+    failed = _info(layers, "ask", touched={"ask": Touch(False, True, ("failed", "token rejected"))})
+    on = _info(layers, "ask", touched={"ask": Touch(False, True, ("on", "answers"))})
+
+    assert "  last check:   failed — token rejected\n" in failed
+    assert "last check" not in on
+
+
+def test_info_renderable_renders_every_name_and_summary_as_text_after_sanitizing(layers) -> None:
+    entry = dataclasses.replace(resolve(ConfigLoader(config_dir=layers.g, local_config_dir=layers.ws)).plan.entry("ask"),
+                                name="bad\x1b[2Jname", summary="[browser] [red]tools[/red]", source="from\x1b]0;x\x07 here")
+
+    text = _info(layers, "ask", entry)
+
+    assert "\x1b" not in text and "\x07" not in text
+    assert text.splitlines()[0] == "badname"
+    assert "[browser] [red]tools[/red]" in text and "from here" in text
+
+
+def test_info_renderable_strips_a_url_credential_and_never_shows_a_stored_secret(layers) -> None:
+    (layers.g / "overrides.yaml").write_text(yaml.safe_dump({"ask": {"enabled": True, "url": "https://user:pw@example.test/v1", "token": "s3cret-value"}}),
+                                             encoding="utf-8")
+
+    text = _info(layers, "ask")
+
+    assert "pw@" not in text and "s3cret-value" not in text
+    assert "'https://example.test/v1'" in text and "Run it at https://example.test/v1." in text

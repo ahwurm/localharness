@@ -42,7 +42,7 @@ from urllib.parse import urlsplit
 
 import click
 import typer
-from rich.console import Console
+from rich.console import Console, Group, RenderableType
 from rich.markup import escape
 from rich.padding import Padding
 from rich.table import Table
@@ -123,6 +123,7 @@ ROUTE_BACK = "{rerun} under /plugins → {names}"
 ENABLE_MANUAL = "{name}: enabled in config; this install must be done by hand."
 TYPED_NEEDS_EXTRA = "{name}: needs {extra}."
 TYPED_ROUTE = "/plugins enable {name} again"
+INFO_FAILED, INFO_UNCONFIGURED, INFO_LAST_CHECK = "did not load", "not set up", "last check"
 _TERMINATE_GRACE = 5.0
 _READ_SIZE = 4096
 _KEPT_LINES = 30
@@ -232,45 +233,38 @@ def override_line(name: str, pair: tuple[Literal["on", "off"], Path], saved: str
                                 name=name)
 
 
-@plugins_app.command("info")
-def plugins_info(name: Name, json_output: Json = False, config_dir: ConfigDir = None) -> None:
-    """One plugin: its state, what it adds, and every setting it owns.
-
-    The settings are the rows `components list` marks `(plugin: NAME)`.
-    """
-    resolution, loader, workspace = _resolve(config_dir, json_output=json_output)
-    entry = _entry(resolution, loader, name, json_output)
-    _warn(resolution)
+def _info_settings(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry) -> tuple[list[tuple], str | None]:
+    """(path, type, value, layer, machine-level only) per setting `plugins info` lists, and its note."""
+    name = entry.name
     rows = plugin_catalogue_rows(resolution)
-    try:
-        catalogue, _ = layered_catalogue(loader.global_config_dir, workspace, loader=loader, plugins=rows)
-    except Exception as exc:
-        _err_config(json_output, exc)
-        raise  # unreachable: _err_config exits
     own = next((r for r in rows if r.name == name), None)
     machine = {f"{name}.{path}" for path in own.global_only} if own is not None else set()
     settings = [(e.path, e.type_name, e.current_value, e.winning_layer, e.path in machine)
-                for e in sorted(catalogue.values(), key=lambda e: e.path) if e.plugin == name]
+                for e in sorted(_catalogue(loader, rows).values(), key=lambda e: e.path) if e.plugin == name]
     note = None
     if not settings and name in resolution.enabled:  # nothing of it loaded to list: its switch only
         settings = [(f"{name}.enabled", "bool", resolution.enabled[name],
                      _switch_layer(loader, name, entry.bundled), not entry.bundled)]
         note = ("Its other settings are listed once it is enabled." if entry.state == "available"
                 else "Its other settings are listed once it loads.")
-    m = entry.manifest
+    return settings, note
+
+
+def _info_text(text: str) -> Text:
+    return Text(sanitize_for_display(text), no_wrap=True, overflow="ignore")
+
+
+def info_renderable(session, entry) -> RenderableType:
+    """The body of `plugins info`, drawn over the session's layers; every string is text, never markup."""
+    from localharness.config.loader import ConfigLoader
+    from localharness.plugins.resolve import resolve
+
+    name, m = entry.name, entry.manifest
+    loader = ConfigLoader(config_dir=session.cfg_path, local_config_dir=session.workspace)
+    resolution = resolve(loader)
+    settings, note = _info_settings(resolution, loader, entry)
     setup_cmd = _set_spelling(name, m.setup) if m is not None and m.setup else None
-    if json_output:
-        typer.echo(_json.dumps({
-            "name": name, "state": entry.display, "state_kind": entry.state,
-            "what_it_does": entry.summary, "from": entry.source, "enable_command": entry.enable_command,
-            "version": m.version if m else None, "kind": m.kind if m else None,
-            "requires": list(m.requires) if m else [], "uses": list(m.uses) if m else [],
-            "cli": [d.name for d in m.cli] if m else [], "slash": [d.name for d in m.slash] if m else [],
-            "settings": [{"path": p, "type": t, "current_value": _serialize_value(v), "layer": layer,
-                          "machine_level_only": only} for p, t, v, layer, only in settings],
-            "setup_command": setup_cmd, "note": note,
-            "sections": list(m.sections) if m else []}, indent=2))
-        return
+    last = (session.touched.get(name) or Touch(False, False, None)).probe
     lines = [("state", entry.display), ("what it does", entry.summary), ("from", entry.source)]
     if m is not None:
         lines += [("version", m.version), ("kind", m.kind)] + [
@@ -280,26 +274,57 @@ def plugins_info(name: Name, json_output: Json = False, config_dir: ConfigDir = 
                 ("slash", [d.name for d in m.slash])) if values]
     if setup_cmd:
         lines.append(("set up", setup_cmd))
-    console.print(escape(name), soft_wrap=True)
-    for label, value in lines:
-        console.print(escape(f"  {label + ':':<14}{value}"), soft_wrap=True)
-    console.print("Settings:")
+    lines += [(label, redact_text(why)) for label, why in (
+        (INFO_FAILED, session.failed.get(name)), (INFO_UNCONFIGURED, session.unconfigured.get(name)),
+        (INFO_LAST_CHECK, f"{last[0]} — {last[1]}" if last and last[0] != "on" else None)) if why]
     table = Table(box=None, show_header=False, pad_edge=False)
     for path, type_name, value, layer, only in settings:
-        table.add_row(*(escape(cell) for cell in (
-            path, type_name, repr(value), f"[{layer}]" + (" (machine-level only)" if only else ""))))
-    console.print(Padding(table, (0, 0, 0, 2), expand=False))
+        table.add_row(*(Text(sanitize_for_display(cell)) for cell in (
+            path, type_name, redact_text(repr(value)), f"[{layer}]" + (" (machine-level only)" if only else ""))))
+    parts: list[RenderableType] = [_info_text(name), *(_info_text(f"  {label + ':':<14}{value}") for label, value in lines),
+                                   Text("Settings:"), Padding(table, (0, 0, 0, 2), expand=False)]
     if note:
-        console.print(f"  {note}")
+        parts.append(Text(f"  {note}"))
     if m is not None and m.sections:  # a bundled plugin's claimed core sections (PluginManifest.sections)
-        *rest, last = [f"{s}:" for s in m.sections]
-        console.print(escape(f"  {', '.join(rest)} and {last} keep their pre-plugin names" if rest
-                             else f"  {last} keeps its pre-plugin name"), soft_wrap=True)
+        *rest, last_section = [f"{s}:" for s in m.sections]
+        parts.append(_info_text(f"  {', '.join(rest)} and {last_section} keep their pre-plugin names" if rest
+                                else f"  {last_section} keeps its pre-plugin name"))
     if m is not None and m.agent_prompt:  # the text view only: the --json key set is pinned
         from localharness.plugins.setup import render_agent_prompt
-        console.print()
-        console.print(escape(render_agent_prompt(
-            m.agent_prompt, _prompt_values(resolution, loader, entry, m.agent_prompt))), soft_wrap=True)
+        parts += [Text(), _info_text(redact_text(render_agent_prompt(
+            m.agent_prompt, _prompt_values(resolution, loader, entry, m.agent_prompt))))]
+    return Group(*parts)
+
+
+@plugins_app.command("info")
+def plugins_info(name: Name, json_output: Json = False, config_dir: ConfigDir = None) -> None:
+    """One plugin: its state, what it adds, and every setting it owns.
+
+    The settings are the rows `components list` marks `(plugin: NAME)`.
+    """
+    resolution, loader, workspace = _resolve(config_dir, json_output=json_output)
+    entry = _entry(resolution, loader, name, json_output)
+    _warn(resolution)
+    try:
+        settings, note = _info_settings(resolution, loader, entry)
+    except Exception as exc:
+        _err_config(json_output, exc)
+        raise  # unreachable: _err_config exits
+    if not json_output:
+        console.print(info_renderable(PluginSession(loader.global_config_dir, workspace, frozenset(), {}, {}), entry),
+                      soft_wrap=True)
+        return
+    m = entry.manifest
+    typer.echo(_json.dumps({
+        "name": name, "state": entry.display, "state_kind": entry.state,
+        "what_it_does": entry.summary, "from": entry.source, "enable_command": entry.enable_command,
+        "version": m.version if m else None, "kind": m.kind if m else None,
+        "requires": list(m.requires) if m else [], "uses": list(m.uses) if m else [],
+        "cli": [d.name for d in m.cli] if m else [], "slash": [d.name for d in m.slash] if m else [],
+        "settings": [{"path": p, "type": t, "current_value": _serialize_value(v), "layer": layer,
+                      "machine_level_only": only} for p, t, v, layer, only in settings],
+        "setup_command": _set_spelling(name, m.setup) if m is not None and m.setup else None, "note": note,
+        "sections": list(m.sections) if m else []}, indent=2))
 
 
 def _checked(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry, pairs: list[str],
