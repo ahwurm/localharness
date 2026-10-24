@@ -47,18 +47,56 @@ def test_a_compound_behind_localharness_skills_is_not_read_only(ws):
 def test_a_config_dir_before_the_subcommand_asks(ws):
     command = "localharness --config-dir X skills"
     shell = classify_shell(command, SETTINGS)
-    assert shell.signatures == ("localharness",)
+    assert shell.signatures == ("localharness --config-dir X",)
     assert not shell.segments[0].read_only
     result = evaluate("bash_exec", {"command": command}, SHELL_META, make_ctx(ws), SETTINGS)
     assert result.verdict is Verdict.ASK
-    assert (result.request.klass, result.request.key) == ("shell-unfamiliar", "localharness")
+    assert (result.request.klass, result.request.key) == ("shell-unfamiliar", "localharness --config-dir X")
 
 
 @pytest.mark.parametrize("flags", ["--install-completion", "--show-completion", "-h", "--config-dir=X"])
 def test_a_flag_before_skills_is_not_the_read_only_verb(flags):
     shell = classify_shell(f"localharness {flags} skills", SETTINGS)
-    assert shell.signatures == ("localharness",)
+    assert shell.signatures == (f"localharness {flags} skills",)
     assert not shell.segments[0].read_only
+
+
+@pytest.mark.parametrize(
+    "command, key",
+    [
+        ("localharness --install-completion", "localharness --install-completion"),
+        ("localharness --help", "localharness --help"),
+        ("localharness -v serve", "localharness -v serve"),
+        ("localharness --config-dir X update", "localharness --config-dir X"),
+    ],
+)
+def test_a_flag_led_line_has_its_own_key(command, key):
+    shell = classify_shell(command, SETTINGS)
+    assert shell.signatures == (key,)
+    assert not shell.segments[0].read_only
+
+
+@pytest.mark.parametrize(
+    "command", ["localharness --config-dir X update", "localharness -v serve", "localharness --install-completion"]
+)
+def test_a_bare_localharness_grant_covers_no_flag_led_line(ws, command):
+    ctx = make_ctx(ws, grants=granting(("shell-unfamiliar", "localharness")))
+    assert evaluate("bash_exec", {"command": command}, SHELL_META, ctx, SETTINGS).verdict is Verdict.ASK
+
+
+@pytest.mark.parametrize("command", ["localharness --show-completion", "localharness --config-dir X update"])
+def test_a_flag_led_grant_covers_no_other_flag_led_line(ws, command):
+    ctx = make_ctx(ws, grants=granting(("shell-unfamiliar", "localharness --help")))
+    assert evaluate("bash_exec", {"command": command}, SHELL_META, ctx, SETTINGS).verdict is Verdict.ASK
+    same = evaluate("bash_exec", {"command": "localharness --help"}, SHELL_META, ctx, SETTINGS)
+    assert same.verdict is Verdict.ALLOW
+
+
+def test_install_completion_before_skills_asks(ws):
+    command = "localharness --install-completion skills"
+    result = evaluate("bash_exec", {"command": command}, SHELL_META, make_ctx(ws), SETTINGS)
+    assert result.verdict is Verdict.ASK
+    assert result.request.key == "localharness --install-completion skills"
 
 
 def test_a_flag_after_skills_stays_read_only():
