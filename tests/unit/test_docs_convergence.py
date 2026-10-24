@@ -364,7 +364,8 @@ def test_plugins_doc_bites():
     nothing = check_plugins_doc("## Nothing\n")
     assert len(nothing) == (2 * len(NEVER_SHOWN_ANCHORS) + len(TRUST_NEEDLES) + len(INSTALL_NEEDLES)
                             + len(RESIDUAL_NEEDLES))
-    assert nothing == check_plugins_doc("## Nothing\n")
+    unnamed = text.replace("Plugins (the screen bare", "(the screen bare")
+    assert check_plugins_doc(unnamed) == ["SECURITY.md's list after wherever a command displays it: does not name Plugins"]
 
 
 # ---------------------------------------------------------------- check 4: three declaration readers
