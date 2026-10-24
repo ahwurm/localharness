@@ -2415,6 +2415,24 @@ async def test_configure_a_stored_secret_is_kept_cleared_or_replaced_and_the_val
     assert not any(SECRET in line or "n3w" in line for line in _audit_lines(sec))
 
 
+@pytest.mark.parametrize(("stored", "kept"), [("n3w", True), ("none", False), ("", False)], ids=["stored", "default", "empty"])
+async def test_configure_a_secret_holding_only_its_default_does_not_claim_a_stored_key(layers, stored, kept) -> None:
+    asked = []
+
+    async def prompt(text, *, default, secret):
+        asked.append(text)
+        return ""
+
+    flow = _flow(layers)
+    flow.prompt = prompt
+    row = SimpleNamespace(path="p.api_key", plugin="p", annotation=SecretStr, current_value=SecretStr(stored),
+                          default_value=SecretStr("none"))
+
+    await plugins_interview._secret(flow, row, None)
+
+    assert (SECRET_KEPT in asked[0]) is kept
+
+
 @pytest.mark.parametrize(("answer", "written"), [
     ("", CRED_URL), ("none", ""), ("http://other.test/y", "http://other.test/y"),
 ], ids=["keep", "clear", "new"])
