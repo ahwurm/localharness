@@ -618,6 +618,17 @@ async def test_closed_on_error_with_changes_prints_the_closed_early_case(layers,
                              "Quit and start localharness again to apply"]
 
 
+async def test_closed_on_error_with_asks_pending_prints_the_asks_case_not_the_error(layers, monkeypatch) -> None:
+    _failing(monkeypatch, "boom")
+    channel = FakeChannel()
+
+    assert await _run(layers, channel, touched=dict(_ONE), parked=1, waiting=2) is False
+
+    assert channel.lines[-1:] == ["1 plugin change saved, not applied: a restart would drop 3 asks. "
+                                  "Answer the asks in /pending and shown next, then open /plugins and close it"]
+    assert "boom" not in channel.text and not channel.closed
+
+
 async def test_closed_on_error_with_no_changes_prints_one_clean_line(layers, monkeypatch) -> None:
     _failing(monkeypatch, "boom\x1b]0;t\x07 https://u:p@h.test/x\nsecond")
     channel = FakeChannel()
