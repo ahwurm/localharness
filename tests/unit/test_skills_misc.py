@@ -1,15 +1,19 @@
 """Skills seams outside the skill modules: the removed microagents key, protected paths and the origins they guard."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
 
 from localharness.agent.gate_types import PROTECTED_CONFIG_DIR_ENTRIES, Verdict
-from localharness.agent.verdict import evaluate
+from localharness.agent.verdict import AGENTS_SKILLS, GateContext, evaluate
 from localharness.config.loader import ConfigLoader, ConfigValidationError
 from localharness.config.models import ContextConfig
+from localharness.config.paths import WORKSPACE_DIR_NAME
+from localharness.config.skills import ORIGINS
 from tests.unit.agent.test_auto_mode import SETTINGS, SHELL, WRITE, _ctx, _shell, _verdict
+from tests.unit.test_docs_convergence import check_protected_entries_doc
 from tests.unit.test_leftover_plugin_section import _CONFIG, _agent_file
 
 
@@ -150,3 +154,88 @@ def test_moving_or_deleting_agents_skills_or_its_parent_asks(project, global_dir
 )
 def test_other_children_of_agents_and_plain_skills_folders_do_not_ask(project, global_dir, command) -> None:
     assert _shell(command, _ctx(project)) is Verdict.ALLOW, command
+
+
+_MODES = ("guarded", "trusted", "auto", "read-only", "unattended")
+_AFTER_ASKING = {"guarded": Verdict.ASK, "trusted": Verdict.ASK, "auto": Verdict.ASK,
+                 "read-only": Verdict.DENY, "unattended": Verdict.ALLOW}
+_SKILL = "skills/release/SKILL.md"
+
+
+@pytest.fixture
+def session_dir(tmp_path: Path) -> Path:
+    folder = tmp_path / "session"
+    folder.mkdir()
+    return folder
+
+
+def _skill_write(where: str, project: Path, global_dir: Path, session_dir: Path, mode: str):
+    sub = project / "sub"
+    if where == "session-config-dir":
+        ctx = GateContext(boundary=project, workspace=project, grants=lambda workspace, klass, key: None,
+                          mode=mode, has_review_surface=True, config_dir=session_dir)
+        return session_dir / _SKILL, ctx
+    target = {
+        "global-config-dir": global_dir / _SKILL,
+        "localharness-top": project / ".localharness" / _SKILL,
+        "localharness-nested": sub / ".localharness" / _SKILL,
+        "agents-workspace": project / ".agents" / _SKILL,
+        "agents-boundary": project / ".agents" / _SKILL,
+    }[where]
+    return target, _ctx(project, mode=mode, workspace=sub if where == "agents-boundary" else None)
+
+
+@pytest.mark.parametrize("mode", _MODES)
+@pytest.mark.parametrize(
+    "where",
+    ["global-config-dir", "session-config-dir", "localharness-top", "localharness-nested",
+     "agents-workspace", "agents-boundary"],
+)
+def test_a_skills_write_asks_in_every_mode_that_asks(where, mode, project, global_dir, session_dir) -> None:
+    target, ctx = _skill_write(where, project, global_dir, session_dir, mode)
+
+    decision = evaluate("write", {"path": str(target)}, WRITE, ctx, SETTINGS)
+
+    assert decision.verdict is _AFTER_ASKING[mode], decision.reason
+    if decision.verdict is Verdict.ASK:
+        assert decision.request.klass == "protected-path"
+        assert decision.request.grantable is False
+
+
+@pytest.mark.parametrize("mode", _MODES)
+@pytest.mark.parametrize("command", ["mv .agents away", "rm -rf .localharness/skills", "rm -rf {g}/skills"])
+def test_moving_or_deleting_a_skills_directory_asks_in_every_mode_that_asks(command, mode, project, global_dir) -> None:
+    decision = evaluate("bash_exec", {"command": command.format(g=global_dir)}, SHELL, _ctx(project, mode=mode), SETTINGS)
+
+    assert decision.verdict is _AFTER_ASKING[mode], decision.reason
+    if decision.verdict is Verdict.ASK:
+        assert decision.request.grantable is False
+
+
+def _gate_gaps(origins) -> set:
+    project = {Path(rel).parts for label, rel in origins if label == "project"}
+    machine = {rel for label, rel in origins if label == "machine"}
+    protected = {(WORKSPACE_DIR_NAME, name) for name in machine} | {AGENTS_SKILLS}
+    return (project ^ protected) | {name for name in machine if name not in PROTECTED_CONFIG_DIR_ENTRIES}
+
+
+def test_the_gate_protects_exactly_the_origins_that_need_it() -> None:
+    assert _gate_gaps(ORIGINS) == set()
+
+
+def test_the_origins_comparison_bites() -> None:
+    project_row = ("project", ".agents/skills")
+    machine_row = ("machine", "skills")
+
+    assert _gate_gaps((*ORIGINS, ("project", ".agents/skill")))
+    assert _gate_gaps(tuple(row for row in ORIGINS if row != project_row))
+    assert _gate_gaps(tuple(("machine", "skill") if row == machine_row else row for row in ORIGINS))
+    assert _gate_gaps(tuple(reversed(ORIGINS))) == set()
+
+
+def test_security_md_names_skills_in_the_thirteen_entry_sentence() -> None:
+    text = (Path(__file__).resolve().parents[2] / "SECURITY.md").read_text(encoding="utf-8")
+    sentence = re.search(r"one thirteen-entry list protects (.*?)\. ", " ".join(text.split()))
+
+    assert check_protected_entries_doc(text) == []
+    assert sentence is not None and "`skills/**`" in sentence.group(1)
