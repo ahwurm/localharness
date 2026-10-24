@@ -713,3 +713,93 @@ def test_every_skill_carries_an_origin_label_in_precedence_then_name_order(tmp_p
     assert {s.origin for s in found.skills} <= {label for label, _ in skills.ORIGINS}
     assert list(found.skills) == sorted(found.skills, key=lambda s: (dirs.index(s.path.parent.parent), s.name))
     assert [s.name for s in found.skills] == ["z1", "z2", "y1", "y2", "x1", "x2", "w1", "w2"]
+
+
+def _one(cfg, text=None, entry="a"):
+    path = _write(cfg, text, entry=entry)
+    return path, SkillSet.discover(cfg, None)
+
+
+def test_read_body_returns_the_raw_text_and_repeats(cfg):
+    text = "---\nname: a\ndescription: d\n---\nBodyé\n"
+    path, found = _one(cfg, text)
+    record = found.skills[0]
+    assert found.read_body(record) == text == path.read_bytes().decode()
+    assert found.read_body(record) == found.read_body(record)
+
+
+def test_read_body_keeps_crlf(cfg):
+    text = "---\r\nname: a\r\ndescription: d\r\n---\r\nBody\r\n"
+    _, found = _one(cfg, text)
+    assert found.read_body(found.skills[0]) == text
+
+
+def test_read_body_cap_is_exact(cfg):
+    head = "---\nname: a\ndescription: d\n---\n"
+    path, found = _one(cfg, head + "x" * (skills.MAX_REFERENCE_BYTES - len(head)))
+    assert path.stat().st_size == skills.MAX_REFERENCE_BYTES
+    assert len(found.read_body(found.skills[0])) == skills.MAX_REFERENCE_BYTES
+    with path.open("ab") as handle:
+        handle.write(b"x")
+    assert skip_line(found.read_body(found.skills[0])) == _expect(skills.TOO_LARGE, path=path)
+
+
+def test_read_body_refuses_a_file_swapped_for_a_link(tmp_path, cfg):
+    path, found = _one(cfg)
+    (tmp_path / "copy.md").write_text(_fm())
+    path.unlink()
+    path.symlink_to(tmp_path / "copy.md")
+    assert skip_line(found.read_body(found.skills[0])) == _expect(skills.NOT_REGULAR, path=path)
+
+
+def test_read_body_refuses_a_directory_swapped_for_a_link_out_of_its_origin(tmp_path, cfg):
+    path, found = _one(cfg)
+    _skill(tmp_path / "dotfiles", "a")
+    path.parent.rename(tmp_path / "moved")
+    path.parent.symlink_to(tmp_path / "dotfiles" / "a")
+    assert skip_line(found.read_body(found.skills[0])) == _expect(
+        skills.OUTSIDE, dir=path.parent, origin=cfg / "skills"
+    )
+
+
+def test_read_body_of_a_deleted_file_is_not_regular(cfg):
+    path, found = _one(cfg)
+    path.unlink()
+    assert skip_line(found.read_body(found.skills[0])) == _expect(skills.NOT_REGULAR, path=path)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
+def test_read_body_refuses_a_fifo_without_blocking(cfg):
+    path, found = _one(cfg)
+    path.unlink()
+    os.mkfifo(path)
+    assert skip_line(found.read_body(found.skills[0])) == _expect(skills.NOT_REGULAR, path=path)
+
+
+def test_read_body_refuses_bytes_that_became_invalid_utf8(cfg):
+    path, found = _one(cfg)
+    path.write_bytes(b"\xff\xfe")
+    assert skip_line(found.read_body(found.skills[0])) == _expect(skills.UNREADABLE, path=path)
+
+
+def test_read_body_runs_the_checks_in_discovery_order(tmp_path, cfg):
+    path, found = _one(cfg)
+    path.write_bytes(b"\xff" * (skills.MAX_REFERENCE_BYTES + 1))
+    assert skip_line(found.read_body(found.skills[0])) == _expect(skills.TOO_LARGE, path=path)
+
+
+def test_read_body_refuses_a_record_under_no_origin(tmp_path, cfg):
+    _, found = _one(cfg)
+    stray = skills.Skill("s", "d", "machine", tmp_path / "stray" / "s" / "SKILL.md", False)
+    assert skip_line(found.read_body(stray)) == _expect(
+        skills.OUTSIDE, dir=stray.path.parent, origin=stray.path.parent.parent
+    )
+
+
+def test_read_body_leaves_the_set_unchanged(cfg):
+    path, found = _one(cfg)
+    before = (found.skills, found.skipped)
+    path.unlink()
+    for _ in range(3):
+        found.read_body(found.skills[0])
+    assert (found.skills, found.skipped) == before
