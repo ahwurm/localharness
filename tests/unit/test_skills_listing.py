@@ -8,11 +8,12 @@ from pathlib import Path
 import pytest
 
 from localharness.agent.loop import _fence_instructions, base_system_prompt
+from localharness.cli import start_serving
 from localharness.config import skills
 from localharness.config.models import AgentConfig, PermissionConfig
 from localharness.config.skills import LISTING_BUDGET_CHARS, Skill, SkillSet, shown
 from localharness.core.fence import TAG
-from localharness.tools.builtin.skill_tool import LISTING_HEADER, SKILLS_FENCE_HEADER, render_listing
+from localharness.tools.builtin.skill_tool import LISTING_HEADER, SKILLS_FENCE_HEADER, render_listing, skill_schema
 from tests.conftest import FakeLLMResponse
 from tests.unit.test_harness_floor import _head_prompt, _loop
 from tests.unit.test_loop_project_instructions import _FakeHandle, _build
@@ -332,3 +333,68 @@ def test_the_loops_fixed_part_counts_the_listing(tmp_path, pkg):
 
 def test_a_loop_built_without_skills_has_none():
     assert _loop(10)[0]._skills == ""
+
+
+_ROOT = AgentConfig(name="orchestrator", role="r", model="inherit")
+
+
+def _notes(tmp_path):
+    cfg = tmp_path / "cfg"
+    _skill(cfg / "skills", "notes")
+    return SkillSet.discover(cfg, None)
+
+
+def _spy_floor(monkeypatch):
+    fixed, rounded = [], []
+    real_fixed, real_floor = start_serving.fixed_tokens, start_serving.harness_floor
+
+    def fixed_spy(counter, prompt, schemas):
+        fixed.append((prompt, schemas))
+        return real_fixed(counter, prompt, schemas)
+
+    def floor_spy(value, max_tokens):
+        rounded.append(value)
+        return real_floor(value, max_tokens)
+
+    monkeypatch.setattr(start_serving, "fixed_tokens", fixed_spy)
+    monkeypatch.setattr(start_serving, "harness_floor", floor_spy)
+    return fixed, rounded
+
+
+async def test_launch_floor_prices_the_listing_and_the_skill_schema(tmp_path, pkg, monkeypatch):
+    found = _notes(tmp_path)
+    fixed, _ = _spy_floor(monkeypatch)
+    await start_serving.launch_floor(_ROOT, found.skills)
+    [(prompt, schemas)] = fixed
+    assert prompt == base_system_prompt(
+        _ROOT, tool_call_mode="native", guardrails="", skills=render_listing(found.skills))
+    assert prompt.endswith(render_listing(found.skills))
+    assert schemas[-1] == skill_schema(["notes"])
+
+
+async def test_launch_floor_without_skills_is_todays_floor(tmp_path, pkg, monkeypatch):
+    fixed, _ = _spy_floor(monkeypatch)
+    bare = await start_serving.launch_floor(_ROOT)
+    empty = await start_serving.launch_floor(_ROOT, ())
+    assert bare == empty
+    for prompt, schemas in fixed:
+        assert prompt == base_system_prompt(_ROOT, tool_call_mode="native", guardrails="")
+        assert not any(s.name == "skill" for s in schemas)
+
+
+async def test_launch_floor_rounds_once(tmp_path, pkg, monkeypatch):
+    found = _notes(tmp_path)
+    _, rounded = _spy_floor(monkeypatch)
+    await start_serving.launch_floor(_ROOT, found.skills)
+    assert len(rounded) == 1
+    await start_serving.launch_floor(_ROOT)
+    assert len(rounded) == 2
+
+
+async def test_one_skill_raises_the_unrounded_fixed_part_and_never_lowers_the_floor(tmp_path, pkg, monkeypatch):
+    found = _notes(tmp_path)
+    rounded = start_serving.harness_floor
+    monkeypatch.setattr(start_serving, "harness_floor", lambda fixed, max_tokens: fixed)
+    assert await start_serving.launch_floor(_ROOT, found.skills) > await start_serving.launch_floor(_ROOT)
+    monkeypatch.setattr(start_serving, "harness_floor", rounded)
+    assert await start_serving.launch_floor(_ROOT, found.skills) >= await start_serving.launch_floor(_ROOT)
