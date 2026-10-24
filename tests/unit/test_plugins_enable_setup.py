@@ -12,6 +12,7 @@ home + project layout from test_doctor_layer_report.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -22,12 +23,14 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from rich.console import Console
 from typer.testing import CliRunner
 
-from localharness.cli import plugins_cmd
+from localharness.cli import plugins_cmd, update_cmd
 from localharness.cli.app import app
 from localharness.plugins import builtin, discovery, lifecycle, resolve
 from localharness.plugins.api import GLOBAL_ONLY, Check, Plugin, PluginManifest, SetupField
 from tests.plugin_prompts import fake_prompts
 from tests.unit.test_doctor_layer_report import _layout
+from tests.unit.test_extra_install import dist  # noqa: F401
+from tests.unit.test_plugins_pass import Mob
 
 runner = CliRunner()
 _REAL_DISCOVER = discovery.discover
@@ -345,6 +348,36 @@ def test_needy_turned_off_still_skips_its_questions(g, monkeypatch, no_prompt) -
     assert result.exit_code == 0, result.output
     assert NEEDY_NOTE in result.output
     assert _overrides(g) == {"needy": {"enabled": True}}
+
+
+@pytest.fixture
+def installable(monkeypatch, dist):  # noqa: F811
+    """mob needs an extra this distribution provides and the venv lacks; any spawn or question fails the test."""
+    def forbidden(*a, **kw):
+        raise AssertionError(f"spawned or asked: {a}")
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Mob,))
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
+    monkeypatch.setitem(resolve.resolve.__kwdefaults__, "extra_installed", lambda extra: False)
+    fake_prompts(monkeypatch, prompt=forbidden, confirm=forbidden)
+    assert update_cmd.install_route("mobile").argv is not None
+
+
+def test_the_shell_never_installs_a_missing_extra_it_could_install(g, monkeypatch, installable) -> None:
+    monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: True)
+    result = _enable(g, "mob")
+
+    assert result.exit_code == 0, result.output
+    assert "mob is missing its install extra — install `localharness[mobile]` to use it" in result.output
+    assert _overrides(g) == {"mob": {"enabled": True}}
+    assert "Checking it now" not in result.output and "installing" not in result.output
+
+
+def test_the_shell_without_a_terminal_spawns_nothing_for_an_installable_extra(g, monkeypatch, installable) -> None:
+    monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: False)
+    result = _enable(g, "mob")
+
+    assert result.exit_code == 0, result.output
+    assert _overrides(g) == {"mob": {"enabled": True}}
 
 
 def test_sections_answers_land_in_one_core_write(g, scripted) -> None:
