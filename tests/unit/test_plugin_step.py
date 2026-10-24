@@ -21,13 +21,13 @@ from types import SimpleNamespace
 import click
 import pytest
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from rich.console import Console
 from typer.testing import CliRunner
 
 from localharness.cli import plugins_cmd
 from localharness.cli.app import app
-from localharness.plugins import builtin, discovery, setup
+from localharness.plugins import builtin, discovery, lifecycle, resolve, setup
 from localharness.plugins.api import GLOBAL_ONLY, Check, Plugin, PluginManifest, SetupField
 from localharness.plugins.setup import AGENT_PROMPT_LEAD
 from tests.plugin_prompts import fake_prompts
@@ -103,6 +103,27 @@ class Pro(Plugin):
         if url == "http://ok":
             return [Check(name="pro", status="pass", detail=f"answers at {url}")]
         return [Check(name="pro", status="fail", detail=f"no answer at {url}")]
+
+
+class QuotingConfig(UrlConfig):
+    @field_validator("url")
+    @classmethod
+    def _not_refused(cls, value: str) -> str:
+        if "refuse" in value:
+            raise ValueError(f"cannot reach {value!r}")
+        return value
+
+
+class Quote(Plugin):
+    """refuses an address and quotes it back"""
+
+    manifest = PluginManifest(
+        name="quote", version="0.1.0", kind="tools", enabled_by_default=False,
+        setup=(SetupField(key="url", prompt="Quote address", default="http://127.0.0.1:5"),))
+    ConfigModel = QuotingConfig
+
+    async def configure(self, ctx):
+        return "ready" if ctx.config.url else ("unconfigured", "quote.url")
 
 
 class Needx(Plugin):
@@ -196,7 +217,7 @@ class Opt(Plugin):
 
 @pytest.fixture(autouse=True)
 def bundled(monkeypatch):
-    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Act, Quiet, Boom, Pro, Needx, Secty, Kit, Plain, Opt))
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Act, Quiet, Boom, Pro, Needx, Secty, Kit, Plain, Opt, Quote))
     monkeypatch.setattr(discovery, "discover", lambda global_config_dir: [])
     monkeypatch.setenv("COLUMNS", "400")
     monkeypatch.setattr(plugins_cmd, "console", Console(width=400))
@@ -630,6 +651,58 @@ def test_session_step_disable_writes_the_switch_off(g, term, capsys) -> None:
     assert yaml.safe_load((g / "overrides.yaml").read_text())["pro"]["enabled"] is False
     assert outcome == plugins_cmd.StepOutcome(name="pro", on=False)
     assert term.asked == [] and term.confirmed == []
+
+
+def _doctor_raises(monkeypatch, g: Path) -> None:
+    real = lifecycle._doctor_row
+
+    async def doctor_row(*a, **kw):
+        if (g / "overrides.yaml").exists():
+            raise RuntimeError("boom")
+        return await real(*a, **kw)
+    monkeypatch.setattr(lifecycle, "_doctor_row", doctor_row)
+
+
+def test_session_step_a_probe_that_raises_is_a_failed_check_with_the_help(g, term, monkeypatch, capsys) -> None:
+    _doctor_raises(monkeypatch, g)
+    term.answers[:] = ["http://ok"]
+    outcome = plugins_cmd.session_step(("enable", "pro"), str(g))
+
+    assert outcome == plugins_cmd.StepOutcome(
+        name="pro", on=True, failed_check="could not check it now: RuntimeError: boom")
+    _in_order(capsys.readouterr().out, "Checking it now:", "✗ pro: could not check it now: RuntimeError: boom",
+              "PRO-HELP", AGENT_PROMPT_LEAD)
+
+
+def test_session_step_a_resolve_that_raises_after_the_write_is_the_same_failed_check(
+        g, term, monkeypatch, capsys) -> None:
+    real, calls = resolve.resolve, []
+
+    def resolve_twice(*a, **kw):
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("boom")
+        return real(*a, **kw)
+    monkeypatch.setattr(resolve, "resolve", resolve_twice)
+    term.answers[:] = ["http://ok"]
+    outcome = plugins_cmd.session_step(("enable", "pro"), str(g))
+
+    assert outcome == plugins_cmd.StepOutcome(
+        name="pro", on=True, failed_check="could not check it now: RuntimeError: boom")
+    _in_order(capsys.readouterr().out, "Checking it now:", "✗ pro: could not check it now: RuntimeError: boom",
+              "PRO-HELP", AGENT_PROMPT_LEAD)
+    assert yaml.safe_load((g / "overrides.yaml").read_text()) == {"pro": {"enabled": True, "url": "http://ok"}}
+
+
+def test_session_step_a_refusal_quoting_a_credentialed_url_prints_it_stripped(g, term, capsys) -> None:
+    term.answers[:] = ["https://user:pw@refuse.test"]
+    outcome = plugins_cmd.session_step(("enable", "quote"), str(g))
+
+    captured = capsys.readouterr()
+    assert "https://refuse.test" in captured.err and "user:pw" not in captured.err + captured.out
+    assert captured.out == "Stopped. Your conversation continues.\n"
+    assert outcome == plugins_cmd.StepOutcome(name="quote", on=True, stopped=True)
+    assert not (g / "overrides.yaml").exists()
 
 
 # --- dispatch's step: the real bundled plugins ------------------------------------------------------

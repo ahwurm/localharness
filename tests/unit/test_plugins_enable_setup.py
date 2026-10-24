@@ -428,12 +428,12 @@ def test_a_sections_write_over_a_config_that_cannot_load_is_reported(g, no_promp
 # --- a check that could not run is a failed check; a credential is stripped where it shows ----------
 
 
-def _doctor_raises(monkeypatch, g: Path) -> None:
+def _doctor_raises(monkeypatch, g: Path, message: str = "boom") -> None:
     real = lifecycle._doctor_row
 
     async def doctor_row(*a, **kw):
         if (g / "overrides.yaml").exists():
-            raise RuntimeError("boom")
+            raise RuntimeError(message)
         return await real(*a, **kw)
     monkeypatch.setattr(lifecycle, "_doctor_row", doctor_row)
 
@@ -499,7 +499,7 @@ def test_the_set_receipt_strips_a_credential_and_the_overlay_keeps_it(g, no_prom
 # --- the phases and the one printer ------------------------------------------------------------------
 
 
-def test_shell_report_prints_plugin_text_as_text(capsys) -> None:
+def test_shell_report_sanitizes_plugin_text_and_prints_it_as_text(capsys) -> None:
     plugins_cmd.shell_report("help", ("Use [browser] and [/x]", "see \x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\ here"))
     plugins_cmd.shell_report("note", "a [b] \x1b[2Jc")
     plugins_cmd.shell_report("next_steps", (True, ("run [x]", "then \x1b]0;title\x07done")))
@@ -555,3 +555,10 @@ def test_a_plugin_with_nothing_to_set_up_prints_only_the_enabled_line(g, no_prom
     result = _enable(g, "plain")
 
     assert [line[0] for line in result.output.splitlines()] == ["✓"]
+
+
+def test_a_check_detail_is_sanitized_on_its_way_to_failed_check(g, prompts, monkeypatch) -> None:
+    _doctor_raises(monkeypatch, g, "x\x1b[2Jy\x1b]8;;http://e\x1b\\z")
+    outcome = plugins_cmd.session_step(("enable", "pro"), str(g))
+
+    assert outcome.failed_check == "could not check it now: RuntimeError: xyz"
