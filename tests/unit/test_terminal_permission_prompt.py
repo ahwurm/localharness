@@ -728,10 +728,8 @@ async def test_the_legend_runs_its_application_with_handle_sigint_false(monkeypa
     assert seen == {"handle_sigint": False}
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+@pytest.mark.usefixtures("default_sigint")
 def test_an_external_sigint_mid_legend_reaches_the_turns_handler():
-    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
-
     async def scenario():
         ch = _channel()
         before = signal.getsignal(signal.SIGINT)

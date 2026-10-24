@@ -259,7 +259,7 @@ async def test_grace_never_restarts_the_box_into_a_stopping_session(tmp_path, an
     assert seen["stdout_restored"]
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+@pytest.mark.usefixtures("default_sigint")
 @pytest.mark.parametrize(
     "answer,grace,decision",
     [("y", 2.0, "allow_once"), ("n", 2.0, "reject_once"), (None, 0.2, None)],
@@ -269,7 +269,6 @@ def test_an_external_sigint_mid_legend_ends_the_session_and_leaves_no_box(tmp_pa
     import os
     import signal
 
-    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
     seen: dict = {}
     before = sys.stdout
     try:
