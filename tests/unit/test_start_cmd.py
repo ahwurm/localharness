@@ -1198,7 +1198,7 @@ def _stub_nonvllm_start(tmp_path, monkeypatch, *, served, probe_window):
 
 def _floor_of(monkeypatch, tokens=256):
     """The harness floor a tiny-window test runs under, before the launch and after the registry."""
-    async def launch_floor(agent_config):
+    async def launch_floor(agent_config, skills=()):
         return tokens
     monkeypatch.setattr("localharness.cli.start_serving.launch_floor", launch_floor)
     monkeypatch.setattr("localharness.agent.loop.AgentLoop.floor", lambda self: tokens)
