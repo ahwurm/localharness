@@ -13,7 +13,7 @@ from typing import Any
 from localharness.agent.task_context import Requirement, TaskContext
 from localharness.agent.task_record import (
     MAX_DECISIONS, MAX_JUDGMENTS, MAX_OBJECTIVE, MAX_QUESTIONS, MAX_REFERENCES, MAX_TEXT, Decision,
-    Judgment, Reference, TaskRecord, TaskRecordTooLarge, TaskState, _turn_label,
+    Judgment, Reference, TaskRecord, TaskRecordTooLarge, TaskState, TooManyReferences, _turn_label,
 )
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 
@@ -161,12 +161,17 @@ class TaskTool(Tool):
             return self.err(f"No active task; call task start for substantive work{hint}",
                             error_type="validation_error")
         prev, prev_notes = (rec.to_dict() if rec is not None else None), list(state.notes)
+        disk = state.path.read_bytes() if state.path is not None and state.path.is_file() else None
         try:
             message = getattr(self, f"_{action}")(state, fields)
             state.save()
         except (_Refused, TaskRecordTooLarge, ValueError) as exc:
             state.current = TaskRecord.from_dict(prev) if prev else None
             state.notes = prev_notes
+            if state.path is not None and disk is None:
+                state.path.unlink(missing_ok=True)
+            elif disk is not None:
+                state._write(disk)
             text = str(exc)
             if isinstance(exc, TaskRecordTooLarge):
                 text = "Task record exceeds 64 KiB; narrow the record"
@@ -340,8 +345,6 @@ class TaskTool(Tool):
         return f"Check {key} declared (revision {ctx.requirements[key].revision})."
 
     def _reference(self, state: TaskState, f: dict[str, Any]) -> str:
-        rec = state.current
-        assert rec is not None
         if "source" not in f:
             raise _Refused("reference requires source")
         source = _text("source", f["source"], 200)
@@ -361,13 +364,10 @@ class TaskTool(Tool):
                 Path(state.workspace or os.getcwd()).resolve())))
         else:
             ref = Reference(source, handle=_text("handle", f["handle"], 64))
-        same = [i for i, r in enumerate(rec.references) if r.source == source]
-        if same:
-            rec.references[same[0]] = ref
-        elif len(rec.references) >= MAX_REFERENCES:
-            raise _Refused("references is limited to four; split or narrow the step")
-        else:
-            rec.references.append(ref)
+        try:
+            state.add_reference(ref)
+        except TooManyReferences:
+            raise _Refused("references is limited to four; split or narrow the step") from None
         return f"Reference {source} declared; it is kept in view from the next request."
 
     def _judge(self, state: TaskState, f: dict[str, Any]) -> str:
