@@ -139,12 +139,16 @@ async def test_the_service_worker_registers_only_in_a_secure_context(page):
 
 
 async def test_the_worker_does_not_cache_the_shell(worker):
-    """WIN-B (WEBCH-20) is 'edit the page, pull to refresh, see it'. A precaching service worker
-    breaks that silently, and it is the single commonest thing a service worker is copied in to
-    do — so the absence is asserted, not just intended."""
+    """WIN-B (WEBCH-20) is 'edit the page, pull to refresh, see it'. A PRECACHING service worker
+    breaks that silently. The worker now carries one fetch handler — the navigation fallback that
+    shows a 'can't reach your box' page instead of iOS's white screen — so the guarantee is no
+    longer 'no fetch handler' but 'never caches': no Cache API, and any fetch handler passes the
+    live network response through on success (synthesising a page only when the box is unreachable)."""
     assert "caches.open" not in worker
-    assert "addEventListener(\"fetch\"" not in worker
-    assert "addEventListener('fetch'" not in worker
+    assert "cache.put" not in worker and "cache.add" not in worker
+    fetch_handler = 'addEventListener("fetch"' in worker or "addEventListener('fetch'" in worker
+    if fetch_handler:
+        assert "fetch(event.request)" in worker, "the navigation handler must hit the network, not a cache"
 
 
 # ---------------------------------------------------------------- push enrolment order
