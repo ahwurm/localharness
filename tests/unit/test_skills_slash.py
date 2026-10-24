@@ -451,3 +451,74 @@ def test_only_the_turn_end_handler_awaits_and_only_the_say():
         assert awaits(getattr(SkillSession, name)) == []
     (only,) = awaits(SkillSession.on_turn_completed)
     assert ast.unparse(only.value.func) == "self._say"
+
+
+NOT_LOADED_NOTES = ('the model did not load /notes; try again, or say "use the notes skill"', {"style": "system.info"})
+NOTES_LINE = "The person invoked /notes. Call skill('notes') and follow it."
+
+
+class Terminal:
+    def __init__(self, tmp_path, build=_build_repl, names=("notes",)):
+        self.channel = RecordingChannel([])
+        self.repl, self.agent, _ = build(self.channel)
+        self.repl._bus = EventBus()
+        self.cfg = tmp_path / "cfg"
+        self.paths = {n: write_skill(self.cfg / "skills", n) for n in names}
+        self.found = SkillSet.discover(self.cfg, None)
+        self.session = self.repl._skills = SkillSession(self.found)
+        self.bus = self.repl._bus
+        set_plugin_rows([skill_row(s) for s in self.found.skills])
+        self.repl._subscribe_pending()
+
+    async def call(self, name, agent="orchestrator"):
+        await self.bus.publish(Action(
+            agent_id=agent, session_id="s1", action_type="tool_call", tool_name="skill", tool_params={"name": name},
+        ))
+
+    async def completed(self):
+        await self.bus.publish(TurnCompleted(
+            agent_id="orchestrator", session_id="s1", iterations=1, duration_seconds=0.1, elapsed_tokens=0, summary="",
+        ))
+
+    def said(self):
+        return [m for m in self.channel.sent if m[0].startswith("the model did not load")]
+
+
+@pytest.fixture
+def terminal(tmp_path, pkg, rows):
+    yield Terminal(tmp_path)
+
+
+async def test_slash_name_at_an_idle_session_is_one_line_the_model_must_load(terminal):
+    task = await terminal.repl._dispatch_input("/notes")
+    await task
+    terminal.agent.run_turn.assert_called_once()
+    assert terminal.agent.run_turn.call_args.kwargs["task"] == NOTES_LINE
+    assert terminal.repl._slash_followup is None
+    await terminal.completed()
+    await terminal.completed()
+    assert terminal.channel.sent[-1] == NOT_LOADED_NOTES
+    assert terminal.channel.sent.count(NOT_LOADED_NOTES) == 1
+
+
+async def test_a_skill_call_keeps_the_classic_path_silent(terminal):
+    await (await terminal.repl._dispatch_input("/notes"))
+    await terminal.call("notes")
+    await terminal.completed()
+    assert terminal.said() == []
+
+
+async def test_unsubscribing_removes_the_session_handlers(terminal):
+    terminal.repl._unsubscribe_pending()
+    await (await terminal.repl._dispatch_input("/notes"))
+    await terminal.completed()
+    assert terminal.said() == []
+
+
+async def test_a_repl_without_a_session_refuses_an_unknown_word_as_before(rows):
+    channel = RecordingChannel([])
+    repl, agent, _ = _build_repl(channel)
+    assert await repl._handle_slash("/frobnicate") is True
+    assert channel.sent == [("Unknown command: /frobnicate — /help lists commands.", {"style": "system.error"})]
+    assert await repl._handle_slash("/frobnicate more") is False
+    agent.run_turn.assert_not_called()
