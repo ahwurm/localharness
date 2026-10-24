@@ -2042,7 +2042,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         if agent_config.model != "inherit"
         else provider.default_model
     )
-    _live_floor = await start_serving.launch_floor(agent_config)
+    from localharness.config.skills import SkillSet
+    from localharness.tools.builtin.skill_tool import render_listing
+    skill_set = SkillSet.discover(cfg_path, workspace.parent if workspace is not None else None)
+    skill_listing = render_listing(skill_set.skills)
+    _live_floor = await start_serving.launch_floor(agent_config, skill_set.skills)
     from localharness.provider.lifecycle import cached_floor, raised_floor
     _floor = raised_floor(_live_floor, cached_floor(server_cfg_path))
     if model_override:
@@ -3133,11 +3137,16 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # The working task record (0.16.5): root only, loaded from this agent's folder; children
         # and bench never hold it. No record = no packet and no file.
         from localharness.agent.task_record import TaskState
+        from localharness.tools.builtin.skill_tool import SkillTool
         from localharness.tools.builtin.task_tool import TaskTool
         task_state, task_notice = TaskState.load(agent_dir / "task.json", workspace=os.getcwd())
         if task_notice:
             console.print(f"[yellow]{task_notice}[/yellow]")
         await tool_registry.register(TaskTool(task_state), scope="global")
+        if skill_set.skills:
+            await tool_registry.register(
+                SkillTool(skill_set, eviction_store, task_state, result_cap=lambda: tool_registry.result_size_cap_chars),
+                scope="global")
 
         # --- 10. Agent loop ---
         # #35: resolve the kill-file value against THIS config dir (a bare default 'KILL' lands at
@@ -3172,6 +3181,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # the loop reads it live against the gate, so an interactive terminal root stays unbounded.
             unattended_max_actions=harness.channels.unattended_max_actions,
             project_instructions=instructions_handle,
+            skills=skill_listing,
             # PAPI-04: the memory slot — the lifecycle's; its occupant (the memory plugin) feeds the
             # prompt's memory section.
             memory_slot=memory_slot,
