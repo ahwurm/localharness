@@ -2453,3 +2453,24 @@ async def test_configure_a_stop_inside_the_audit_for_a_leaf_the_project_wins_nam
     assert channel.lines == [
         f"conf: stopped — count saved on this machine, but this project's {project} still wins here; the audit entry may be missing"]
     assert _written(conf)["conf"]["count"] == 7 and project.read_bytes() == before and touched["conf"].rebind is False
+
+
+_DEEP = {
+    "menu": ("layers", lambda: (Label("stub"),)),
+    "configure": ("conf", lambda: (Label("conf"), Label("Configure…"))),
+    "turn_on_which": ("batch", lambda: (Label("Turn several on…"),)),
+}
+
+
+@pytest.mark.parametrize("why", [Unreachable.TOO_SMALL, Unreachable.ERROR], ids=lambda why: why.name.lower())
+@pytest.mark.parametrize("changes", [True, False], ids=["with_changes", "no_changes"])
+@pytest.mark.parametrize("node", list(_DEEP))
+async def test_abandon_an_unreached_node_deep_inside_plugins_prints_exactly_one_line(request, node, changes, why) -> None:
+    fixture, lead = _DEEP[node]
+    channel = FakeChannel(*lead(), Unreached(why))
+
+    assert await _run(request.getfixturevalue(fixture), channel, touched=dict(_ONE) if changes else {}) is False
+
+    saved = _TOO_SMALL if why is Unreachable.TOO_SMALL else _NO_DRAW
+    assert channel.lines == [saved if changes else plugins_interview.unavailable(why)]
+    assert ("saved, not applied" in channel.text) is not ("can't be drawn here" in channel.text)
