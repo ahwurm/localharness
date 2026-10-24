@@ -34,6 +34,7 @@ IMAGE_TOKEN_OVERHEAD = 2     # <|vision_start|> … <|vision_end|>
 MIN_PIXELS = 65_536          # preprocessor_config.json size.shortest_edge: smaller images are upscaled
 MAX_PIXELS = 16_777_216      # size.longest_edge: larger ones are downscaled by the preprocessor
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
+MAX_REFERENCE_BYTES = 200 * 1024
 DEFAULT_MAX_IMAGE_TOKENS = 4096   # a 2560×1440 screenshot (3,602 tokens) passes untouched
 DROPPED_IMAGE_PREFIX = "[image dropped to fit the context window:"
 VISION_EXTRA_HINT = (

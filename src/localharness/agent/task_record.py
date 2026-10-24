@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from localharness.agent.context import MAX_ACTIVE_REFERENCES, ActiveReferenceError
 from localharness.agent.task_context import Receipt, Requirement, TaskContext
+from localharness.core.content import MAX_REFERENCE_BYTES
 from localharness.core.private_files import write_private_bytes
 
 if TYPE_CHECKING:
@@ -44,7 +45,6 @@ MAX_TURN_CHARS = 2000
 MAX_RECORD_BYTES = 64 * 1024
 MAX_REFERENCES = MAX_ACTIVE_REFERENCES
 MAX_JUDGMENTS = 8
-MAX_REFERENCE_BYTES = 200 * 1024
 MAX_DELEGATIONS = 8
 MAX_ARTIFACT_HISTORY = 16
 MAX_QUOTE_DISPLAY = 200
