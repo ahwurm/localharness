@@ -293,16 +293,23 @@ async def guarded(flow: Flow, node: Callable, *, names: tuple[str, ...] = (), pr
     if got is _STOP and seam:
         _stopped(flow, names, progress, priors, in_batch=in_batch, key=key, file=file)
     if isinstance(got, _Escape):
+        if seam:
+            _record(flow, names, progress, priors)
         raise _Abandon(error=got.error)
     return got
 
 
-def _stopped(flow: Flow, names: tuple[str, ...], progress: PassProgress, priors: Mapping[str, Touch], **tail: Any) -> None:
-    """Record what the stopped pass wrote, recompute the plan from it, then say what state the stop left."""
+def _record(flow: Flow, names: tuple[str, ...], progress: PassProgress, priors: Mapping[str, Touch]) -> None:
+    """Store what the ended pass had written and recompute the plan from it."""
     for name in names:
         if (touch := touch_after_stop(flow.session, name, progress, priors[name])) is not None:
             flow.session.touched[name] = touch
     flow.plan = flow.should_reload(flow.session.touched)
+
+
+def _stopped(flow: Flow, names: tuple[str, ...], progress: PassProgress, priors: Mapping[str, Touch], **tail: Any) -> None:
+    """Record what the stopped pass wrote, then say what state the stop left."""
+    _record(flow, names, progress, priors)
     _say(flow.console, STOP_LINE.format(names=", ".join(names), tail=stop_tail(names, progress, flow.session, flow.plan, **tail)))
 
 

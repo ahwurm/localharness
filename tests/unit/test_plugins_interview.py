@@ -1100,6 +1100,23 @@ async def test_stop_path_a_written_edit_records_the_touch_then_says_when_it_appl
     assert after.asked[0].options[-1].label == "Close — restarts to apply (1 plugin)"
 
 
+async def test_stop_path_an_error_after_a_write_records_the_touch_and_closes_with_the_closed_early_case(layers) -> None:
+    flow, channel = _flow_for(layers, running={"stub"})
+    progress = PassProgress()
+
+    async def node():
+        progress.phase, progress.wrote = "edit", True
+        raise OSError("disk")
+
+    with pytest.raises(plugins_interview._Abandon) as caught:
+        await plugins_interview.guarded(flow, node, names=("stub",), progress=progress, key="color")
+
+    assert flow.session.touched["stub"] == Touch(True, True, None)
+    assert plugins_interview._finish(flow, closing=False, error=caught.value.error) is False
+    assert channel.lines == ["1 plugin change saved, not applied: Plugins closed on an error: OSError: disk. "
+                             "Quit and start localharness again to apply"]
+
+
 @pytest.mark.parametrize("phase", ["consent", "question", "edit", "disable"])
 async def test_stop_path_before_a_write_stores_no_touch(layers, phase) -> None:
     flow, channel = _flow_for(layers, running={"stub"})
