@@ -1809,9 +1809,12 @@ class TerminalChannel(ChannelAdapter):
         self, question: str, options: Sequence[Any], *, default: Any, cancel: str, multi: bool = False
     ) -> Any:
         """Draw one interview node inside the caller's open span; a terminal that cannot draw it reaches nobody."""
-        from localharness.cli.interview import Answer, build_interview, can_draw
+        from localharness.cli.interview import Answer, Unreachable, build_interview, can_draw
 
-        output = self._tty_output()
+        try:
+            output = self._tty_output()
+        except Exception:
+            return Answer((cancel,), True, reached=False, why=Unreachable.ERROR)
         why = can_draw(output)
         if why is not None:
             return Answer((cancel,), True, reached=False, why=why)
@@ -1828,7 +1831,12 @@ class TerminalChannel(ChannelAdapter):
         """None when the Plugins flow can draw its nodes; else the reason it cannot."""
         from localharness.cli.interview import Unreachable, can_draw
 
-        return Unreachable.NO_TTY if cannot_ask_reason() is not None else can_draw(self._tty_output())
+        if cannot_ask_reason() is not None:
+            return Unreachable.NO_TTY
+        try:
+            return can_draw(self._tty_output())
+        except Exception:
+            return Unreachable.ERROR
 
     def _note_newline_chord(self, name: str) -> None:
         """The input apps call this each time a newline chord fires as a line break. Only a
