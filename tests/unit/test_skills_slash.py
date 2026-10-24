@@ -151,6 +151,11 @@ class Sitting:
             agent_id=agent, session_id="s1", action_type="tool_call", tool_name=tool, tool_params={"name": name},
         ))
 
+    async def act(self, tool, **params):
+        await self.bus.publish(Action(
+            agent_id="orchestrator", session_id="s1", action_type="tool_call", tool_name=tool, tool_params=params,
+        ))
+
     async def completed(self, agent="orchestrator"):
         await self.bus.publish(TurnCompleted(
             agent_id=agent, session_id="s1", iterations=1, duration_seconds=0.1, elapsed_tokens=0, summary="",
@@ -191,3 +196,139 @@ async def test_a_skill_call_or_a_failed_turn_says_nothing(sitting):
     await sitting.failed()
     await sitting.completed()
     assert sitting.said == []
+
+
+def _text(name, mark):
+    return f"---\nname: {name}\ndescription: Use {name} when asked.\n---\nBody {mark}.\n"
+
+
+def _changed(path):
+    return (f"changed since first use: {str(path)!r}; using it",)
+
+
+def test_each_distinct_body_is_reported_once_as_changed(sitting):
+    path, record = sitting.paths["notes"], sitting.record()
+    assert sitting.session.invoke(record, "")[1] == ()
+    path.write_text(_text("notes", "B"))
+    assert sitting.session.invoke(record, "")[1] == _changed(path)
+    assert sitting.session.invoke(record, "")[1] == ()
+
+
+def test_the_first_body_seen_again_is_not_reported(sitting):
+    path, record = sitting.paths["notes"], sitting.record()
+    first = path.read_text()
+    sitting.session.invoke(record, "")
+    path.write_text(_text("notes", "B"))
+    assert sitting.session.invoke(record, "")[1] == _changed(path)
+    path.write_text(first)
+    assert sitting.session.invoke(record, "")[1] == ()
+    path.write_text(_text("notes", "C"))
+    assert sitting.session.invoke(record, "")[1] == _changed(path)
+
+
+def test_a_skill_found_after_start_is_added_once(sitting):
+    path = write_skill(sitting.cfg / "skills", "fresh")
+    record = sitting.session.find("fresh")
+    assert sitting.session.invoke(record, "")[1] == (f"added since start: fresh (machine, {str(path)!r})",)
+    assert sitting.session.invoke(record, "")[1] == ()
+
+
+@pytest.mark.parametrize("params", [{}, {"mode": "overwrite"}])
+async def test_an_overwrite_write_of_the_new_text_keeps_the_changed_notice_quiet(sitting, params):
+    path, record = sitting.paths["notes"], sitting.record()
+    sitting.session.invoke(record, "")
+    path.write_text(_text("notes", "B"))
+    await sitting.act("write", path=str(path), content=_text("notes", "B"), **params)
+    assert sitting.session.invoke(record, "")[1] == ()
+    path.write_text(_text("notes", "C"))
+    assert sitting.session.invoke(record, "")[1] == _changed(path)
+
+
+async def test_a_creator_write_followed_by_the_name_is_silent(sitting):
+    path = sitting.cfg / "skills" / "fresh" / "SKILL.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(_text("fresh", "F"))
+    await sitting.act("write", path=str(path), content=_text("fresh", "F"))
+    assert sitting.session.invoke(sitting.session.find("fresh"), "")[1] == ()
+
+
+@pytest.mark.parametrize(
+    "tool, params",
+    [
+        ("write", {"content": _text("notes", "B2")}),
+        ("write", {"content": _text("notes", "B"), "mode": "append"}),
+        ("write", {"content": _text("notes", "B"), "mode": "Overwrite"}),
+        ("edit", {"old_string": "Body of notes.", "new_string": "Body B."}),
+    ],
+)
+async def test_a_write_of_other_content_an_append_or_an_edit_suppresses_nothing(sitting, tool, params):
+    path, record = sitting.paths["notes"], sitting.record()
+    sitting.session.invoke(record, "")
+    path.write_text(_text("notes", "B"))
+    await sitting.act(tool, path=str(path), **params)
+    assert sitting.session.invoke(record, "")[1] == _changed(path)
+
+
+async def test_an_equal_write_under_another_directory_suppresses_nothing(tmp_path, pkg):
+    sitting = Sitting(tmp_path / "cfg", ("notes", "notes-two"))
+    path, record = sitting.paths["notes"], sitting.record()
+    sitting.session.invoke(record, "")
+    path.write_text(_text("notes", "B"))
+    await sitting.act("write", path=str(sitting.paths["notes-two"]), content=_text("notes", "B"))
+    assert sitting.session.invoke(record, "")[1] == _changed(path)
+    await sitting.act("write", path=str(path.parent / "references" / "x.md"), content=_text("notes", "B"))
+    path.write_text(_text("notes", "D"))
+    await sitting.act("write", path=str(path.parent / "references" / "x.md"), content=_text("notes", "D"))
+    assert sitting.session.invoke(record, "")[1] == ()
+
+
+async def test_a_write_of_the_old_text_while_the_file_holds_another_suppresses_nothing(sitting):
+    path, record = sitting.paths["notes"], sitting.record()
+    first = path.read_text()
+    sitting.session.invoke(record, "")
+    path.write_text(_text("notes", "B"))
+    await sitting.act("write", path=str(path), content=first)
+    assert sitting.session.invoke(record, "")[1] == _changed(path)
+
+
+async def test_a_relative_write_path_is_resolved_against_the_working_directory(sitting, monkeypatch):
+    path, record = sitting.paths["notes"], sitting.record()
+    sitting.session.invoke(record, "")
+    path.write_text(_text("notes", "B"))
+    monkeypatch.chdir(sitting.cfg)
+    await sitting.act("write", path="skills/notes/SKILL.md", content=_text("notes", "B"))
+    assert sitting.session.invoke(record, "")[1] == ()
+
+
+async def test_a_leading_bom_does_not_defeat_the_digest(sitting):
+    path, record = sitting.paths["notes"], sitting.record()
+    sitting.session.invoke(record, "")
+    path.write_bytes(b"\xef\xbb\xbf" + _text("notes", "B").encode())
+    await sitting.act("write", path=str(path), content=_text("notes", "B"))
+    assert sitting.session.invoke(record, "")[1] == ()
+
+
+async def test_a_model_triggered_first_load_records_no_digest(sitting):
+    path, record = sitting.paths["notes"], sitting.record()
+    await sitting.call("notes")
+    path.write_text(_text("notes", "B"))
+    assert sitting.session.invoke(record, "")[1] == ()
+
+
+async def test_a_deleted_skill_is_skipped_and_arms_nothing(sitting):
+    path, record = sitting.paths["notes"], sitting.record()
+    path.unlink()
+    assert isinstance(sitting.session.invoke(record, ""), skills.Skipped)
+    sitting.session.arm()
+    await sitting.completed()
+    assert sitting.said == []
+
+
+async def test_a_write_from_an_earlier_turn_still_suppresses(sitting):
+    path, record = sitting.paths["notes"], sitting.record()
+    sitting.session.invoke(record, "")
+    path.write_text(_text("notes", "B"))
+    await sitting.act("write", path=str(path), content=_text("notes", "B"))
+    sitting.session.arm()
+    await sitting.completed()
+    assert sitting.session.invoke(record, "")[1] == ()
