@@ -468,3 +468,187 @@ def test_the_denied_label_is_one_definition():
     assert permission_denied_reason(f"{DENIED_OBSERVATION_PREFIX}because") == "because"
     assert permission_denied_reason("Error: something else") is None
     assert permission_denied_reason(None) is None
+
+
+# ------------------------------------------------------------ the host: suspended_box
+
+@pytest.mark.asyncio
+async def test_suspend_stops_a_live_box_once_and_restarts_it_once():
+    from tests.unit.test_picker import _fake_box
+
+    ch = _channel()
+    calls: list[str] = []
+    _fake_box(ch, calls)
+    async with ch.suspended_box():
+        pass
+    assert calls == ["stop", "start('queue', 'interrupt')"]
+
+
+@pytest.mark.asyncio
+async def test_suspend_restarts_the_box_when_the_body_raises():
+    from tests.unit.test_picker import _fake_box
+
+    ch = _channel()
+    calls: list[str] = []
+    _fake_box(ch, calls)
+    with pytest.raises(RuntimeError, match="boom"):
+        async with ch.suspended_box():
+            raise RuntimeError("boom")
+    assert calls == ["stop", "start('queue', 'interrupt')"]
+    assert ch._suspended is False
+
+
+@pytest.mark.asyncio
+async def test_suspend_with_no_live_box_starts_and_stops_nothing():
+    from tests.unit.test_picker import _fake_box
+
+    ch = _channel()
+    calls: list[str] = []
+    _fake_box(ch, calls)
+    ch._box_active = False
+    async with ch.suspended_box():
+        pass
+    assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", ["close", "stop_before", "stop_inside"])
+async def test_suspend_close_or_begin_stop_leaves_the_box_stopped_and_frees_the_lock(how):
+    from tests.unit.test_picker import _fake_box
+
+    ch = _channel()
+    calls: list[str] = []
+    _fake_box(ch, calls)
+    if how == "stop_before":
+        ch.begin_stop()
+    async with ch.suspended_box() as (_output, _console, close):
+        if how == "close":
+            close()
+        if how == "stop_inside":
+            ch.begin_stop()
+    assert calls == ["stop"]
+    assert ch._suspended is False
+
+    async def _again():
+        async with ch.suspended_box():
+            return True
+
+    assert await asyncio.wait_for(_again(), timeout=1.0) is True
+
+
+@pytest.mark.asyncio
+async def test_suspend_runs_concurrent_entrants_one_after_the_other():
+    from tests.unit.test_picker import _fake_box
+
+    ch = _channel()
+    calls: list[str] = []
+    _fake_box(ch, calls)
+
+    async def _span(n: int):
+        async with ch.suspended_box():
+            calls.append(f"enter-{n}")
+            await asyncio.sleep(0.02)
+            calls.append(f"exit-{n}")
+
+    first = asyncio.create_task(_span(1))
+    await asyncio.sleep(0)
+    await asyncio.gather(first, _span(2))
+    assert calls == [
+        "stop", "enter-1", "exit-1", "start('queue', 'interrupt')",
+        "stop", "enter-2", "exit-2", "start('queue', 'interrupt')",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_suspend_holds_the_stdout_patch_for_the_whole_span():
+    import sys
+
+    from prompt_toolkit.patch_stdout import StdoutProxy
+
+    ch = _channel()
+    with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+        before = sys.stdout
+        async with ch.suspended_box() as (output, console, _close):
+            assert isinstance(sys.stdout, StdoutProxy)
+            await asyncio.sleep(0.02)
+            assert isinstance(sys.stdout, StdoutProxy)
+            assert output is None and console is ch._console
+        assert sys.stdout is before
+
+
+@pytest.mark.asyncio
+async def test_suspend_on_a_redirected_stdout_yields_the_tty_output_and_leaves_stdout_alone(monkeypatch):
+    import sys
+
+    from rich.console import Console
+
+    ch = _channel()
+    ch._console = Console(file=StringIO(), force_terminal=False, width=120, theme=TERMINAL_THEME)
+    sentinel = DummyOutput()
+    monkeypatch.setattr("prompt_toolkit.output.defaults.create_output", lambda **kw: sentinel)
+    before = sys.stdout
+    async with ch.suspended_box() as (output, console, _close):
+        assert output is sentinel and console is ch._err_console
+        assert sys.stdout is before
+    assert sys.stdout is before
+
+
+@pytest.mark.asyncio
+async def test_suspend_starts_no_rich_status():
+    from localharness.channels.terminal import _Burst
+    from localharness.core.events import ConsolidationStarted
+
+    ch = _channel()
+    burst = _Burst(frozenset({"read"}), None)
+    async with ch.suspended_box():
+        assert ch._suspended is True
+        ch._start_thinking()
+        ch._start_dreaming()
+        await ch.on_consolidation_started(ConsolidationStarted())
+        ch._burst_refresh(burst)
+        assert ch._thinking is None and ch._dreaming is None and burst.status is None
+    assert ch._suspended is False
+    ch._start_dreaming()
+    assert ch._dreaming is not None
+    ch._stop_dreaming()
+
+
+@pytest.mark.asyncio
+async def test_suspend_touches_no_sigint_handler(monkeypatch):
+    import signal
+
+    from tests.unit.test_picker import _fake_box
+
+    ch = _channel()
+    _fake_box(ch, [])
+    loop = asyncio.get_running_loop()
+    seen: list[tuple[str, int]] = []
+    monkeypatch.setattr(loop, "add_signal_handler", lambda sig, *a: seen.append(("add", sig)))
+    monkeypatch.setattr(loop, "remove_signal_handler", lambda sig: seen.append(("remove", sig)))
+    before = signal.getsignal(signal.SIGINT)
+    async with ch.suspended_box():
+        pass
+    assert [s for s in seen if s[1] == signal.SIGINT] == []
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+@pytest.mark.asyncio
+async def test_suspend_keeps_a_typed_secret_out_of_the_box():
+    from localharness.cli.interview import prompt_line
+
+    ch = _channel()
+    ch._history = InMemoryHistory()
+    with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+        await ch.start_input_box(asyncio.Queue(), on_interrupt=lambda: None)
+        try:
+            async with ch.suspended_box() as (_output, console, _close):
+                inp.send_text("s3cret\r")
+                typed = await asyncio.wait_for(
+                    prompt_line("token", console=console, secret=True), timeout=10.0
+                )
+            assert typed == "s3cret"
+            assert ch._box_active is True
+            assert "s3cret" not in ch._history.get_strings()
+            assert "s3cret" not in ch._box_app.current_buffer.text
+        finally:
+            await ch.stop_input_box()
