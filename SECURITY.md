@@ -148,8 +148,9 @@ secrets are `provider.api_key`, the `api_key` and `extra_headers` of each `extra
 `active_endpoint.api_key`, an MCP server's `env` and `headers`, `proposer.api_key` and
 `dispatch.discord.token`. Each is shown as `**********` wherever a command displays it:
 `components get`, `components list` and `components set` (its receipt and its audit record),
-`config show` and its `--json`, `validate`, `doctor`, error text, and the message the phone shows
-when its session fails to start. Error text masks those values only, never the name or address of
+`config show` and its `--json`, `validate`, `doctor`, Plugins (the screen bare `/plugins` opens:
+its Info and Configure), error text, and the message the phone shows when its session fails to
+start. Error text masks those values only, never the name or address of
 an endpoint around them, so it still says where the problem is. The harness sends the real value
 only where it belongs — the key to its server, an MCP server's `env` to that server's process —
 and the file it writes a secret to (`overrides.yaml`, or `config.yaml` from `init`) holds the real
@@ -163,6 +164,9 @@ print a stored secret, whole or by its last characters, in the error text of com
 `headers` values; both are fixed. **What this does NOT cover:** the phone's failed-start message
 masks the provider's, the endpoints' and the proposer's keys, so the Discord token or an MCP
 server's `env` or `headers` value quoted in that one error would reach the phone as it is.
+An address's user name and password (`https://user:pass@host`) are kept out of what Plugins and
+`components set` show and out of the audit record a change writes; a credential carried in an
+address's query instead (`?token=`) is not recognized and is shown as it is.
 
 - **Found is not on.** A plugin is found from package metadata and folder names alone, and one you
   installed stays off, with none of its code imported, until you turn it on. `localharness start`,
@@ -171,10 +175,10 @@ server's `env` or `headers` value quoted in that one error would reach the phone
 - **Turning on a plugin you installed is a machine-level act, and it is your trust grant.**
   `localharness plugins enable <name>` writes your machine-level `overrides.yaml`. A project can
   never turn such a plugin on: its value for `<name>.enabled` is ignored with a warning, and
-  `plugins enable --workspace` refuses. In a session, `/plugins enable <name>` for a plugin you
-  installed first asks one yes/no question that says its code will run with your permissions in
-  every session; No leaves it off and the conversation goes on. A plugin that ships with
-  LocalHarness can be switched on or
+  `plugins enable --workspace` refuses. In a session, `/plugins enable <name>` and Enable in Plugins
+  (what bare `/plugins` opens) first ask one yes/no question for a plugin you installed, saying its
+  code will run with your permissions in every session; No leaves it off and the conversation goes
+  on. A plugin that ships with LocalHarness can be switched on or
   off per project, like any other setting, so a project's `.localharness/config.yaml` can switch on
   `mobile` or `dispatch`; the bind address, `mobile.public_url`, the Discord token, allow-list and
   channels stay machine-level. A project can also change a plugin's ordinary settings,
@@ -1953,8 +1957,8 @@ Added with the mobile plugin:
   than listen to everyone. The token is stored as plain text in the global `overrides.yaml`
   (written mode 600 by `plugins enable` and `components set`; a hand-written `config.yaml` keeps
   whatever mode you give it). It is never printed: `plugins enable`, `components set`/`list`/`get`,
-  `plugins info`, `doctor`, the start banner, the setup prompt, error messages and the
-  `components set` audit event show `**********`. The token comes only from
+  `plugins info`, Plugins and its Configure, `doctor`, the start banner, the setup prompt, error
+  messages and the `components set` audit event show `**********`. The token comes only from
   `dispatch.discord.token`: the deprecated environment variables of 0.16.x are no longer read
   (deleted in 0.17.1). Another program's token file, `~/.claude/channels/discord/.env`, is not
   read either; with no token anywhere the start refuses
