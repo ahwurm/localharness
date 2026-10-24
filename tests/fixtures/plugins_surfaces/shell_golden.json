@@ -37,7 +37,7 @@
   "enable_project_override_note": {
     "exit": 0,
     "stderr": "",
-    "stdout": "\u2713 plain enabled in <TMP>/home/.localharness/overrides.yaml \u2014 takes effect on the next `localharness start`\n  note: this project turns plain off (<TMP>/home/proj/.localharness), and that still wins here \u2014 `localharness plugins enable plain --workspace` changes it for this project\n"
+    "stdout": "\u2713 plain enabled in <TMP>/home/.localharness/overrides.yaml \u2014 takes effect on the next `localharness start`\n  note: saved on this machine, but this project turns it off (<TMP>/home/proj/.localharness/config.yaml) and that still wins \u2014 localharness plugins enable plain --workspace changes it\n"
   },
   "enable_questions_check_passes": {
     "exit": 0,

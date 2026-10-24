@@ -508,5 +508,5 @@ def test_a_machine_level_enable_says_when_this_project_still_wins(tmp_path, monk
 
     assert result.exit_code == 0, result.output
     assert _yaml(layout.global_dir / "overrides.yaml") == {"q": {"enabled": True}}
-    assert "this project turns q off" in result.stdout
+    assert "this project turns it off (" in result.stdout
     assert "localharness plugins enable q --workspace" in result.stdout
