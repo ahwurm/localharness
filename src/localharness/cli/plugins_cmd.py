@@ -590,6 +590,27 @@ def loads_from_plan(session: PluginSession, name: str, prior: Touch, probe: Doct
             and name not in session.failed and name not in session.unconfigured)
 
 
+def touch_from(session: PluginSession, name: str, result: PassResult, prior: Touch) -> Touch | None:
+    """The Touch a returned pass leaves, or None when it wrote nothing."""
+    if result.kind in ("refused", "declined", "rerun_blocked") or (result.kind == "override" and result.step.on):
+        return None
+    probe = ((result.row.state, result.row.detail) if result.row
+             else ("unconfigured", "setup questions skipped") if result.questions == "skipped"
+             else None if result.kind == "disabled" else prior.probe)
+    return Touch(rebind=prior.rebind or result.rebind, loads=result.loads, probe=probe)
+
+
+def touch_after_stop(session: PluginSession, name: str, progress: PassProgress, prior: Touch) -> Touch | None:
+    """The Touch a caught stop leaves: what the pass had already written before it ended."""
+    if not (progress.wrote or progress.answered):
+        return None
+    rebind = prior.rebind or (name in session.running and (
+        progress.answered or (progress.phase == "edit" and not progress.overridden)))
+    enable_written = progress.phase in ("download", "check") and not progress.rerun
+    loads = loads_from_plan(session, name, prior, None) if enable_written else prior.loads
+    return Touch(rebind=rebind, loads=loads, probe=prior.probe)
+
+
 async def step_pending(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry,
                        paths: PluginPaths) -> bool:
     """Does this plugin's setup step still have work — the first time, or while it is not set up?

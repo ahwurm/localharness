@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from localharness.cli.plugins_cmd import (
     ACTION_CONFIGURE, ACTION_DISABLE, ACTION_ENABLE, ACTION_INFO, ACTION_INSTALL, ACTION_RERUN,
     ACTION_SHOW_INSTALL, Kind, PassProgress, PassResult, Phase, PluginSession, ReloadPlan, ReportKind,
-    StepOutcome, TailKey, Touch, loads_from_plan, prior_touch, refused,
+    StepOutcome, TailKey, Touch, loads_from_plan, prior_touch, refused, touch_after_stop, touch_from,
 )
 from localharness.plugins import builtin, discovery
 from localharness.plugins.api import Plugin, PluginManifest
@@ -210,3 +210,110 @@ def test_the_bookkeeping_never_stores_into_touched() -> None:
     loads_from_plan(s, "a", Touch(False, False, None), None, resolution=_resolution("on"))
     refused(s, "a", "why", "none")
     assert s.touched == {}
+
+
+def _result(kind: str = "saved", on: bool = True, **kw) -> PassResult:
+    return PassResult(kind, StepOutcome("a", on), **kw)
+
+
+@pytest.mark.parametrize("result", [_result("refused"), _result("declined"), _result("rerun_blocked"),
+                                    _result("override", True)])
+def test_touch_from_leaves_touched_alone_when_nothing_was_written(result) -> None:
+    assert touch_from(_session(), "a", result, Touch(True, True, ("failed", "x"))) is None
+
+
+def test_touch_from_an_overridden_disable_wrote_and_keeps_the_probe() -> None:
+    prior = Touch(False, True, ("failed", "x"))
+    assert touch_from(_session(), "a", _result("override", False, loads=True), prior) == Touch(False, True, ("failed", "x"))
+
+
+def test_touch_from_probe_from_the_row() -> None:
+    got = touch_from(_session(), "a", _result("enabled", row=_row("failed", "failed — no answer"),
+                                              questions="skipped"), Touch(False, False, ("on", "")))
+    assert got.probe == ("failed", "failed — no answer")
+
+
+def test_touch_from_probe_from_skipped_questions_without_a_row() -> None:
+    got = touch_from(_session(), "a", _result("enabled_unconfigured", questions="skipped"),
+                     Touch(False, False, ("on", "")))
+    assert got.probe == ("unconfigured", "setup questions skipped")
+
+
+def test_touch_from_a_disable_clears_the_probe() -> None:
+    got = touch_from(_session(), "a", _result("disabled", False), Touch(False, True, ("failed", "x")))
+    assert got.probe is None
+
+
+def test_touch_from_otherwise_keeps_the_prior_probe() -> None:
+    got = touch_from(_session(), "a", _result("saved", loads=True), Touch(False, True, ("failed", "x")))
+    assert got.probe == ("failed", "x")
+
+
+def test_touch_from_ors_rebind_and_takes_loads_from_the_result() -> None:
+    assert touch_from(_session(), "a", _result("saved", rebind=False), Touch(True, True, None)) == Touch(True, False, None)
+    assert touch_from(_session(), "a", _result("saved", rebind=True, loads=True),
+                      Touch(False, False, None)) == Touch(True, True, None)
+
+
+def _stop(session: PluginSession, prior: Touch, **kw) -> Touch | None:
+    return touch_after_stop(session, "stub", PassProgress(**kw), prior)
+
+
+def test_touch_after_stop_before_any_write_is_none() -> None:
+    assert _stop(_session(), Touch(False, False, None), phase="download") is None
+
+
+def test_touch_after_stop_a_running_plugins_written_configure_rebinds() -> None:
+    s, prior = _session(running=frozenset({"stub"})), Touch(False, True, ("on", ""))
+    assert _stop(s, prior, phase="edit", wrote=True) == Touch(True, True, ("on", ""))
+
+
+def test_touch_after_stop_an_overridden_configure_does_not_rebind() -> None:
+    s, prior = _session(running=frozenset({"stub"})), Touch(False, True, None)
+    assert _stop(s, prior, phase="edit", wrote=True, overridden=True) == Touch(False, True, None)
+
+
+def test_touch_after_stop_written_answers_rebind_a_running_plugin_only() -> None:
+    prior = Touch(False, True, None)
+    assert _stop(_session(running=frozenset({"stub"})), prior, phase="question", answered=True).rebind is True
+    assert _stop(_session(), prior, phase="question", answered=True).rebind is False
+    assert _stop(_session(), Touch(True, True, None), phase="question", answered=True).rebind is True
+
+
+def test_touch_after_stop_a_plugin_not_running_does_not_rebind_on_edit() -> None:
+    assert _stop(_session(), Touch(False, False, None), phase="edit", wrote=True).rebind is False
+
+
+def test_touch_after_stop_at_the_download_reads_the_fresh_plan(machine) -> None:
+    _turn(machine, True)
+    s = _session(machine, running=frozenset({"stub"}))
+    assert _stop(s, Touch(False, False, None), phase="download", wrote=True) == Touch(False, True, None)
+    assert _stop(s, Touch(False, False, None), phase="check", wrote=True).loads is True
+
+
+def test_touch_after_stop_a_stopped_rerun_keeps_prior_loads(machine) -> None:
+    _turn(machine, True)
+    s = _session(machine, running=frozenset({"stub"}))
+    assert _stop(s, Touch(False, False, None), phase="check", wrote=True, rerun=True).loads is False
+
+
+def test_touch_after_stop_a_build_failed_plugin_re_enabled_does_not_load(machine) -> None:
+    _turn(machine, True)
+    s = _session(machine, failed={"stub": "boom"})
+    assert _stop(s, Touch(False, False, None), phase="download", wrote=True).loads is False
+
+
+def test_touch_after_stop_keeps_the_prior_probe(machine) -> None:
+    _turn(machine, True)
+    got = _stop(_session(machine), Touch(False, False, ("failed", "x")), phase="download", wrote=True)
+    assert got.probe == ("failed", "x") and got.loads is False
+
+
+def test_the_derivations_never_store_into_touched(machine) -> None:
+    _turn(machine, True)
+    s = _session(machine, touched={"stub": Touch(False, True, None)})
+    before = dict(s.touched)
+    touch_from(s, "stub", _result("saved"), Touch(False, True, None))
+    _stop(s, Touch(False, True, None), phase="download", wrote=True)
+    _stop(s, Touch(False, True, None), phase="download")
+    assert s.touched == before
