@@ -147,6 +147,16 @@ def _not_regular(cfg, proj, pkg):
     return _expect(skills.NOT_REGULAR, path=path)
 
 
+def _empty_dirs(base, count):
+    for i in range(count):
+        (base / f"d{i:03d}").mkdir(parents=True, exist_ok=True)
+
+
+def _over_256(cfg, proj, pkg):
+    _empty_dirs(cfg / "skills", 257)
+    return _expect(skills.OVER_256, origin=cfg / "skills")
+
+
 def _link(link, target):
     link.parent.mkdir(parents=True, exist_ok=True)
     link.symlink_to(target)
@@ -205,6 +215,11 @@ def _name_dir(cfg, proj, pkg):
     return _expect(skills.NAME_DIR, path=_write(cfg, _fm("b")), name="b")
 
 
+def _bundled_name(cfg, proj, pkg):
+    _skill(pkg / "assets" / "skills", "skill-creator")
+    return _expect(skills.BUNDLED_NAME, path=_write(cfg, None, entry="skill-creator"), name="skill-creator")
+
+
 def _no_description(cfg, proj, pkg):
     return _expect(skills.NO_DESCRIPTION, path=_write(cfg, "---\nname: a\n---\n"))
 
@@ -224,7 +239,27 @@ def _control_description(cfg, proj, pkg):
     return _expect(skills.CONTROL_DESCRIPTION, path=_write(cfg, _fm(description='"a\\eb"')))
 
 
+def _cap_project(cfg, proj, pkg):
+    for i in range(33):
+        last = _skill(proj / ".localharness" / "skills", f"s{i:02d}")
+    return _expect(skills.CAP_PROJECT, dir=last.parent)
+
+
+def _cap_total(cfg, proj, pkg):
+    for i in range(32):
+        _skill(proj / ".localharness" / "skills", f"p{i:02d}")
+    for i in range(33):
+        last = _write(cfg, None, entry=f"m{i:02d}")
+    return _expect(skills.CAP_TOTAL, dir=last.parent)
+
+
+def _shadowed(cfg, proj, pkg):
+    kept = _skill(proj / ".localharness" / "skills", "x")
+    return _expect(skills.SHADOWED, dir=_write(cfg, None, entry="x").parent, other=kept.parent)
+
+
 CASES = [
+    (skills.OVER_256, _over_256),
     (skills.NOT_REGULAR, _not_regular),
     (skills.OUTSIDE, _outside),
     (skills.CONTROL_PATH, _control_path),
@@ -238,18 +273,23 @@ CASES = [
     (skills.BAD_NAME, _bad_name),
     (skills.LONG_NAME, _long_name),
     (skills.NAME_DIR, _name_dir),
+    (skills.BUNDLED_NAME, _bundled_name),
     (skills.NO_DESCRIPTION, _no_description),
     (skills.LONG_DESCRIPTION, _long_description),
     (skills.MULTILINE_DESCRIPTION, _multiline_description),
     (skills.CONTROL_DESCRIPTION, _control_description),
+    (skills.CAP_PROJECT, _cap_project),
+    (skills.CAP_TOTAL, _cap_total),
+    (skills.SHADOWED, _shadowed),
 ]
+KEPT = {skills.BUNDLED_NAME: 1, skills.CAP_PROJECT: 32, skills.CAP_TOTAL: 64, skills.SHADOWED: 1}
 
 
 @pytest.mark.parametrize("pair,build", CASES, ids=[build.__name__.lstrip("_") for _, build in CASES])
 def test_each_per_skill_rule_skips_with_its_exact_line(pair, build, tmp_path, cfg, proj):
     expected = build(cfg, proj, tmp_path / "pkg")
     found = SkillSet.discover(cfg, proj)
-    assert found.skills == ()
+    assert len(found.skills) == KEPT.get(pair, 0)
     assert [skip_line(s) for s in found.skipped] == [expected]
     assert pair in skills.RULES and expected.endswith(f". {pair[1]}.")
 
@@ -537,3 +577,139 @@ def test_regular_file_test_is_lstat():
     assert "is_file" not in {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
     calls = {ast.unparse(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
     assert {"os.lstat", "stat.S_ISREG"} <= calls
+
+
+def test_every_rule_has_a_case():
+    assert {pair for pair, _ in CASES} == set(skills.RULES)
+    assert len(CASES) == len(skills.RULES) == 22
+    fixes = [fix for _, fix in skills.RULES]
+    assert len(set(fixes)) == 22 and all(fixes)
+
+
+def test_the_entry_bound_is_256_and_the_257th_sorted_name_is_never_read(cfg):
+    base = cfg / "skills"
+    _empty_dirs(base, 255)
+    _skill(base, "zzz")
+    found = SkillSet.discover(cfg, None)
+    assert [s.name for s in found.skills] == ["zzz"] and found.skipped == ()
+    (base / "d255").mkdir()
+    found = SkillSet.discover(cfg, None)
+    assert found.skills == ()
+    assert [skip_line(s) for s in found.skipped] == [_expect(skills.OVER_256, origin=base)]
+
+
+def test_two_over_full_origins_give_two_notices_project_first(cfg, proj):
+    _empty_dirs(cfg / "skills", 257)
+    _empty_dirs(proj / ".localharness" / "skills", 257)
+    assert _only(cfg, proj) == [
+        _expect(skills.OVER_256, origin=proj / ".localharness" / "skills"),
+        _expect(skills.OVER_256, origin=cfg / "skills"),
+    ]
+
+
+def test_entries_are_read_in_code_point_order(cfg):
+    for name in ("a-2", "a-10", "a-1"):
+        _skill(cfg / "skills", name)
+    assert [s.name for s in SkillSet.discover(cfg, None).skills] == ["a-1", "a-10", "a-2"]
+
+
+def test_a_non_bundled_skill_never_takes_a_bundled_name(tmp_path, cfg, proj):
+    bundled = _skill(tmp_path / "pkg" / "assets" / "skills", "skill-creator")
+    project = _skill(proj / ".localharness" / "skills", "skill-creator")
+    machine = _write(cfg, None, entry="skill-creator")
+    found = SkillSet.discover(cfg, proj)
+    assert [(s.origin, s.path) for s in found.skills] == [("bundled", bundled)]
+    assert [skip_line(s) for s in found.skipped] == [
+        _expect(skills.BUNDLED_NAME, path=project, name="skill-creator"),
+        _expect(skills.BUNDLED_NAME, path=machine, name="skill-creator"),
+    ]
+
+
+def test_an_invalid_bundled_directory_reserves_no_name(tmp_path, cfg, proj):
+    _skill(tmp_path / "pkg" / "assets" / "skills", "broken", "name: broken\n")
+    _skill(proj / ".localharness" / "skills", "broken")
+    found = SkillSet.discover(cfg, proj)
+    assert [(s.name, s.origin) for s in found.skills] == [("broken", "project")]
+    assert len(found.skipped) == 1
+
+
+def test_the_caps_keep_exactly_32_project_and_64_total(cfg, proj):
+    for i in range(32):
+        _skill(proj / ".localharness" / "skills", f"p{i:02d}")
+        _write(cfg, None, entry=f"m{i:02d}")
+    found = SkillSet.discover(cfg, proj)
+    assert len(found.skills) == 64 and found.skipped == ()
+
+
+def test_a_shadowed_record_takes_no_project_slot(cfg, proj):
+    for i in range(31):
+        _skill(proj / ".localharness" / "skills", f"p{i:02d}")
+        _skill(proj / ".agents" / "skills", f"p{i:02d}")
+    _skill(proj / ".agents" / "skills", "q")
+    found = SkillSet.discover(cfg, proj)
+    assert len(found.skills) == 32 and found.skills[-1].name == "q"
+    assert len(found.skipped) == 31
+    assert all(" is shadowed by " in s.reason for s in found.skipped)
+
+
+def test_a_full_cap_wins_over_a_shadow(cfg, proj):
+    for i in range(32):
+        _skill(proj / ".localharness" / "skills", f"p{i:02d}")
+    dup = _skill(proj / ".agents" / "skills", "p00")
+    found = SkillSet.discover(cfg, proj)
+    assert [skip_line(s) for s in found.skipped] == [_expect(skills.CAP_PROJECT, dir=dup.parent)]
+
+
+def test_a_machine_duplicate_past_the_total_cap_is_capped_not_shadowed(cfg, proj):
+    for i in range(32):
+        _skill(proj / ".localharness" / "skills", "zz-dup" if i == 31 else f"p{i:02d}")
+        _write(cfg, None, entry=f"m{i:02d}")
+    dup = _write(cfg, None, entry="zz-dup")
+    found = SkillSet.discover(cfg, proj)
+    assert len(found.skills) == 64
+    assert [skip_line(s) for s in found.skipped] == [_expect(skills.CAP_TOTAL, dir=dup.parent)]
+
+
+def test_the_highest_precedence_same_name_skill_is_kept(cfg, proj):
+    top = _skill(proj / ".localharness" / "skills", "x")
+    agents = _skill(proj / ".agents" / "skills", "x")
+    machine = _write(cfg, None, entry="x")
+    found = SkillSet.discover(cfg, proj)
+    assert [s.path for s in found.skills] == [top]
+    assert [skip_line(s) for s in found.skipped] == [
+        _expect(skills.SHADOWED, dir=agents.parent, other=top.parent),
+        _expect(skills.SHADOWED, dir=machine.parent, other=top.parent),
+    ]
+
+
+def test_no_project_root_reads_machine_and_bundled_only(tmp_path, cfg, proj):
+    _skill(proj / ".localharness" / "skills", "p")
+    _skill(proj / ".agents" / "skills", "q")
+    _write(cfg, None, entry="m")
+    _skill(tmp_path / "pkg" / "assets" / "skills", "b")
+    assert [(s.name, s.origin) for s in SkillSet.discover(cfg, None).skills] == [("m", "machine"), ("b", "bundled")]
+
+
+def test_agents_skills_without_a_localharness_directory_contribute_nothing(tmp_path, cfg):
+    bare = tmp_path / "bare"
+    _skill(bare / ".agents" / "skills", "a")
+    found = SkillSet.discover(cfg, bare)
+    assert found.skills == () and found.skipped == ()
+
+
+def test_every_origin_absent_gives_empty_tuples(cfg):
+    found = SkillSet.discover(cfg, None)
+    assert found.skills == () and found.skipped == ()
+
+
+def test_every_skill_carries_an_origin_label_in_precedence_then_name_order(tmp_path, cfg, proj):
+    bases = {"project": proj, "machine": cfg, "bundled": tmp_path / "pkg"}
+    dirs = [bases[label] / rel for label, rel in skills.ORIGINS]
+    for directory, names in zip(dirs, (("z1", "z2"), ("y1", "y2"), ("x1", "x2"), ("w1", "w2"))):
+        for name in names:
+            _skill(directory, name)
+    found = SkillSet.discover(cfg, proj)
+    assert len(found.skills) == 8 and found.skipped == ()
+    assert {s.origin for s in found.skills} <= {label for label, _ in skills.ORIGINS}
+    assert list(found.skills) == sorted(found.skills, key=lambda s: (dirs.index(s.path.parent.parent), s.name))
+    assert [s.name for s in found.skills] == ["z1", "z2", "y1", "y2", "x1", "x2", "w1", "w2"]
