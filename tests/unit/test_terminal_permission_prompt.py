@@ -673,6 +673,7 @@ async def test_waiting_counts_an_ask_queued_behind_an_open_span():
             await asyncio.sleep(0.01)
             if ch._suspended:
                 break
+        assert ch._suspended
         assert ch.waiting_asks() == 0
         inp.send_text("y")
         assert (await asyncio.wait_for(task, timeout=10.0)).kind == "allow_once"
