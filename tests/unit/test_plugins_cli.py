@@ -233,6 +233,21 @@ def test_info_lists_exactly_the_paths_components_list_marks_as_the_plugins(g) ->
         "on", "draws p swatches", "built in", "0.1.0", "tools")
 
 
+def test_info_text_strips_a_url_credential_and_its_json_keeps_it(g) -> None:
+    (g / "overrides.yaml").write_text("p: {url: 'https://user:pw@example.test/v1'}\n", encoding="utf-8")
+
+    text, machine = _plugins(g, "info", "p"), _plugins(g, "info", "p", "--json")
+
+    assert text.exit_code == 0 and "pw@" not in text.stdout and "'https://example.test/v1'" in text.stdout
+    assert {s["path"]: s["current_value"] for s in json.loads(machine.stdout)["settings"]}["p.url"] == "https://user:pw@example.test/v1"
+
+
+def test_info_text_shows_neither_extra_line_in_the_shell(g) -> None:
+    text = _plugins(g, "info", "p").stdout
+
+    assert "did not load" not in text and "not set up" not in text and "last check" not in text
+
+
 def test_info_prints_type_value_layer_and_machine_level_only(g) -> None:
     (g / "overrides.yaml").write_text("p: {color: '#00ff00'}\n", encoding="utf-8")
 

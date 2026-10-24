@@ -67,7 +67,7 @@
   "info_credential_url": {
     "exit": 0,
     "stderr": "",
-    "stdout": "pro\n  state:        on\n  what it does: answers at an address\n  from:         built in\n  version:      0.1.0\n  kind:         tools\n  set up:       localharness plugins enable pro --set url=http://127.0.0.1:1 --set token=<token>\nSettings:\n  pro.enabled  bool       True                               [global-overrides]                     \n  pro.token    SecretStr  SecretStr('')                      [default] (machine-level only)         \n  pro.url      str        'https://user:pw@example.test/v1'  [global-overrides] (machine-level only)\n\nOr paste this into your coding agent to set it up for your hardware:\n\n  Run it at https://user:pw@example.test/v1. Done when it answers.\n"
+    "stdout": "pro\n  state:        on\n  what it does: answers at an address\n  from:         built in\n  version:      0.1.0\n  kind:         tools\n  set up:       localharness plugins enable pro --set url=http://127.0.0.1:1 --set token=<token>\nSettings:\n  pro.enabled  bool       True                       [global-overrides]                     \n  pro.token    SecretStr  SecretStr('')              [default] (machine-level only)         \n  pro.url      str        'https://example.test/v1'  [global-overrides] (machine-level only)\n\nOr paste this into your coding agent to set it up for your hardware:\n\n  Run it at https://example.test/v1. Done when it answers.\n"
   },
   "info_settings_and_prompt": {
     "exit": 0,
