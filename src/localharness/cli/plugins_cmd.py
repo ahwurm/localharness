@@ -801,6 +801,12 @@ class PassState:
     row: DoctorRow | None = None
     failed: str = ""
     skipped: str = ""
+    help: tuple[str, ...] = ()
+    progress: PassProgress = field(default_factory=PassProgress)
+    trust_tail: str = ""
+    verify: bool = False
+    asked: bool = False
+    downloaded: bool = False
 
     @property
     def verb(self) -> str:
@@ -811,8 +817,8 @@ class PassState:
         return self.ask and self.after is not None and not self.missing
 
 
-async def _confirmed(confirm: Any, text: str, default: bool) -> bool:
-    answer = await confirm(sanitize_for_display(text), default=default)
+async def _confirmed(confirm: Any, text: str, default: bool, tail: str = "") -> bool:
+    answer = await confirm(sanitize_for_display(text), default=default, **({"tail": tail} if tail else {}))
     if answer is None:
         raise click.Abort()
     return answer
@@ -844,7 +850,7 @@ async def _prepare(s: PassState, *, confirm: Any, report: Any) -> PassState:
         report("note", override_line(s.name, pair))
         return replace(s, overridden=True)
     if (s.in_session and s.on and s.ask and not s.entry.bundled
-            and not await _confirmed(confirm, THIRD_PARTY_CONFIRM.format(name=s.name), False)):
+            and not await _confirmed(confirm, THIRD_PARTY_CONFIRM.format(name=s.name), False, s.trust_tail)):
         report("stays_off", s.name)
         return replace(s, declined=True)
     m = s.entry.manifest if s.on else None
@@ -864,13 +870,14 @@ async def _prepare(s: PassState, *, confirm: Any, report: Any) -> PassState:
 
 
 async def _questions(s: PassState, *, prompt: Any) -> PassState:
+    s.progress.phase = "question"
     if not (s.ask and s.setup and not s.missing and (s.pending or not s.in_session)):
         return s
     # the answers go through the one checked write path, as --set values
     pairs = await ask_fields(s.setup, lambda key: _stored(s.resolution, s.loader, s.entry, key),
                              lambda key: _secret_stored(s.resolution, s.loader, s.entry, key),
                              lambda key: _cleared(s.resolution, s.entry, key), prompt=prompt)
-    return replace(s, pairs=tuple(pairs))
+    return replace(s, pairs=tuple(pairs), asked=True)
 
 
 async def _write(s: PassState, *, report: Any) -> PassState:
@@ -882,11 +889,12 @@ async def _write(s: PassState, *, report: Any) -> PassState:
     values = (_checked_all(s.resolution, s.loader, s.entry, list(s.pairs), s.to_workspace, overlay)
               if s.pairs else {})
     atomic_write_overlay(s.target, overlay)
+    s.progress.wrote, s.progress.answered, s.progress.written = True, bool(s.pairs), s.on
     tail = "" if s.in_session else " — takes effect on the next `localharness start`"
     shown_values = tuple((path, redact_text(value)) for path, value in values.items())
     report("wrote", (f"{s.name} {s.verb}d in {s.target}{tail}", shown_values))
     fresh_loader = fresh = after = row = None
-    if s.m is not None:
+    if s.m is not None or s.verify:
         # What was just written, read through a NEW loader over the same layers: ConfigLoader caches
         # its harness and raw sources, and re-deriving the workspace would print its trust notice
         # (and maybe ask) a second time.
@@ -897,7 +905,7 @@ async def _write(s: PassState, *, report: Any) -> PassState:
         except Exception as exc:  # noqa: BLE001 — the enable already wrote; the rest is advice
             row = could_not_check(s.name, exc)
     missing = s.missing
-    if after is not None and s.m.requires_extra and after.state == "needs-extra":
+    if after is not None and s.m is not None and s.m.requires_extra and after.state == "needs-extra":
         missing = True  # "takes effect on the next start" is not true without its install extra
         report("note", f"{s.name} is missing its install extra — {after.reason}")
     if pair := override_of(s.loader, s.entry, s.on, s.to_workspace):
@@ -910,20 +918,23 @@ async def _write(s: PassState, *, report: Any) -> PassState:
 async def _act(s: PassState, *, confirm: Any, report: Any) -> PassState:
     from localharness.plugins.lifecycle import DoctorRow, setup_action_rows
 
-    if not (s.step and s.has_action and s.after.state == "on" and (s.pending or s.pairs) and (
-            not s.m.setup_action or await _confirmed(confirm, s.m.setup_action, True))):
+    if not (s.step and s.has_action and s.after.state == "on" and (s.pending or s.pairs)):
+        return s
+    s.progress.phase = "download"
+    if s.m.setup_action and not await _confirmed(confirm, s.m.setup_action, True):
         return s
     rows = _stripped(DoctorRow(s.name, "on", "", await setup_action_rows(s.fresh, s.name, s.paths))).checks
     if rows:
         report("row", DoctorRow(s.name, "on", "", rows))
-    return replace(s, rows=rows)
+    return replace(s, rows=rows, downloaded=True)
 
 
 async def _check(s: PassState, *, report: Any) -> PassState:
     from localharness.plugins.setup import render_agent_prompt
 
-    m, row, failed, skipped, block = s.m, s.row, "", "", False
+    m, row, failed, skipped, block, paragraphs = s.m, s.row, "", "", False, ()
     if row is not None or (s.step and (s.setup or s.has_action)):
+        s.progress.phase = "check"
         report("checking", None)
         stored = row is not None
         row = row or await probe(s.name, s.fresh, s.paths)
@@ -945,7 +956,8 @@ async def _check(s: PassState, *, report: Any) -> PassState:
                 next((c.detail for c in checks if c.status == "skip"), ""))
             paragraphs = tuple(p for p in (m.setup_help, redact_text(render_agent_prompt(
                 m.agent_prompt, _prompt_values(s.fresh or s.resolution, s.fresh_loader or s.loader,
-                                               s.after or s.entry, m.agent_prompt))) if m.agent_prompt else "") if p)
+                                               s.after or s.entry, m.agent_prompt))) if m.agent_prompt else "")
+                               if p) if m is not None else ()
             if paragraphs:  # the one place it prints
                 report("help", paragraphs)
             block = bool(paragraphs)
@@ -958,7 +970,7 @@ async def _check(s: PassState, *, report: Any) -> PassState:
             report("next_steps", (False, lines))
     if m is not None and m.next_steps:
         report("next_steps", (block, tuple(m.next_steps.splitlines())))  # a blank line ends the text to paste
-    return replace(s, row=row, failed=failed, skipped=skipped)
+    return replace(s, row=row, failed=failed, skipped=skipped, help=paragraphs)
 
 
 def could_not_check(name: str, exc: Exception) -> DoctorRow:
@@ -1113,6 +1125,64 @@ async def install_pass(session: PluginSession, extras: set[str], names: list[str
         return skipped("failed", code=code)
     importlib.invalidate_caches()
     return frozenset(names)
+
+
+def _pass_result(s: PassState, session: PluginSession, prior: Touch) -> PassResult:
+    row, after = s.row, s.after
+    answered = tuple(pair.partition("=")[0] for pair in s.pairs)
+    questions = "answered" if answered else "skipped" if s.asked else "none"
+    detail = ""
+    if after is not None and after.state != "on":
+        kind, detail = "enabled_not_loading", after.reason or after.display
+    elif row is None and after is not None and not loads_from_plan(session, s.name, prior, None, s.fresh):
+        kind = "enabled_not_loading"
+        detail = session.failed.get(s.name) or session.unconfigured.get(s.name) or (prior.probe or ("", ""))[1]
+    elif row is not None and row.state not in ("on", "unconfigured"):
+        kind, detail = "check_failed_noload", s.failed
+    elif (row is not None and row.state == "unconfigured") or (row is None and questions == "skipped"):
+        kind, detail = "enabled_unconfigured", (row.detail if row else "") or "setup questions skipped"
+    elif s.failed:
+        kind = "check_failed"
+    elif s.skipped:
+        kind = "check_skipped"
+    else:
+        kind = "enabled"
+    loads = kind in ("enabled", "check_failed", "check_skipped") and loads_from_plan(
+        session, s.name, prior, row, s.fresh)
+    rebind = s.name in session.running and (bool(answered) or (
+        row is not None and row.state != (prior.probe[0] if prior.probe else "on")))
+    return PassResult(kind, StepOutcome(s.name, True, failed_check=s.failed, skipped_check=s.skipped),
+                      questions=questions, answered=answered, downloaded=s.downloaded, row=row,
+                      loads=loads, rebind=rebind, detail=redact_text(sanitize_for_display(detail)),
+                      next_steps=s.m.next_steps if s.m is not None else "", help=s.help)
+
+
+async def enable_pass(session, name, *, mode: Literal["enable", "rerun"], progress, prompt, confirm, report,
+                      install: Literal["own", "done", "skipped", "none"] = "own", in_batch=False,
+                      console=console) -> PassResult:
+    """Trust, install, questions, download and check for one plugin (`rerun`: the last three), one kind out."""
+    from localharness.config.loader import ConfigLoader
+    from localharness.plugins.resolve import resolve
+
+    progress.rerun = mode == "rerun"
+    prior = session.touched.get(name) or prior_touch(session, name)
+    loader = ConfigLoader(config_dir=session.cfg_path, local_config_dir=session.workspace)
+    resolution = resolve(loader)
+    if (entry := resolution.plan.entry(name)) is None:
+        raise Refusal(f"Unknown plugin: {name}. /plugins lists them.", ())
+    progress.written = resolution.enabled.get(name, False)
+    tail = CTRLC.format(does=CTRLC_DOES["batch" if in_batch else "prompt"])
+    state = PassState(name, True, (), False, True, True, resolution, loader, session.workspace, entry,
+                      progress=progress, trust_tail=tail, verify=True)
+    state = await _prepare(state, confirm=confirm, report=report)
+    if state.overridden:
+        return PassResult("override", StepOutcome(name, True, stopped=True), override=override_of(loader, entry, True, False),
+                          loads=loads_from_plan(session, name, prior, None, resolution))
+    if state.declined:
+        return PassResult("declined", StepOutcome(name, True, stopped=True))
+    state = await _write(await _questions(state, prompt=prompt), report=report)
+    state = await _check(await _act(state, confirm=confirm, report=report), report=report)
+    return _pass_result(state, session, prior)
 
 
 async def disable_pass(session, name, *, progress, report) -> PassResult:
