@@ -33,7 +33,10 @@ from localharness.channels.base import ChannelAdapter
 from localharness.channels.terminal import TerminalChannel
 from localharness.channels.mobile.channel import MobileChannel
 from localharness.cli import plugins_cmd, start_cmd, update_cmd
-from localharness.cli.repl import OrchestratorREPL
+from localharness.cli.interview import Unreachable
+from localharness.cli.plugins_interview import unavailable
+from localharness.cli.repl import PLUGINS_RELOADING, OrchestratorREPL
+from localharness.cli.session_resume import RELOAD_ACTION
 from localharness.cli.slash_commands import all_rows, find_row
 from localharness.plugins import builtin, discovery
 from localharness.plugins import resolve as resolve_module
@@ -261,12 +264,25 @@ PARKED = "Answer the parked calls first (/pending lists them): a restart would d
 
 
 class Terminalish(RecordingChannel):
-    """RecordingChannel that, like the terminal, can restart the session for /plugins."""
+    """RecordingChannel that, like the terminal, can restart the session for /plugins; `why` is what draws it out."""
     can_switch_plugins = True
+    why = Unreachable.NO_TTY
+
+    def can_manage(self):
+        return self.why
 
 
 class BoxTerminal(FakeBoxChannel):
     can_switch_plugins = True
+
+    def can_manage(self):
+        return None
+
+
+def _managing(*inputs):
+    channel = Terminalish(list(inputs))
+    channel.why = None
+    return channel
 
 
 def _classic(channel, *, pending=None, **kw):
@@ -387,8 +403,84 @@ async def test_bare_plugins_sends_the_list(line):
     repl, _ = _classic(channel, on_plugin_switch=hook)
     await repl.run()
     hook.assert_awaited_once_with("list", "")
-    assert channel.sent == [("Plugins:\n  image  on", INFO)]
+    assert channel.sent == [("Plugins:\n  image  on", INFO), (unavailable(Unreachable.NO_TTY), INFO)]
     assert repl.restart_request is None
+
+
+async def test_manage_an_unreachable_screen_sends_the_list_then_why_and_never_asks_the_hook_to_manage():
+    hook = AsyncMock(return_value="Plugins:\n  x  on")
+    channel = Terminalish(["/plugins"])
+    channel.why = Unreachable.TOO_SMALL
+    repl, _ = _classic(channel, on_plugin_switch=hook)
+    await repl.run()
+    hook.assert_awaited_once_with("list", "")
+    assert channel.sent == [("Plugins:\n  x  on", INFO), (unavailable(Unreachable.TOO_SMALL), INFO)]
+
+
+@pytest.mark.parametrize("line", ["/plugins", "/PLUGINS  "])
+async def test_manage_true_reloads_and_ends_the_repl_without_reading_on(line):
+    hook = AsyncMock(return_value=True)
+    channel = _managing(line, "never read")
+    repl, agent = _classic(channel, on_plugin_switch=hook)
+    await repl.run()
+    hook.assert_awaited_once_with("manage", "")
+    assert channel.sent == [(PLUGINS_RELOADING, INFO)]
+    assert PLUGINS_RELOADING == "Restarting to apply your plugin changes — your conversation is kept."
+    assert repl.restart_request == RELOAD_ACTION
+    assert channel._inputs == ["never read"]
+    agent.run_turn.assert_not_called()
+
+
+async def test_manage_false_says_nothing_and_reads_the_next_input():
+    hook = AsyncMock(return_value=False)
+    channel = _managing("/plugins", "/help")
+    repl, _ = _classic(channel, on_plugin_switch=hook)
+    await repl.run()
+    hook.assert_awaited_once_with("manage", "")
+    assert len(channel.sent) == 1 and channel.sent[0][0].startswith("Available commands:")
+    assert repl.restart_request is None
+
+
+async def test_manage_a_str_is_one_line_and_never_a_reload_and_the_next_open_manages_again():
+    hook = AsyncMock(return_value="oops")
+    channel = _managing("/plugins", "/plugins")
+    repl, _ = _classic(channel, on_plugin_switch=hook)
+    await repl.run()
+    assert [c.args for c in hook.await_args_list] == [("manage", ""), ("manage", "")]
+    assert channel.sent == [("oops", INFO), ("oops", INFO)]
+    assert repl.restart_request is None
+
+
+async def test_manage_runs_with_a_call_parked():
+    hook = AsyncMock(return_value=True)
+    channel = _managing("/plugins")
+    repl, _ = _classic(channel, pending={1: object()}, on_plugin_switch=hook)
+    await repl.run()
+    hook.assert_awaited_once_with("manage", "")
+    assert repl.restart_request == RELOAD_ACTION
+
+
+async def test_manage_on_a_channel_that_cannot_switch_is_terminal_only_and_never_asks():
+    hook = AsyncMock(return_value=True)
+    channel = RecordingChannel(["/plugins"])
+    repl, _ = _classic(channel, on_plugin_switch=hook)
+    await repl.run()
+    assert channel.sent == [(TERMINAL_ONLY, INFO)]
+    hook.assert_not_awaited()
+
+
+async def test_manage_in_box_mode_reloads_and_keeps_the_typed_ahead_lines():
+    hook = AsyncMock(return_value=True)
+    repl, channel, _ = _box(on_plugin_switch=hook, queued=("/plugins", "/help"))
+    await asyncio.wait_for(repl._run_with_box(), 5)
+    hook.assert_awaited_once_with("manage", "")
+    assert repl.restart_request == RELOAD_ACTION
+    assert repl.queued == ("/help",)
+    assert (PLUGINS_RELOADING, INFO) in channel.sent
+
+
+def test_manage_a_channel_with_no_host_cannot_draw_it():
+    assert ChannelAdapter.can_manage(None) is Unreachable.NO_TTY
 
 
 async def test_classic_mode_plays_resumed_lines_before_reading_input():

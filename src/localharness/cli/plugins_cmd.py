@@ -663,6 +663,11 @@ class ReloadPlan:
         return bool(self.names) and self.parked == self.waiting == 0
 
 
+def reload_names(touched: Mapping[str, Touch], running: frozenset[str]) -> frozenset[str]:
+    """The touched plugins a restart would change: loading differs from running, or running and rebound."""
+    return frozenset(n for n, t in touched.items() if t.loads != (n in running) or (n in running and t.rebind))
+
+
 @dataclass(frozen=True)
 class PluginSession:
     cfg_path: Path

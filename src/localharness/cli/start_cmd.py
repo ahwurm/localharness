@@ -3390,14 +3390,26 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             if name not in available_agent_names:
                 available_agent_names.append(name)
 
-        async def _plugin_switch(verb: str, name: str) -> str | None:
-            """/plugins for this session: a fresh plan over the session's own layers. A plan that
-            cannot be read answers one line, and the session goes on."""
-            from localharness.cli.plugins_cmd import plugins_overview, switch_decision
+        touched: dict = {}
+
+        async def _plugin_switch(verb: str, name: str) -> bool | str | None:
+            """/plugins for this session; a plan that cannot be read answers one line and the session goes on."""
+            from localharness.cli import plugins_interview
+            from localharness.cli.plugins_cmd import (
+                PluginSession, ReloadPlan, plugins_overview, reload_names, switch_decision,
+            )
             running = frozenset(plugin_result.loaded_names) if plugin_result is not None else frozenset()
             try:
                 if verb == "list":
                     return plugins_overview(running, cfg_path, workspace)
+                if verb == "manage":
+                    def should_reload(t):
+                        return ReloadPlan(reload_names(t, running), len(gate.pending), channel.waiting_asks())
+
+                    session = PluginSession(
+                        cfg_path, workspace, running, dict(plugin_result.unconfigured) if plugin_result is not None else {},
+                        dict(plugin_result.failed) if plugin_result is not None else {}, touched)
+                    return await plugins_interview.run(channel, session, should_reload)
                 return await switch_decision(name, verb == "enable", running, cfg_path, workspace)
             except Exception as exc:  # noqa: BLE001 — a config broken mid-session never ends it
                 log.warning("/plugins could not read the plugin settings", exc_info=True)
