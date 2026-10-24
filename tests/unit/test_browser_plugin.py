@@ -16,6 +16,7 @@ from localharness.tools.base import StoreBound
 from localharness.tools.builtin import browser_tool
 from localharness.tools.builtin.browser_tool import BrowserFetchTool, BrowserRuntime, Rendered
 from localharness.tools.builtin.web_tool import UNTRUSTED_BANNER, WebFetchTool, WebPageQueryTool
+from tests.plugin_prompts import fake_prompts
 from tests.unit.test_web_fetch_guard import public_web
 
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/156.0.0.0 Safari/537.36"
@@ -1240,7 +1241,7 @@ def home(tmp_path, monkeypatch, cache, world):
 def terminal(monkeypatch):
     asked: list[str] = []
     monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: True)
-    monkeypatch.setattr(plugins_cmd.typer, "confirm", lambda text, **kw: asked.append(text) or True)
+    fake_prompts(monkeypatch, confirm=lambda text, **kw: asked.append(text) or True)
     return asked
 
 
@@ -1307,7 +1308,7 @@ def test_a_projects_enable_downloads_nothing(tmp_path, monkeypatch, fake_home, c
 
 def test_without_a_terminal_it_downloads_nothing_and_says_where_to_answer(home, cache, monkeypatch):
     monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: False)
-    monkeypatch.setattr(plugins_cmd.typer, "confirm", lambda *a, **k: pytest.fail("asked without a terminal"))
+    fake_prompts(monkeypatch, confirm=lambda *a, **k: pytest.fail("asked without a terminal"))
     install = no_download(monkeypatch, cache)
     result = enable(home)
 

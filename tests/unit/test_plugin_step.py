@@ -30,6 +30,7 @@ from localharness.cli.app import app
 from localharness.plugins import builtin, discovery, setup
 from localharness.plugins.api import GLOBAL_ONLY, Check, Plugin, PluginManifest, SetupField
 from localharness.plugins.setup import AGENT_PROMPT_LEAD
+from tests.plugin_prompts import fake_prompts
 from tests.unit.test_plugin_sections import _INFO_KEYS
 from tests.unit.test_plugins_enable_setup import _CONFIG
 
@@ -229,8 +230,7 @@ def term(monkeypatch):
         return t.yes.pop(0)
 
     monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: True)
-    monkeypatch.setattr(plugins_cmd.typer, "prompt", prompt)
-    monkeypatch.setattr(plugins_cmd.typer, "confirm", confirm)
+    fake_prompts(monkeypatch, prompt=prompt, confirm=confirm)
     return t
 
 
@@ -239,8 +239,7 @@ def no_term(monkeypatch):
     def asked(*a, **kw):
         raise AssertionError("asked")
     monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: False)
-    monkeypatch.setattr(plugins_cmd.typer, "prompt", asked)
-    monkeypatch.setattr(plugins_cmd.typer, "confirm", asked)
+    fake_prompts(monkeypatch, prompt=asked, confirm=asked)
 
 
 def _enable(g: Path, *args: str):
@@ -594,7 +593,7 @@ def test_session_step_ctrl_c_at_a_question_stops_the_step(g, monkeypatch, capsys
     def prompt(*a, **kw):
         raise click.exceptions.Abort()
     monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: True)
-    monkeypatch.setattr(plugins_cmd.typer, "prompt", prompt)
+    fake_prompts(monkeypatch, prompt=prompt)
     outcome = plugins_cmd.session_step(("enable", "pro"), str(g))
 
     assert "Stopped. Your conversation continues." in capsys.readouterr().out
@@ -664,8 +663,7 @@ def typed(monkeypatch):
         raise AssertionError("dispatch has no setup action to confirm")
 
     monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: True)
-    monkeypatch.setattr(plugins_cmd.typer, "prompt", prompt)
-    monkeypatch.setattr(plugins_cmd.typer, "confirm", confirm)
+    fake_prompts(monkeypatch, prompt=prompt, confirm=confirm)
     return calls, answers
 
 

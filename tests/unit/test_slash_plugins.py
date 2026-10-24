@@ -36,6 +36,7 @@ from localharness.cli import plugins_cmd, start_cmd
 from localharness.cli.repl import OrchestratorREPL
 from localharness.cli.slash_commands import all_rows, find_row
 from localharness.plugins import builtin, discovery
+from tests.plugin_prompts import fake_prompts
 from tests.unit.test_plugin_step import Reach
 from tests.unit.test_plugins_enable_setup import _CONFIG, Needy, Stub
 from tests.unit.test_repl_input_box import FakeBoxChannel, _pending_turn, _repl
@@ -120,7 +121,7 @@ def test_decision_disable_of_a_plugin_not_enabled_is_already_off(g):
 def test_decision_asks_and_writes_nothing(g, monkeypatch):
     def boom(*a, **k):
         raise AssertionError("the decision must not ask or write")
-    monkeypatch.setattr(plugins_cmd.typer, "prompt", boom)
+    fake_prompts(monkeypatch, prompt=boom)
     monkeypatch.setattr(plugins_cmd, "atomic_write_overlay", boom)
     _overrides(g, {"stub": {"enabled": True}})
     before = sorted(p.name for p in g.iterdir())
@@ -420,7 +421,7 @@ def test_indicator_a_failing_setup_action_row_is_a_failed_check(g, monkeypatch):
     offline doctor check passes reaches the indicator as "its check failed", not "on"."""
     monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Stub, Needy, Reach))
     monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: True)
-    monkeypatch.setattr(plugins_cmd.typer, "prompt", lambda text, default=None, **kw: "http://far")
+    fake_prompts(monkeypatch, prompt=lambda text, default=None, **kw: "http://far")
     monkeypatch.setattr(plugins_cmd, "console", Console(file=io.StringIO(), width=400))
 
     outcome = plugins_cmd.session_step(("enable", "reach"), str(g))

@@ -20,6 +20,7 @@ from localharness.cli import components_cmd, plugins_cmd
 from localharness.cli.app import app
 from localharness.plugins import builtin, discovery
 from localharness.plugins.api import GLOBAL_ONLY, Plugin, PluginManifest, SetupField
+from tests.plugin_prompts import fake_prompts
 from tests.unit.test_plugins_enable_setup import _CONFIG
 
 SENTINEL = "SENTINEL-XYZ"
@@ -150,7 +151,7 @@ def test_the_secret_setup_question_hides_its_input(g, monkeypatch) -> None:
         calls.append({"text": text, **kw})
         return SENTINEL
     monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: True)
-    monkeypatch.setattr(plugins_cmd.typer, "prompt", prompt)
+    fake_prompts(monkeypatch, prompt=prompt)
     result = _run(g, "plugins", "enable", "secp")
     assert result.exit_code == 0, result.output
     assert calls == [{"text": "Token", "hide_input": True, "show_default": False}]
@@ -166,7 +167,7 @@ def test_a_stored_secret_is_never_offered_as_the_default(g, monkeypatch) -> None
         calls.append((text, default, kw))
         return ""
     monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: True)
-    monkeypatch.setattr(plugins_cmd.typer, "prompt", prompt)
+    fake_prompts(monkeypatch, prompt=prompt)
     result = _run(g, "plugins", "enable", "secp")
     assert result.exit_code == 0, result.output
     # the question says the stored token is kept and how to clear it — and still shows nothing

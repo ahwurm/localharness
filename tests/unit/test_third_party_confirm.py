@@ -20,6 +20,7 @@ from localharness.cli import plugins_cmd
 from localharness.cli.app import app
 from localharness.plugins import builtin, discovery
 from localharness.plugins.api import Plugin, PluginManifest
+from tests.plugin_prompts import fake_prompts
 from tests.unit.test_plugin_resolve import write_folder_plugin
 
 _REAL_DISCOVER = discovery.discover
@@ -76,8 +77,7 @@ def terminal(monkeypatch):
         raise AssertionError("a setup question was asked")
 
     monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: True)
-    monkeypatch.setattr(plugins_cmd.typer, "confirm", confirm)
-    monkeypatch.setattr(plugins_cmd.typer, "prompt", prompt)
+    fake_prompts(monkeypatch, prompt=prompt, confirm=confirm)
     return asked, answer
 
 

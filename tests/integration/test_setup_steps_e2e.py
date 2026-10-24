@@ -22,6 +22,7 @@ from localharness.cli.app import app
 from localharness.plugins import setup
 from localharness.plugins.api import Check
 from localharness.plugins.setup import AGENT_PROMPT_LEAD
+from tests.plugin_prompts import fake_prompts
 
 runner = CliRunner()
 _CONFIG = {  # port 9 (discard): nothing ever reaches a model
@@ -65,8 +66,7 @@ def terminal(monkeypatch):
         return confirms.pop(0)
 
     monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: True)
-    monkeypatch.setattr(plugins_cmd.typer, "prompt", prompt)
-    monkeypatch.setattr(plugins_cmd.typer, "confirm", confirm)
+    fake_prompts(monkeypatch, prompt=prompt, confirm=confirm)
     return asked, answers, confirms
 
 
@@ -75,8 +75,7 @@ def no_terminal(monkeypatch):
     def never(*a, **kw):
         raise AssertionError("asked off a terminal")
     monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: False)
-    monkeypatch.setattr(plugins_cmd.typer, "prompt", never)
-    monkeypatch.setattr(plugins_cmd.typer, "confirm", never)
+    fake_prompts(monkeypatch, prompt=never, confirm=never)
 
 
 def _enable(g: Path, *args: str):
