@@ -2959,24 +2959,33 @@ async def test_restart_at_close_a_rerun_that_passes_for_a_plugin_unconfigured_at
     assert _rows(channel.asked[-1])[1].hint == "on — starts when you close Plugins"
 
 
-async def test_restart_at_close_should_reload_is_asked_after_every_action_and_at_close(layers) -> None:
+async def test_restart_at_close_should_reload_is_asked_after_every_action_and_the_last_ask_is_followed_by_the_close(layers) -> None:
     _on_disk(layers, stub=True)
-    should_reload, calls = _recorded({"stub"})
-    drawn = []
+    recorded, calls = _recorded({"stub"})
+    events, drawn = [], []
+
+    def should_reload(touched):
+        events.append("plan")
+        return recorded(touched)
+
+    class Ordered(FakeChannel):
+        @asynccontextmanager
+        async def suspended_box(self):
+            async with super().suspended_box() as (output, console, close):
+                yield output, console, lambda: (events.append("close"), close())[1]
 
     def root(answer):
         def draw(options):
-            drawn.append((options[-1].label, calls[-1]))
+            drawn.append((options[-1].label, calls[-1].names))
             return answer
         return draw
 
-    channel = FakeChannel(root("0"), Label("Disable"), root("+close"))
+    channel = Ordered(root("0"), Label("Disable"), root("+close"))
 
     assert await run(channel, _session(layers, running=frozenset({"stub"})), should_reload) is True
 
-    assert len(calls) == 6 and calls[0].names == calls[1].names == calls[2].names == frozenset()
-    assert calls[3].names == calls[4].names == calls[5].names == frozenset({"stub"})
-    assert drawn == [("Close", calls[1]), (RESTARTS, calls[4])]
+    assert events[-2:] == ["plan", "close"] and calls[-1].names == frozenset({"stub"})
+    assert drawn == [("Close", frozenset()), (RESTARTS, frozenset({"stub"}))]
 
 
 async def test_restart_at_close_waiting_asks_defer_the_restart_and_a_later_open_applies_it(layers) -> None:
