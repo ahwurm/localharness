@@ -5,12 +5,15 @@ import asyncio
 import importlib.metadata
 import importlib.util
 import io
+import os
 import shlex
+import signal
 import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import click
 import pytest
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
@@ -436,3 +439,203 @@ def test_the_install_strings_are_the_spec_text():
     assert p.ENABLE_MANUAL == "{name}: enabled in config; this install must be done by hand."
     assert p.TYPED_NEEDS_EXTRA == "{name}: needs {extra}."
     assert p.TYPED_ROUTE == "/plugins enable {name} again"
+
+
+# --------------------------------------------------------------------------- decline, abort, failure
+
+SKIP = ["To finish later, in another terminal run:", shlex.join(PIP_ARGV), "then Re-run setup under /plugins → a"]
+
+
+def test_install_pass_declined_prints_one_skipped_block_and_runs_nothing(h):
+    h.answer = False
+    assert h.run() == frozenset()
+    assert h.lines[-4:] == ["a: enabled in config, package not installed", *SKIP]
+    assert h.buf.getvalue().count("package not installed") == 1
+    assert "installing" not in h.buf.getvalue() and h.spawns == []
+    assert h.progress.phase == "consent"
+
+
+def test_install_pass_aborted_at_the_consent_spawns_nothing(h):
+    h.answer = None
+    with pytest.raises(click.exceptions.Abort):
+        h.run()
+    assert h.spawns == [] and "package not installed" not in h.buf.getvalue()
+
+
+def test_install_pass_exit_code_shows_the_last_thirty_lines_then_one_skipped_block(h):
+    h.proc = _Proc([b"".join(b"line %d\n" % i for i in range(40))], code=3)
+    assert h.run() == frozenset()
+    at = h.lines.index(f"pip installing {SPEC} — output is shown only if it fails")
+    assert h.lines[at + 1:] == [f"line {i}" for i in range(10, 40)] + [
+        "a: enabled in config, package not installed — the install failed (exit 3; see the output above)", *SKIP]
+    assert h.buf.getvalue().count("installing") == 1 and h.proc.calls == ["wait"]
+
+
+def test_install_pass_silent_success_prints_installing_once_and_nothing_else(h):
+    assert h.run() == frozenset({"a"})
+    assert h.lines[-1] == f"pip installing {SPEC} — output is shown only if it fails"
+    assert h.proc.calls == ["wait"]
+
+
+def test_install_pass_silent_failure_prints_the_exit_code_and_no_output_lines(h):
+    h.proc = _Proc(code=7)
+    h.run()
+    at = h.lines.index(f"pip installing {SPEC} — output is shown only if it fails")
+    assert h.lines[at + 1:] == [
+        "a: enabled in config, package not installed — the install failed (exit 7; see the output above)", *SKIP]
+
+
+def test_install_pass_a_success_refreshes_the_import_caches(h, monkeypatch):
+    seen = []
+    monkeypatch.setattr(plugins_cmd.importlib, "invalidate_caches", lambda: seen.append(h.proc.calls[:]))
+    h.run()
+    assert seen == [["wait"]]
+
+
+def test_install_pass_a_manual_route_asks_nothing_and_prints_its_block(h, monkeypatch):
+    monkeypatch.setattr(update_cmd, "_installer_kind", lambda: ("uv-tool", None))
+    assert h.run(("a", "b")) == frozenset()
+    assert h.lines == [
+        "a, b: enabled in config, package not installed", "Install uv first (https://docs.astral.sh/uv/).",
+        "In another terminal run:", f"uv tool install {shlex.quote(SPEC)}",
+        "then Re-run setup under /plugins → a, b"]
+    assert h.asked == [] and h.spawns == []
+
+
+# --------------------------------------------------------------------------- the private directory
+
+def _only_skipped(h, why: str) -> None:
+    assert h.lines[-4:] == [f"a: enabled in config, package not installed{why}", *SKIP]
+    assert "installing" not in h.buf.getvalue() and h.spawns == []
+    assert list(h.cfg.iterdir()) == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write anywhere")
+def test_install_pass_not_writable_config_dir_aborts_with_its_reason(h):
+    h.cfg.chmod(0o500)
+    try:
+        assert h.run() == frozenset()
+    finally:
+        h.cfg.chmod(0o700)
+    _only_skipped(h, f" — {h.cfg} is not writable")
+
+
+def test_install_pass_open_to_others_config_dir_aborts_with_its_reason(h, monkeypatch):
+    monkeypatch.setattr(plugins_cmd, "ensure_private_dir", lambda path: None)
+    h.cfg.chmod(0o755)
+    assert h.run() == frozenset()
+    _only_skipped(h, f" — {h.cfg} is open to other accounts and could not be made private")
+
+
+def test_install_pass_open_to_others_is_not_checked_on_windows(h, monkeypatch):
+    monkeypatch.setattr(plugins_cmd, "ensure_private_dir", lambda path: None)
+    monkeypatch.setattr(update_cmd, "_is_windows", lambda: True)
+    h.cfg.chmod(0o755)
+    assert h.run() == frozenset({"a"}) and len(h.spawns) == 1
+
+
+def test_install_pass_tightens_an_open_config_dir_it_can_and_goes_on(h):
+    h.cfg.chmod(0o755)
+    assert h.run() == frozenset({"a"})
+    assert h.cfg.stat().st_mode & 0o077 == 0
+
+
+def test_install_pass_no_temp_dir_aborts_with_its_reason(h, monkeypatch):
+    def refuse(**kw):
+        raise OSError("disk full")
+    monkeypatch.setattr(plugins_cmd.tempfile, "mkdtemp", refuse)
+    assert h.run() == frozenset()
+    _only_skipped(h, f" — no temp dir under {h.cfg}")
+
+
+def test_install_pass_spawn_raises_propagates_and_leaves_no_directory(h, monkeypatch):
+    async def refuse(*argv, **kw):
+        raise FileNotFoundError(argv[0])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", refuse)
+    with pytest.raises(FileNotFoundError):
+        h.run()
+    assert list(h.cfg.iterdir()) == [] and "package not installed" not in h.buf.getvalue()
+
+
+# --------------------------------------------------------------------------- the output reader
+
+def _stream(chunks):
+    queue = list(chunks)
+
+    async def read(n):
+        return queue.pop(0) if queue else b""
+    return SimpleNamespace(read=read)
+
+
+@pytest.mark.parametrize("chunks, expected", [
+    ([b"x" * 4096], ["x" * 4096]),
+    ([b"x" * 4097], ["x" * 4096]),
+    ([b"x" * 70_000], ["x" * 4096]),
+    ([b"x" * 4096] * 17 + [b"x" * 1000], ["x" * 4096]),
+    ([b"x" * 5000 + b"\nnext\n"], ["x" * 4096, "next"]),
+    ([b"abc\rdef\n"], ["abcdef"]),
+    ([b"ab", b"c\r", b"\ndef"], ["abc", "def"]),
+    ([b"\xff\xfe"], ["\ufffd\ufffd"]),
+    ([b"\x1b]8;;http://evil.test\x07link\x1b]8;;\x07\n"], ["link"]),
+    ([b"", b"never"], []),
+])
+def test_output_lines_are_truncated_sanitized_and_never_raise(chunks, expected):
+    assert asyncio.run(plugins_cmd._read_lines(_stream(chunks))) == expected
+
+
+def test_output_keeps_only_the_last_thirty_lines():
+    out = asyncio.run(plugins_cmd._read_lines(_stream([b"".join(b"%d\n" % i for i in range(100))])))
+    assert out == [str(i) for i in range(70, 100)]
+
+
+# --------------------------------------------------------------------------- stopping the run
+
+def _cancel_during_read(h) -> None:
+    async def go():
+        task = asyncio.ensure_future(h.call())
+        await h.proc.reading.wait()
+        task.cancel()
+        await task
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(go())
+
+
+def test_install_pass_cancel_terminates_the_child_and_removes_the_directory(h):
+    h.proc = _Proc(blocked=True)
+    _cancel_during_read(h)
+    assert h.proc.calls == ["terminate", "wait"] and h.progress.phase == "install"
+    assert list(h.cfg.iterdir()) == []
+
+
+def test_install_pass_cancel_timeout_kills_the_child_and_still_raises_cancelled(h, monkeypatch):
+    monkeypatch.setattr(plugins_cmd, "_TERMINATE_GRACE", 0.01)
+    h.proc = _Proc(blocked=True, hangs=True)
+    _cancel_during_read(h)
+    assert h.proc.calls == ["terminate", "wait", "kill", "wait"]
+    assert list(h.cfg.iterdir()) == []
+
+
+def test_install_pass_cancel_kill_on_a_reaped_child_does_not_raise(h, monkeypatch):
+    monkeypatch.setattr(plugins_cmd, "_TERMINATE_GRACE", 0.01)
+    h.proc = _Proc(blocked=True, hangs=True, kill_raises=True)
+    _cancel_during_read(h)
+    assert h.proc.calls == ["terminate", "wait", "kill", "wait"]
+
+
+def test_install_pass_a_child_already_exited_is_not_signalled(h):
+    h.run()
+    assert not {"terminate", "kill"} & set(h.proc.calls)
+
+
+def test_install_pass_ignored_sigint_says_so_before_installing(h, monkeypatch):
+    monkeypatch.setattr(signal, "getsignal", lambda s: signal.SIG_IGN)
+    h.run()
+    said = "Ctrl-C is ignored in this session; this install cannot be stopped from the keyboard"
+    assert h.lines[-2:] == [said, f"pip installing {SPEC} — output is shown only if it fails"]
+    assert h.buf.getvalue().count(said) == 1
+
+
+def test_install_pass_a_live_sigint_handler_says_nothing_about_ignoring(h):
+    h.run()
+    assert "ignored" not in h.buf.getvalue()
