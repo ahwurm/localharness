@@ -548,11 +548,11 @@ ACTIONS: tuple[tuple[str, str, Callable[[Any, bool | None, Any, PluginSession, b
 )
 
 
-def actions_for(entry: Any, session: PluginSession, route: Any) -> list[tuple[Option, Callable]]:
+def actions_for(entry: Any, session: PluginSession, route: Any, loaded: tuple[Any, Any] | None = None) -> list[tuple[Option, Callable]]:
     """The menu rows a plugin's state allows, each with its handler; a handler answering True keeps the menu open."""
     from localharness.plugins import lifecycle
 
-    loader, resolution = _loaded(session)
+    loader, resolution = loaded or _loaded(session)
     enabled = resolution.enabled.get(entry.name)
     settings = entry.state == "on" and bool(plugins_cmd.settings_rows(resolution, loader, entry))
     hint = RERUN_HINT if lifecycle.downloading(entry.name) else ""
@@ -562,13 +562,14 @@ def actions_for(entry: Any, session: PluginSession, route: Any) -> list[tuple[Op
 
 async def _ask_menu(flow: Flow, index: int, name: str) -> Any:
     session = flow.session
-    entries = _resolved(session)[1]
+    loaded = _loaded(session)
+    entries = loaded[1].plan.entries
     entry = entries[index] if index < len(entries) and entries[index].name == name else None
     if entry is None:
         return None
     flow.plan = flow.should_reload(session.touched)
     route = plugins_cmd.install_route_for(entry)
-    actions = actions_for(entry, session, route)
+    actions = actions_for(entry, session, route, loaded)
     question = f"{sanitize_for_display(name)} — {_row_state(entry, session, flow.plan)} (Esc = back)"
     answer = await flow.channel.run_interview(question, [option for option, _ in actions], default=0, cancel="back")
     return answer, entry, route, {option.key: handler for option, handler in actions}
