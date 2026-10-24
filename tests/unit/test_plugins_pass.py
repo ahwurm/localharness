@@ -1,17 +1,26 @@
-"""The project override: its one predicate and its one sentence."""
+"""The project override (its one predicate and its one sentence) and the disable producer."""
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import yaml
 
-from localharness.cli.plugins_cmd import OVERRIDE_LINE, OVERRIDE_SAVED, override_line, override_of
+from localharness.cli.plugins_cmd import (
+    OVERRIDE_LINE, OVERRIDE_SAVED, PassProgress, PassResult, PluginSession, Refusal, StepOutcome, Touch,
+    disable_pass, override_line, override_of,
+)
 from localharness.config.loader import ConfigLoader
+from localharness.core.bus import EventBus
 from localharness.plugins import builtin, discovery
+from localharness.plugins import resolve as resolve_module
 from localharness.plugins.resolve import resolve
+from tests.unit.test_plugin_resolve import write_folder_plugin
 from tests.unit.test_plugins_bookkeeping import _CONFIG, Stub
+
+_REAL_DISCOVER = discovery.discover
 
 
 @pytest.fixture
@@ -107,3 +116,88 @@ def test_override_line_fills_the_one_template(layers) -> None:
 def test_the_template_and_the_saved_prefix() -> None:
     assert OVERRIDE_LINE.startswith("{saved}this project turns it {state} ({file})")
     assert OVERRIDE_SAVED == "saved on this machine, but "
+
+
+def _session(layers, **kw) -> PluginSession:
+    return PluginSession(layers.g, layers.ws, frozenset(), kw.pop("unconfigured", {}), kw.pop("failed", {}), **kw)
+
+
+async def _disable(layers, name: str = "stub", **kw):
+    progress, reports = PassProgress(), []
+    result = await disable_pass(_session(layers, **kw), name, progress=progress,
+                                report=lambda kind, payload: reports.append((kind, payload)))
+    return result, progress, reports
+
+
+def _machine(layers) -> dict:
+    return yaml.safe_load((layers.g / "overrides.yaml").read_text(encoding="utf-8"))
+
+
+async def test_disable_pass_writes_the_machine_switch_off(layers) -> None:
+    _write(layers.g / "overrides.yaml", True)
+
+    result, progress, reports = await _disable(layers)
+
+    assert _machine(layers) == {"stub": {"enabled": False}}
+    assert result == PassResult("disabled", StepOutcome("stub", False))
+    assert (progress.phase, progress.wrote) == ("disable", True)
+    assert reports == [("wrote", (f"stub disabled in {layers.g / 'overrides.yaml'}", ()))]
+
+
+async def test_disable_pass_under_a_project_that_turns_it_on_is_an_override_that_still_loads(layers) -> None:
+    _write(layers.ws / "config.yaml", True)
+
+    result, progress, reports = await _disable(layers)
+
+    assert _machine(layers) == {"stub": {"enabled": False}}
+    assert (result.kind, result.override, result.step, result.loads) == (
+        "override", ("on", layers.ws / "config.yaml"), StepOutcome("stub", False), True)
+    assert progress.wrote and [kind for kind, _ in reports] == ["wrote"]
+    assert not (layers.ws / "overrides.yaml").exists()
+
+
+@pytest.mark.parametrize("kw", [
+    {"touched": {"stub": Touch(False, True, ("failed", "x"))}},
+    {"failed": {"stub": "import broke"}},
+    {"unconfigured": {"stub": "stub.url"}}])
+async def test_disable_pass_keeps_a_plugin_that_would_not_load_out_of_loads(layers, kw) -> None:
+    _write(layers.ws / "config.yaml", True)
+
+    result, _, _ = await _disable(layers, **kw)
+
+    assert (result.kind, result.loads) == ("override", False)
+
+
+async def test_disable_pass_publishes_nothing_and_resolves_once(layers, monkeypatch) -> None:
+    async def publish(self, event):
+        raise AssertionError("published")
+
+    calls = []
+
+    def counting(loader, *a, **kw):
+        calls.append(loader)
+        return resolve(loader, *a, **kw)
+
+    monkeypatch.setattr(EventBus, "publish", publish)
+    monkeypatch.setattr(resolve_module, "resolve", counting)
+    _write(layers.ws / "config.yaml", True)
+
+    await _disable(layers)
+
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("name", ["nope", "org"])
+async def test_disable_pass_refuses_a_name_the_plan_refused_or_does_not_hold(layers, monkeypatch, name) -> None:
+    monkeypatch.setattr(discovery, "discover", _REAL_DISCOVER)
+    write_folder_plugin(layers.g, "org")
+
+    with pytest.raises(Refusal):
+        await _disable(layers, name)
+
+    assert not (layers.g / "overrides.yaml").exists()
+
+
+def test_disable_pass_is_a_coroutine_with_no_await_in_it() -> None:
+    assert inspect.iscoroutinefunction(disable_pass)
+    assert "await" not in inspect.getsource(disable_pass)

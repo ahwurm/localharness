@@ -1115,6 +1115,33 @@ async def install_pass(session: PluginSession, extras: set[str], names: list[str
     return frozenset(names)
 
 
+async def disable_pass(session, name, *, progress, report) -> PassResult:
+    """Write `<name>.enabled: false` to the machine overlay; no event, no second read of the plan."""
+    from localharness.config.loader import ConfigLoader
+    from localharness.plugins.resolve import resolve
+
+    progress.phase = "disable"
+    loader = ConfigLoader(config_dir=session.cfg_path, local_config_dir=session.workspace)
+    resolution = resolve(loader)
+    entry = resolution.plan.entry(name)
+    if entry is None:
+        raise Refusal(f"Unknown plugin: {name}. /plugins lists them.", ())
+    if name not in resolution.enabled:
+        raise Refusal(f"{name} cannot be turned off: {entry.reason}", ())
+    pair = override_of(loader, entry, False, False)
+    target = loader.user_overlay_path
+    overlay = load_overlay(target)
+    set_value_in_dict(overlay, f"{name}.enabled", False)
+    atomic_write_overlay(target, overlay)
+    progress.wrote = True
+    report("wrote", (f"{name} disabled in {target}", ()))
+    if pair is None:
+        return PassResult("disabled", StepOutcome(name, False))
+    prior = session.touched.get(name) or prior_touch(session, name)
+    return PassResult("override", StepOutcome(name, False), override=pair,
+                      loads=loads_from_plan(session, name, prior, None, resolution))
+
+
 def session_step(action: tuple[str, str], config_dir: str | None) -> StepOutcome:
     """The step `/plugins enable|disable NAME` runs between the two halves of a terminal session's
     restart (cli/start_cmd.start_app): the same _switch the shell command runs, on the plain
