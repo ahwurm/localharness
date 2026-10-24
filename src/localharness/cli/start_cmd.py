@@ -3618,7 +3618,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 await stop_plugins(plugin_result)  # reverse start order, each stop contained
             except Exception as exc:  # noqa: BLE001
                 log.debug("plugin shutdown failed: %s", exc)
-            set_plugin_rows(())  # the rows are process-wide: they leave with the session
+        set_plugin_rows(())  # the rows are process-wide: they leave with the session
         # LAST (#154): the LLM client's httpx pool outlives every consumer that could still issue
         # a request through it — the REPL and its agents (repl.run() has returned), consolidation,
         # the gates — and the close-out summary above is pure. Closing it earlier would risk

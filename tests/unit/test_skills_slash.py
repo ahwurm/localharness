@@ -718,3 +718,125 @@ async def test_a_start_with_no_skill_has_no_skill_row_and_no_session(tmp_path, p
     seen = _watch_run(monkeypatch)
     await _start_async(None, False, False, str(tmp_path))
     assert seen["session"] is None and not [r for r in seen["rows"] if r.plugin == "skill"]
+
+
+def _rows_seen(monkeypatch, fail=None):
+    seen = {}
+
+    async def run(self):
+        seen.update(rows=all_rows(), session=self._skills)
+        if fail is not None:
+            raise fail
+
+    monkeypatch.setattr(OrchestratorREPL, "run", run)
+    return seen
+
+
+def _taken(name, skill=None):
+    return f'{skill or name} {name}: slash command /{name} is already taken — say "use the {name} skill", or rename it'
+
+
+@pytest.mark.parametrize("patched", ["localharness.plugins.lifecycle.start_plugins", "localharness.plugins.resolve.resolve"])
+async def test_skills_have_rows_when_the_plugin_block_raises_and_the_table_clears_at_exit(tmp_path, pkg, rows, monkeypatch, patched):
+    from localharness.cli.start_cmd import _start_async
+    from tests.unit.test_skills_listing import _start_world
+
+    seen_set, _ = _start_world(tmp_path, monkeypatch)
+
+    def boom(*a, **k):
+        raise RuntimeError("no plugins")
+
+    monkeypatch.setattr(patched, boom)
+    seen = _rows_seen(monkeypatch)
+    await _start_async(None, False, False, str(tmp_path))
+    assert seen["rows"] == SLASH_COMMANDS + tuple(skill_row(s) for s in seen_set[0])
+    assert all_rows() == SLASH_COMMANDS
+
+
+async def test_an_exception_out_of_the_repl_still_clears_the_table(tmp_path, pkg, rows, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+    from tests.unit.test_skills_listing import _start_world
+
+    _start_world(tmp_path, monkeypatch)
+    seen = _rows_seen(monkeypatch, RuntimeError("boom"))
+    with pytest.raises(RuntimeError, match="boom"):
+        await _start_async(None, False, False, str(tmp_path))
+    assert any(r.plugin == "skill" for r in seen["rows"]) and all_rows() == SLASH_COMMANDS
+
+
+async def test_a_skill_named_like_a_core_row_gets_no_row_and_is_told_once(tmp_path, pkg, rows, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+    from tests.unit.test_skills_listing import _start_world
+    from tests.unit.test_start_cmd import _capture_start_console
+
+    _start_world(tmp_path, monkeypatch, skill=False)
+    write_skill(tmp_path / "skills", "help")
+    write_skill(tmp_path / "skills", "help-me")
+    printed = _capture_start_console(monkeypatch)
+    seen = _rows_seen(monkeypatch)
+    await _start_async(None, False, False, str(tmp_path))
+    by_name = {r.name: r for r in seen["rows"]}
+    assert by_name["/help"] in SLASH_COMMANDS and by_name["/help"].plugin is None
+    assert by_name["/help-me"].plugin == "skill"
+    assert seen["session"].find("help").name == "help"
+    assert "\n".join(printed).count(_taken("help", "skill")) == 1
+
+
+async def test_a_skill_named_like_a_plugin_row_leaves_the_plugin_row_and_is_told_once(tmp_path, pkg, rows, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+    from tests.unit.test_skills_listing import _start_world
+    from tests.unit.test_start_cmd import _capture_start_console
+    from tests.unit.test_start_plugins import _bundle, _Probe
+
+    _start_world(tmp_path, monkeypatch, skill=False)
+    write_skill(tmp_path / "skills", "probe")
+    _bundle(monkeypatch, _Probe)
+    printed = _capture_start_console(monkeypatch)
+    seen = _rows_seen(monkeypatch)
+    await _start_async(None, False, False, str(tmp_path))
+    (row,) = [r for r in seen["rows"] if r.name == "/probe"]
+    assert row.plugin == "probe"
+    assert "\n".join(printed).count(_taken("probe", "skill")) == 1
+    assert all_rows() == SLASH_COMMANDS
+
+
+async def test_skill_rows_follow_the_plugin_rows_in_skill_order(tmp_path, pkg, rows, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+    from tests.unit.test_skills_listing import _start_world
+    from tests.unit.test_start_plugins import _bundle, _Probe
+
+    _start_world(tmp_path, monkeypatch, skill=False)
+    write_skill(tmp_path / "skills", "beta")
+    write_skill(tmp_path / "skills", "alpha")
+    _bundle(monkeypatch, _Probe)
+    seen = _rows_seen(monkeypatch)
+    await _start_async(None, False, False, str(tmp_path))
+    assert [r.name for r in seen["rows"][len(SLASH_COMMANDS):]] == ["/probe", "/alpha", "/beta"]
+
+
+def test_start_installs_the_rows_once_and_clears_outside_the_plugin_guard():
+    from localharness.cli.start_cmd import _start_async
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(_start_async)))
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "set_plugin_rows"]
+    assert len(calls) == 2
+    (clear,) = [c for c in calls if ast.unparse(c.args[0]) == "()"]
+    node, guards = clear, []
+    while node in parents:
+        node = parents[node]
+        if isinstance(node, ast.If):
+            guards.append(ast.unparse(node.test))
+    assert not [g for g in guards if "plugin_result" in g]
+
+
+async def test_a_skill_row_is_listed_by_help_and_the_phone_menu(tmp_path, pkg, rows):
+    from tests.unit.test_slash_table import _phone_menu
+
+    from localharness.cli.slash_commands import help_text
+
+    write_skill(tmp_path / "cfg" / "skills", "notes")
+    (notes,) = SkillSet.discover(tmp_path / "cfg", None).skills
+    assert rows([skill_row(notes)]) == []
+    assert "  /notes " in help_text()
+    assert (await _phone_menu(tmp_path))[-1] == {"name": "/notes", "description": "Use notes when asked."}
