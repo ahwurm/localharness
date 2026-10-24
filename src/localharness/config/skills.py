@@ -304,3 +304,23 @@ class SkillSet:
             return _skip(CAP_TOTAL, here, dir=here)
         self.skills = self.skills + (record,)
         return record
+
+
+LISTING_BUDGET_CHARS = 1_300
+
+
+def shown(skills: tuple[Skill, ...]) -> tuple[tuple[str, str, str | None, int], ...]:
+    """Rows of (name, label, description or None, fit_len) under the listing budget, project descriptions dropped first."""
+    total = sum(len(s.description) for s in skills)
+    order = sorted(range(len(skills)), key=lambda i: (skills[i].origin != "project", -len(skills[i].description), skills[i].name, i))
+    dropped = set()
+    for i in order:
+        if total <= LISTING_BUDGET_CHARS:
+            break
+        dropped.add(i)
+        total -= len(skills[i].description)
+    slack = LISTING_BUDGET_CHARS - total
+    return tuple(
+        (s.name, s.origin, None, slack) if i in dropped else (s.name, s.origin, s.description, slack + len(s.description))
+        for i, s in enumerate(skills)
+    )
