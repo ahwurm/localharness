@@ -1482,12 +1482,14 @@ class OrchestratorREPL:
         lowered = cmd.lower().strip()
         row = find_row(lowered)
         if row is not None:
-            if callable(row.handler):
-                await self._run_plugin_slash(row, raw[len(row.name):].strip())
-            else:
+            if row.plugin is None:
                 # A core row's adapter gets the text after the name as typed and lower-cased;
                 # each passes on exactly the slice its command always took.
                 await getattr(self, row.handler)(raw[len(row.name):], lowered[len(row.name):])
+            elif callable(row.handler):
+                await self._run_plugin_slash(row, raw[len(row.name):].strip())
+            else:
+                await getattr(self, row.handler)(row, raw[len(row.name):].strip())
             return True
 
         # #48: a single-token "/word" is the COMMAND namespace — reject unknown ones
