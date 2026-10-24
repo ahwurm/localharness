@@ -395,6 +395,14 @@ def test_no_agents_skills_directory_no_line(fake_home, pkg, monkeypatch, as_file
     assert _run() == []
 
 
+def test_a_deleted_working_directory_says_nothing_and_does_not_crash(fake_home, pkg, monkeypatch):
+    gone = fake_home() / "gone"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+    assert _run() == []
+
+
 def test_a_localharness_dir_made_between_two_runs_changes_only_the_second(fake_home, pkg, monkeypatch):
     home = fake_home()
     proj = home / "proj"
