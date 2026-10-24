@@ -295,9 +295,9 @@ def _classic(channel, *, pending=None, **kw):
     return repl, agent
 
 
-def _box(**kw):
+def _box(channel=None, **kw):
     """test_repl_input_box's `_repl`, built again with the /plugins keywords."""
-    base, channel, agent = _repl(BoxTerminal())
+    base, channel, agent = _repl(channel or BoxTerminal())
     repl = OrchestratorREPL(orchestrator=base._orchestrator, agent_loop=agent, channel=channel,
                             bus=base._bus, **kw)
     repl._box_ctrl_q = asyncio.Queue()
@@ -415,6 +415,52 @@ async def test_manage_an_unreachable_screen_sends_the_list_then_why_and_never_as
     await repl.run()
     hook.assert_awaited_once_with("list", "")
     assert channel.sent == [("Plugins:\n  x  on", INFO), (unavailable(Unreachable.TOO_SMALL), INFO)]
+
+
+CANT_DRAW = "Plugins can't be drawn here — "
+UNAVAILABLE_TEXTS = {why: CANT_DRAW + ("enlarge the window, then open /plugins again" if why is Unreachable.TOO_SMALL
+                                       else "use /plugins enable <name>") for why in Unreachable}
+
+
+@pytest.mark.parametrize("pending", [None, {1: object()}], ids=["idle", "call_parked"])
+@pytest.mark.parametrize("why", list(Unreachable), ids=lambda why: why.name.lower())
+async def test_manage_unreachable_sends_the_list_then_the_exact_line_and_never_manages_or_refuses(why, pending):
+    hook = AsyncMock(return_value="Plugins:\n  x  on")
+    channel = Terminalish(["/plugins"])
+    channel.why = why
+    repl, _ = _classic(channel, pending=pending, on_plugin_switch=hook)
+    await repl.run()
+    assert channel.sent == [("Plugins:\n  x  on", INFO), (UNAVAILABLE_TEXTS[why], INFO)]
+    assert [c.args for c in hook.await_args_list] == [("list", "")]
+    assert PARKED not in [text for text, _ in channel.sent]
+    assert repl.restart_request is None
+
+
+class _UndrawableBox(BoxTerminal):
+    def can_manage(self):
+        return Unreachable.TOO_SMALL
+
+    @property
+    def suspended_box(self):
+        raise AssertionError("the input box was suspended")
+
+
+async def test_manage_unreachable_in_box_mode_lists_in_place_and_never_suspends_the_box():
+    hook = AsyncMock(return_value="Plugins:\n  x  on")
+    repl, channel, _ = _box(_UndrawableBox(), on_plugin_switch=hook, queued=("/plugins", "/quit"))
+    await asyncio.wait_for(repl._run_with_box(), 5)
+    assert [c.args for c in hook.await_args_list] == [("list", "")]
+    assert channel.sent == [("Plugins:\n  x  on", INFO), (UNAVAILABLE_TEXTS[Unreachable.TOO_SMALL], INFO)]
+    assert repl.restart_request is None
+
+
+async def test_manage_terminal_only_every_time_a_channel_that_cannot_switch_types_bare_plugins():
+    hook = AsyncMock(return_value="Plugins:\n  x  on")
+    channel = RecordingChannel(["/plugins", "/plugins"])
+    repl, _ = _classic(channel, on_plugin_switch=hook)
+    await repl.run()
+    assert channel.sent == [(TERMINAL_ONLY, INFO), (TERMINAL_ONLY, INFO)]
+    hook.assert_not_awaited()
 
 
 @pytest.mark.parametrize("line", ["/plugins", "/PLUGINS  "])
