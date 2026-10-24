@@ -343,7 +343,6 @@ PAIRS = [
     (skills.CONTROL_PATH, skills.TOO_LARGE, _plain(b"x" * 204_801, entry="a\nb")),
     (skills.TOO_LARGE, skills.UNREADABLE, _plain(b"\xff" * 204_801)),
     (skills.UNREADABLE, skills.NO_FRONTMATTER, _plain(b"\xff")),
-    (skills.NO_FRONTMATTER, skills.UNPARSEABLE, _plain("name: [a\n")),
     (skills.UNPARSEABLE, skills.ANCHORS, _plain("---\nname: &n a\ndescription: [x\n---\n")),
     (skills.ANCHORS, skills.NOT_MAPPING, _plain("---\n- &a x\n- *a\n---\n")),
     (skills.NOT_MAPPING, skills.NO_NAME, _plain("---\ndescription: 7\n---\n")),
@@ -358,6 +357,7 @@ PAIRS = [
     (skills.CAP_TOTAL, skills.SHADOWED, _total_cap_and_shadow),
 ]
 UNREACHABLE = [
+    (skills.NO_FRONTMATTER, skills.UNPARSEABLE),
     (skills.OVER_256, skills.NOT_REGULAR),
     (skills.NO_NAME, skills.BAD_NAME),
     (skills.CAP_PROJECT, skills.CAP_TOTAL),
@@ -480,10 +480,11 @@ def test_crlf_line_ends_are_accepted(cfg):
     assert kept.description == "d"
 
 
-def test_a_byte_order_mark_and_a_zero_byte_file_have_no_frontmatter(cfg):
-    bom = _write(cfg, b"\xef\xbb\xbf" + _fm().encode(), entry="a")
+def test_a_byte_order_mark_is_read_past_and_a_zero_byte_file_has_no_frontmatter(cfg):
+    _write(cfg, b"\xef\xbb\xbf" + _fm().encode(), entry="a")
     empty = _write(cfg, b"", entry="b")
-    assert _only(cfg) == [_expect(skills.NO_FRONTMATTER, path=bom), _expect(skills.NO_FRONTMATTER, path=empty)]
+    assert [s.name for s in SkillSet.discover(cfg, None).skills] == ["a"]
+    assert _only(cfg) == [_expect(skills.NO_FRONTMATTER, path=empty)]
 
 
 def test_four_hyphens_do_not_open_the_frontmatter(cfg):
@@ -1024,18 +1025,21 @@ def test_find_validates_only_the_directories_named_like_the_typed_name(cfg, proj
     assert found.find("a") is not None and set(seen) == {"a"}
 
 
-def _timeout(seconds=3):
+@pytest.fixture
+def alarm():
     def fire(*_):
         raise TimeoutError("blocked")
 
-    signal.signal(signal.SIGALRM, fire)
-    signal.setitimer(signal.ITIMER_REAL, seconds)
+    previous = []
 
+    def arm(seconds=3):
+        previous.append(signal.signal(signal.SIGALRM, fire))
+        signal.setitimer(signal.ITIMER_REAL, seconds)
 
-@pytest.fixture
-def alarm():
-    yield _timeout
+    yield arm
     signal.setitimer(signal.ITIMER_REAL, 0)
+    if previous:
+        signal.signal(signal.SIGALRM, previous[0])
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")

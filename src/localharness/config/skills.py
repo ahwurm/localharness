@@ -137,7 +137,7 @@ def _read(path: Path) -> str | tuple[str, str]:
     if total > MAX_REFERENCE_BYTES:
         return TOO_LARGE
     try:
-        return b"".join(chunks).decode("utf-8")
+        return b"".join(chunks).decode("utf-8-sig")
     except UnicodeDecodeError:
         return UNREADABLE
 
@@ -182,7 +182,7 @@ def _parse(text: str) -> dict | tuple[str, str]:
     try:
         data = yaml.safe_load(front)
         # yaml.scan took 9.2 s on 40,000 open brackets where safe_load raised RecursionError on
-        # 100,000 in 0.4 s (PyYAML 6.0.3, Python 3.12); safe_load shares aliased objects, so loading first expands nothing
+        # 100,000 in 0.4 s (PyYAML 6.0.3, Python 3.12)
         anchored = any(isinstance(t, (yaml.AnchorToken, yaml.AliasToken)) for t in yaml.scan(front))
     except Exception:
         return UNPARSEABLE
