@@ -467,3 +467,58 @@ def test_a_role_floor_prompt_has_no_listing(monkeypatch):
     cfg = AgentConfig(name="explore", role="r", model="inherit")
     subagent.role_floor(cfg, [], counter=TokenCounter(offline=True), llm=SimpleNamespace(config=None), max_response_tokens=None)
     assert len(seen) == 1 and "## Skills" not in seen[0]
+
+
+def _start_world(base, monkeypatch, skill=True):
+    from tests.unit.test_start_cmd import _stub_nonvllm_start
+    from tests.unit.test_start_floor import _capture_agent
+
+    base.mkdir(exist_ok=True)
+    _stub_nonvllm_start(base, monkeypatch, served=65_536, probe_window=None)
+    (base / "work").mkdir()
+    monkeypatch.chdir(base / "work")
+    if skill:
+        _skill(base / "skills", "notes")
+    seen = []
+
+    async def spy(agent_config, skills=()):
+        seen.append(skills)
+        return 256
+
+    monkeypatch.setattr(start_serving, "launch_floor", spy)
+    return seen, _capture_agent(monkeypatch)
+
+
+async def test_start_builds_one_skill_set_for_the_floor_the_prompt_and_the_tool(tmp_path, pkg, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+    from tests.unit.test_start_floor import _spy_record_floor
+
+    seen, agents = _start_world(tmp_path, monkeypatch)
+    calls = _spy_record_floor(monkeypatch)
+    await _start_async(None, False, False, str(tmp_path))
+    (loop,) = agents
+    assert [s.name for s in seen[0]] == ["notes"]
+    assert loop._skills == render_listing(seen[0]) and "- notes: Use notes when asked." in loop._skills
+    assert loop._tools.schema_of("skill").parameters["properties"]["name"]["enum"] == ["notes"]
+    tool, task = loop._tools._tools["global"]["skill"], loop._tools._tools["global"]["task"]
+    assert isinstance(tool, SkillTool) and tool._state is task._state and tool._store is loop._ctx._content_store
+    assert calls[0][1] == loop.floor()
+
+
+async def test_a_start_with_no_skill_has_no_listing_and_no_tool(tmp_path, pkg, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+
+    seen, agents = _start_world(tmp_path, monkeypatch, skill=False)
+    await _start_async(None, False, False, str(tmp_path))
+    (loop,) = agents
+    assert seen == [()] and loop._skills == "" and loop._tools.schema_of("skill") is None
+
+
+async def test_the_listing_and_the_schema_raise_the_floor_a_start_records(tmp_path, pkg, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+
+    _, with_skill = _start_world(tmp_path / "a", monkeypatch)
+    await _start_async(None, False, False, str(tmp_path / "a"))
+    _, without = _start_world(tmp_path / "b", monkeypatch, skill=False)
+    await _start_async(None, False, False, str(tmp_path / "b"))
+    assert with_skill[0].fixed_tokens() > without[0].fixed_tokens()
