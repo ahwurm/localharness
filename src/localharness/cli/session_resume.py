@@ -48,13 +48,19 @@ scan ever lists it)."""
 ASLEEP_FORMAT = 1
 SLEEP_ACTION: tuple[str, str] = ("sleep", "")
 """`Resume.action` for a thread that slept, next to `("enable" | "disable", plugin)`."""
+RELOAD_ACTION: tuple[str, str] = ("reload", "")
+"""`Resume.action` for a restart that only reloads plugins: no plugin step runs."""
+
+
+def is_reload(action: tuple[str, str]) -> bool:
+    return action == RELOAD_ACTION
 
 
 @dataclass(frozen=True)
 class Resume:
     """What a session carries into its rebuild after `/plugins enable|disable` (in memory) or a
     sleep (from disk) — plain data, so one builder path serves both."""
-    action: tuple[str, str]          # ("enable" | "disable", plugin name) or SLEEP_ACTION
+    action: tuple[str, str]          # ("enable" | "disable", plugin name), SLEEP_ACTION or RELOAD_ACTION
     agent_name: str                  # the agent this sitting ran; the rebuild shows no picker
     conversation: tuple[dict, ...]   # AgentLoop's exact model-side messages
     prior_context: str               # the prior-session context folded into the system prompt

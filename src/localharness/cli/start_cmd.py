@@ -61,6 +61,7 @@ OWN_COMMAND_ERROR = ("the {name} channel is served by its own command, because {
 FIRST_START_LEAD = "LocalHarness is not set up yet. Setting up the model server first:"
 
 RESTARTED_LINE = "Restarted with {name} {state}. Your conversation continues."
+RESTARTED_RELOAD = "Restarted with plugins reloaded. Your conversation continues."
 # The two start-summary lines for a server that refused an effort request key (spec 16 §7.4, D-19, D-22);
 # the first is spelled once in config/effort.py (imported above), shared with /effort show.
 EFFORT_CUT_OFF_LINE = "effort: thinking-off rejected by this server; the reasoning cut is off"
@@ -255,7 +256,7 @@ def _plugins_text(loaded: list[str], unconfigured: dict[str, str], available: Se
 
 
 from localharness.cli.session_resume import (  # noqa: E402 — the handle lives beside its file form
-    SLEEP_ACTION, Restart, Resume, asleep_path, take_asleep, write_asleep,
+    SLEEP_ACTION, Restart, Resume, asleep_path, is_reload, take_asleep, write_asleep,
 )
 
 
@@ -3254,6 +3255,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 channel.first_prompt_hint = _first_prompt_hint(is_returning)
         elif resume.slept:
             console.print(Text(RESUMED_LINE.format(previous=resume.previous_sitting_id)), soft_wrap=True)
+        elif is_reload(resume.action):
+            console.print(Text(RESTARTED_RELOAD), soft_wrap=True)
         else:  # R3: no wordmark mid-conversation — one line, then the plugin lines and the status
             console.print(Text(RESTARTED_LINE.format(
                 name=resume.action[1], state="on" if resume.action[0] == "enable" else "off")),
@@ -3341,7 +3344,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             )
             if _plugins_line is not None:
                 console.print(_plugins_line, soft_wrap=True)
-        if resume is not None and not resume.slept:
+        if resume is not None and not resume.slept and not is_reload(resume.action):
             console.print(Text(_resume_status(resume, plugin_result)), soft_wrap=True)
 
         # --- Verbose output ---
@@ -3681,10 +3684,11 @@ def start_app(
             # and a finalizer that closes on "the running loop" must find none: collect before the
             # step's own event loops run, and again before the rebuilt session's.
             gc.collect()
-            outcome = session_step(restart.action, config_dir)
+            outcome = None if is_reload(restart.action) else session_step(restart.action, config_dir)
             reset_inference_gate()  # the next asyncio.run is a new event loop
             gc.collect()
-            resume = replace(restart.resume, failed_check=outcome.failed_check,
-                             skipped_check=outcome.skipped_check, step_stopped=outcome.stopped)
+            resume = restart.resume if outcome is None else replace(
+                restart.resume, failed_check=outcome.failed_check,
+                skipped_check=outcome.skipped_check, step_stopped=outcome.stopped)
     except KeyboardInterrupt:
         console.print("\nGoodbye.")

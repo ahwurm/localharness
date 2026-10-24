@@ -16,7 +16,7 @@ from typer.testing import CliRunner
 
 from localharness.cli import library, plugins_cmd, start_cmd, workspace
 from localharness.cli.app import app
-from localharness.cli.session_resume import Restart, Resume
+from localharness.cli.session_resume import RELOAD_ACTION, Restart, Resume
 from localharness.provider import model_library
 from tests.unit import test_init_discovery_records as world
 from tests.unit.gguf_support import write_gguf
@@ -283,6 +283,61 @@ def test_the_plugins_restart_pass_does_not_sync_again(after_first_run, monkeypat
     _exited(result, 0)
     assert len(seen) == 2 and seen[0] is None and seen[1] is not None
     assert len(calls) == 1 and calls[0]["scope"] == "new"
+
+
+def _restart_pass(box, monkeypatch, first: Restart):
+    """Run `start` with `_start_async` answering `first` then None; returns what the loop did around it."""
+    import gc
+
+    import localharness.provider.client as client
+
+    scripted(monkeypatch)
+    answers = [first, None]
+    seen: list = []
+    steps: list = []
+    gates: list = []
+    collects: list = []
+    real_collect = gc.collect
+
+    async def start_async(*args, **kw):
+        seen.append(kw.get("resume"))
+        return answers.pop(0)
+
+    def step(*a, **k):
+        steps.append(a)
+        return SimpleNamespace(failed_check="boom", skipped_check="", stopped=False)
+
+    def collect(*a, **k):
+        collects.append(1)
+        return real_collect(*a, **k)
+
+    monkeypatch.setattr(start_cmd, "_start_async", start_async)
+    monkeypatch.setattr(plugins_cmd, "session_step", step)
+    monkeypatch.setattr(client, "reset_inference_gate", lambda: gates.append(1))
+    monkeypatch.setattr(gc, "collect", collect)
+    result = CliRunner().invoke(app, ["start", "--config-dir", str(box.cfg)])
+    _exited(result, 0)
+    return SimpleNamespace(seen=seen, steps=steps, gates=gates, collects=collects)
+
+
+def test_a_reload_restart_skips_the_step_keeps_the_gate_reset_and_resumes_unchanged(after_first_run, monkeypatch):
+    reload_resume = Resume(RELOAD_ACTION, "a", (), "", None, (), "default", "s")
+
+    ran = _restart_pass(after_first_run, monkeypatch, Restart(RELOAD_ACTION, reload_resume))
+
+    assert ran.steps == []
+    assert len(ran.gates) == 1 and len(ran.collects) >= 2
+    assert len(ran.seen) == 2 and ran.seen[0] is None and ran.seen[1] is reload_resume
+
+
+def test_a_verb_restart_still_runs_its_step_and_carries_the_check_into_the_resume(after_first_run, monkeypatch):
+    resume = Resume(("enable", "x"), "a", (), "", None, (), "default", "s")
+
+    ran = _restart_pass(after_first_run, monkeypatch, Restart(("enable", "x"), resume))
+
+    assert ran.steps == [(("enable", "x"), str(after_first_run.cfg))]
+    assert len(ran.gates) == 1
+    assert ran.seen[1].failed_check == "boom" and ran.seen[1].action == ("enable", "x")
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
