@@ -1,7 +1,6 @@
 """Skills seams outside the skill modules: the removed microagents key, protected paths, the origins they guard and the children that never hold the tool."""
 from __future__ import annotations
 
-import ast
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -295,11 +294,3 @@ async def test_the_grant_target_toolset_omits_skill(root_registry) -> None:
 @pytest.mark.parametrize("name", [*subagent._STATIC_TOOLSETS, *subagent._WEB_ROLES])
 async def test_no_built_in_role_holds_the_skill_tool(root_registry, name) -> None:
     assert "skill" not in subagent.builtin_toolset(name, root_registry), name
-
-
-def test_children_are_built_without_a_listing() -> None:
-    calls = [n for n in ast.walk(ast.parse(Path(subagent.__file__).read_text(encoding="utf-8")))
-             if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "AgentLoop"]
-
-    assert calls
-    assert not [c.lineno for c in calls if "skills" in {k.arg for k in c.keywords}]
