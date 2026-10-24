@@ -1,0 +1,146 @@
+{
+  "disable_plain": {
+    "exit": 0,
+    "stderr": "",
+    "stdout": "\u2713 pro disabled in <TMP>/g/overrides.yaml \u2014 takes effect on the next `localharness start`\n"
+  },
+  "enable_check_fails_help_and_prompt": {
+    "exit": 0,
+    "stderr": "",
+    "stdout": "\u2713 pro enabled in <TMP>/g/overrides.yaml \u2014 takes effect on the next `localharness start`\n  set pro.url = 'http://nope.test'\n  set pro.token = '**********'\nChecking it now:\n\u2717 pro: at http://nope.test\n\nPRO-HELP\n\nOr paste this into your coding agent to set it up for your hardware:\n\n  Run it at http://nope.test. Done when it answers.\n\n  Then: start it.\n  Then: use it.\n"
+  },
+  "enable_check_skipped": {
+    "exit": 0,
+    "stderr": "",
+    "stdout": "\u2713 pro enabled in <TMP>/g/overrides.yaml \u2014 takes effect on the next `localharness start`\n  set pro.url = 'http://ok.test'\nChecking it now:\ni  pro: at http://ok.test\n\nPRO-HELP\n\nOr paste this into your coding agent to set it up for your hardware:\n\n  Run it at http://ok.test. Done when it answers.\n\n  Then: start it.\n  Then: use it.\n"
+  },
+  "enable_help_prompt_credential_url": {
+    "exit": 0,
+    "stderr": "",
+    "stdout": "\u2713 pro enabled in <TMP>/g/overrides.yaml \u2014 takes effect on the next `localharness start`\n  set pro.url = 'https://user:pw@example.test'\n  set pro.token = '**********'\nChecking it now:\n\u2717 pro: at https://user:pw@example.test\n\nPRO-HELP\n\nOr paste this into your coding agent to set it up for your hardware:\n\n  Run it at https://user:pw@example.test. Done when it answers.\n\n  Then: start it.\n  Then: use it.\n"
+  },
+  "enable_missing_extra_note": {
+    "exit": 0,
+    "stderr": "",
+    "stdout": "\u2713 needx enabled in <TMP>/g/overrides.yaml \u2014 takes effect on the next `localharness start`\n  note: needx is missing its install extra \u2014 install `localharness[nosuchextra]` to use it\n  NEEDX-NEXT\n"
+  },
+  "enable_no_terminal": {
+    "exit": 0,
+    "stderr": "",
+    "stdout": "\u2713 pro enabled in <TMP>/g/overrides.yaml \u2014 takes effect on the next `localharness start`\n  next step \u2014 give it the Server address, Access token: localharness plugins enable pro --set url=http://127.0.0.1:1 --set token=<token>\n  Then: start it.\n  Then: use it.\n"
+  },
+  "enable_probe_raises": {
+    "exit": 0,
+    "stderr": "",
+    "stdout": "\u2713 pro enabled in <TMP>/g/overrides.yaml \u2014 takes effect on the next `localharness start`\n  set pro.url = 'http://ok.test'\n  set pro.token = '**********'\nChecking it now:\n  could not check it now: RuntimeError: boom\n  Then: start it.\n  Then: use it.\n"
+  },
+  "enable_project_override_note": {
+    "exit": 0,
+    "stderr": "",
+    "stdout": "\u2713 plain enabled in <TMP>/home/.localharness/overrides.yaml \u2014 takes effect on the next `localharness start`\n  note: this project turns plain off (<TMP>/home/proj/.localharness), and that still wins here \u2014 `localharness plugins enable plain --workspace` changes it for this project\n"
+  },
+  "enable_questions_check_passes": {
+    "exit": 0,
+    "stderr": "",
+    "stdout": "\u2713 pro enabled in <TMP>/g/overrides.yaml \u2014 takes effect on the next `localharness start`\n  set pro.url = 'http://ok.test'\n  set pro.token = '**********'\nChecking it now:\n\u2713 pro: at http://ok.test\n  Then: start it.\n  Then: use it.\n"
+  },
+  "enable_refused_credential_url": {
+    "exit": 2,
+    "stderr": "Error: Validation failed for pro: url: Value error, cannot reach 'https://user:pw@bad.test'\n",
+    "stdout": ""
+  },
+  "enable_resolve_raises": {
+    "exit": 0,
+    "stderr": "",
+    "stdout": "\u2713 pro enabled in <TMP>/g/overrides.yaml \u2014 takes effect on the next `localharness start`\n  set pro.url = 'http://ok.test'\n  set pro.token = '**********'\n  could not check it now: RuntimeError: boom\n  Then: start it.\n  Then: use it.\n"
+  },
+  "enable_set_values": {
+    "exit": 0,
+    "stderr": "",
+    "stdout": "\u2713 pro enabled in <TMP>/g/overrides.yaml \u2014 takes effect on the next `localharness start`\n  set pro.url = 'http://ok.test'\n  set pro.token = '**********'\n  Then: start it.\n  Then: use it.\n"
+  },
+  "enable_setup_action_confirmed": {
+    "exit": 0,
+    "stderr": "",
+    "stdout": "\u2713 act enabled in <TMP>/g/overrides.yaml \u2014 takes effect on the next `localharness start`\n\u2713 act: fetched\nChecking it now:\n\u2713 act: ready\n  Then: run the thing.\n"
+  },
+  "info_credential_url": {
+    "exit": 0,
+    "stderr": "",
+    "stdout": "pro\n  state:        on\n  what it does: answers at an address\n  from:         built in\n  version:      0.1.0\n  kind:         tools\n  set up:       localharness plugins enable pro --set url=http://127.0.0.1:1 --set token=<token>\nSettings:\n  pro.enabled  bool       True                               [global-overrides]                     \n  pro.token    SecretStr  SecretStr('')                      [default] (machine-level only)         \n  pro.url      str        'https://user:pw@example.test/v1'  [global-overrides] (machine-level only)\n\nOr paste this into your coding agent to set it up for your hardware:\n\n  Run it at https://user:pw@example.test/v1. Done when it answers.\n"
+  },
+  "info_settings_and_prompt": {
+    "exit": 0,
+    "stderr": "",
+    "stdout": "pro\n  state:        on\n  what it does: answers at an address\n  from:         built in\n  version:      0.1.0\n  kind:         tools\n  set up:       localharness plugins enable pro --set url=http://127.0.0.1:1 --set token=<token>\nSettings:\n  pro.enabled  bool       True              [global-overrides]                     \n  pro.token    SecretStr  SecretStr('')     [default] (machine-level only)         \n  pro.url      str        'http://ok.test'  [global-overrides] (machine-level only)\n\nOr paste this into your coding agent to set it up for your hardware:\n\n  Run it at http://ok.test. Done when it answers.\n"
+  },
+  "info_switch_only_note": {
+    "exit": 0,
+    "stderr": "",
+    "stdout": "swatch\n  state:        available \u2014 turn on: localharness plugins enable swatch\n  what it does: (not loaded)\n  from:         folder: <TMP>/g/plugins/swatch\nSettings:\n  swatch.enabled  bool  False  [default] (machine-level only)\n  Its other settings are listed once it is enabled.\n"
+  },
+  "step_check_fails": {
+    "failed_check": "at http://nope.test",
+    "on": true,
+    "skipped_check": "",
+    "stderr": "",
+    "stdout": "\u2713 pro enabled in <TMP>/g/overrides.yaml\n  set pro.url = 'http://nope.test'\n  set pro.token = '**********'\nChecking it now:\n\u2717 pro: at http://nope.test\n\nPRO-HELP\n\nOr paste this into your coding agent to set it up for your hardware:\n\n  Run it at http://nope.test. Done when it answers.\n\n  Then: start it.\n  Then: use it.\n",
+    "stopped": false
+  },
+  "step_configured_not_asked": {
+    "failed_check": "",
+    "on": true,
+    "skipped_check": "",
+    "stderr": "",
+    "stdout": "\u2713 pro enabled in <TMP>/g/overrides.yaml\nChecking it now:\n\u2713 pro: at http://ok.test\n  Then: start it.\n  Then: use it.\n",
+    "stopped": false
+  },
+  "step_probe_raises": {
+    "failed_check": "",
+    "on": true,
+    "skipped_check": "",
+    "stderr": "",
+    "stdout": "\u2713 pro enabled in <TMP>/g/overrides.yaml\n  set pro.url = 'http://ok.test'\n  set pro.token = '**********'\nChecking it now:\n  could not check it now: RuntimeError: boom\n  Then: start it.\n  Then: use it.\n",
+    "stopped": false
+  },
+  "step_questions_check_passes": {
+    "failed_check": "",
+    "on": true,
+    "skipped_check": "",
+    "stderr": "",
+    "stdout": "\u2713 pro enabled in <TMP>/g/overrides.yaml\n  set pro.url = 'http://ok.test'\n  set pro.token = '**********'\nChecking it now:\n\u2713 pro: at http://ok.test\n  Then: start it.\n  Then: use it.\n",
+    "stopped": false
+  },
+  "step_refused_credential_url": {
+    "failed_check": "",
+    "on": true,
+    "skipped_check": "",
+    "stderr": "Error: Validation failed for pro: url: Value error, cannot reach 'https://user:pw@bad.test'\n",
+    "stdout": "Stopped. Your conversation continues.\n",
+    "stopped": true
+  },
+  "step_setup_action_confirmed": {
+    "failed_check": "",
+    "on": true,
+    "skipped_check": "",
+    "stderr": "",
+    "stdout": "\u2713 act enabled in <TMP>/g/overrides.yaml\n\u2713 act: fetched\nChecking it now:\n\u2713 act: ready\n  Then: run the thing.\n",
+    "stopped": false
+  },
+  "step_stopped_at_question": {
+    "failed_check": "",
+    "on": true,
+    "skipped_check": "",
+    "stderr": "",
+    "stdout": "Stopped. Your conversation continues.\n",
+    "stopped": true
+  },
+  "step_third_party_declined": {
+    "failed_check": "",
+    "on": true,
+    "skipped_check": "",
+    "stderr": "",
+    "stdout": "swatch stays off. Your conversation continues.\n",
+    "stopped": true
+  }
+}
