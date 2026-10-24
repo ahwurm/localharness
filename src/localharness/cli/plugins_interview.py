@@ -54,12 +54,12 @@ ROW_STATES = MappingProxyType({
     "off_needs_extra": "off (needs {extra})",
 })
 
+CLOSED_ON_ERROR = "Plugins closed on an error: {error}"
 NOT_APPLIED = "{changes} saved, not applied: {why}. {fix}"
 NOT_APPLIED_CASES = MappingProxyType({
     "asks": ("a restart would drop {asks}", "Answer the asks {where}, then open /plugins and close it"),
-    "closed_early": ("Plugins closed on an error: {error}", "Quit and start localharness again to apply"),
+    "closed_early": (CLOSED_ON_ERROR, "Quit and start localharness again to apply"),
 })
-CLOSED_ON_ERROR = "Plugins closed on an error: {error}"
 
 SEVERAL = "+several"
 TURN_SEVERAL_ON = "Turn several on…"
