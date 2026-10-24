@@ -56,6 +56,16 @@ class TaskRecordTooLarge(ValueError):
     pass
 
 
+class TooManyReferences(ValueError):
+    pass
+
+
+def _task_answer(rec: TaskRecord, source: str) -> Literal["add", "replace", "full"]:
+    if any(r.source == source for r in rec.references):
+        return "replace"
+    return "full" if len(rec.references) >= MAX_REFERENCES else "add"
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -372,6 +382,19 @@ class TaskState:
             self._store.clear_active_references()
         return True
 
+    def add_reference(self, ref: Reference) -> None:
+        """Commit `ref` to the current record: replace the same source in place, else append; saves."""
+        rec = self.current
+        assert rec is not None
+        answer = _task_answer(rec, ref.source)
+        if answer == "full":
+            raise TooManyReferences("references is limited to four; split or narrow the step")
+        if answer == "replace":
+            rec.references[next(i for i, r in enumerate(rec.references) if r.source == ref.source)] = ref
+        else:
+            rec.references.append(ref)
+        self._save_quietly()
+
     @property
     def active(self) -> bool:
         return self.current is not None
@@ -602,6 +625,10 @@ class TaskState:
             data = json.dumps(rec.to_dict(), ensure_ascii=True).encode()
         if len(data) > MAX_RECORD_BYTES:
             raise TaskRecordTooLarge("Task record exceeds 64 KiB; narrow the record")
+        self._write(data)
+
+    def _write(self, data: bytes) -> None:
+        assert self.path is not None
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_name(self.path.name + ".tmp")
         write_private_bytes(tmp, data)
