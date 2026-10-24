@@ -1,6 +1,7 @@
 """`install_route` / `installed_extras` / `install_pass`: one spec, six installer rows, nothing spawned."""
 from __future__ import annotations
 
+import ast
 import asyncio
 import importlib.metadata
 import importlib.util
@@ -639,3 +640,86 @@ def test_install_pass_ignored_sigint_says_so_before_installing(h, monkeypatch):
 def test_install_pass_a_live_sigint_handler_says_nothing_about_ignoring(h):
     h.run()
     assert "ignored" not in h.buf.getvalue()
+
+
+# --------------------------------------------------------------------------- rendering
+
+OSC = "\x1b]8;;http://evil.test\x07"
+OSC_END = "\x1b]8;;\x07"
+
+
+def test_install_pass_prints_every_text_verbatim_and_never_as_markup(h):
+    h.questions["a"] = f"Fetch [bold]x[/bold] and [/x] {OSC}now{OSC_END}?"
+    h.proc = _Proc([f"[red]boom[/red] [/x] {OSC}bad{OSC_END}\r\n".encode()], code=2)
+    h.run(("a",))
+    out = h.buf.getvalue()
+    assert "a: Fetch [bold]x[/bold] and [/x] now?" in out
+    assert "[red]boom[/red] [/x] bad" in out
+    assert "localharness[browser,dev,mobile]==1.2.3" in out
+    assert "\x1b" not in out and "\x07" not in out and "\r" not in out
+
+
+def test_install_pass_prints_a_manual_route_command_with_brackets_intact(h, monkeypatch):
+    monkeypatch.setattr(update_cmd, "_installer_kind", lambda: ("uv-tool", None))
+    h.run()
+    assert f"uv tool install {shlex.quote(SPEC)}" in h.lines
+
+
+def test_manual_block_with_a_prereq_and_quit_first():
+    manual = Manual("Install uv first (https://docs.astral.sh/uv/).", True, "uv tool install x")
+    assert plugins_cmd.manual_block(["a"], manual, plugins_cmd.ROUTE_BACK) == (
+        "Install uv first (https://docs.astral.sh/uv/).", "Quit localharness first, then run:",
+        "uv tool install x", "then start localharness and Re-run setup under /plugins → a")
+
+
+def test_manual_block_without_a_prereq_or_quit_first_takes_the_typed_route():
+    assert plugins_cmd.manual_block(["a"], Manual(None, False, "uv tool install x"), plugins_cmd.TYPED_ROUTE) == (
+        "In another terminal run:", "uv tool install x", "then /plugins enable a again")
+
+
+def test_manual_block_does_not_reparse_a_name_as_a_template():
+    block = plugins_cmd.manual_block(["{rerun}", "b"], Manual(None, False, "c"), plugins_cmd.ROUTE_BACK)
+    assert block[-1] == "then Re-run setup under /plugins → {rerun}, b"
+
+
+# --------------------------------------------------------------------------- the strings, once each
+
+_STRINGS = ("CTRLC", "CTRLC_DOES", "CTRLC_IGNORED", "INSTALLING", "CONSENT", "CONSENT_WITH", "CONSENT_ASK",
+            "INSTALL_SKIPPED", "INSTALL_SKIPPED_WHY", "ROUTE_BACK", "ENABLE_MANUAL", "TYPED_NEEDS_EXTRA",
+            "TYPED_ROUTE")
+_SOURCE = Path(plugins_cmd.__file__).read_text()
+_TREE = ast.parse(_SOURCE)
+
+
+@pytest.mark.parametrize("name", _STRINGS)
+def test_each_install_string_is_assigned_once(name):
+    stores = [n for n in ast.walk(_TREE) if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Store)]
+    assert len(stores) == 1
+
+
+@pytest.mark.parametrize("fragment", [
+    "from your package index", "output is shown only if it fails", "package not installed",
+    "To finish later, in another terminal run:", "this install must be done by hand",
+    "Quit localharness first, then run:", "In another terminal run:", "cancels this enable",
+    "stops the batch", "cannot be stopped from the keyboard", "dropped.", "under /plugins",
+])
+def test_each_install_text_appears_once_in_the_module(fragment):
+    assert _SOURCE.count(fragment) == 1
+
+
+def test_the_keyed_install_strings_cannot_be_changed_at_runtime():
+    for table in (plugins_cmd.CTRLC_DOES, plugins_cmd.INSTALL_SKIPPED_WHY):
+        with pytest.raises(TypeError):
+            table["x"] = "y"
+
+
+def test_the_third_party_confirm_is_unchanged():
+    assert plugins_cmd.THIRD_PARTY_CONFIRM == (
+        "{name} is a plugin you installed, not one that ships with LocalHarness: turning it on lets its code "
+        "run with your permissions on this machine, in every session. Turn it on?")
+
+
+def test_plugins_cmd_imports_nothing_from_the_flow_module():
+    modules = {a.name for n in ast.walk(_TREE) if isinstance(n, ast.Import) for a in n.names}
+    modules |= {(n.module or "") + "." + a.name for n in ast.walk(_TREE) if isinstance(n, ast.ImportFrom) for a in n.names}
+    assert not [m for m in modules if "plugins_interview" in m]
