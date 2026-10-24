@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from localharness.cli.repl import OrchestratorREPL
+from localharness.cli.skill_session import SkillSession
 from localharness.cli.slash_commands import (
     SLASH_COMMANDS,
     SlashCommand,
@@ -16,7 +17,12 @@ from localharness.cli.slash_commands import (
     all_rows,
     set_plugin_rows,
 )
+from localharness.config import skills
+from localharness.config.skills import SkillSet
+from localharness.core.bus import EventBus
+from localharness.core.events import Action, TurnCompleted, TurnFailed
 from tests.unit.test_repl_unknown_slash import RecordingChannel, _build_repl
+from tests.unit.test_skills_discovery import _skill as write_skill
 
 
 @pytest.fixture
@@ -116,3 +122,72 @@ async def test_a_callable_on_a_late_row_gets_the_stripped_text_only(rows):
 def test_the_dispatcher_does_not_key_on_the_kind():
     tree = ast.parse(textwrap.dedent(inspect.getsource(OrchestratorREPL._handle_slash)))
     assert not [n for n in ast.walk(tree) if isinstance(n, ast.Constant) and n.value == "skill"]
+
+
+@pytest.fixture
+def pkg(tmp_path, monkeypatch):
+    monkeypatch.setattr(skills, "PACKAGE_DIR", tmp_path / "pkg")
+    return tmp_path / "pkg"
+
+
+class Sitting:
+    def __init__(self, cfg, names=("notes",)):
+        self.cfg = cfg
+        self.paths = {n: write_skill(cfg / "skills", n) for n in names}
+        self.found = SkillSet.discover(cfg, None)
+        self.session = SkillSession(self.found)
+        self.bus = EventBus()
+        self.said = []
+        self.handles = self.session.subscribe(self.bus, "orchestrator", self._say)
+
+    async def _say(self, text):
+        self.said.append(text)
+
+    def record(self, name="notes"):
+        return next(s for s in self.found.skills if s.name == name)
+
+    async def call(self, name, agent="orchestrator", tool="skill"):
+        await self.bus.publish(Action(
+            agent_id=agent, session_id="s1", action_type="tool_call", tool_name=tool, tool_params={"name": name},
+        ))
+
+    async def completed(self, agent="orchestrator"):
+        await self.bus.publish(TurnCompleted(
+            agent_id=agent, session_id="s1", iterations=1, duration_seconds=0.1, elapsed_tokens=0, summary="",
+        ))
+
+    async def failed(self):
+        await self.bus.publish(TurnFailed(
+            agent_id="orchestrator", session_id="s1", reason="llm_error", detail="x", iterations=1, duration_seconds=0.1,
+        ))
+
+
+@pytest.fixture
+def sitting(tmp_path, pkg):
+    return Sitting(tmp_path / "cfg")
+
+
+async def test_a_slash_name_the_model_did_not_load_is_said_once(sitting):
+    assert len(sitting.handles) == 3
+    line, notices = sitting.session.invoke(sitting.record(), "")
+    assert (line, notices) == ("The person invoked /notes. Call skill('notes') and follow it.", ())
+    assert "Body of notes." not in line
+    assert sitting.session.invoke(sitting.record(), "draft v2")[0] == (
+        "The person invoked /notes with: draft v2. Call skill('notes') and follow it."
+    )
+    sitting.session.arm()
+    await sitting.completed()
+    await sitting.completed()
+    assert sitting.said == ['the model did not load /notes; try again, or say "use the notes skill"']
+
+
+async def test_a_skill_call_or_a_failed_turn_says_nothing(sitting):
+    sitting.session.invoke(sitting.record(), "")
+    sitting.session.arm()
+    await sitting.call("notes")
+    await sitting.completed()
+    sitting.session.invoke(sitting.record(), "")
+    sitting.session.arm()
+    await sitting.failed()
+    await sitting.completed()
+    assert sitting.said == []

@@ -36,7 +36,7 @@ _MIXED_DIR_CORE = {
             "config_cmd", "doctor_cmd", "errors", "init_cmd", "init_import", "interview", "library", "mcp_cmd", "model_cmd", "model_ops",
             "picker", "plugin_mount", "plugins_cmd", "plugins_interview", "repl",
             "serve_cmd", "autostart",  # arrive in the autostart phase; named now so those plans leave this file alone
-            "session_accumulator", "session_resume", "session_trust", "slash_commands", "start_cmd", "start_serving", "theme", "ui",
+            "session_accumulator", "session_resume", "session_trust", "skill_session", "slash_commands", "start_cmd", "start_serving", "theme", "ui",
             "update_cmd", "validate_cmd", "workspace"),
     "channels": ("__init__", "acp", "base", "clipboard", "errors", "input_router", "keys", "terminal"),
     "tools": ("__init__", "base", "capabilities", "hooks", "mcp", "registry"),
