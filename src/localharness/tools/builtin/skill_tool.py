@@ -82,4 +82,10 @@ class SkillTool(Tool):
         if record.untrusted:
             body = fence_project_text(SKILLS_FENCE_HEADER, body)
         header = f"skill {name!r} ({record.origin}), directory {str(record.path.parent.absolute())!r}"
-        return self.ok(f"{header}\n\n{body}")
+        text = f"{header}\n\n{body}"
+        source = f"skill {name}"
+        step, _, has_room = self._state.room(self._store, source)
+        handle = self._store.put(text, origin="untrusted" if record.untrusted else "trusted")
+        if has_room:
+            self._store.declare_active_reference(step, handle, source)
+        return self.ok(text)
