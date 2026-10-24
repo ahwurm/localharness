@@ -596,6 +596,16 @@ def test_changelog_structure_live():
     assert check_changelog_structure(_read("CHANGELOG.md")) == []
 
 
+def test_the_0_21_0_changelog_entry_tells_the_three_plugins_changes_in_user_terms():
+    entry = re.search(r"^## \[0\.21\.0\].*?(?=^## \[|\Z)", _read("CHANGELOG.md"), re.M | re.S).group(0)
+    flat = " ".join(entry.replace("**", "").split())
+    assert len(re.findall(r"^- ", entry, re.M)) == 3
+    for needle in ("kill -INT", "as `/quit` does", "trap '' INT", "a third time", "Turn cancelled.",
+                   "/plugins on a terminal now opens Plugins", "after one consent", "your conversation is kept",
+                   "`localharness plugins` still works"):
+        assert needle in flat, needle
+
+
 def _good_changelog() -> str:
     return (
         "# Changelog\n\n## [Unreleased]\n\nThis release adds plugins.\n\n### Added\n"
