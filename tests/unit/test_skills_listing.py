@@ -9,9 +9,12 @@ import pytest
 
 from localharness.agent.loop import _fence_instructions, base_system_prompt
 from localharness.config import skills
+from localharness.config.models import AgentConfig, PermissionConfig
 from localharness.config.skills import LISTING_BUDGET_CHARS, Skill, SkillSet, shown
 from localharness.core.fence import TAG
 from localharness.tools.builtin.skill_tool import LISTING_HEADER, SKILLS_FENCE_HEADER, render_listing
+from tests.conftest import FakeLLMResponse
+from tests.unit.test_harness_floor import _head_prompt, _loop
 from tests.unit.test_loop_project_instructions import _FakeHandle, _build
 from tests.unit.test_skills_discovery import _skill
 
@@ -272,3 +275,60 @@ async def test_without_guardrails_the_listing_ends_the_base_prompt(bus, tmp_path
     await loop.run_turn("hi")
     assert llm.roles[0].endswith("\n\n" + listing)
     assert llm.roles[0].count(listing) == 1
+
+
+_CFG = AgentConfig(name="a", role="Test agent.", permissions=PermissionConfig(mode="unattended"))
+_MODES = [("native", True), ("text", False)]
+
+
+@pytest.mark.parametrize("mode,native", _MODES)
+@pytest.mark.parametrize("guardrails", ["", "NEVER rm -rf"])
+def test_an_empty_skills_string_leaves_the_prompt_byte_identical(mode, native, guardrails):
+    today = _head_prompt("Test agent.", native=native, guardrails=guardrails)
+    assert base_system_prompt(_CFG, tool_call_mode=mode, guardrails=guardrails, skills="") == today
+    assert base_system_prompt(_CFG, tool_call_mode=mode, guardrails=guardrails) == today
+
+
+@pytest.mark.parametrize("mode,native", _MODES)
+@pytest.mark.parametrize("guardrails", ["", "NEVER rm -rf"])
+def test_a_listing_is_appended_once_and_verbatim(mode, native, guardrails):
+    listing = f"## Skills\n- é: —\n<project-instructions {TAG}>\n- p (project): d\n</project-instructions {TAG}>"
+    prompt = base_system_prompt(_CFG, tool_call_mode=mode, guardrails=guardrails, skills=listing)
+    assert prompt == _head_prompt("Test agent.", native=native, guardrails=guardrails) + "\n\n" + listing
+    assert prompt.count(listing) == 1 and prompt.endswith(listing)
+
+
+@pytest.mark.asyncio
+async def test_the_listing_is_byte_stable_across_turns(bus, tmp_path, pkg):
+    listing = _listing(tmp_path, pkg)
+    loop, llm = _build(
+        bus, None, responses=[FakeLLMResponse(content="One."), FakeLLMResponse(content="Two.")],
+        guardrails="No pushes.", tmp_path=tmp_path, skills=listing,
+    )
+    await loop.run_turn("hi")
+    await loop.run_turn("again")
+    first, second = llm.roles[:2]
+    end = first.index(listing) + len(listing)
+    assert first[:end] == second[:end]
+    assert second.count(listing) == 1
+
+
+def test_the_loops_fixed_part_counts_the_listing(tmp_path, pkg):
+    listing = _listing(tmp_path, pkg)
+    path = tmp_path / "GUARDRAILS.md"
+    path.write_text("RULES-G", encoding="utf-8")
+    plain, plain_counter = _loop(10)
+    loop, counter = _loop(10)
+    plain._guardrails_path = loop._guardrails_path = path
+    loop._skills = listing
+    plain.fixed_tokens()
+    loop.fixed_tokens()
+    counted = counter.seen[-1][0]["content"]
+    assert listing in counted
+    assert counted.index("## Guardrails\n") < counted.index(listing)
+    assert counted == base_system_prompt(loop._config, tool_call_mode="native", guardrails="RULES-G", skills=listing)
+    assert listing not in plain_counter.seen[-1][0]["content"]
+
+
+def test_a_loop_built_without_skills_has_none():
+    assert _loop(10)[0]._skills == ""
