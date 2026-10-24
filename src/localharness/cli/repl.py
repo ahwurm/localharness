@@ -788,6 +788,7 @@ class OrchestratorREPL:
                 # above was being handled was typed BEFORE the loop could answer it.
                 self._ctrl_ready_at = time.monotonic()
         finally:
+            self._channel.begin_stop()
             await self._drain_turn_on_exit()
             await self._channel.stop_input_box()
             await self._channel.stop()

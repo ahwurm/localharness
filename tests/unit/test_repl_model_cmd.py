@@ -94,6 +94,9 @@ class FakeBoxChannel(FakeChannel):
         self.ctrl_q = None
         self.on_interrupt = None
 
+    def begin_stop(self) -> None:
+        pass
+
     async def start(self) -> None:
         pass
 

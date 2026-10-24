@@ -33,6 +33,9 @@ class FakeBoxChannel:
         self.box_stopped = False
         self.last_activity_summary = ""
 
+    def begin_stop(self) -> None:
+        pass
+
     def can_run_input_box(self) -> bool:
         return True
 
