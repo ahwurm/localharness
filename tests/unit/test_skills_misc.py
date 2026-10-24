@@ -1,12 +1,14 @@
-"""Skills seams outside the skill modules: the removed microagents key, protected paths and the origins they guard."""
+"""Skills seams outside the skill modules: the removed microagents key, protected paths, the origins they guard and the children that never hold the tool."""
 from __future__ import annotations
 
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from localharness.agent.gate_types import PROTECTED_CONFIG_DIR_ENTRIES, Verdict
+from localharness.agent.subagent import CONFIG_CHILD_DEFAULT_TOOLS, _config_child_allowed
 from localharness.agent.verdict import AGENTS_SKILLS, GateContext, evaluate
 from localharness.config.loader import ConfigLoader, ConfigValidationError
 from localharness.config.models import ContextConfig
@@ -239,3 +241,14 @@ def test_security_md_names_skills_in_the_thirteen_entry_sentence() -> None:
 
     assert check_protected_entries_doc(text) == []
     assert sentence is not None and "`skills/**`" in sentence.group(1)
+
+
+def _cfg(add):
+    return SimpleNamespace(tools=SimpleNamespace(add=add, deny=[]))
+
+
+def test_config_children_never_hold_skill() -> None:
+    assert _config_child_allowed(_cfg(["read", "skill", "task", "agent"])) == ["read"]
+    assert _config_child_allowed(_cfg(["read", "mcp:skill", "plugin:example.skill"])) == ["read"]
+    assert _config_child_allowed(_cfg(["read", "skills", "skill-creator"])) == ["read", "skills", "skill-creator"]
+    assert _config_child_allowed(_cfg([])) == list(CONFIG_CHILD_DEFAULT_TOOLS)
