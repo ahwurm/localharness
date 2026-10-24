@@ -53,7 +53,7 @@ CORE = [
     ("/instructions", "The project's instructions file (CLAUDE.md, AGENTS.md); /instructions off|on|show"),
     ("/image", "Attach a picture to your next message; /image <path>, /image (the clipboard), "
                "/image clear — or drop the file onto the terminal, or Ctrl+V"),
-    ("/plugins", "List plugins; /plugins enable|disable <name> to switch one in this session"),
+    ("/plugins", "Manage plugins; /plugins enable|disable <name> switches one from the keyboard"),
     ("/mcp", "Manage MCP servers for the session's agent (list, add, edit, test, remove)"),
     ("/quit", "Exit LocalHarness"),
     ("/exit", "Exit LocalHarness"),
@@ -78,7 +78,7 @@ HELP_BEFORE = (
     "  /instructions  The project's instructions file (CLAUDE.md, AGENTS.md); /instructions off|on|show\n"
     "  /image         Attach a picture to your next message; /image <path>, /image (the clipboard), "
     "/image clear — or drop the file onto the terminal, or Ctrl+V\n"
-    "  /plugins       List plugins; /plugins enable|disable <name> to switch one in this session\n"
+    "  /plugins       Manage plugins; /plugins enable|disable <name> switches one from the keyboard\n"
     "  /mcp           Manage MCP servers for the session's agent (list, add, edit, test, remove)\n"
     "  /quit          Exit LocalHarness\n"
     "  /exit          Exit LocalHarness\n"

@@ -59,7 +59,7 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand("/image", "Attach a picture to your next message; /image <path>, /image (the clipboard), "
                  "/image clear — or drop the file onto the terminal, or Ctrl+V",
                  "_slash_image", True, terminal_only=True),
-    SlashCommand("/plugins", "List plugins; /plugins enable|disable <name> to switch one in this session",
+    SlashCommand("/plugins", "Manage plugins; /plugins enable|disable <name> switches one from the keyboard",
                  "_slash_plugins", True, terminal_only=True),
     SlashCommand("/mcp", "Manage MCP servers for the session's agent (list, add, edit, test, remove)",
                  "_slash_mcp", True, terminal_only=True),
