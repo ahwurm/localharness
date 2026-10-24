@@ -1,6 +1,7 @@
 """Skills seams outside the skill modules: the removed microagents key, protected paths, the origins they guard and the children that never hold the tool."""
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,12 +12,20 @@ from localharness.agent.gate_types import PROTECTED_CONFIG_DIR_ENTRIES, Verdict
 from localharness.agent.subagent import CONFIG_CHILD_DEFAULT_TOOLS, _config_child_allowed
 from localharness.agent.verdict import AGENTS_SKILLS, GateContext, evaluate
 from localharness.config.loader import ConfigLoader, ConfigValidationError
-from localharness.config.models import ContextConfig
+from localharness.config.models import AgentConfig, ContextConfig, ToolConfig
 from localharness.config.paths import WORKSPACE_DIR_NAME
-from localharness.config.skills import ORIGINS
+from localharness.config import skills
+from localharness.config.skills import ORIGINS, SkillSet
+from localharness.agent import subagent
+from localharness.agent.context import ContentStore
+from localharness.agent.task_record import TaskState
+from localharness.tools.builtin.skill_tool import SkillTool
+from localharness.tools.registry import ToolRegistry
 from tests.unit.agent.test_auto_mode import SETTINGS, SHELL, WRITE, _ctx, _shell, _verdict
 from tests.unit.test_docs_convergence import check_protected_entries_doc
+from tests.unit.test_capabilities import _production_registry
 from tests.unit.test_leftover_plugin_section import _CONFIG, _agent_file
+from tests.unit.test_skills_discovery import _skill
 
 
 @pytest.fixture
@@ -252,3 +261,45 @@ def test_config_children_never_hold_skill() -> None:
     assert _config_child_allowed(_cfg(["read", "mcp:skill", "plugin:example.skill"])) == ["read"]
     assert _config_child_allowed(_cfg(["read", "skills", "skill-creator"])) == ["read", "skills", "skill-creator"]
     assert _config_child_allowed(_cfg([])) == list(CONFIG_CHILD_DEFAULT_TOOLS)
+
+
+@pytest.fixture
+async def root_registry(tmp_path, monkeypatch) -> ToolRegistry:
+    monkeypatch.setattr(skills, "PACKAGE_DIR", tmp_path / "pkg")
+    _skill(tmp_path / "cfg" / "skills", "alpha")
+    skill_set = SkillSet.discover(tmp_path / "cfg", None)
+    base = await _production_registry()
+    await base.register(SkillTool(skill_set, ContentStore(), TaskState(None, workspace=str(tmp_path)), result_cap=lambda: 50_000), scope="global")
+    assert "skill" in [s.name for s in base.global_schemas()]
+    return base
+
+
+def _yaml_child(add) -> AgentConfig:
+    return AgentConfig(name="writer", role="r", tools=ToolConfig(add=add))
+
+
+@pytest.mark.parametrize("add", [["read", "skill"], ["read", "mcp:skill"], ["read", "plugin:example.skill"]])
+async def test_no_config_child_registry_holds_the_skill_tool(root_registry, add) -> None:
+    child = ToolRegistry.from_allowed(_config_child_allowed(_yaml_child(add)), base_registry=root_registry)
+
+    assert child.has("read")
+    assert not child.has("skill")
+
+
+async def test_the_grant_target_toolset_omits_skill(root_registry) -> None:
+    got = subagent._resolve_target_toolset("writer", lambda n: _yaml_child(["read", "skill"]), root_registry)
+
+    assert got == ["read"]
+
+
+@pytest.mark.parametrize("name", [*subagent._STATIC_TOOLSETS, *subagent._WEB_ROLES])
+async def test_no_built_in_role_holds_the_skill_tool(root_registry, name) -> None:
+    assert "skill" not in subagent.builtin_toolset(name, root_registry), name
+
+
+def test_children_are_built_without_a_listing() -> None:
+    calls = [n for n in ast.walk(ast.parse(Path(subagent.__file__).read_text(encoding="utf-8")))
+             if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "AgentLoop"]
+
+    assert calls
+    assert not [c.lineno for c in calls if "skills" in {k.arg for k in c.keywords}]
