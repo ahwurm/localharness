@@ -120,7 +120,8 @@ INSTALL_SKIPPED_WHY = MappingProxyType({
     "failed": " — the install failed (exit {code}; see the output above)",
     "not_writable": " — {dir} is not writable",
     "open": " — {dir} is open to other accounts and could not be made private",
-    "no_temp": " — no temp dir under {dir}"})
+    "no_temp": " — no temp dir under {dir}",
+    "no_start": " — the installer could not start: {error}"})
 ROUTE_BACK = "{rerun} under /plugins → {names}"
 ENABLE_MANUAL = "{name}: enabled in config; this install must be done by hand."
 TYPED_NEEDS_EXTRA = "{name}: needs {extra}."
@@ -1175,7 +1176,11 @@ async def install_pass(session: PluginSession, extras: set[str], names: list[str
             say(CTRLC_IGNORED.format(step="install"))
         say(INSTALLING.format(installer=installer, spec=route.spec))
 
-    if (ran := await _run_install(route.argv, cfg, announce)) is None:
+    try:
+        ran = await _run_install(route.argv, cfg, announce)
+    except OSError as exc:
+        return skipped("no_start", error=redact_text(sanitize_for_display(str(exc))))
+    if ran is None:
         return skipped("no_temp", dir=cfg)
     code, tail = ran
     if code:
