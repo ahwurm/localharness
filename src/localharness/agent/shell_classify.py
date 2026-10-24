@@ -4166,7 +4166,8 @@ def _is_dangerous_git_key(key: str, settings: GateSettings) -> bool:
 def _first_subcommand(head: str, rest: list[str]) -> tuple[str, list[str]] | None:
     """First positional argument and what follows it, skipping global flags and their values.
 
-    A flag before ``localharness``'s subcommand yields none: its root flags (completion install) act on their own.
+    A flag before ``localharness``'s subcommand makes the whole flag-led form one key (that flag, then the first
+    positional): its root flags (completion install) act on their own, so no bare or subcommand grant may cover it.
     The tail is what lets a group take one more word (:data:`NESTED_SUBCOMMAND_GROUPS`); PRD
     §3.2 step 7.
     """
@@ -4176,7 +4177,8 @@ def _first_subcommand(head: str, rest: list[str]) -> tuple[str, list[str]] | Non
         token = rest[index]
         if token.startswith("-"):
             if head == "localharness":
-                return None
+                positional = next((word for word in rest[index + 1:] if not word.startswith("-")), None)
+                return (f"{token} {positional}" if positional else token), []
             index += 2 if token in value_flags else 1
             continue
         return token, rest[index + 1:]
