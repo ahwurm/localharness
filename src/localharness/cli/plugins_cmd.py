@@ -1,8 +1,8 @@
-"""`localharness plugins` — see plugins, and turn them on and off (ENAB-03, PRD §4).
+"""`localharness plugins` — see plugins, and turn them on and off.
 
 - `list`: every plugin — NAME / WHAT IT DOES / STATE / FROM — with the exact command that turns an
   off or available one on; on stderr, each section no installed plugin owns (most often a removed
-  plugin's settings), with its file, line and fix (QA-06).
+  plugin's settings), with its file, line and fix.
 - `info NAME`: one plugin, what it adds, and every setting it owns: the dot-paths `components list`
   marks `(plugin: NAME)`, read through the same catalogue.
 - `enable NAME [--set k=v …]` and `disable NAME` write `NAME.enabled` (and the settings) into ONE
@@ -15,7 +15,7 @@
   session tears down, whether that restart happens at all, and `plugins_overview` is bare `/plugins`.
 
 A plugin you installed is turned on and off only in machine-level settings: turning it on is your
-trust grant (SAFE-06), so --workspace is refused for it, as it is for a machine-level setting.
+trust grant, so --workspace is refused for it, as it is for a machine-level setting.
 Nothing here imports a plugin that is not enabled, except `enable NAME --set …` for a plugin you
 installed: checking the values needs its settings model, and that command is the grant.
 
@@ -88,7 +88,7 @@ Workspace = Annotated[bool, typer.Option(
     "--workspace", help="Write this project's overrides.yaml instead of the machine's. Plugins that "
                         "ship with LocalHarness only: a plugin you installed is switched machine-wide.")]
 # Asked once, in a session, before turning on a plugin the user installed: it is machine-wide trust
-# in code that runs with their permissions (SAFE-06). Bundled plugins and the shell command never ask.
+# in code that runs with their permissions. Bundled plugins and the shell command never ask.
 THIRD_PARTY_CONFIRM = ("{name} is a plugin you installed, not one that ships with LocalHarness: turning "
                        "it on lets its code run with your permissions on this machine, in every "
                        "session. Turn it on?")
@@ -97,7 +97,7 @@ OVERRIDE_LINE = ("{saved}this project turns it {state} ({file}) and that still w
                  "localharness plugins {flip} {name} --workspace changes it")
 # The same literal init's scaffolded plugins/README.md links to (a PyPI install has no examples/).
 _TEMPLATE_URL = "https://github.com/ahwurm/localharness/tree/main/examples/plugin-template"
-# A setup question for a secret that is already stored (#28): what Enter does, and how to clear it.
+# A setup question for a secret that is already stored: what Enter does, and how to clear it.
 SECRET_KEPT = "stored key kept — type none to clear, or paste a new one"
 URL_KEPT = "stored URL kept — type none to clear, or paste a new one"
 SECRET_KEPT_FOR = "stored key for {host} kept — type none to clear, or paste a new one"
@@ -161,7 +161,7 @@ def _where(dotpath: str, file: Path, line: Optional[int]) -> str:
 def _entry(resolution: Resolution, loader: ConfigLoader, name: str, json_output: bool) -> PlanEntry:
     entry = resolution.plan.entry(name)
     if entry is None:
-        # QA-06: uninstalling leaves the plugin's settings behind; say where, and what to do.
+        # uninstalling leaves the plugin's settings behind; say where, and what to do.
         left = [s for s in loader.unowned_sections() if s[0] in (name, f"agent.{name}")]
         if left:
             _fail(f"Unknown plugin: {name!r} — no installed plugin has that name, but its settings "
@@ -184,7 +184,7 @@ def plugins_list(json_output: Json = False, config_dir: ConfigDir = None) -> Non
     """Every plugin: what it does, whether it is on (and how to turn it on), and where it is from."""
     resolution, loader, _ = _resolve(config_dir, json_output=json_output)
     _warn(resolution)
-    for dotpath, file, line in loader.unowned_sections():  # QA-06: never silent about a leftover
+    for dotpath, file, line in loader.unowned_sections():  # never silent about a leftover
         hint = unowned_hint(dotpath.removeprefix("agent."), under_agent=dotpath.startswith("agent."))
         err_console.print("[yellow]⚠[/yellow] " + escape(f"{_where(dotpath, file, line)}: {hint}"),
                           soft_wrap=True)
@@ -195,7 +195,7 @@ def plugins_list(json_output: Json = False, config_dir: ConfigDir = None) -> Non
                                  "enable_command": e.enable_command} for e in entries], indent=2))
         return
     if not entries:
-        console.print(escape(  # QA-13: where it looked, and a URL a PyPI install can reach
+        console.print(escape(  # where it looked, and a URL a PyPI install can reach
             f"No plugins found in this Python environment ({sys.prefix}) or in "
             f"{loader.global_config_dir / 'plugins'}/. To write one, copy the example plugin: "
             f"{_TEMPLATE_URL}"), soft_wrap=True)
@@ -228,7 +228,7 @@ def override_of(loader, entry, on, to_workspace) -> tuple[Literal["on", "off"], 
     if not held or held[-1][1] is on:
         return None
     band, state = held[-1]
-    return ("on" if state else "off"), workspace_file_of(loader, band) or Path(loader.plugin_layer_files()[2]).parent
+    return ("on" if state else "off"), workspace_file_of(loader, band)
 
 
 def override_line(name: str, pair: tuple[Literal["on", "off"], Path], saved: str = "") -> str:
@@ -310,14 +310,14 @@ def plugins_info(name: Name, json_output: Json = False, config_dir: ConfigDir = 
     entry = _entry(resolution, loader, name, json_output)
     _warn(resolution)
     try:
+        if not json_output:
+            console.print(info_renderable(PluginSession(loader.global_config_dir, workspace, frozenset(), {}, {}), entry),
+                          soft_wrap=True)
+            return
         settings, note = _info_settings(resolution, loader, entry)
     except Exception as exc:
         _err_config(json_output, exc)
         raise  # unreachable: _err_config exits
-    if not json_output:
-        console.print(info_renderable(PluginSession(loader.global_config_dir, workspace, frozenset(), {}, {}), entry),
-                      soft_wrap=True)
-        return
     m = entry.manifest
     typer.echo(_json.dumps({
         "name": name, "state": entry.display, "state_kind": entry.state,
@@ -343,7 +343,7 @@ def _checked(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry, pai
     name, cls = entry.name, resolution.classes.get(entry.name)
     if cls is None and not entry.bundled:
         # A plugin you installed that is not on yet: its model is in its code, and this command is
-        # the trust grant (SAFE-06). A plain `enable` imports nothing.
+        # the trust grant. A plain `enable` imports nothing.
         found = next(d for d in discovery.discover(loader.global_config_dir) if d.name == name)
         try:
             cls = discovery.load_plugin_class(found)
@@ -741,21 +741,7 @@ async def step_pending(resolution: Resolution, loader: ConfigLoader, entry: Plan
 
 def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_dir: Optional[str],
             ask: bool = False, in_session: bool = False, install: Literal["own", "none"] = "none") -> StepOutcome:
-    """Write `<name>.enabled: <on>`, and any --set values, into one layer's overrides.yaml; turning
-    a plugin on, run its setup step around that write. With `ask` (a terminal, no --set): its
-    questions are asked first and the answers written as --set values; after the write its setup
-    action runs (after its yes/no question, when it has one) and its doctor check runs whenever it
-    declares questions or an action; setup_help and the filled-in coding-agent prompt follow a
-    check that is not clean. Without `ask` nothing is asked and nothing runs: the next step says
-    what to run. A plugin missing its install extra is asked nothing and not checked. next_steps
-    print on every outcome, and the command exits 0 whether or not the check passes: it wrote.
-
-    `in_session` (the /plugins restart, via session_step): the questions are asked only while the
-    step is pending — a configured plugin is just switched — and the change takes effect in the
-    session that resumes, so the success line does not point at the next start. Either way the
-    setup action runs only while the step is pending or when answers were written in this run.
-
-    `install="own"` (with `ask`): a missing install extra is installed first, after one consent."""
+    """Write `<name>.enabled` and any --set values into one layer's overrides.yaml; with `ask`, run the plugin's setup step around the write."""
     resolution, loader, workspace = _resolve(config_dir, json_output=False)
     entry = _entry(resolution, loader, name, False)
     state = PassState(name, on, tuple(pairs), to_workspace, ask, in_session, resolution, loader, workspace, entry)
@@ -1082,19 +1068,18 @@ def _line(raw: bytes) -> str:
 async def _read_lines(stream: Any) -> list[str]:
     """The last lines of `stream`, read in fixed chunks so no line length can raise."""
     lines: deque[str] = deque(maxlen=_KEPT_LINES)
-    partial = b""
+    rest = b""
     while chunk := await stream.read(_READ_SIZE):
-        *done, partial = (partial + chunk).split(b"\n")
+        *done, rest = (rest + chunk).split(b"\n")
         lines.extend(map(_line, done))
-        partial = partial[:_READ_SIZE]
-    if partial:
-        lines.append(_line(partial))
+        rest = rest[:_READ_SIZE]
+    if rest:
+        lines.append(_line(rest))
     return list(lines)
 
 
 async def _run_install(argv: list[str], cfg: Path, announce: Any) -> tuple[int, list[str]] | None:
-    """Run the installer in a fresh private directory; None when no such directory could be made.
-    The child never outlives this call, and neither does the directory."""
+    """Run the installer in a fresh private directory (None when none could be made); neither child nor directory outlives the call."""
     d = None
     try:
         with suppress(OSError):
@@ -1129,8 +1114,7 @@ async def _run_install(argv: list[str], cfg: Path, announce: Any) -> tuple[int, 
 
 async def install_pass(session: PluginSession, extras: set[str], names: list[str], *, progress: PassProgress,
                        confirm: Any, console: Console, in_batch: bool = False) -> frozenset[str]:
-    """One consent, one install of the union of `extras`, for the plugins in `names`; the names it
-    covers on success, an empty set after printing why not. Prints its own blocks through `console`."""
+    """One consent and one install of the union of `extras` for `names`: the names covered, or an empty set after printing why not."""
     from localharness.config.loader import ConfigLoader
     from localharness.plugins.resolve import resolve
 
@@ -1362,11 +1346,8 @@ async def disable_pass(session, name, *, progress, report) -> PassResult:
 
 
 def session_step(action: tuple[str, str], config_dir: str | None) -> StepOutcome:
-    """The step `/plugins enable|disable NAME` runs between the two halves of a terminal session's
-    restart (cli/start_cmd.start_app): the same _switch the shell command runs, on the plain
-    terminal with nothing else drawing on it — never inside the input box, so a typed secret never
-    reaches the box's history. It never raises: Ctrl-C or Ctrl-D at a question, a refusal, or an
-    error (a failed write, a plugin bug) stops the step and the session resumes anyway."""
+    """The step `/plugins enable|disable NAME` runs between the two halves of a terminal session's restart; it never raises."""
+    # plain terminal, never the input box: a typed secret must not reach its history
     import click
     verb, name = action
     try:
@@ -1386,11 +1367,7 @@ def session_step(action: tuple[str, str], config_dir: str | None) -> StepOutcome
 
 async def switch_decision(name: str, on: bool, running: frozenset[str], global_config_dir: Path,
                           workspace: Path | None) -> str | None:
-    """Should `/plugins enable|disable NAME` restart the running session? None: yes — end the REPL,
-    the step runs between the two halves. A line: no — show it and stay. A session restarts when
-    the set of running plugins would change, when the plugin's flag on disk would change, or when
-    its setup step still has work (its questions are asked on the plain terminal, never in the
-    input box). Reads a fresh plan over the session's own layers; asks and writes nothing."""
+    """None: `/plugins enable|disable NAME` restarts the session and the step runs between the halves; a line: show it and stay. Asks and writes nothing."""
     from localharness.config.loader import ConfigLoader
     from localharness.plugins.resolve import resolve
     loader = ConfigLoader(config_dir=global_config_dir, local_config_dir=workspace)
