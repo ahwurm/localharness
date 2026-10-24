@@ -48,6 +48,13 @@ ROW_STATES = MappingProxyType({
     "off_needs_extra": "off (needs {extra})",
 })
 
+NOT_APPLIED = "{changes} saved, not applied: {why}. {fix}"
+NOT_APPLIED_CASES = MappingProxyType({
+    "asks": ("a restart would drop {asks}", "Answer the asks {where}, then open /plugins and close it"),
+    "closed_early": ("Plugins closed on an error: {error}", "Quit and start localharness again to apply"),
+})
+CLOSED_ON_ERROR = "Plugins closed on an error: {error}"
+
 _STOP = object()
 _STOPS = (click.exceptions.Abort, click.exceptions.Exit, EOFError, KeyboardInterrupt, SystemExit)
 
@@ -147,7 +154,7 @@ async def _contained(flow: Flow, node: Callable, names: tuple[str, ...], progres
 
 
 async def guarded(flow: Flow, node: Callable, *, names: tuple[str, ...] = (), progress: Any = None) -> Any:
-    """The node's value, `_STOP` for a user stop, or `_Abandon` for an error the node let out."""
+    """The node's value, or `_STOP` for a user stop; an error the node let out raises `_Abandon`."""
     task = asyncio.ensure_future(_contained(flow, node, names, progress))
     async with sigint_cancels(task) as cancelled:
         try:
@@ -185,11 +192,29 @@ async def _root(flow: Flow) -> None:
             return
 
 
-def _finish(flow: Flow, *, closing: bool) -> bool:
+def _not_applied(plan: ReloadPlan, why: Unreachable | None, error: str) -> str:
+    """The one line for a change that was saved but cannot be applied: an unreached node, then asks, then an error."""
+    if why is not None:
+        reason, fix = UNREACHABLE[why][1:]
+    elif plan.parked or plan.waiting:
+        reason, fix = (t.format(asks=n_of(plan.parked + plan.waiting, "ask"), where=_where(plan))
+                       for t in NOT_APPLIED_CASES["asks"])
+    else:
+        reason, fix = (t.format(error=error) for t in NOT_APPLIED_CASES["closed_early"])
+    return NOT_APPLIED.format(changes=n_of(len(plan.names), "plugin change"), why=reason, fix=fix)
+
+
+def _finish(flow: Flow, *, closing: bool, why: Unreachable | None = None, error: str = "") -> bool:
     plan = flow.should_reload(flow.session.touched)
     if closing and plan.reload:
         flow.close()
         return True
+    if plan.names:
+        _say(flow.console, _not_applied(plan, why, error))
+    elif why is not None:
+        _say(flow.console, unavailable(why))
+    elif error:
+        _say(flow.console, CLOSED_ON_ERROR.format(error=error))
     return False
 
 
@@ -202,6 +227,8 @@ async def run(channel: Any, session: PluginSession, should_reload: Callable[[Map
             _say(console, ASKS_PENDING.format(asks=n_of(flow.plan.parked, "ask")))
         try:
             await _root(flow)
-        except Exception:  # noqa: BLE001 — Plugins closes; the session goes on
-            return _finish(flow, closing=False)
+        except _Abandon as gone:
+            return _finish(flow, closing=False, why=gone.why, error=gone.error)
+        except Exception as exc:  # noqa: BLE001 — Plugins closes; the session goes on
+            return _finish(flow, closing=False, error=_first_line(exc))
         return _finish(flow, closing=True)
