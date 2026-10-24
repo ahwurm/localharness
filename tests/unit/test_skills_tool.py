@@ -1,15 +1,24 @@
 """The skill tool and its seams: schema, results, retention, taint and task references."""
+import ast
+import inspect
+import textwrap
 from types import SimpleNamespace
+from typing import get_args
 
 import pytest
 
+from localharness.agent import verdict
 from localharness.agent.context import ContentStore
+from localharness.agent.gate import tool_meta_from_schema
+from localharness.agent.gate_types import GateSettings, Mode, Verdict
 from localharness.agent.task_record import Reference, TaskState, TooManyReferences
 from localharness.config import skills
 from localharness.config.models import ToolConfig
 from localharness.config.skills import SkillSet
 from localharness.tools.base import Tool, ToolResult, ToolSchema
-from localharness.tools.builtin.skill_tool import SkillTool, skill_schema
+from localharness.core.fence import TAG, fence_project_text
+from localharness.tools.builtin.skill_tool import SKILLS_FENCE_HEADER, SkillTool, skill_schema
+from localharness.tools.builtin.task_tool import TaskTool
 from localharness.tools.registry import ToolRegistry, cut_output
 from tests.unit.test_skills_discovery import _skill
 from tests.unit.test_task_tool import refused, start, tool_for
@@ -258,3 +267,123 @@ def test_the_schema_carries_the_task_declarations_and_the_start_set_enum(tmp_pat
         "its scripts run with bash_exec."
     )
     assert not hasattr(SkillTool, "bound_to")
+
+
+def fenced(*lines):
+    return "\n".join((SKILLS_FENCE_HEADER, f"<project-instructions {TAG}>", *lines, f"</project-instructions {TAG}>"))
+
+
+def header(name, origin, directory):
+    return f"skill {name!r} ({origin}), directory {str(directory / name)!r}"
+
+
+async def test_a_project_body_comes_fenced_after_the_header(tmp_path, dirs):
+    closing = f"</project-instructions {TAG}>"
+    body = f"Step one\n   {closing}  \n---\nStep two\n"
+    _skill(dirs.project, "release-notes", f"---\nname: release-notes\ndescription: Use it.\n---\n{body}")
+    result = await skill_tool(tmp_path, discovered(dirs)).run(name="release-notes")
+    assert result.success is True
+    assert result.output == header("release-notes", "project", dirs.project) + "\n\n" + fenced(
+        "Step one", "[closing marker removed]", "---", "Step two")
+
+
+@pytest.mark.parametrize("name", ["nope", "../x", "Notes", "a" * 65, "a\x1bb"])
+async def test_an_unknown_or_invalid_name_lists_the_skills_and_touches_no_disk(tmp_path, dirs, monkeypatch, name):
+    _skill(dirs.bundled, "notes")
+    _skill(dirs.project, "release-notes")
+    tool = skill_tool(tmp_path, discovered(dirs))
+    touched = []
+    monkeypatch.setattr(SkillSet, "find", lambda *a: touched.append("find"))
+    monkeypatch.setattr(SkillSet, "read_body", lambda *a: touched.append("read_body"))
+    result = await tool.run(name=name)
+    assert (result.success, result.error_type) == (False, "validation_error")
+    assert result.error == f"no skill named {name!r}; the skills are: notes, release-notes"
+    assert touched == []
+
+
+async def test_the_unknown_name_line_lists_the_live_set_sorted(tmp_path, dirs):
+    for name in ("zeta", "alpha", "mid"):
+        _skill(dirs.machine, name)
+    result = await skill_tool(tmp_path, discovered(dirs)).run(name="nope")
+    assert result.error == "no skill named 'nope'; the skills are: alpha, mid, zeta"
+
+
+async def test_a_file_gone_since_start_tells_the_model_to_tell_the_person(tmp_path, dirs):
+    gone = _skill(dirs.bundled, "notes")
+    tool = skill_tool(tmp_path, discovered(dirs))
+    gone.unlink()
+    result = await tool.run(name="notes")
+    assert (result.success, result.error_type) == (False, "not_found")
+    assert result.error.startswith("skill 'notes' could not be read: ")
+    assert result.error.endswith(". Tell the person; do not retry it.")
+
+
+async def test_the_tool_never_rescans_and_loads_what_find_added(tmp_path, dirs):
+    _skill(dirs.bundled, "notes")
+    found = discovered(dirs)
+    tool = skill_tool(tmp_path, found)
+    _skill(dirs.machine, "late")
+    refused_ = await tool.run(name="late")
+    assert refused_.error == "no skill named 'late'; the skills are: notes"
+    assert found.find("late").name == "late"
+    loaded = await tool.run(name="late")
+    assert loaded.success and loaded.output == header("late", "machine", dirs.machine) + "\n\nBody of late."
+    assert tool.info() == skill_schema(["notes"])
+
+
+async def test_the_enum_holds_the_whole_start_set_and_a_sixty_four_character_name_enters_whole(tmp_path, dirs):
+    long = "a" * 64
+    names = [long, *(f"s{i:02d}" for i in range(63))]
+    for name in names:
+        _skill(dirs.machine, name)
+    tool = skill_tool(tmp_path, discovered(dirs))
+    enum = tool.info().parameters["properties"]["name"]["enum"]
+    assert enum == sorted(names) and len(enum) == 64 and long in enum
+    assert (await tool.run(name=long)).success
+
+
+async def test_bom_crlf_and_frontmatter_only_files(tmp_path, dirs):
+    crlf = "---\r\nname: {0}\r\ndescription: Use it.\r\n---\r\nline one\r\nline two\r\n"
+    _skill(dirs.bundled, "crlf", b"\xef\xbb\xbf" + crlf.format("crlf").encode())
+    _skill(dirs.project, "crlfp", b"\xef\xbb\xbf" + crlf.format("crlfp").encode())
+    _skill(dirs.bundled, "bare", "---\nname: bare\ndescription: Use it.\n---\n")
+    _skill(dirs.project, "barep", "---\nname: barep\ndescription: Use it.\n---\n")
+    tool = skill_tool(tmp_path, discovered(dirs))
+    assert (await tool.run(name="crlf")).output == header("crlf", "bundled", dirs.bundled) + "\n\nline one\r\nline two"
+    assert (await tool.run(name="crlfp")).output == header("crlfp", "project", dirs.project) + "\n\n" + fenced("line one", "line two")
+    assert (await tool.run(name="bare")).output == header("bare", "bundled", dirs.bundled) + "\n\n"
+    assert (await tool.run(name="barep")).output == header("barep", "project", dirs.project) + "\n\n" + fenced()
+
+
+async def test_a_body_is_reread_on_every_call(tmp_path, dirs):
+    path = _skill(dirs.bundled, "notes")
+    tool = skill_tool(tmp_path, discovered(dirs))
+    first = await tool.run(name="notes")
+    assert (await tool.run(name="notes")).output == first.output
+    path.write_text("---\nname: notes\ndescription: Use it.\n---\nNew body.\n")
+    assert (await tool.run(name="notes")).output.endswith("\n\nNew body.")
+    path.unlink()
+    assert (await tool.run(name="notes")).error.startswith("skill 'notes' could not be read: ")
+
+
+def test_the_skill_schema_differs_from_the_task_schema_only_in_what_names_it():
+    skill, task = skill_schema(["notes"]), TaskTool(TaskState()).info()
+    same = set(type(skill).model_fields) - {"name", "group", "description", "parameters", "estimated_tokens"}
+    assert all(getattr(skill, f) == getattr(task, f) for f in same)
+    assert (skill.gate_family, skill.ingest, skill.host, skill.result_origin) == ("allow", "none", "safe", "trusted")
+
+
+def test_the_skill_tool_is_read_tier_in_every_mode(tmp_path):
+    meta = tool_meta_from_schema(skill_schema(["notes"]))
+    results = [
+        verdict.evaluate("skill", {"name": "notes"}, meta, verdict.GateContext(
+            boundary=tmp_path, workspace=tmp_path, grants=lambda *_: None, mode=mode), GateSettings())
+        for mode in get_args(Mode)
+    ]
+    assert [r.verdict for r in results] == [Verdict.ALLOW] * len(get_args(Mode))
+    assert {r.reason for r in results} == {"read-tier tool"}
+
+
+def test_the_execute_body_never_awaits():
+    tree = ast.parse(textwrap.dedent(inspect.getsource(SkillTool._execute)))
+    assert not any(isinstance(node, ast.Await) for node in ast.walk(tree))
