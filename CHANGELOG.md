@@ -4,7 +4,9 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
-## [Unreleased]
+## [0.21.1] — 2026-10-24
+
+The installed phone app shows a "can't reach your box" page instead of a white screen when the box is unreachable.
 
 ### Fixed
 - **The installed phone app no longer white-screens when the box is unreachable.** When
