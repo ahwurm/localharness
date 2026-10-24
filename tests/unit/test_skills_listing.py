@@ -4,9 +4,13 @@ from __future__ import annotations
 import inspect
 from itertools import permutations
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from localharness.agent import context, subagent
+from localharness.agent.context import ContentStore, TokenCounter
+from localharness.agent.task_record import TaskState
 from localharness.agent.loop import _fence_instructions, base_system_prompt
 from localharness.cli import model_cmd, start_serving
 from localharness.cli.workspace import MachineTrust
@@ -15,8 +19,9 @@ from localharness.config.loader import ConfigLoader
 from localharness.config.models import AgentConfig, PermissionConfig
 from localharness.config.skills import LISTING_BUDGET_CHARS, Skill, SkillSet, shown
 from localharness.core.fence import TAG
-from localharness.tools.builtin.skill_tool import LISTING_HEADER, SKILLS_FENCE_HEADER, render_listing, skill_schema
+from localharness.tools.builtin.skill_tool import LISTING_HEADER, SKILLS_FENCE_HEADER, SkillTool, render_listing, skill_schema
 from tests.conftest import FakeLLMResponse
+from tests.unit.test_capabilities import _production_registry
 from tests.unit.test_harness_floor import _head_prompt, _loop
 from tests.unit.test_loop_project_instructions import _FakeHandle, _build
 from tests.unit.test_skills_discovery import _skill
@@ -443,3 +448,22 @@ def test_a_failed_discovery_in_the_swap_floor_falls_back_to_the_cache(tmp_path, 
     monkeypatch.setattr(SkillSet, "discover", staticmethod(boom))
     assert model_cmd._swap_floor(MachineTrust(), cfg) == 7_000
     assert seen == []
+
+
+async def test_the_built_in_role_floors_do_not_move_when_the_root_holds_the_skill_tool(tmp_path, pkg):
+    reg = await _production_registry()
+    counter, llm = TokenCounter(offline=True), SimpleNamespace(config=None)
+    before = subagent.builtin_role_floors(reg, counter, llm, None)
+    tool = SkillTool(_notes(tmp_path), ContentStore(), TaskState(None, workspace=str(tmp_path)), result_cap=lambda: 50_000)
+    await reg.register(tool, scope="global")
+    after = subagent.builtin_role_floors(reg, counter, llm, None)
+    assert before == after
+    assert set(after) == {"explore", "web-researcher", "search-verifier"}
+
+
+def test_a_role_floor_prompt_has_no_listing(monkeypatch):
+    seen = []
+    monkeypatch.setattr(context, "fixed_tokens", lambda counter, prompt, schemas: seen.append(prompt) or 1)
+    cfg = AgentConfig(name="explore", role="r", model="inherit")
+    subagent.role_floor(cfg, [], counter=TokenCounter(offline=True), llm=SimpleNamespace(config=None), max_response_tokens=None)
+    assert len(seen) == 1 and "## Skills" not in seen[0]
