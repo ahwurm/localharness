@@ -20,7 +20,8 @@ from localharness.agent.gate_types import MODE_STRICTNESS
 from localharness.channels import input_router
 from localharness.cli.model_ops import _hold_peer_session_key, _launch_key, _peer_session_key
 from localharness.cli.session_resume import RELOAD_ACTION
-from localharness.cli.slash_commands import SlashCommand, find_row, help_text
+from localharness.cli.skill_session import skill_row
+from localharness.cli.slash_commands import SlashCommand, add_plugin_row, find_row, help_text
 from localharness.config.effort import EFFORT_UNENFORCED_LINE, LEVELS, resolve_effort
 from localharness.config.skills import Skipped, skip_line
 from localharness.core.content import ImageError, describe, fit_all, fit_to_tokens
@@ -1502,6 +1503,18 @@ class OrchestratorREPL:
             else:
                 await getattr(self, row.handler)(row, raw[len(row.name):].strip())
             return True
+
+        head = lowered.partition(" ")[0]
+        if self._skills is not None and find_row(head) is None:
+            found = self._skills.find(head[1:])
+            if isinstance(found, Skipped):
+                await self._channel.send_message(skip_line(found), metadata={"style": "system.error"})
+                return True
+            if found is not None:
+                row = skill_row(found)
+                add_plugin_row(row)
+                await self._slash_skill(row, raw.partition(" ")[2].strip())
+                return True
 
         # #48: a single-token "/word" is the COMMAND namespace — reject unknown ones
         # deterministically (no LLM turn) instead of letting them fall through to the
