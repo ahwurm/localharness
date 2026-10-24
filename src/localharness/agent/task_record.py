@@ -383,7 +383,7 @@ class TaskState:
         return True
 
     def add_reference(self, ref: Reference) -> None:
-        """Commit `ref` to the current record: replace the same source in place, else append; saves."""
+        """Commit `ref` to the current record: replace the same source in place, else append; saves, and an oversize record is logged, not raised."""
         rec = self.current
         assert rec is not None
         answer = _task_answer(rec, ref.source)
