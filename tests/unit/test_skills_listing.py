@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import inspect
+from itertools import permutations
 from pathlib import Path
 
 import pytest
@@ -194,3 +195,46 @@ def test_a_bundled_and_a_project_skill_render_the_spec_listing(tmp_path, pkg):
         "- release-notes (project): Use release-notes when asked.",
         f"</project-instructions {TAG}>",
     ))
+
+
+def _fenced(rows):
+    return f"{SKILLS_FENCE_HEADER}\n<project-instructions {TAG}>\n" + "\n".join(rows) + f"\n</project-instructions {TAG}>"
+
+
+def test_an_empty_start_set_lists_nothing():
+    assert render_listing(()) == ""
+
+
+def test_one_skill_per_group_gives_the_minimal_sections():
+    assert render_listing((_sk("a", 5, "bundled"),)).split("\n") == [*LISTING_HEADER.split("\n"), "- a: ddddd"]
+    assert render_listing((_sk("p", 5, "project"),)) == LISTING_HEADER + "\n" + _fenced(["- p (project): ddddd"])
+
+
+def test_rows_dropped_to_name_only_keep_their_names_and_labels():
+    found = (_sk("m", 800, "bundled"), _sk("n", 600), _sk("p", 100, "project"))
+    assert [row[2] is None for row in shown(found)] == [True, False, True]
+    lines = render_listing(found).split("\n")
+    assert "- m" in lines and "- p (project)" in lines and f"- n: {'d' * 600}" in lines
+    assert render_listing(found) == "\n".join((LISTING_HEADER, "- m", f"- n: {'d' * 600}", _fenced(["- p (project)"])))
+
+
+def test_bundled_and_machine_rows_sort_together_and_project_rows_sort_inside_the_fence():
+    found = (_sk("zeta", 1, "bundled"), _sk("b-proj", 1, "project"), _sk("alpha", 1), _sk("a-proj", 1, "project"), _sk("mid", 1, "bundled"))
+    assert render_listing(found) == "\n".join((
+        LISTING_HEADER, "- alpha: d", "- mid: d", "- zeta: d", _fenced(["- a-proj (project): d", "- b-proj (project): d"]),
+    ))
+
+
+def test_the_listing_is_the_same_for_every_order_of_the_start_set():
+    found = (_sk("b", 3, "bundled"), _sk("a", 4), _sk("q", 5, "project"), _sk("p", 6, "project"))
+    outputs = {render_listing(order) for order in permutations(found)}
+    assert len(list(permutations(found))) == 24 and len(outputs) == 1
+
+
+def test_descriptions_enter_their_rows_verbatim():
+    found = (
+        Skill("a", "Résumé — it's \"fine\" \\ {x}", "machine", Path("/x/a/SKILL.md"), False),
+        Skill("b", "same", "machine", Path("/x/b/SKILL.md"), False),
+        Skill("c", "same", "machine", Path("/x/c/SKILL.md"), False),
+    )
+    assert render_listing(found).split("\n")[2:] == ["- a: Résumé — it's \"fine\" \\ {x}", "- b: same", "- c: same"]
