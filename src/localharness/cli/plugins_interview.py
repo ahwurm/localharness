@@ -439,7 +439,7 @@ async def _read_only(flow: Flow, row: Any, loader: Any) -> None:
 async def _secret(flow: Flow, row: Any, loader: Any) -> str | None:
     key, value, secret = _key(row), row.current_value, is_secret(row.annotation)
     pairs = await plugins_cmd.ask_fields(
-        (SetupField(key=key, prompt=key, secret=secret),), lambda k: str(value), lambda k: bool(value),
+        (SetupField(key=key, prompt=key, secret=secret),), lambda k: str(value), lambda k: bool(value) and value != row.default_value,
         lambda k: "none" if unwrap_optional(row.annotation) is not row.annotation else "", prompt=flow.prompt)
     return pairs[0].removeprefix(f"{key}=") if pairs else None
 
