@@ -357,3 +357,70 @@ def test_a_bracket_in_a_path_survives_and_an_escape_is_written_out(fake_home, pk
     output = CliRunner().invoke(app, ["skills", "--config-dir", str(cfg)]).output
     assert "\x1b" not in output
     assert f"  {str(evil)!r} holds a control character. rename it without control characters." in output.splitlines()
+
+
+def _agents_only(directory):
+    from localharness.cli.skills_cmd import AGENTS_ONLY
+
+    return AGENTS_ONLY.format(dir=repr(str(directory)))
+
+
+def test_the_agents_only_line_leads_and_the_skills_under_it_are_not_listed(fake_home, pkg, monkeypatch):
+    home = fake_home()
+    proj = home / "proj"
+    _skill(proj / ".agents" / "skills", "x")
+    monkeypatch.chdir(proj)
+    lines = _run()
+    assert lines == [
+        f"{str(Path.cwd() / '.agents' / 'skills')!r} is not read: no .localharness/ here; localharness init --workspace "
+        "creates it, adds files to this repository, and then loads these skills"
+    ]
+    assert lines == [_agents_only(Path.cwd() / ".agents" / "skills")]
+
+
+def test_beside_a_localharness_dir_the_agents_skills_are_listed_and_nothing_is_said(fake_home, pkg, monkeypatch):
+    home = fake_home()
+    proj = _project(home, monkeypatch)
+    path = _skill(proj / ".agents" / "skills", "x")
+    assert _run() == [f"x (project, {str(path)!r})"]
+
+
+@pytest.mark.parametrize("as_file", [False, True])
+def test_no_agents_skills_directory_no_line(fake_home, pkg, monkeypatch, as_file):
+    home = fake_home()
+    (home / "proj" / ".agents").mkdir(parents=True)
+    if as_file:
+        (home / "proj" / ".agents" / "skills").write_text("")
+    monkeypatch.chdir(home / "proj")
+    assert _run() == []
+
+
+def test_a_localharness_dir_made_between_two_runs_changes_only_the_second(fake_home, pkg, monkeypatch):
+    home = fake_home()
+    proj = home / "proj"
+    path = _skill(proj / ".agents" / "skills", "x")
+    monkeypatch.chdir(proj)
+    first = _run()
+    (proj / ".localharness").mkdir()
+    assert (first, _run()) == ([_agents_only(Path.cwd() / ".agents" / "skills")], [f"x (project, {str(path)!r})"])
+
+
+@pytest.mark.parametrize("agents, workspace, count", [(True, False, 1), (False, False, 0), (True, True, 0)])
+async def test_start_prints_the_agents_only_line_once_and_only_then(tmp_path, fake_home, pkg, monkeypatch, agents, workspace, count):
+    import io
+
+    from rich.console import Console
+
+    from localharness.cli import start_cmd
+    from localharness.cli.start_cmd import _start_async
+    from tests.unit.test_skills_listing import _start_world
+
+    fake_home(tmp_path, clear_overrides=False)
+    _start_world(tmp_path, monkeypatch, skill=False)
+    work = tmp_path / "work"
+    (work / ".agents" / "skills").mkdir(parents=True) if agents else None
+    (work / ".localharness").mkdir() if workspace else None
+    out = io.StringIO()
+    monkeypatch.setattr(start_cmd, "console", Console(file=out, width=400))
+    await _start_async(None, False, False, str(tmp_path))
+    assert out.getvalue().count(_agents_only(work / ".agents" / "skills")) == count
