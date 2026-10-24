@@ -1,8 +1,10 @@
-"""`install_route` / `installed_extras`: one spec, six installer rows, nothing spawned."""
+"""`install_route` / `installed_extras` / `install_pass`: one spec, six installer rows, nothing spawned."""
 from __future__ import annotations
 
+import asyncio
 import importlib.metadata
 import importlib.util
+import io
 import shlex
 import subprocess
 import sys
@@ -12,10 +14,14 @@ from types import SimpleNamespace
 import pytest
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
+from rich.console import Console
 
-from localharness.cli import update_cmd
+from localharness.cli import plugins_cmd, update_cmd
+from localharness.cli.plugins_cmd import PassProgress, PluginSession, extra_for, install_pass, install_route_for
 from localharness.cli.update_cmd import Manual, install_route
-from localharness.plugins.plan import installed_extras
+from localharness.plugins import resolve as resolve_mod
+from localharness.plugins.api import PluginManifest
+from localharness.plugins.plan import PlanEntry, installed_extras
 
 EXTRAS = ["browser", "dev", "Exact_Tokenizer", "mobile"]
 SPEC = "localharness[browser,dev,mobile]==1.2.3"
@@ -226,3 +232,207 @@ def test_installed_extras_on_this_install():
     found = installed_extras()
     assert "dev" in found
     assert all(e == canonicalize_name(e) for e in found)
+
+
+# --------------------------------------------------------------------------- several extras
+
+def test_several_extras_make_one_spec_over_every_installed_extra(dist):
+    route = install_route("mobile", "exact-tokenizer")
+    req = Requirement(route.spec)
+    assert route.spec == "localharness[browser,dev,exact-tokenizer,mobile]==1.2.3"
+    assert req.extras == {"browser", "dev", "exact-tokenizer", "mobile"}
+    assert route.argv[-1] == route.spec
+    assert install_route("mobile") == install_route("mobile", "mobile")
+    assert install_route("mobile").spec == SPEC
+
+
+@pytest.mark.parametrize("wanted", [("mobile", "nope"), ("nope", "mobile"), ()])
+def test_several_extras_with_one_undeclared_or_none_have_no_route(dist, wanted):
+    assert install_route(*wanted) is None
+
+
+# --------------------------------------------------------------------------- the installer guard
+
+def test_installer_guard_refuses_an_install_argv():
+    with pytest.raises(AssertionError, match="spawned an installer"):
+        asyncio.run(asyncio.create_subprocess_exec(sys.executable, "-I", "-m", "pip", "install", "x"))
+
+
+def test_installer_guard_stops_install_pass_on_an_argv_route_with_no_fake(bare):
+    with pytest.raises(AssertionError, match="spawned an installer"):
+        bare.run()
+    assert list(bare.cfg.iterdir()) == []
+
+
+# --------------------------------------------------------------------------- extra_for
+
+def _entry(extra, *, bundled=True, manifest=True) -> PlanEntry:
+    m = PluginManifest(name="plug", version="0.1", kind="tools", requires_extra=extra) if manifest else None
+    return PlanEntry("plug", bundled, "off", "built in", "", "", m)
+
+
+@pytest.fixture
+def seam(monkeypatch):
+    monkeypatch.setitem(resolve_mod.resolve.__kwdefaults__, "extra_installed", lambda e: e in {"browser", "dev"})
+
+
+@pytest.mark.parametrize("entry, expected", [
+    (_entry("mobile"), "mobile"),
+    (_entry("mobile", bundled=False), None),
+    (_entry("x;rm -rf ~"), None),
+    (_entry("nope"), None),
+    (_entry("browser"), None),
+    (_entry(None), None),
+    (_entry("mobile", manifest=False), None),
+])
+def test_extra_for_gives_only_a_missing_provided_extra_of_a_bundled_plugin(dist, seam, entry, expected):
+    assert extra_for(entry) == expected
+    route = install_route_for(entry)
+    assert (route is not None) == (expected is not None)
+    assert route is None or route.spec == SPEC
+
+
+# --------------------------------------------------------------------------- install_pass on a faked spawn
+
+class _Proc:
+    def __init__(self, chunks=(), code=0, *, blocked=False, hangs=False, kill_raises=False):
+        self.chunks, self.code, self.blocked, self.hangs, self.kill_raises = list(chunks), code, blocked, hangs, kill_raises
+        self.returncode, self.calls, self.reading = None, [], asyncio.Event()
+        self.stdout = SimpleNamespace(read=self._read)
+
+    async def _read(self, n):
+        if self.blocked:
+            self.reading.set()
+            await asyncio.Event().wait()
+        return self.chunks.pop(0) if self.chunks else b""
+
+    async def wait(self):
+        self.calls.append("wait")
+        if self.hangs and "kill" not in self.calls:
+            await asyncio.Event().wait()
+        self.returncode = -9 if "kill" in self.calls else -15 if "terminate" in self.calls else self.code
+        return self.returncode
+
+    def terminate(self):
+        self.calls.append("terminate")
+
+    def kill(self):
+        self.calls.append("kill")
+        if self.kill_raises:
+            raise ProcessLookupError
+
+
+class Harness:
+    def __init__(self, monkeypatch, tmp_path):
+        self.cfg = tmp_path / "cfg"
+        self.cfg.mkdir(mode=0o700)
+        self.session = PluginSession(self.cfg, None, frozenset(), {}, {})
+        self.progress, self.proc, self.answer = PassProgress(), _Proc(), True
+        self.buf = io.StringIO()
+        self.console = Console(file=self.buf, width=400)
+        self.spawns, self.phases, self.asked = [], [], []
+        self.questions = {"a": "", "b": ""}
+        monkeypatch.setattr(resolve_mod, "resolve", lambda loader: SimpleNamespace(plan=SimpleNamespace(
+            entry=lambda n: SimpleNamespace(manifest=SimpleNamespace(setup_action=self.questions[n])))))
+
+    async def _spawn(self, *argv, **kw):
+        self.spawns.append((argv, kw))
+        self.phases.append(self.progress.phase)
+        return self.proc
+
+    async def _confirm(self, text, *, default, tail=""):
+        self.asked.append((text, default, tail))
+        return self.answer
+
+    def call(self, names=("a",), extras=("mobile",), **kw):
+        return install_pass(self.session, set(extras), list(names), progress=self.progress,
+                            confirm=self._confirm, console=self.console, **kw)
+
+    def run(self, *a, **kw):
+        return asyncio.run(self.call(*a, **kw))
+
+    @property
+    def lines(self) -> list[str]:
+        return self.buf.getvalue().splitlines()
+
+
+@pytest.fixture
+def bare(dist, monkeypatch, tmp_path):
+    return Harness(monkeypatch, tmp_path)
+
+
+@pytest.fixture
+def h(bare, monkeypatch):
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", bare._spawn)
+    return bare
+
+
+def test_install_pass_consents_installs_and_returns_the_names_on_uv(h, monkeypatch):
+    monkeypatch.setattr(update_cmd, "_installer_kind", lambda: ("uv-tool", "/usr/bin/uv"))
+    h.questions["a"] = "Download the model (1.2 GB)?"
+    spec = "localharness[browser,dev,exact-tokenizer,mobile]==1.2.3"
+    h.proc = _Proc([b"all good\n"])
+    got = h.run(("a", "b"), ("mobile", "exact-tokenizer"))
+    assert got == frozenset({"a", "b"})
+    assert h.lines == [
+        "Enable a, b",
+        f"uv installs {spec} from your package index and runs its build steps."
+        " Packages added with uv tool install --with are dropped.",
+        "a: Download the model (1.2 GB)?",
+        "/usr/bin/uv tool install 'localharness[browser,dev,exact-tokenizer,mobile]==1.2.3'",
+        f"uv installing {spec} — output is shown only if it fails"]
+    [(text, default, tail)] = h.asked
+    assert (text, default) == ("", True)
+    assert tail == "n = enable without installing or downloading · Ctrl-C cancels this enable — nothing is written"
+    [(argv, kw)] = h.spawns
+    assert list(argv) == ["/usr/bin/uv", "tool", "install", spec]
+    assert Path(kw["cwd"]).parent == h.cfg and Path(kw["cwd"]) != Path.cwd()
+    assert (kw["stdin"], kw["stdout"], kw["stderr"]) == (
+        asyncio.subprocess.DEVNULL, asyncio.subprocess.PIPE, asyncio.subprocess.STDOUT)
+    assert "env" not in kw and "shell" not in kw
+    assert h.phases == ["install"]
+    assert list(h.cfg.iterdir()) == []
+
+
+def test_install_pass_on_pip_runs_isolated_pip_and_adds_no_with_sentence(h):
+    assert h.run() == frozenset({"a"})
+    assert h.lines[1] == f"pip installs {SPEC} from your package index and runs its build steps."
+    assert h.lines[-1] == f"pip installing {SPEC} — output is shown only if it fails"
+    [(argv, _)] = h.spawns
+    assert list(argv) == PIP_ARGV
+
+
+def test_install_pass_in_a_batch_names_the_batch_stop(h):
+    h.run(in_batch=True)
+    assert h.asked[0][2].endswith("Ctrl-C stops the batch")
+
+
+def test_install_pass_a_listed_plugin_with_no_question_adds_no_download_paragraph(h):
+    h.questions["b"] = "Fetch b?"
+    h.run(("a", "b"))
+    assert [ln for ln in h.lines if ln.startswith(("a:", "b:"))] == ["b: Fetch b?"]
+
+
+def test_the_install_strings_are_the_spec_text():
+    p = plugins_cmd
+    assert p.CTRLC.format(does=p.CTRLC_DOES["prompt"]) == "Ctrl-C cancels this enable — nothing is written"
+    assert p.CTRLC.format(does=p.CTRLC_DOES["batch"]) == "Ctrl-C stops the batch"
+    assert p.CTRLC_IGNORED.format(step="install") == (
+        "Ctrl-C is ignored in this session; this install cannot be stopped from the keyboard")
+    assert p.INSTALLING.format(installer="pip", spec="s") == "pip installing s — output is shown only if it fails"
+    assert p.CONSENT == ("Enable {names}",
+                         "{installer} installs {spec} from your package index and runs its build steps.{with}",
+                         "{name}: {question}", "{command}")
+    assert p.CONSENT_WITH == " Packages added with uv tool install --with are dropped."
+    assert p.CONSENT_ASK.format(ctrlc="C") == "n = enable without installing or downloading · C"
+    assert p.INSTALL_SKIPPED == ("{names}: enabled in config, package not installed{why}",
+                                 "To finish later, in another terminal run:", "{command}", "then {route}")
+    assert dict(p.INSTALL_SKIPPED_WHY) == {
+        "declined": "", "failed": " — the install failed (exit {code}; see the output above)",
+        "not_writable": " — {dir} is not writable",
+        "open": " — {dir} is open to other accounts and could not be made private",
+        "no_temp": " — no temp dir under {dir}"}
+    assert p.ROUTE_BACK == "{rerun} under /plugins → {names}"
+    assert p.ENABLE_MANUAL == "{name}: enabled in config; this install must be done by hand."
+    assert p.TYPED_NEEDS_EXTRA == "{name}: needs {extra}."
+    assert p.TYPED_ROUTE == "/plugins enable {name} again"

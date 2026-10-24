@@ -128,17 +128,17 @@ def _source_root() -> Path:
     return next((p for p in pkg_dir.parents if (p / "pyproject.toml").is_file()), pkg_dir.parent)
 
 
-def install_route(extra: str) -> InstallRoute | None:
-    """How this install gets `localharness[<extra>]`: argv to run here, or a command to paste."""
+def install_route(*wanted: str) -> InstallRoute | None:
+    """How this install gets `localharness[<extras>]`: argv to run here, or a command to paste."""
     try:
         declared = importlib.metadata.distribution("localharness").metadata.get_all("Provides-Extra")
         version = importlib.metadata.version("localharness")
     except importlib.metadata.PackageNotFoundError:
         return None
-    name = canonicalize_name(extra)
-    if name not in map(canonicalize_name, declared or ()):
+    names = set(map(canonicalize_name, wanted))
+    if not names or not names <= set(map(canonicalize_name, declared or ())):
         return None
-    extras = sorted(installed_extras() | {name})
+    extras = sorted(installed_extras() | names)
     spec = f"localharness[{','.join(extras)}]=={version}"
     if _is_source_install():
         sync = ["uv", "sync", *(a for e in extras for a in ("--extra", e))]

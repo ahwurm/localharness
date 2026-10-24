@@ -110,6 +110,22 @@ def _no_hub_calls(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_installer_spawn(monkeypatch):
+    """No test spawns pip or uv through asyncio: any argv holding an `install` element raises, every
+    other child (git, bash, a tool's own) runs for real. A test that installs a fake replaces this."""
+    import asyncio
+
+    real = asyncio.create_subprocess_exec
+
+    async def guarded(*args, **kwargs):
+        if "install" in map(str, args):
+            raise AssertionError(f"spawned an installer {args}")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", guarded)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_hf_cache_lookup(monkeypatch):
     """A vLLM launch looks a repo id's config.json up in the Hugging Face cache, and the suite's fake
     HOME does not cover an absolute HF_HOME inherited from the developer's shell. The lookup finds
