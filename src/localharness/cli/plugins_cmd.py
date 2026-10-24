@@ -24,11 +24,19 @@ Unlike `components set`, these commands emit no ComponentMutated audit event.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json as _json
+import os
+import shutil
+import signal
 import sys
+import tempfile
+from collections import deque
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Mapping, NoReturn, Optional
 from urllib.parse import urlsplit
 
@@ -38,8 +46,10 @@ from rich.console import Console
 from rich.markup import escape
 from rich.padding import Padding
 from rich.table import Table
+from rich.text import Text
 
 from localharness.channels.base import sanitize_for_display
+from localharness.cli import update_cmd
 from localharness.cli.components_cmd import (
     Refusal, _build_layered_loader, _core_secret_values, _err, _err_config, _serialize_value,
     _validate_overlay, _validation_text, is_secret, redact_text, shown, walk_secret_values,
@@ -48,11 +58,13 @@ from localharness.cli.interview import confirm_line, prompt_line
 from localharness.cli.workspace import _stdin_is_a_terminal
 from localharness.config.overlay import atomic_write_overlay, load_overlay
 from localharness.config.plugin_sections import unowned_hint
+from localharness.core.private_files import OPEN_TO_OTHERS, ensure_private_dir
 from localharness.registry import LAYER_DEFAULT, coerce_value, set_value_in_dict, walk_model_fields
 from localharness.registry.catalogue import LAYER_BANDS, plugin_catalogue_rows
 from localharness.registry.provenance import layered_catalogue
 
 if TYPE_CHECKING:
+    from localharness.cli.update_cmd import InstallRoute, Manual
     from localharness.config.loader import ConfigLoader
     from localharness.plugins.api import PluginManifest, PluginPaths, SetupField
     from localharness.plugins.lifecycle import DoctorRow
@@ -82,6 +94,33 @@ _TEMPLATE_URL = "https://github.com/ahwurm/localharness/tree/main/examples/plugi
 # A setup question for a secret that is already stored (#28): what Enter does, and how to clear it.
 SECRET_KEPT = "stored key kept — type none to clear, or paste a new one"
 SECRET_KEPT_FOR = "stored key for {host} kept — type none to clear, or paste a new one"
+CTRLC = "Ctrl-C {does}"
+CTRLC_DOES = MappingProxyType({"prompt": "cancels this enable — nothing is written", "batch": "stops the batch"})
+CTRLC_IGNORED = "Ctrl-C is ignored in this session; this {step} cannot be stopped from the keyboard"
+INSTALLING = "{installer} installing {spec} — output is shown only if it fails"
+CONSENT = ("Enable {names}",
+           "{installer} installs {spec} from your package index and runs its build steps.{with}",
+           "{name}: {question}",
+           "{command}")
+CONSENT_WITH = " Packages added with uv tool install --with are dropped."
+CONSENT_ASK = "n = enable without installing or downloading · {ctrlc}"
+INSTALL_SKIPPED = ("{names}: enabled in config, package not installed{why}",
+                   "To finish later, in another terminal run:",
+                   "{command}",
+                   "then {route}")
+INSTALL_SKIPPED_WHY = MappingProxyType({
+    "declined": "",
+    "failed": " — the install failed (exit {code}; see the output above)",
+    "not_writable": " — {dir} is not writable",
+    "open": " — {dir} is open to other accounts and could not be made private",
+    "no_temp": " — no temp dir under {dir}"})
+ROUTE_BACK = "{rerun} under /plugins → {names}"
+ENABLE_MANUAL = "{name}: enabled in config; this install must be done by hand."
+TYPED_NEEDS_EXTRA = "{name}: needs {extra}."
+TYPED_ROUTE = "/plugins enable {name} again"
+_TERMINATE_GRACE = 5.0
+_READ_SIZE = 4096
+_KEPT_LINES = 30
 
 
 def _fail(message: str, json_output: bool = False) -> NoReturn:
@@ -445,6 +484,19 @@ def _extra_missing(manifest: PluginManifest) -> bool:
     installed = (getattr(resolve, "__kwdefaults__", None) or {}).get("extra_installed",
                                                                      plan.extra_installed)
     return bool(extra) and not installed(extra)
+
+
+def extra_for(entry: PlanEntry) -> str | None:
+    """The extra a bundled plugin needs and this install lacks and can provide; None otherwise."""
+    m = entry.manifest
+    if m is None or not entry.bundled or not m.requires_extra or not _extra_missing(m):
+        return None
+    return m.requires_extra if update_cmd.install_route(m.requires_extra) is not None else None
+
+
+def install_route_for(entry: PlanEntry) -> InstallRoute | None:
+    extra = extra_for(entry)
+    return update_cmd.install_route(extra) if extra else None
 
 
 def _set_spelling(name: str, setup) -> str:
@@ -908,6 +960,137 @@ async def probe(name: str, resolution: Resolution, paths: PluginPaths) -> Doctor
                          else DoctorRow(name, entry.state, entry.display, bundled=entry.bundled))
     except Exception as exc:  # noqa: BLE001 — the enable already wrote; the check is advice
         return could_not_check(name, exc)
+
+
+def manual_block(names: list[str], manual: Manual, route: str) -> tuple[str, ...]:
+    """The lines that tell a person to run the install themselves, then come back by `route`."""
+    joined = ", ".join(names)
+    return (*([manual.prereq] if manual.prereq else []),
+            "Quit localharness first, then run:" if manual.quit_first else "In another terminal run:",
+            manual.command,
+            "then " + ("start localharness and " if manual.quit_first else "")
+            + route.format(rerun=ACTION_RERUN, names=joined, name=joined))
+
+
+def _config_dir_problem(cfg: Path) -> str | None:
+    ensure_private_dir(cfg)
+    if not cfg.is_dir() or not os.access(cfg, os.W_OK):
+        return "not_writable"
+    if not update_cmd._is_windows() and cfg.stat().st_mode & OPEN_TO_OTHERS:
+        return "open"
+    return None
+
+
+def _line(raw: bytes) -> str:
+    return sanitize_for_display(raw[:_READ_SIZE].decode("utf-8", errors="replace"))
+
+
+async def _read_lines(stream: Any) -> list[str]:
+    """The last lines of `stream`, read in fixed chunks so no line length can raise."""
+    lines: deque[str] = deque(maxlen=_KEPT_LINES)
+    partial = b""
+    while chunk := await stream.read(_READ_SIZE):
+        *done, partial = (partial + chunk).split(b"\n")
+        lines.extend(map(_line, done))
+        partial = partial[:_READ_SIZE]
+    if partial:
+        lines.append(_line(partial))
+    return list(lines)
+
+
+async def _run_install(argv: list[str], cfg: Path, announce: Any) -> tuple[int, list[str]] | None:
+    """Run the installer in a fresh private directory; None when no such directory could be made.
+    The child never outlives this call, and neither does the directory."""
+    d = None
+    try:
+        with suppress(OSError):
+            d = tempfile.mkdtemp(prefix="install-", dir=cfg)
+        if d is None:
+            return None
+        announce()
+        proc = await asyncio.create_subprocess_exec(
+            *argv, cwd=d, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT)
+        try:
+            lines = await _read_lines(proc.stdout)
+            await proc.wait()
+        finally:
+            if proc.returncode is None:
+                with suppress(ProcessLookupError):
+                    proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), _TERMINATE_GRACE)
+                except BaseException as exc:
+                    if proc.returncode is None:
+                        with suppress(ProcessLookupError):
+                            proc.kill()
+                    await proc.wait()
+                    if not isinstance(exc, TimeoutError):
+                        raise
+        return proc.returncode, lines
+    finally:
+        if d:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+async def install_pass(session: PluginSession, extras: set[str], names: list[str], *, progress: PassProgress,
+                       confirm: Any, console: Console, in_batch: bool = False) -> frozenset[str]:
+    """One consent, one install of the union of `extras`, for the plugins in `names`; the names it
+    covers on success, an empty set after printing why not. Prints its own blocks through `console`."""
+    from localharness.config.loader import ConfigLoader
+    from localharness.plugins.resolve import resolve
+
+    route = update_cmd.install_route(*sorted(extras))
+    joined = ", ".join(names)
+    command = update_cmd._quote(route.argv) if route.argv else ""
+
+    def say(*lines: str) -> None:
+        for line in lines:
+            console.print(Text(sanitize_for_display(line)), soft_wrap=True)
+
+    def skipped(why: str, **fill: Any) -> frozenset[str]:
+        back = (manual_block(names, route.manual, ROUTE_BACK) if route.argv is None else (
+            INSTALL_SKIPPED[1], INSTALL_SKIPPED[2].format(command=command),
+            INSTALL_SKIPPED[3].format(route=ROUTE_BACK.format(rerun=ACTION_RERUN, names=joined))))
+        say(INSTALL_SKIPPED[0].format(names=joined, why=INSTALL_SKIPPED_WHY[why].format(**fill)), *back)
+        return frozenset()
+
+    if route.argv is None:
+        return skipped("declined")
+    plan = resolve(ConfigLoader(config_dir=session.cfg_path, local_config_dir=session.workspace)).plan
+    asks = [(n, e.manifest.setup_action) for n in names
+            if (e := plan.entry(n)) is not None and e.manifest is not None and e.manifest.setup_action]
+    uv = route.argv[1:3] == ["tool", "install"]
+    installer = "uv" if uv else "pip"
+    head, how, per_plugin, last = CONSENT
+    say(head.format(names=joined),
+        how.format(installer=installer, spec=route.spec, **{"with": CONSENT_WITH if uv else ""}),
+        *(per_plugin.format(name=n, question=q) for n, q in asks),
+        last.format(command=command))
+    ctrlc = CTRLC.format(does=CTRLC_DOES["batch" if in_batch else "prompt"])
+    answer = await confirm("", default=True, tail=CONSENT_ASK.format(ctrlc=ctrlc))
+    if answer is None:
+        raise click.Abort()
+    if not answer:
+        return skipped("declined")
+    progress.phase = "install"
+    cfg = session.cfg_path
+    if problem := _config_dir_problem(cfg):
+        return skipped(problem, dir=cfg)
+
+    def announce() -> None:
+        if signal.getsignal(signal.SIGINT) is signal.SIG_IGN:
+            say(CTRLC_IGNORED.format(step="install"))
+        say(INSTALLING.format(installer=installer, spec=route.spec))
+
+    if (ran := await _run_install(route.argv, cfg, announce)) is None:
+        return skipped("no_temp", dir=cfg)
+    code, tail = ran
+    if code:
+        say(*tail)
+        return skipped("failed", code=code)
+    importlib.invalidate_caches()
+    return frozenset(names)
 
 
 def session_step(action: tuple[str, str], config_dir: str | None) -> StepOutcome:
