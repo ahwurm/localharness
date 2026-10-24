@@ -1774,7 +1774,7 @@ class TerminalChannel(ChannelAdapter):
                         f"{escape(sanitize_for_display(request.display))}"
                     )
                 try:
-                    kind = await _build_permission_app(options, request.grantable, output).run_async()
+                    kind = await _build_permission_app(options, request.grantable, output).run_async(handle_sigint=False)
                 except (KeyboardInterrupt, EOFError):
                     kind = PERMISSION_DEFAULT_DECISION
                 kind = kind or PERMISSION_DEFAULT_DECISION

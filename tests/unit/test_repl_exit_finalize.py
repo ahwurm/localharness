@@ -8,6 +8,7 @@ in-flight turn a BOUNDED grace to reach its own finalization before cancelling â
 from __future__ import annotations
 
 import asyncio
+import sys
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -163,7 +164,7 @@ async def test_begin_stop_is_per_instance():
     assert calls == ["stop", "start('queue', 'interrupt')"]
 
 
-async def _box_session_ended_mid_legend(tmp_path, *, answer, grace, end):
+async def _box_session_ended_mid_legend(tmp_path, *, answer, grace, end, observed=None):
     """A real box session whose turn is parked on a permission legend when `end(run_task)` ends it."""
     import sys
     from io import StringIO
@@ -212,7 +213,7 @@ async def _box_session_ended_mid_legend(tmp_path, *, answer, grace, end):
     )
     repl._exit_grace_seconds = grace
     before = sys.stdout
-    observed: dict = {}
+    observed = {} if observed is None else observed
     try:
         with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
             run_task = asyncio.ensure_future(repl._run_with_box())
@@ -227,12 +228,11 @@ async def _box_session_ended_mid_legend(tmp_path, *, answer, grace, end):
                 await asyncio.sleep(0.005)
             end(run_task)
             if answer:
-                await asyncio.sleep(0.05)
-                inp.send_text(answer)
+                asyncio.get_running_loop().call_later(0.05, inp.send_text, answer)
             await asyncio.wait_for(asyncio.gather(run_task, return_exceptions=True), timeout=10.0)
-            if seen["turn"] is not None:
-                await asyncio.wait_for(asyncio.gather(seen["turn"], return_exceptions=True), timeout=10.0)
     finally:
+        if seen["turn"] is not None:
+            await asyncio.wait_for(asyncio.gather(seen["turn"], return_exceptions=True), timeout=10.0)
         observed.update(
             seen, starts=len(starts), box_task=ch._box_task, box_patch=ch._box_patch,
             stdout_restored=sys.stdout is before,
@@ -252,6 +252,34 @@ async def test_grace_never_restarts_the_box_into_a_stopping_session(tmp_path, an
     seen = await _box_session_ended_mid_legend(
         tmp_path, answer=answer, grace=grace, end=lambda run_task: run_task.cancel()
     )
+    assert seen["decision"] == decision
+    assert seen["cancelled"] is (decision is None)
+    assert seen["starts"] == 1
+    assert seen["box_task"] is None and seen["box_patch"] is None
+    assert seen["stdout_restored"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+@pytest.mark.parametrize(
+    "answer,grace,decision",
+    [("y", 2.0, "allow_once"), ("n", 2.0, "reject_once"), (None, 0.2, None)],
+    ids=["yes-inside-the-grace", "no-inside-the-grace", "nothing-until-the-grace-cancels"],
+)
+def test_an_external_sigint_mid_legend_ends_the_session_and_leaves_no_box(tmp_path, answer, grace, decision):
+    import os
+    import signal
+
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    seen: dict = {}
+    before = sys.stdout
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            asyncio.run(_box_session_ended_mid_legend(
+                tmp_path, answer=answer, grace=grace, observed=seen,
+                end=lambda _run_task: os.kill(os.getpid(), signal.SIGINT),
+            ))
+    finally:
+        sys.stdout = before
     assert seen["decision"] == decision
     assert seen["cancelled"] is (decision is None)
     assert seen["starts"] == 1

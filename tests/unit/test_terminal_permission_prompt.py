@@ -7,6 +7,9 @@ real key bindings, not a stubbed prompt.
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
+import sys
 from io import StringIO
 
 import pytest
@@ -26,6 +29,7 @@ from localharness.channels.terminal import (
     _build_permission_app,
 )
 from localharness.core.bus import EventBus
+from localharness.core.interrupt import sigint_cancels
 
 
 def _channel() -> TerminalChannel:
@@ -708,3 +712,43 @@ async def test_base_channel_run_interview_reports_nobody_was_reached():
         object(), "q?", [Option("a", "A")], default=0, cancel="a"
     )
     assert answer == Answer(("a",), True, reached=False, why=Unreachable.NO_TTY)
+
+
+@pytest.mark.asyncio
+async def test_the_legend_runs_its_application_with_handle_sigint_false(monkeypatch):
+    seen: dict = {}
+
+    class _App:
+        async def run_async(self, **kw):
+            seen.update(kw)
+            return "allow_once"
+
+    monkeypatch.setattr("localharness.channels.terminal._build_permission_app", lambda *a, **k: _App())
+    assert (await _channel().ask_permission(_request())).kind == "allow_once"
+    assert seen == {"handle_sigint": False}
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_an_external_sigint_mid_legend_reaches_the_turns_handler():
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+    async def scenario():
+        ch = _channel()
+        before = signal.getsignal(signal.SIGINT)
+        with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+            turn = asyncio.ensure_future(ch.ask_permission(_request()))
+            async with sigint_cancels(turn) as cancelled:
+                for _ in range(400):
+                    if ch._suspended:
+                        break
+                    await asyncio.sleep(0.005)
+                os.kill(os.getpid(), signal.SIGINT)
+                try:
+                    await asyncio.wait_for(turn, timeout=5.0)
+                except asyncio.CancelledError:
+                    if not cancelled():
+                        raise
+                stopped = cancelled()
+        return turn.cancelled(), stopped, signal.getsignal(signal.SIGINT) is before
+
+    assert asyncio.run(scenario()) == (True, True, True)
