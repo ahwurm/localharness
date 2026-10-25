@@ -19,7 +19,13 @@ from rich.protocol import is_renderable
 from localharness.agent.gate_types import MODE_STRICTNESS
 from localharness.channels import input_router
 from localharness.cli.model_ops import _hold_peer_session_key, _launch_key, _peer_session_key
-from localharness.cli.model_switch import LAUNCH_SLOW, RESTART_DOWN_ON_PEER, ModelSwitch, launch_holder
+from localharness.cli.model_switch import (
+    LAUNCH_SLOW,
+    MODEL_UNAVAILABLE,
+    RESTART_DOWN_ON_PEER,
+    ModelSwitch,
+    launch_holder,
+)
 from localharness.cli.session_resume import RELOAD_ACTION
 from localharness.cli.skill_session import SkillSession, skill_row
 from localharness.cli.slash_commands import SlashCommand, add_plugin_row, find_row, help_text
@@ -1935,21 +1941,25 @@ class OrchestratorREPL:
             arg = ""
         llm = getattr(self._agent, "_llm", None)
         if llm is None or self._harness is None or self._config_dir is None:
-            await self._send_info("Model switching is unavailable in this session.")
+            await self._send_info(MODEL_UNAVAILABLE)
             return
 
         current = llm.config.model
         from localharness.cli import model_ops
         entries, live, malformed = await self._plan_model_entries(llm)
         cur_key = model_ops._norm_url(llm.config.base_url)
-        if cur_key in malformed:
+        provider = getattr(self._harness, "provider", None)
+        entry = entries.pick(arg) if arg else None
+        if cur_key in malformed and not (
+            isinstance(entry, model_ops.PlanEntry)
+            and model_ops.switch_kind(entry, provider.base_url, llm.config.base_url) == "cross"
+        ):
             await self._send_info(
                 f"The server at {llm.config.base_url} responded, but the response wasn't "
                 "understood — is base_url pointing at an OpenAI-compatible API?"
             )
             return
         managed = self._harness.server
-        provider = getattr(self._harness, "provider", None)
         medians = self._measured_medians()
         cur_ptype = self._provider_type_for_base_url(llm.config.base_url)
         prim_ptype = getattr(provider, "provider_type", None)
@@ -1972,7 +1982,6 @@ class OrchestratorREPL:
                 open_menu()  # one-Enter picker: menu pops with the first model highlighted
             return
 
-        entry = entries.pick(arg)
         if isinstance(entry, str):
             await self._send_info(entry)
             await self._strata_offer(entries, arg)
@@ -2003,7 +2012,7 @@ class OrchestratorREPL:
 
         if entry is not None and entry.kind == "live":
             ep = entry.endpoint
-            if model_ops._norm_url(ep.base_url if ep is not None else provider.base_url) == cur_key:
+            if model_ops.switch_kind(entry, provider.base_url, llm.config.base_url) == "hot":
                 # Same (current) endpoint → hot-swap, mechanics unchanged.
                 llm.config.model = target
                 cap = await llm.detect_capabilities()

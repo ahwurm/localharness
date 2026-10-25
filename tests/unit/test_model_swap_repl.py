@@ -23,6 +23,7 @@ from localharness.cli.model_switch import (
     LAUNCH_STOPS,
     LAUNCH_STOPS_NONE,
     LAUNCH_YES,
+    MODEL_UNAVAILABLE,
     launch_holder,
 )
 from localharness.cli.repl import OrchestratorREPL
@@ -1142,3 +1143,64 @@ async def test_failed_restart_with_the_server_down_from_the_primary_keeps_the_ex
     [(line, _)] = [s for s in sent if s[0].startswith("Model swap failed:")]
     assert line.endswith(" The managed server is down — retry /model to relaunch.")
     assert RESTART_DOWN_ON_PEER not in line
+
+
+MALFORMED_LINE = (
+    "The server at http://x/v1 responded, but the response wasn't understood — "
+    "is base_url pointing at an OpenAI-compatible API?"
+)
+
+
+def _malformed_world(tmp_path, monkeypatch):
+    healthy = EndpointRef(name="side", base_url="http://side/v1", provider_type="ollama", api_key="none")
+    bus = EventBus()
+    r, chan, llm, _p = _mk(tmp_path, _managed(), monkeypatch, bus=bus, session_id="s1",
+                           peers=[healthy, _cold_peer()])
+
+    async def live(base_url):
+        if base_url == "http://x/v1":
+            raise model_ops.MalformedModelListError("not a model list")
+        return (["peer-m"], True) if base_url == "http://side/v1" else ([], False)
+
+    async def persist_active(endpoint, model):
+        return None
+
+    r._live_models = live
+    r._persist_active_endpoint = persist_active
+    return r, chan, llm, bus
+
+
+async def test_malformed_bound_server_still_lets_a_cross_switch_through(tmp_path, monkeypatch):
+    r, chan, llm, bus = _malformed_world(tmp_path, monkeypatch)
+
+    await r._handle_slash("/model peer-m")
+    [event] = bus.history(event_types=[ModelSwitched])
+
+    assert llm.config.base_url == "http://side/v1" and llm.config.model == "peer-m"
+    assert not any("wasn't understood" in m for m in chan.msgs)
+    assert (event.kind, event.endpoint, event.model) == ("cross", "side", "peer-m")
+
+
+@pytest.mark.parametrize("command", ["/model", "/model qwen3.6-35b-a3b", f"/model {COLD_SERVED}", "/model nonesuch"])
+async def test_malformed_bound_server_sends_only_the_line_for_everything_but_a_cross_pick(
+        tmp_path, monkeypatch, command):
+    r, chan, llm, bus = _malformed_world(tmp_path, monkeypatch)
+    rebound: list = []
+    llm.rebind_endpoint = lambda *a, **k: rebound.append(a)
+    launched = _watch_every_probe(r, monkeypatch)
+
+    await r._handle_slash(command)
+
+    assert chan.msgs == [MALFORMED_LINE] and rebound == [] and launched == []
+    assert bus.history(event_types=[ModelSwitched]) == []
+
+
+async def test_unavailable_session_sends_the_module_line_and_publishes_nothing(tmp_path, monkeypatch):
+    bus = EventBus()
+    r, chan, _llm, _p = _mk(tmp_path, _managed(), monkeypatch, bus=bus, session_id="s1")
+    r._config_dir = None
+
+    await r._handle_slash("/model")
+
+    assert chan.msgs == [MODEL_UNAVAILABLE]
+    assert bus.history(event_types=[ModelSwitched]) == []
