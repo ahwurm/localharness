@@ -27,9 +27,10 @@ from localharness.agent.loop import AgentLoop, base_system_prompt, render_index
 from localharness.agent.permissions import PermissionEvaluator
 from localharness.agent.task_context import TaskContext
 from localharness.agent.task_record import Reference, TaskRecord, TaskState
-from localharness.cli import model_cmd, start_serving
+from localharness.cli import doctor_cmd, model_cmd, start_serving
 from localharness.channels.base import one_line
 from localharness.cli.workspace import MachineTrust
+from localharness.config import paths as config_paths
 from localharness.config.paths import resolve_config_dir
 from localharness.config.loader import ConfigLoader
 from localharness.config.models import AgentConfig, ToolConfig
@@ -40,7 +41,8 @@ from localharness.core.types import harness_message, human_message, is_harness_m
 from localharness.memory import resonance
 from localharness.memory.plugin import MemoryPlugin
 from localharness.memory.resonance import EMBED_MAX_TOKENS, ResonanceEngine, ResonanceUnavailable, local_folder
-from localharness.plugins.api import MemorySlotPlugin, QueryEmbedder
+from localharness.plugins.api import Check, MemorySlotPlugin, QueryEmbedder
+from localharness.plugins.lifecycle import DoctorRow
 from localharness.plugins.slot import MemorySlot
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 from localharness.tools.builtin.agent_tool import BUILTIN_AGENT_NAMES
@@ -1121,3 +1123,102 @@ def test_the_holdout_shares_no_prompt_with_the_calibration_set():
         sets = yaml.safe_load((ROOT / "tests" / "fixtures" / "skills_live" / name).read_text(encoding="utf-8"))["skills"]
         return {t.strip().casefold() for groups in sets.values() for kind in affordance.LABELS for t in groups[kind]}
     assert texts("prompts_holdout.yaml") and not texts("prompts_holdout.yaml") & texts("prompts.yaml")
+
+
+# --- doctor's affordance-cue row ------------------------------------------------------------------
+
+CUE_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+CAL = Calibration(0.5, {"config.json": "a", "model.safetensors": "b"}, datetime.date(2026, 10, 25))
+_HF = f"`hf download {CUE_MODEL}`"
+_REFRESH = (f"{_HF} refreshes an old copy; if it still differs, a newer localharness may carry a calibration for "
+            "these weights")
+_READY = dict(memory_state="on", embedding_status="pass", skill_tool_held=True, unreadable={}, calibration=CAL,
+              cached_files=dict(CAL.snapshot_files), checkout=False)
+_DOCTOR_ROWS = [
+    ("memory-not-on", dict(memory_state="off", embedding_status=None),
+     "skip", "cue off: the memory plugin is not on (the cue uses memory's embedder)", ""),
+    ("embedding-failed", dict(embedding_status="fail"), "skip", "cue off: waits on memory-embedding", ""),
+    ("embedding-missing", dict(embedding_status=None), "skip", "cue off: waits on memory-embedding", ""),
+    ("unreadable-cache", dict(unreadable={"cache": "OSError: denied"}, cached_files=None),
+     "warn", "cue off: calibration record or cached model unreadable: OSError: denied", _HF),
+    ("unreadable-record", dict(unreadable={"record": "ValueError: bad"}, calibration=None),
+     "warn", "cue off: calibration record or cached model unreadable: ValueError: bad", "`reinstall localharness`"),
+    ("unreadable-both", dict(unreadable={"record": "ValueError: bad", "cache": "OSError: denied"},
+                             calibration=None, cached_files=None),
+     "warn", "cue off: calibration record or cached model unreadable: OSError: denied; ValueError: bad",
+     f"{_HF}; `reinstall localharness`"),
+    ("not-cached", dict(cached_files=None), "skip", "cue off: waits on memory-embedding", ""),
+    ("skill-tool-not-held", dict(skill_tool_held=False), "skip", "cue off: the skill tool is not enabled for the root", ""),
+    ("no-calibration", dict(calibration=None), "skip", "cue off: calibrated for the default embedding model only", ""),
+    ("incomplete", dict(cached_files={"config.json": "a"}), "warn", "cue off: the embedding model download is incomplete",
+     f"{_HF} finishes it; the cue starts at the next start"),
+    ("mismatch", dict(cached_files={"config.json": "a", "model.safetensors": "c"}), "warn",
+     "cue off: the cached embedding model is not the one this release was calibrated on (nothing you did)", _REFRESH),
+    ("mismatch-in-a-checkout", dict(cached_files={"config.json": "a", "model.safetensors": "c"}, checkout=True), "warn",
+     "cue off: the cached embedding model is not the one this release was calibrated on (nothing you did)",
+     _REFRESH + "; `python scripts/gen_calibration.py` writes one"),
+    ("ready", {}, "pass", f"ready — {CUE_MODEL}, calibrated 2026-10-25", ""),
+]
+
+
+@pytest.mark.parametrize("given, status, detail, hint", [r[1:] for r in _DOCTOR_ROWS], ids=[r[0] for r in _DOCTOR_ROWS])
+def test_affordance_check_rows_in_order(given, status, detail, hint):
+    check = doctor_cmd._affordance_check(CUE_MODEL, **{**_READY, **given})
+    assert (check.name, check.status, check.detail, check.hint) == ("affordance-cue", status, detail, hint)
+
+
+def test_affordance_check_is_never_a_failure_and_every_off_row_says_so():
+    checks = [doctor_cmd._affordance_check(CUE_MODEL, **{**_READY, **r[1]}) for r in _DOCTOR_ROWS]
+    assert all(c.status != "fail" for c in checks)
+    assert all(c.detail.startswith("cue off:") for c in checks if c.status != "pass")
+
+
+def test_doctor_and_the_engine_read_the_folder_through_one_function():
+    assert resonance.local_folder is config_paths.local_folder
+
+
+def _affordance_cue_doctor(monkeypatch, tmp_path, root_agent, memory_state="on"):
+    import io
+
+    from rich.console import Console
+
+    async def rows(*_args, **_kwargs):
+        return [DoctorRow("memory", memory_state, "", checks=(Check(name="memory-db", status="pass"),
+                                                             Check(name="memory-embedding", status="pass"))),
+                DoctorRow("p", "off", "p is off")]
+    monkeypatch.setattr("localharness.plugins.resolve.resolve", lambda _loader: SimpleNamespace(warnings=[]))
+    monkeypatch.setattr("localharness.plugins.lifecycle.doctor_rows", rows)
+    monkeypatch.setattr(doctor_cmd, "_print_remote_lock", lambda *_a: None)
+    monkeypatch.setattr(config_paths, "local_folder", lambda model, cfg: tmp_path)
+    monkeypatch.setattr(affordance, "snapshot_files", lambda folder: dict(CAL.snapshot_files))
+    monkeypatch.setattr(affordance, "load_calibration", lambda model: CAL if model == CUE_MODEL else None)
+    buf = io.StringIO()
+    monkeypatch.setattr(doctor_cmd, "console", Console(file=buf, width=400, color_system=None))
+    failures: list[str] = []
+    doctor_cmd._print_plugins(tmp_path, None, None, failures, root_agent)
+    return buf.getvalue().splitlines(), failures
+
+
+_ROOT_AGENT = SimpleNamespace(memory=SimpleNamespace(embedding_model=CUE_MODEL), tools=ToolConfig())
+
+
+def test_affordance_cue_row_follows_the_plugin_rows(monkeypatch, tmp_path):
+    lines, failures = _affordance_cue_doctor(monkeypatch, tmp_path, _ROOT_AGENT)
+    plugin = next(i for i, line in enumerate(lines) if "p: p is off" in line)
+    assert f"affordance-cue: ready — {CUE_MODEL}, calibrated 2026-10-25" in lines[-1]
+    assert plugin < len(lines) - 1 and failures == []
+
+
+def test_affordance_cue_row_is_absent_without_a_root_agent(monkeypatch, tmp_path):
+    lines, failures = _affordance_cue_doctor(monkeypatch, tmp_path, None)
+    assert not any("affordance-cue" in line for line in lines) and failures == []
+
+
+def test_affordance_cue_row_reads_the_memory_row_doctor_collected(monkeypatch, tmp_path):
+    lines, _ = _affordance_cue_doctor(monkeypatch, tmp_path, _ROOT_AGENT, memory_state="off")
+    assert "affordance-cue: cue off: the memory plugin is not on (the cue uses memory's embedder)" in lines[-1]
+
+
+def test_affordance_cue_row_without_memory_settings_says_memory_is_not_on(monkeypatch, tmp_path):
+    lines, _ = _affordance_cue_doctor(monkeypatch, tmp_path, SimpleNamespace(tools=ToolConfig()), memory_state="off")
+    assert "affordance-cue: cue off: the memory plugin is not on (the cue uses memory's embedder)" in lines[-1]
