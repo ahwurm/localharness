@@ -1204,3 +1204,47 @@ async def test_unavailable_session_sends_the_module_line_and_publishes_nothing(t
 
     assert chan.msgs == [MODEL_UNAVAILABLE]
     assert bus.history(event_types=[ModelSwitched]) == []
+
+
+async def test_a_model_posted_mid_turn_asks_only_after_the_turn_completes(tmp_path, monkeypatch):
+    from localharness.core.events import TurnCompleted
+    from localharness.provider import server as ms
+
+    bus = EventBus()
+    r, chan, _llm, _p = _mk(tmp_path, _managed(), monkeypatch, bus=bus, session_id="s1")
+    log: list[str] = []
+    phone = _Phone(chan, None, log=log)
+    r._gate = NS(remote_unattended=True)
+    offer_primary_as(monkeypatch, "qwen3.6-27b")
+    stopped: list = []
+    monkeypatch.setattr(ms, "stop_server", lambda *a, **kw: stopped.append("stop"))
+    bus.subscribe(TurnCompleted, lambda event: log.append("TurnCompleted"))
+    posted = ["hello"]
+
+    async def read_input():
+        if not posted:
+            raise EOFError
+        return posted.pop(0)
+
+    async def turn():
+        posted.append("/model qwen3.6-27b")
+        log.append("posted")
+        await asyncio.sleep(0)
+        await bus.publish(TurnCompleted(
+            agent_id="root", session_id="s1", iterations=1, duration_seconds=0.0, elapsed_tokens=0, summary=""))
+
+    real_dispatch = r._dispatch_input
+
+    async def dispatch(text):
+        return await real_dispatch(text) if text.startswith("/") else asyncio.ensure_future(turn())
+
+    async def noop(*a, **kw):
+        return None
+
+    chan.read_input, chan.start, chan.stop = read_input, noop, noop
+    r._establish_workspace_trust = noop
+    r._dispatch_input = dispatch
+
+    await r._run_classic()
+
+    assert phone.steps() == ["posted", "TurnCompleted", "ask"] and stopped == []
