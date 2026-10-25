@@ -27,8 +27,9 @@ from localharness.config.loader import (
     AGENT_GLOBAL_ONLY_FIELDS, ASK_GLOBAL_ONLY_FIELDS, HARNESS_GLOBAL_ONLY_FIELDS,
 )
 from localharness.config.plugin_sections import CORE_HARNESS_KEYS, global_only_paths
-from localharness.config.skills import ORIGINS
+from localharness.config.skills import MAX_ENTRIES, ORIGINS
 from localharness.config.trust import LAUNCH_KEYS, LAUNCH_MODEL_KEYS, LAUNCH_MODEL_KIND
+from localharness.core.content import MAX_REFERENCE_BYTES
 from localharness.plugins.api import Plugin, plugin_summary
 from localharness.plugins.builtin import BUILTIN_PLUGINS
 from localharness.tools.base import ToolSchema
@@ -372,7 +373,13 @@ def test_plugins_doc_bites():
 # ---------------------------------------------------------------- check: the skills section
 
 SKILLS_HEADING = "### Skills"
-SKILLS_NEEDLES = ("`allowed-tools` grants nothing", "installs nothing")
+SKILLS_NEEDLES = (
+    "`allowed-tools` grants nothing", "installs nothing", "](#project-instructions-files)",
+    "one approval per file", "`guarded`", "`trusted`", "`auto`", "`read-only`", "`unattended`",
+    f"{MAX_REFERENCE_BYTES // 1024} KiB", f"{MAX_ENTRIES} entries", "named gaps", "shows only the path",
+    "`permissions.workspace_root`", "`mv staged .agents`", "`[budget: …]`", "off switch",
+    "`localharness --config-dir X skills`", "whole line", "about a second", "minutes", "once per subcommand",
+)
 CLONE_NEEDLES = ("can load agent and division files and skills from it",
                  "config, agent files and skills load with no prompt")
 
@@ -423,7 +430,28 @@ def test_skills_doc_live():
 
 
 def test_skills_doc_bites():
+    text = _read("SECURITY.md")
+    body = section(text, SKILLS_HEADING)
     assert check_skills_doc("## Nothing\n") == ["SECURITY.md has no ### Skills section"]
+    assert check_skills_doc(text.replace(SKILLS_HEADING + "\n", "### Other\n\nText.\n\n" + SKILLS_HEADING + "\n", 1)) == [
+        "### Skills is not between ### Plugins and ### Machine-level-only settings"]
+    for more in ("\n- x\n", "\n\nMore.\n"):
+        assert check_skills_doc(text.replace(body, body.rstrip() + more + "\n")) == [
+            "the Skills section is not one paragraph of prose"]
+    kib = f"{MAX_REFERENCE_BYTES // 1024} KiB"
+    assert check_skills_doc(text.replace(kib, "100 KiB")) == [f"the Skills section does not say {kib}"]
+    assert check_skills_doc(text.replace("`[budget: …]`", "the note")) == [
+        "the Skills section does not say `[budget: …]`"]
+    assert check_skills_doc(text.replace(body, body.rstrip() + " See `tools/capabilities.py`.\n")) == [
+        "the Skills section names the capability-floor module in backticks"]
+    assert check_skills_doc(text.replace(body, body.rstrip() + " \N{SECTION SIGN}9.\n")) == [
+        "the Skills section carries a section sign"]
+    assert check_skills_doc(text.replace("agent files and skills load", "agent files load")) == [
+        "SECURITY.md does not say config, agent files and skills load with no prompt"]
+    assert skills_dirs() == ["`.localharness/skills/`", "`.agents/skills/`", "`~/.localharness/skills/`", "bundled"]
+    assert in_order("`b` then `a`", ["`a`", "`b`"]) == ["`b`"]
+    assert in_order("`a` then `b`", ["`a`", "`b`", "`c`"]) == ["`c`"]
+    assert in_order("`a` `a`", ["`a`", "`a`"]) == ["`a`"]
 
 
 # ---------------------------------------------------------------- check 4: three declaration readers
