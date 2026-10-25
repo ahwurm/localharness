@@ -2251,6 +2251,29 @@ class OrchestratorREPL:
             await self._channel.send_message(
                 self._channel_redactor()(unplanned), metadata={"style": "system.error"})
             return
+        build = await self._first_build_note(planned)
+
+        async def recheck():
+            redact = self._channel_redactor()
+            if line := await asyncio.to_thread(self._foreign_incumbent, managed, target):
+                return redact(line), "system.info"
+            if line := launch_decision(managed, bool(launch_kw)).refusal:
+                return redact(line), "system.error"
+            if why := await asyncio.to_thread(
+                    _lifecycle.unit_launch_refusal, managed, None, self._unit_state, self._server_config_dir):
+                return redact(_lifecycle.SWAP_REFUSED.format(name=target, why=why)), "system.error"
+            if line := await asyncio.to_thread(
+                    _lifecycle.swap_refusal, target_heavy, incumbent_heavy, config_dir=self._server_config_dir,
+                    autosense=getattr(self._harness, "autosense", None), floor=floor, unit=self._unit_state):
+                return redact(line), "system.error"
+            return None
+
+        stop = await self._switch.confirm(
+            target, launch_holder(self._active_heavy, self._harness, (managed, primary_url)), build, recheck)
+        if stop is not None:
+            if stop[0]:
+                await self._channel.send_message(stop[0], metadata={"style": stop[1]})
+            return
         # Tradeoff BEFORE the rebind-back below — cur_ptype must key where the current model
         # actually ran (possibly a peer), not the primary we are about to re-point at.
         tradeoff = self._swap_tradeoff_note(cur_ptype, current, prim_ptype, target)
@@ -2267,7 +2290,7 @@ class OrchestratorREPL:
         await self._flush_launch_lines()
         await self._send_info(
             f"Restarting managed {label} with {target}{f' ({posture})' if posture else ''}"
-            f" — model load can take several minutes...{await self._first_build_note(planned)}{tradeoff}",
+            f" — model load {LAUNCH_SLOW}...{build}{tradeoff}",
             colorize=True,
         )
         if decision.note:
@@ -2284,6 +2307,7 @@ class OrchestratorREPL:
         # stop-failure is reported honestly and NOTHING is torn down (the peer is still up). A no-op
         # when the primary is itself the incumbent (the common restart case), whose own stop below
         # reloads the model.
+        self._switch.launch(target)
         async with self._launch_lock():
             try:
                 freed = await free_accelerator(

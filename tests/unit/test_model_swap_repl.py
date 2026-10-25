@@ -514,19 +514,23 @@ def _phone_cold(tmp_path, monkeypatch, *answers, attached=True, peer=None, durin
     return harness, repl, phone, agent, swaps
 
 
-def _decision_refuses_from_foreign_call(monkeypatch, repl, n, line):
-    from localharness.provider import server
-
-    real, seen = server.launch_decision, []
+def _refuse_from_foreign_call(monkeypatch, repl, n, module, name, result):
+    real, seen = getattr(module, name), []
 
     def foreign(managed, target):
         seen.append(target)
 
-    def decision(*a, **k):
-        return NS(refusal=line, note=None) if len(seen) >= n else real(*a, **k)
+    def wrapped(*a, **k):
+        return result if len(seen) >= n else real(*a, **k)
 
     repl._foreign_incumbent = foreign
-    monkeypatch.setattr(server, "launch_decision", decision)
+    monkeypatch.setattr(module, name, wrapped)
+
+
+def _decision_refuses_from_foreign_call(monkeypatch, repl, n, line):
+    from localharness.provider import server
+
+    _refuse_from_foreign_call(monkeypatch, repl, n, server, "launch_decision", NS(refusal=line, note=None))
 
 
 def _refusal_of(monkeypatch, repl, which):
@@ -693,3 +697,124 @@ async def test_terminal_cold_peer_key_line_then_the_refusal_keeps_today_order(tm
 
     assert sent == [("KEY LINE", "system.info"), ("WITHHELD", "system.error")]
     assert swaps == [] and agent._llm.rebinds == [] and not hasattr(channel, "run_picker")
+
+
+@pytest.fixture
+def launches(request):
+    return request.getfixturevalue("_boundaries")
+
+
+def _phone_restart(tmp_path, monkeypatch, *answers, on_peer=False, attached=True):
+    from tests.unit.test_launch_paths_repl import ON_PEER, PRIMARY_DOWN, _llama_primary, _on_the_cold_peer
+
+    stub_liveness(monkeypatch, False)
+    peer = _launchable_peer()
+    harness, repl, channel, agent = _session(
+        tmp_path, peer, server=_llama_primary(), live=ON_PEER if on_peer else PRIMARY_DOWN)
+    if on_peer:
+        _on_the_cold_peer(repl, agent, peer)
+    phone = _Phone(channel, *answers, attached=attached)
+    repl._gate = NS(remote_unattended=True)
+    _logged_lock(repl, phone.log)
+    return harness, repl, phone, agent, peer
+
+
+PRIMARY_SERVED = "qwen-primary"
+RESTART_KEY = "sk-PROVIDER-SECRET-0123456789"
+
+
+def _restart_refusal(monkeypatch, repl, which, n, line):
+    from localharness.provider import lifecycle
+    from localharness.provider import server
+
+    if which == "foreign":
+        answers = iter([None] * (n - 1) + [line])
+        repl._foreign_incumbent = lambda managed, target: next(answers, line)
+        return line, "system.info"
+    if which == "decision":
+        _refuse_from_foreign_call(monkeypatch, repl, n, server, "launch_decision", NS(refusal=line, note=None))
+        return line, "system.error"
+    if which == "unit":
+        _refuse_from_foreign_call(monkeypatch, repl, n, lifecycle, "unit_launch_refusal", line)
+        return lifecycle.SWAP_REFUSED.format(name=PRIMARY_SERVED, why=line), "system.error"
+    _refuse_from_foreign_call(monkeypatch, repl, n, lifecycle, "swap_refusal", line)
+    return line, "system.error"
+
+
+RESTART_REFUSALS = ["foreign", "decision", "unit", "swap"]
+
+
+@pytest.mark.parametrize("which", RESTART_REFUSALS)
+async def test_phone_restart_refusals_are_sent_as_today_and_never_asked(tmp_path, monkeypatch, launches, which):
+    _, repl, phone, agent, peer = _phone_restart(tmp_path, monkeypatch, LAUNCH_YES, on_peer=True)
+    line, style = _restart_refusal(monkeypatch, repl, which, 1, "NOT TODAY")
+
+    await repl._handle_slash(f"/model {PRIMARY_SERVED}")
+
+    assert phone.sent == [(line, style)] and phone.asked == []
+    assert agent._llm.rebinds == [] and agent._llm.config.base_url == peer.base_url
+    assert launches.stops == [] and launches.cmds == []
+
+
+async def test_phone_restart_cancel_leaves_the_client_on_the_peer_with_no_rebind(tmp_path, monkeypatch, launches):
+    _, repl, phone, agent, peer = _phone_restart(tmp_path, monkeypatch, LAUNCH_NO, on_peer=True)
+    before = (dict(vars(agent._llm.config)), repl._active_heavy)
+
+    await repl._handle_slash(f"/model {PRIMARY_SERVED}")
+
+    assert len(phone.asked) == 1 and phone.sent == []
+    assert agent._llm.rebinds == [] and agent._llm.config.base_url == peer.base_url
+    assert (dict(vars(agent._llm.config)), repl._active_heavy) == before
+    assert launches.stops == [] and launches.cmds == []
+    assert repl._switch.launching is None and "chip" not in phone.log and "lock" not in phone.log
+
+
+async def test_phone_restart_names_the_fallback_holder_when_nothing_is_tracked(tmp_path, monkeypatch, launches):
+    harness, repl, phone, agent, _peer = _phone_restart(tmp_path, monkeypatch, LAUNCH_NO)
+    assert repl._active_heavy is None
+    holder = launch_holder(None, harness, (harness.server, agent._llm.config.base_url))
+    assert holder
+
+    await repl._handle_slash(f"/model {PRIMARY_SERVED}")
+
+    [ask] = phone.asked
+    assert ask.options == [LAUNCH_YES, LAUNCH_NO] and ask.confirm == LAUNCH_YES
+    assert PRIMARY_SERVED in ask.prompt and LAUNCH_STOPS.format(holder=holder) in ask.prompt
+
+
+@pytest.mark.parametrize("which", RESTART_REFUSALS)
+async def test_phone_restart_refusal_after_the_wait_is_masked_and_nothing_moves(
+        tmp_path, monkeypatch, launches, which):
+    from pydantic import SecretStr
+
+    harness, repl, phone, agent, peer = _phone_restart(tmp_path, monkeypatch, LAUNCH_YES, on_peer=True)
+    harness.provider.api_key = SecretStr(RESTART_KEY)
+    line, style = _restart_refusal(monkeypatch, repl, which, 2, f"changed, key {RESTART_KEY} in the tail")
+
+    await repl._handle_slash(f"/model {PRIMARY_SERVED}")
+
+    [(sent, sent_style)] = phone.sent
+    assert len(phone.asked) == 1 and sent_style == style and sent
+    assert RESTART_KEY not in sent and "changed, key" in sent
+    assert agent._llm.rebinds == [] and agent._llm.config.base_url == peer.base_url
+    assert launches.stops == [] and launches.cmds == [] and "chip" not in phone.log
+
+
+async def test_phone_restart_asks_then_chips_then_locks_and_computes_the_build_note_once(
+        tmp_path, monkeypatch, launches):
+    _, repl, phone, agent, _peer = _phone_restart(tmp_path, monkeypatch, LAUNCH_YES)
+    notes: list = []
+
+    async def build_note(spec):
+        notes.append(spec)
+        return " (first build x)"
+
+    repl._first_build_note = build_note
+
+    await repl._handle_slash(f"/model {PRIMARY_SERVED}")
+
+    assert phone.steps()[:3] == ["ask", "chip", "lock"] and len(launches.cmds) == 1
+    assert len(notes) == 1 and "(first build x)" in phone.asked[0].prompt
+    [line] = [m for m, _ in phone.sent if m.startswith("Restarting managed")]
+    assert "model load can take several minutes... (first build x)" in line
+    assert repl._switch.launching is None
