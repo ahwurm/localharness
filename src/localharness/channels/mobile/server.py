@@ -164,6 +164,10 @@ MEMORY_ASLEEP = {"error": "the chat is asleep — send a message to wake it, the
 """What every memory route answers (409) while the session sleeps: the slot is empty because the
 store closed with the session, which is not the same fact as memory being off."""
 
+MODEL_LIST_NO_SESSION = "chat asleep — /model list wakes it"
+
+MODEL_LIST_NOT_READY = "chat not ready — {state}"
+
 TRASH_DIRNAME = "sessions-trash"
 """Where a deleted chat's log MOVES (never unlinks) — beside `sessions/` in the agent dir.
 
@@ -323,7 +327,7 @@ class MobileServer:
 
     # ------------------------------------------------------------------ auth
 
-    def _authed(self, request: Request, *, post: bool) -> Optional[JSONResponse]:
+    def _authed(self, request: Request, *, post: bool, cookie: bool = True) -> Optional[JSONResponse]:
         """None when the request may proceed, otherwise the refusal.
 
         Two different checks for two different transports, because `EventSource` cannot send an
@@ -335,8 +339,8 @@ class MobileServer:
         * **GET** (the stream included) accepts the bearer header or the `SameSite=Strict`
           cookie set at enrolment — a value DERIVED from the token, never the token itself, so a
           service on the same host name that is sent the cookie gains the reads and no verb. A
-          presented bearer is judged alone. The token is never placed in a URL — a query string
-          lands in logs and referrers.
+          presented bearer is judged alone; a route that turns `cookie` off takes the bearer only.
+          The token is never placed in a URL — a query string lands in logs and referrers.
         """
         if post:
             ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
@@ -346,7 +350,8 @@ class MobileServer:
         else:
             bearer = self._bearer(request)
             ok = (auth.constant_time_match(bearer, self.token) if bearer is not None else
-                  auth.constant_time_match(request.cookies.get(auth.AUTH_COOKIE), self._cookie_value))
+                  (cookie and auth.constant_time_match(
+                      request.cookies.get(auth.AUTH_COOKIE), self._cookie_value)))
         return None if ok else _unauthorized()
 
     @staticmethod
@@ -384,6 +389,7 @@ class MobileServer:
             Route("/api/auth/enroll", self.enroll, methods=["POST"]),
             Route("/api/stream", self.stream, methods=["GET"]),
             Route("/api/health", self.health, methods=["GET"]),
+            Route("/api/model", self.model_list, methods=["GET"]),
             Route("/api/protocol", self.protocol, methods=["GET"]),
             Route("/api/schema", self.schema, methods=["GET"]),
             Route("/api/tools", self.tools, methods=["GET"]),
@@ -1152,6 +1158,24 @@ class MobileServer:
             return _json(MEMORY_ASLEEP, status=409)
         return _json(MEMORY_OFF, status=404)
 
+    async def model_list(self, request: Request) -> Response:
+        """The REPL's model list as data; bearer only, and it never starts a session."""
+        refusal = self._authed(request, post=False, cookie=False)
+        if refusal is not None:
+            return refusal
+        resolver = self.channel._model_list_resolver
+        if resolver is None:
+            if self.channel.asleep:
+                return _json({"error": MODEL_LIST_NO_SESSION, "asleep": True}, status=503)
+            state = self.channel.model_state()
+            return _json({"error": MODEL_LIST_NOT_READY.format(state=state), "asleep": False}, status=503)
+        from localharness.cli.model_switch import MODEL_UNAVAILABLE
+
+        try:
+            return _json(await resolver())
+        except Exception:
+            return _json({"error": MODEL_UNAVAILABLE, "asleep": False}, status=503)
+
     async def memory_list(self, request: Request) -> Response:
         """The memory page's list: active facts, store-ranked; `?q=` narrows via the store's FTS."""
         refusal = self._authed(request, post=False)
@@ -1559,6 +1583,7 @@ _VERBS: tuple[tuple[str, str, str], ...] = (
     ("GET", "/api/permissions", "everything awaiting a human: {blocking, parked}"),
     ("GET", "/api/tools", "the live registry: name -> group, destructive"),
     ("GET", "/api/health", "model reachability and session state"),
+    ("GET", "/api/model", "the models /model offers, as data, and which is active"),
     ("GET", "/api/grants", "the permanent grants in force (read-only)"),
     ("GET", "/api/tool-results/{eviction_id}", "a ContentStore-evicted body, live session only"),
     ("GET", "/api/artifacts/{plugin}/{id}",
