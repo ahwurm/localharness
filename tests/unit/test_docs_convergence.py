@@ -23,7 +23,7 @@ from collections.abc import Callable, Iterable
 import pytest
 
 from localharness.agent.gate_types import PROTECTED_CONFIG_DIR_ENTRIES
-from localharness.cli.model_switch import ROW_WITHHELD
+from localharness.cli.model_switch import LAUNCH_NO, LAUNCH_YES, ROW_LOCKED, ROW_WITHHELD
 from localharness.cli.plugins_cmd import CONSENT, THIRD_PARTY_CONFIRM
 from localharness.config.loader import (
     AGENT_GLOBAL_ONLY_FIELDS, ASK_GLOBAL_ONLY_FIELDS, HARNESS_GLOBAL_ONLY_FIELDS,
@@ -375,6 +375,40 @@ def test_model_switch_doc_bites():
     empty = check_model_switch_doc("## Nothing\n")
     assert len(empty) == len(MOBILE_NEEDLES) + 1 + len(LOCK_NEEDLES) + 1
     assert check_model_switch_doc("## Nothing\n") == empty
+
+
+MOBILE_DOC_NEEDLES = ("cannot be cancelled", "two requests for the server", "`active`", "`launches`")
+
+
+def _page_constant(name: str) -> str:
+    """The string of `const <name> = "...";` in the mobile reference page."""
+    return re.search(rf'^const {name} = "([^"\n]*)";', _read("src/localharness/channels/mobile/ui/index.html"), re.M).group(1)
+
+
+def check_mobile_model_doc(
+    mobile_text: str, wake: str = _page_constant("MODEL_WAKE"),
+    asleep: str = _source_constant("src/localharness/channels/mobile/server.py", "MODEL_LIST_NO_SESSION"),
+) -> list[str]:
+    """docs/mobile.md's What to expect says the launch confirm and quotes the shipped confirm, lock and asleep strings."""
+    expect = " ".join((section(mobile_text, "## What to expect") or "").split())
+    return [f"docs/mobile.md does not say {n}" for n in (*MOBILE_DOC_NEEDLES, *(f"`{q}`" for q in (
+        LAUNCH_YES, LAUNCH_NO, ROW_LOCKED, asleep, wake))) if n not in expect]
+
+
+def test_mobile_model_doc_live():
+    assert check_mobile_model_doc(_read("docs/mobile.md")) == []
+
+
+def test_mobile_model_doc_bites():
+    text = _read("docs/mobile.md")
+    wake = _page_constant("MODEL_WAKE")
+    assert check_mobile_model_doc(_swap(text, f"`{wake}`", "x")) == [f"docs/mobile.md does not say `{wake}`"]
+    assert check_mobile_model_doc(text, asleep="chat sleeping") == ["docs/mobile.md does not say `chat sleeping`"]
+    needle = "two requests for the server"
+    assert check_mobile_model_doc(_swap(text, needle, "x")) == [f"docs/mobile.md does not say {needle}"]
+    empty = check_mobile_model_doc("## Nothing\n")
+    assert len(empty) == len(MOBILE_DOC_NEEDLES) + 5
+    assert check_mobile_model_doc("## Nothing\n") == empty
 
 
 # ---------------------------------------------------------------- check: what the Plugins sentences say

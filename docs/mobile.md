@@ -211,6 +211,31 @@ is one a cloned repo can ship and the agent's own write tool can reach), and lin
 are never in it. The thread belongs to the folder it slept in: a server started from another
 folder leaves it where it is and starts fresh.
 
+**The model pill names the serving model, and tapping it lists what you can switch to.** Once the
+session is up the pill shows the session's model, and it follows every switch, made here or at the
+terminal. Tapping it opens settings with a Model section listing what `/model` offers: the serving
+model says `active`, a model on another configured endpoint says `on` and that endpoint's name, a
+model whose server has to start says `launches` (and `stops` with the model it stops, when one is
+serving), and a row you cannot pick here says why — `set up at the terminal`,
+`held by another server`, `launch from the terminal`, or the reason the terminal's list gives,
+with any path in it withheld. A tap on a model already served switches at once and asks nothing; a
+switch to another endpoint sends the conversation there from the next turn on. Typing bare
+`/model` opens the list; `/model list` prints the full text, paths and commands included. A
+sleeping chat has no list to show: settings says `chat asleep — /model list wakes it` with a
+`wake chat and list` button, which wakes the session and fills the list once it is up.
+
+**A launch asks first, and once it starts it cannot be cancelled.** A `launches` row starts a model
+server, or restarts the managed one with another model: that holds the GPU for minutes and stops
+the serving model for every client. Its tap shows one question naming what it stops, with `Launch`
+and `Cancel`; `Cancel` stops nothing. `Launch` is one tap for you and two requests for the server,
+so a script that sends one request cannot launch, and before anything stops the server checks
+again what could have changed while you were deciding. While the launch runs, the state chip shows
+it with the seconds elapsed and an open list holds still; when it ends, the list says whether the
+model landed. If the app was closed by the time the question was due, nothing launches and the
+transcript says to tap again. A tap while a turn is running waits for that turn: the list's header
+says so, the tap adds a line saying when it runs, and a launch question comes when the turn ends —
+keep the app open to answer it, or it expires and nothing runs.
+
 **Permission questions are a queue, not a modal.** In `auto` — the default — a blacklisted call is
 *parked*: the model is told to carry on without that step, the turn keeps running, and the page
 shows a badge. Answer it from the phone, the terminal or Discord; whichever you use, it closes
@@ -227,11 +252,13 @@ grant is global, keyed by your project's real path, never expires, and has no re
 single request can never write one. `GET /api/grants` lists what you have allowed forever.
 
 **A paired phone can do what you can do at the terminal** — including switching the session to
-`unattended` and answering "always". To keep those two to the terminal and Zed, set
-`channels.remote_unattended: false` in your machine config: the phone then gets one line naming the
-setting, and its questions offer no "always". The default, `true`, changes nothing, and
-`localharness doctor` shows a row while it is on. See
-[SECURITY.md](../SECURITY.md#a-paired-phone-or-discord-account).
+`unattended`, answering "always" and launching a model. To keep those three to the terminal and
+Zed, set `channels.remote_unattended: false` in your machine config: the phone then gets one line
+naming the setting for `unattended` and for a launch, its questions offer no "always", and the list
+marks each launch row `launch from the terminal`. A switch to a model already served still takes
+one tap. The default, `true`, locks none of the three, and `localharness doctor` shows a row while
+it is on. Discord is refused a launch whatever the setting, since it cannot put the launch
+question. See [SECURITY.md](../SECURITY.md#a-paired-phone-or-discord-account).
 
 **Memory and Pictures appear only when the session has them.** The drawer's Memory button shows
 when memory is on: list and search facts, open one with its history, edit it, forget it (two
