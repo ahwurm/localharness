@@ -1,6 +1,7 @@
 """The affordance layer over tools, skills and agents."""
 from __future__ import annotations
 
+import asyncio
 import shlex
 from itertools import combinations
 from pathlib import Path
@@ -8,15 +9,20 @@ from pathlib import Path
 import pytest
 
 from localharness.agent import subagent
-from localharness.agent.context import ContentStore
+from localharness.agent.context import ContentStore, TokenCounter, fixed_tokens
 from localharness.agent.loop import base_system_prompt, render_index
 from localharness.agent.task_record import TaskState
+from localharness.cli import model_cmd, start_serving
+from localharness.cli.workspace import MachineTrust
+from localharness.config.loader import ConfigLoader
 from localharness.config.models import AgentConfig, ToolConfig
+from localharness.config.skills import SkillSet
 from localharness.tools.builtin.agent_tool import BUILTIN_AGENT_NAMES
-from localharness.tools.builtin.skill_tool import SkillTool
+from localharness.tools.builtin.skill_tool import SkillTool, render_listing
 from localharness.tools.builtin.task_tool import TaskTool
 from tests.unit.test_capabilities import _production_registry
-from tests.unit.test_skills_listing import _CFG, _MODES, _notes, pkg  # noqa: F401
+from tests.unit.test_skills_discovery import _skill
+from tests.unit.test_skills_listing import _CFG, _MODES, _ROOT, _notes, _spy_floor, pkg  # noqa: F401
 
 
 # --- index text -----------------------------------------------------------------------------------
@@ -155,3 +161,48 @@ def test_the_index_is_appended_after_the_skills_listing():
     assert (base_system_prompt(_CFG, skills=listing, index=FULL, **kw)
             == base_system_prompt(_CFG, skills=listing, **kw) + "\n\n" + FULL)
     assert base_system_prompt(_CFG, index=FULL, **kw) == base_system_prompt(_CFG, **kw) + "\n\n" + FULL
+
+
+@pytest.mark.usefixtures("pkg")
+@pytest.mark.parametrize("root,flag", [("proj", False), (None, False), ("proj", True)])
+async def test_the_launch_floor_with_the_index_is_at_least_the_floor_without(tmp_path, root, flag):
+    found = _notes(tmp_path)
+    with_index = await start_serving.launch_floor(
+        _ROOT, found.skills, root=tmp_path / root if root else None, machine_dir=tmp_path / "cfg", config_dir_flag=flag)
+    assert with_index >= await start_serving.launch_floor(_ROOT, found.skills)
+
+
+@pytest.mark.usefixtures("pkg")
+async def test_the_launch_floor_prices_the_slash_index_with_agent_and_task_held(tmp_path, monkeypatch):
+    found, cfg = _notes(tmp_path), tmp_path / "cfg"
+    fixed, _ = _spy_floor(monkeypatch)
+    await start_serving.launch_floor(_ROOT, found.skills, machine_dir=cfg)
+    await start_serving.launch_floor(_ROOT, (), machine_dir=cfg)
+    assert fixed[0][0].endswith("\n\n" + render_index(None, cfg, {"agent", "task", "skill"}, False, True))
+    assert fixed[1][0].endswith("\n\n" + render_index(None, cfg, {"agent", "task"}, False, True))
+    assert "Skills: " not in fixed[1][0]
+    counter = TokenCounter(offline=True)
+
+    def priced(slash):
+        index = render_index(None, cfg, {"agent", "task", "skill"}, False, slash)
+        prompt = base_system_prompt(_ROOT, tool_call_mode="native", guardrails="",
+                                    skills=render_listing(found.skills), index=index)
+        return fixed_tokens(counter, prompt, [])
+    assert priced(True) >= priced(False)
+
+
+@pytest.mark.usefixtures("pkg")
+def test_the_swap_floor_prices_the_no_layer_index_with_the_machine_directory(tmp_path, monkeypatch):
+    cfg = tmp_path / "cfg"
+    _skill(cfg / "skills", "notes")
+    monkeypatch.setattr(ConfigLoader, "load_agent", lambda self, name: _ROOT)
+    real, seen = start_serving.launch_floor, []
+
+    async def spy(agent_config, skills=(), **kw):
+        seen.append(kw)
+        return await real(agent_config, skills, **kw)
+
+    monkeypatch.setattr(start_serving, "launch_floor", spy)
+    floor = model_cmd._swap_floor(MachineTrust(), cfg)
+    assert seen == [{"root": None, "machine_dir": cfg, "config_dir_flag": False}]
+    assert floor >= asyncio.run(real(_ROOT, SkillSet.discover(cfg, None).skills))

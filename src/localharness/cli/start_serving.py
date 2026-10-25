@@ -254,9 +254,10 @@ def foreign_incumbent_line(
         holder, port=port, form="imperative", served=incumbent.served, target=target.name)
 
 
-async def launch_floor(agent_config: Any, skills: tuple = ()) -> int | None:
-    """The root's window floor before the registry exists: base prompt with the skills listing plus the built-in and skill tool schemas, counted offline."""
-    from localharness.agent.loop import base_system_prompt
+async def launch_floor(agent_config: Any, skills: tuple = (), *, root: Path | None = None,
+                       machine_dir: Path | None = None, config_dir_flag: bool = False) -> int | None:
+    """The root's window floor before the registry exists: base prompt with the skills listing and the index plus the built-in and skill tool schemas, counted offline."""
+    from localharness.agent.loop import base_system_prompt, render_index
     from localharness.tools.builtin import register_builtin_tools
     from localharness.tools.builtin.skill_tool import render_listing, skill_schema
     from localharness.tools.capabilities import apply_root_capability_floor
@@ -272,7 +273,11 @@ async def launch_floor(agent_config: Any, skills: tuple = ()) -> int | None:
             schemas = [*schemas, skill_schema(s.name for s in skills)]
     except Exception:  # noqa: BLE001 — the loop's own count degrades the same way: no schemas
         schemas = []
-    prompt = base_system_prompt(agent_config, tool_call_mode="native", guardrails="", skills=render_listing(skills))
+    # agent and task register after this count and the slash form is the longer one: over-prices, never under
+    held = {s.name for s in schemas} | {"agent", "task"} | ({"skill"} if skills else set())
+    index = render_index(root, machine_dir, held, config_dir_flag, slash=True) if machine_dir is not None else ""
+    prompt = base_system_prompt(agent_config, tool_call_mode="native", guardrails="", skills=render_listing(skills),
+                                index=index)
     return harness_floor(fixed_tokens(TokenCounter(offline=True), prompt, schemas), agent_config.max_tokens)
 
 

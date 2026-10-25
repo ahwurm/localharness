@@ -205,7 +205,7 @@ async def test_run_swap_hands_the_floor_to_lifecycle_swap(swap_rig, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_starts_swap_of_another_launch_passes_the_pre_launch_floor(world, monkeypatch):
-    async def floor(agent_config, skills=()):
+    async def floor(agent_config, skills=(), **kw):
         return FLOOR
 
     monkeypatch.setattr(start_serving, "launch_floor", floor)
@@ -223,7 +223,7 @@ def test_the_cli_swap_prices_the_root_agent_the_way_start_does(cli, monkeypatch)
     flash = flash_ready(cli.world)
     seen = _spy_run_swap_sync(monkeypatch)
 
-    async def floor(agent_config, skills=()):
+    async def floor(agent_config, skills=(), **kw):
         return FLOOR
 
     monkeypatch.setattr(start_serving, "launch_floor", floor)
