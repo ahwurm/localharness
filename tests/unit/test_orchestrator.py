@@ -133,6 +133,16 @@ def test_begin_agent_creation():
     assert wf2 is not wf
 
 
+def test_begin_agent_creation_forwards_the_loader(tmp_path):
+    from localharness.config.loader import ConfigLoader
+    from localharness.orchestrator.router import AgentCreationFlow
+    from localharness.orchestrator.workflow import WorkflowState
+    orch = AgentCreationFlow(card_registry=AgentCardRegistry())
+    loader = ConfigLoader(config_dir=tmp_path)
+    assert orch.begin_agent_creation(loader=loader)._loader is loader
+    assert orch.begin_agent_creation().state == WorkflowState.DISCUSS
+
+
 # --- OrchestratorREPL: session_id on UserMessage ---
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@
 import pytest
 import yaml
 from pathlib import Path
+from localharness.config.loader import ConfigLoader
 from localharness.orchestrator.workflow import (
     AgentCreationWorkflow,
     WorkflowState,
@@ -124,7 +125,7 @@ def test_workflow_cancel_from_confirm():
     assert wf.state == WorkflowState.CANCELLED
 
 def test_workflow_deploy_config_writes_file(tmp_path: Path):
-    wf = AgentCreationWorkflow(config_dir=tmp_path)
+    wf = AgentCreationWorkflow(loader=ConfigLoader(config_dir=tmp_path))
     wf.set_generated_yaml("name: test-agent\nrole: Test agent role")
     path = wf.deploy_config("test-agent")
     assert path.exists()
@@ -153,7 +154,7 @@ def test_change_followup_updates_generation_input(tmp_path: Path):
     description once (`if 'description' not in gathered`) so 'change' regenerated an
     IDENTICAL config. Choice: append-with-newline (original intent + correction both
     reach the generator)."""
-    wf = AgentCreationWorkflow(config_dir=tmp_path)
+    wf = AgentCreationWorkflow(loader=ConfigLoader(config_dir=tmp_path))
     wf.transition("Track stock prices and summarize the daily moves")  # -> CONFIGURE
     wf.transition("")  # -> CONFIRM
     original_desc = wf.gathered["description"]
@@ -171,7 +172,7 @@ def test_short_then_long_description_recovers(tmp_path: Path):
     """#56 corollary: a first reply <=10 chars set the description but could never be
     replaced (`if 'description' not in gathered`), wedging DISCUSS forever. A subsequent
     longer description must REPLACE the too-short one and advance."""
-    wf = AgentCreationWorkflow(config_dir=tmp_path)
+    wf = AgentCreationWorkflow(loader=ConfigLoader(config_dir=tmp_path))
     wf.transition("agent")  # 5 chars — too short, stays in DISCUSS
     assert wf.state == WorkflowState.DISCUSS
     wf.transition("monitor hacker news for AI stories and summarize them")
@@ -182,7 +183,7 @@ def test_short_then_long_description_recovers(tmp_path: Path):
 
 def test_deploy_config_rejects_invalid_yaml(tmp_path: Path):
     """deploy_config must raise ValueError for unparseable YAML."""
-    wf = AgentCreationWorkflow(config_dir=tmp_path)
+    wf = AgentCreationWorkflow(loader=ConfigLoader(config_dir=tmp_path))
     wf.set_generated_yaml("this is: [[[not: valid")
     with pytest.raises(ValueError):
         wf.deploy_config("test-agent")
@@ -191,7 +192,7 @@ def test_deploy_config_rejects_invalid_yaml(tmp_path: Path):
 
 def test_deploy_config_rejects_bad_schema(tmp_path: Path):
     """deploy_config must raise for YAML that fails AgentConfig validation."""
-    wf = AgentCreationWorkflow(config_dir=tmp_path)
+    wf = AgentCreationWorkflow(loader=ConfigLoader(config_dir=tmp_path))
     # temperature > 2.0 exceeds AgentConfig's le=2.0 constraint
     wf.set_generated_yaml("name: x\nrole: test\ntemperature: 999")
     with pytest.raises((ValueError, Exception)):
@@ -201,7 +202,7 @@ def test_deploy_config_rejects_bad_schema(tmp_path: Path):
 
 def test_deploy_config_overrides_name(tmp_path: Path):
     """deploy_config must override the name field to match the agent_name parameter."""
-    wf = AgentCreationWorkflow(config_dir=tmp_path)
+    wf = AgentCreationWorkflow(loader=ConfigLoader(config_dir=tmp_path))
     wf.set_generated_yaml("name: llm-chose-this\nrole: A helpful agent")
     path = wf.deploy_config("my-agent")
     data = yaml.safe_load(path.read_text())
@@ -210,7 +211,7 @@ def test_deploy_config_overrides_name(tmp_path: Path):
 
 def test_deploy_config_no_name_honors_yaml_name(tmp_path: Path):
     """#19: with no agent_name, deploy what the user confirmed — the YAML's own name."""
-    wf = AgentCreationWorkflow(config_dir=tmp_path)
+    wf = AgentCreationWorkflow(loader=ConfigLoader(config_dir=tmp_path))
     wf.set_generated_yaml("name: llm-chose-this\nrole: A helpful agent")
     path = wf.deploy_config()
     assert path.name == "llm-chose-this.yaml"
@@ -221,7 +222,7 @@ def test_deploy_config_no_name_anywhere_fails_explicitly(tmp_path: Path):
     """#28: a generated config with no top-level name must FAIL explicitly, never
     silently become a 'new-agent' placeholder (the project rule: fail loudly, never
     placeholder). Replaces the earlier test that codified the placeholder default."""
-    wf = AgentCreationWorkflow(config_dir=tmp_path)
+    wf = AgentCreationWorkflow(loader=ConfigLoader(config_dir=tmp_path))
     wf.set_generated_yaml("role: A helpful agent")
     with pytest.raises(ValueError, match="name"):
         wf.deploy_config()
@@ -233,12 +234,12 @@ def test_deploy_config_refuses_to_overwrite_existing(tmp_path: Path):
     """#28: deploy wrote a .tmp then os.replace with NO existence check, silently
     clobbering an existing agent config. It must refuse and name the collision,
     leaving the existing file untouched."""
-    wf = AgentCreationWorkflow(config_dir=tmp_path)
+    wf = AgentCreationWorkflow(loader=ConfigLoader(config_dir=tmp_path))
     wf.set_generated_yaml("name: dup-agent\nrole: The original agent")
     path = wf.deploy_config()
     original = path.read_text()
 
-    wf2 = AgentCreationWorkflow(config_dir=tmp_path)
+    wf2 = AgentCreationWorkflow(loader=ConfigLoader(config_dir=tmp_path))
     wf2.set_generated_yaml("name: dup-agent\nrole: A DIFFERENT agent that would clobber")
     with pytest.raises(ValueError, match="exists"):
         wf2.deploy_config()
@@ -254,22 +255,58 @@ def test_workflow_config_dir_honors_env_chain(monkeypatch, tmp_path: Path):
     home_env = tmp_path / "home"
     monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
     monkeypatch.setenv("LOCALHARNESS_HOME", str(home_env))
-    assert AgentCreationWorkflow()._config_dir == home_env
+    assert AgentCreationWorkflow()._loader.global_config_dir == home_env
 
     dir_env = tmp_path / "dir"
     monkeypatch.setenv("LOCALHARNESS_DIR", str(dir_env))
-    assert AgentCreationWorkflow()._config_dir == dir_env
+    assert AgentCreationWorkflow()._loader.global_config_dir == dir_env
 
 
 def test_workflow_explicit_config_dir_wins(monkeypatch, tmp_path: Path):
     """The real interactive path (repl.py -> router.py) threads a dir; it still wins."""
     monkeypatch.setenv("LOCALHARNESS_DIR", str(tmp_path / "ignored"))
     explicit = tmp_path / "explicit"
-    assert AgentCreationWorkflow(config_dir=explicit)._config_dir == explicit
+    assert AgentCreationWorkflow(loader=ConfigLoader(config_dir=explicit))._loader.global_config_dir == explicit
 
 
 def test_workflow_config_dir_unchanged_when_nothing_set(monkeypatch):
     """Zero-behavior-change guarantee: no env, no arg -> ~/.localharness, exactly as before."""
     monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
     monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
-    assert AgentCreationWorkflow()._config_dir == Path("~/.localharness").expanduser()
+    assert AgentCreationWorkflow()._loader.global_config_dir == Path("~/.localharness").expanduser()
+
+
+def test_the_destination_defaults_to_the_bound_layer(tmp_path: Path):
+    m, p = tmp_path / "m", tmp_path / "p"
+    assert AgentCreationWorkflow(loader=ConfigLoader(config_dir=m, local_config_dir=p))._layer == "project"
+    assert AgentCreationWorkflow(loader=ConfigLoader(config_dir=m))._layer == "machine"
+    bare = AgentCreationWorkflow()._loader
+    assert isinstance(bare, ConfigLoader) and bare.local_dir is None
+
+
+def test_deploy_config_writes_the_bound_project_layer_through_the_writer(tmp_path: Path, monkeypatch):
+    m, p = tmp_path / "m", tmp_path / "p"
+    m.mkdir()
+    p.mkdir()
+    layers = []
+    real = ConfigLoader.write_agent
+
+    def spy(self, name, yaml_text, *, layer, overwrite=False):
+        layers.append(layer)
+        return real(self, name, yaml_text, layer=layer, overwrite=overwrite)
+
+    monkeypatch.setattr(ConfigLoader, "write_agent", spy)
+    loader = ConfigLoader(config_dir=m, local_config_dir=p)
+    wf = AgentCreationWorkflow(loader=loader)
+    wf.set_generated_yaml("name: x\nrole: r")
+    path = wf.deploy_config()
+    assert path == p / "agents" / "x.yaml"
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert layers == ["project"]
+
+    wf2 = AgentCreationWorkflow(loader=loader)
+    wf2.set_generated_yaml("name: x\nrole: r2")
+    with pytest.raises(ValueError, match="exists") as err:
+        wf2.deploy_config()
+    assert str(err.value).endswith("remove the existing config.")
+    assert str(err.value).count("remove the existing config.") == 1

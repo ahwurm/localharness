@@ -187,7 +187,7 @@ def test_the_name_check_is_a_full_match():
 
 
 def test_set_generated_yaml_stores_a_valid_name_or_none(tmp_path):
-    flow = AgentCreationWorkflow(config_dir=tmp_path)
+    flow = AgentCreationWorkflow(loader=ConfigLoader(config_dir=tmp_path))
     flow.set_generated_yaml("name: ok-name\nrole: r")
     assert flow.gathered["name"] == "ok-name"
     for text in ('name: "ab\\n"\nrole: r', "this is: [[[not: valid", "- a\n- b", "role: r",
