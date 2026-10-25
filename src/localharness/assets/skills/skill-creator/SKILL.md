@@ -24,7 +24,7 @@ Otherwise ask exactly one question: "What should this skill do, and when should 
 
 ## 2. Check for an existing skill
 
-Run `localharness skills`. It is read-only to the shell gate and never asks.
+Run `localharness skills`, with `--config-dir X` after `skills` when this session was started with `--config-dir X`. It is read-only to the shell gate and never asks.
 If a listed skill covers the workflow, extend it instead of writing a new one.
 
 ## 3. Write the description
@@ -33,7 +33,7 @@ The description is a retrieval cue, the only part the model sees before it decid
 
 - Third person: what the skill does, then when to use it.
 - Use the words the person types.
-- One line, at most 250 characters, so the listing keeps it.
+- One line, at most 250 characters; the listing holds 1,300 characters in all and drops a project description first when it overflows.
 - Distinct from the other listed skills, so a near-miss request does not match.
 
 ## 4. Write the body
@@ -50,9 +50,9 @@ Show one block, in this order:
 
 1. The files to write, with the count of approvals: one per file, so 1 for a bare skill, 2 with one references file, N for an edit touching N files.
 2. A diff for an existing file, or "new file".
-3. The full body, last.
+3. The full text of every file, one after another, `SKILL.md` last.
 
-Then write the shown text byte for byte with `write` in the same turn, so each ask the person answers sits under the block they read. The block is the review, not a second question.
+Then write each file's shown text byte for byte with `write` in the same turn, so each ask the person answers sits under the block they read. The block is the review, not a second question.
 
 ## 6. Write and validate
 

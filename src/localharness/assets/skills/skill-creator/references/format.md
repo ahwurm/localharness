@@ -2,7 +2,7 @@
 
 ## Fields
 - `name`: lowercase letters and digits joined by single hyphens, at most 64 characters, equal to the directory name.
-- `description`: one line, at most 1024 characters, best at most 250.
+- `description`: one line, at most 1024 characters, best at most 250. Avoid `: ` and ` #` inside it, or quote it.
 - Every other key is ignored. `allowed-tools` grants nothing.
 
 ## Layout
@@ -44,8 +44,8 @@ description: Drafts release notes from the local git history since the last tag 
 
 ## Where to put a skill
 - `~/.localharness/skills/<name>/`: yours, every project (`<config dir>/skills/<name>/` in a `--config-dir` session).
-- `.localharness/skills/<name>/`: this project's, shared with the repository.
-- `.agents/skills/<name>/`: the cross-client folder, read only beside a `.localharness/`.
+- `.localharness/skills/<name>/`: this project's, shared with the repository, at the project root (the folder holding `.localharness/`).
+- `.agents/skills/<name>/`: the cross-client folder, at the same root, read only beside a `.localharness/`.
 A project skill shadows a machine one of the same name. A bundled name cannot be taken.
 
 ## Skip lines
