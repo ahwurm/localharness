@@ -207,9 +207,11 @@ class ModelSwitch:
 
     async def _planned(self, plan, llm, active_heavy, gen: int) -> dict:
         try:
-            entries, _live, _malformed = await plan(llm)
+            entries, _live, malformed = await plan(llm)
             payload = list_payload(entries, llm=llm, harness=self._harness, active_heavy=active_heavy,
                                    locked=self.refusal("") is not None, launching=self.launching)
+            if model_ops._norm_url(llm.config.base_url) in malformed:
+                payload = {**payload, "models": [r for r in payload["models"] if r["kind"] == "cross"], "footer": [MODEL_MALFORMED]}
             if gen == self._generation:
                 self._stored = (time.monotonic(), payload)
             return payload

@@ -849,3 +849,43 @@ async def test_model_list_reply_carries_the_launching_of_the_moment_without_touc
     switch.launching = "x"
     assert (await switch.model_list(plan, None))["launching"] == "x"
     assert switch._stored[1]["launching"] is None
+
+
+async def test_model_list_malformed_bound_server_keeps_only_the_cross_rows(tmp_path):
+    switch, plan = _listing(tmp=tmp_path), _Plan(malformed={ms.model_ops._norm_url(PRIMARY)})
+    payload = await switch.model_list(plan, None)
+    assert _names(payload) == ["llama3.1:8b"] and [r["kind"] for r in payload["models"]] == ["cross"]
+    assert payload["footer"] == [ms.MODEL_MALFORMED]
+    assert PRIMARY not in json.dumps(payload) and "primary:8000" not in json.dumps(payload)
+    assert switch._stored[1]["footer"] == [ms.MODEL_MALFORMED]
+
+
+def test_malformed_line_names_no_address():
+    assert "http" not in ms.MODEL_MALFORMED
+
+
+async def test_model_list_malformed_naming_another_endpoint_changes_nothing(tmp_path):
+    clean = await _listing(tmp=tmp_path).model_list(_Plan(), None)
+    other = await _listing(tmp=tmp_path).model_list(_Plan(malformed={ms.model_ops._norm_url(PEER_B)}), None)
+    assert other == clean and len(other["models"]) == 3
+
+
+async def test_model_list_locked_marks_the_cold_rows_for_a_picker_channel_under_the_lock(tmp_path):
+    _, switch, _, _ = _world(chan=_Picker(), gate=lambda: NS(remote_unattended=False), config_dir=tmp_path)
+    payload = await switch.model_list(_Plan(), None)
+    why = {r["name"]: r["why"] for r in payload["models"]}
+    assert why == {"qwen3:32b": None, "llama3.1:8b": None, "mixtral": ms.ROW_LOCKED}
+    assert payload["footer"] == [ms.MODEL_LOCKED_FOOTER]
+
+
+async def test_model_list_locked_marks_the_cold_rows_for_a_channel_with_no_picker(tmp_path):
+    _, switch, _, _ = _world(chan=_Remote(), gate=lambda: OPEN, config_dir=tmp_path)
+    payload = await switch.model_list(_Plan(), None)
+    assert [r["why"] for r in payload["models"]] == [None, None, ms.ROW_LOCKED]
+    assert payload["footer"] == [ms.MODEL_LOCKED_FOOTER]
+
+
+async def test_model_list_locked_is_absent_for_the_local_operator(tmp_path):
+    _, switch, _, _ = _world(chan=_local(), gate=lambda: LOCK, config_dir=tmp_path)
+    payload = await switch.model_list(_Plan(), None)
+    assert [r["why"] for r in payload["models"]] == [None] * 3 and payload["footer"] == []
