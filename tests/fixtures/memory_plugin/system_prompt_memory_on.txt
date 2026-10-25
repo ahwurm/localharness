@@ -14,6 +14,10 @@ Answer ordinary questions directly. For substantive work, follow the latest huma
 BASELINE-GUARDRAILS-SENTINEL
 
 
+## Skills
+Procedures. When a request matches one, call skill(name) before starting the work it covers.
+- skill-creator: Creates or improves a LocalHarness skill, a reusable procedure in a SKILL.md. Use when the person says make a skill, turn this into a skill, new skill, save this as a procedure or improve this skill.
+
 ## Division Context
 # Division
 BASELINE-DIVISION-SENTINEL
