@@ -23,6 +23,7 @@ from collections.abc import Callable, Iterable
 import pytest
 
 from localharness.agent.gate_types import PROTECTED_CONFIG_DIR_ENTRIES
+from localharness.cli.model_switch import ROW_WITHHELD
 from localharness.cli.plugins_cmd import CONSENT, THIRD_PARTY_CONFIRM
 from localharness.config.loader import (
     AGENT_GLOBAL_ONLY_FIELDS, ASK_GLOBAL_ONLY_FIELDS, HARNESS_GLOBAL_ONLY_FIELDS,
@@ -327,6 +328,7 @@ def test_key_file_doc_bites():
 LOCK_NEEDLES = ("cold launch or managed restart", "whatever the setting", "not an authorization boundary",
                 "one tap and no question", "may be another machine")
 STALE_DEFAULT = "today stops working"
+MOBILE_NEEDLES = ("except `GET /api/model`, bearer only", "a model launch, whose confirm it can answer")
 
 
 def _source_constant(rel: str, name: str):
@@ -342,10 +344,13 @@ def _swap(text: str, phrase: str, new: str) -> str:
 def check_model_switch_doc(
     security_text: str, ttl: float = _source_constant("src/localharness/channels/mobile/channel.py", "CONFIRM_TOKEN_TTL_S"),
 ) -> list[str]:
-    """SECURITY.md's paired-phone section says the machine lock covers launches, who is refused whatever the setting, and how long the confirm lives."""
-    paired = " ".join((section(security_text, "### A paired phone or Discord account") or "").split())
-    found = [f"SECURITY.md's paired-phone section does not say {n}" for n in (*LOCK_NEEDLES, f"{int(ttl)} seconds")
-             if n not in paired]
+    """SECURITY.md says the machine lock covers launches, who is refused whatever the setting, how long the confirm lives, and what the model route withholds."""
+    mobile, paired = (" ".join((section(security_text, f"### {h}") or "").split())
+                      for h in ("`localharness mobile`", "A paired phone or Discord account"))
+    found = [f"SECURITY.md's mobile section does not say {n}" for n in (*MOBILE_NEEDLES, f"`{ROW_WITHHELD}`")
+             if n not in mobile]
+    found += [f"SECURITY.md's paired-phone section does not say {n}" for n in (*LOCK_NEEDLES, f"{int(ttl)} seconds")
+              if n not in paired]
     return found + ([f"SECURITY.md's paired-phone section still says {STALE_DEFAULT}"] if STALE_DEFAULT in paired else [])
 
 
@@ -358,13 +363,17 @@ def test_model_switch_doc_bites():
     for needle in LOCK_NEEDLES:
         assert check_model_switch_doc(_swap(text, needle, "x")) == [
             f"SECURITY.md's paired-phone section does not say {needle}"]
+    for needle in MOBILE_NEEDLES:
+        assert check_model_switch_doc(_swap(text, needle, "x")) == [f"SECURITY.md's mobile section does not say {needle}"]
+    assert check_model_switch_doc(_swap(text, f"`{ROW_WITHHELD}`", "x")) == [
+        f"SECURITY.md's mobile section does not say `{ROW_WITHHELD}`"]
     assert check_model_switch_doc(text, ttl=60.0) == ["SECURITY.md's paired-phone section does not say 60 seconds"]
     lock = "**What this does NOT cover.** The lock refuses"
     assert lock in text
     stale = text.replace(lock, f"It is `true` by default, so nothing you do from the phone or Discord {STALE_DEFAULT},\n\n{lock}", 1)
     assert check_model_switch_doc(stale) == [f"SECURITY.md's paired-phone section still says {STALE_DEFAULT}"]
     empty = check_model_switch_doc("## Nothing\n")
-    assert len(empty) == len(LOCK_NEEDLES) + 1
+    assert len(empty) == len(MOBILE_NEEDLES) + 1 + len(LOCK_NEEDLES) + 1
     assert check_model_switch_doc("## Nothing\n") == empty
 
 
