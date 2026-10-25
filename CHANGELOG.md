@@ -4,6 +4,25 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [Unreleased]
+
+Skills: procedures the model loads when a request matches, and a bundled `skill-creator` that writes the next one with you. A skill is procedural memory, knowing how kept apart from knowing that ([Cohen and Squire 1980](https://doi.org/10.1126/science.7414331)); its description is the cue a situation is recognised by (Klein's recognition-primed decision, 1993), its body a script of steps (Schank and Abelson 1977), and writing one from a worked session is knowledge compilation ([Anderson 1982](https://doi.org/10.1037/0033-295X.89.4.369); Soar's chunking, [Laird, Rosenbloom and Newell 1986](https://doi.org/10.1023/A:1022639103969)). The format is the open [Agent Skills](https://agentskills.io/specification) one. In one study open-weight models triggered the right skill on only about a third of tasks ([Skill-Use](https://arxiv.org/abs/2608.04828)), so `/<name>` is the sure way in.
+
+### Added
+- **skills** — procedures the model loads when a request matches. A skill is a directory holding a
+  `SKILL.md` (Agent Skills format; only `name` and `description` are honoured, and `allowed-tools`
+  grants nothing) under `.localharness/skills/`, `.agents/skills/` (beside `.localharness/`),
+  `~/.localharness/skills/` or the bundled set. The base prompt lists them in one line each under a
+  fixed 1,300-character description budget, a project's skills fenced as the project's own text; the
+  root's new `skill` tool loads a body by name and holds it in view for the turn, and,
+  while a task is live, for the sitting where the four-reference limit allows, and anything it leads
+  to meets the same gates. `/<name>` asks the model to run a skill; `localharness skills` lists what
+  was found and why anything was skipped. The bundled `skill-creator` writes the next one with you;
+  the skills directories are protected paths, so each file it writes is an approval that cannot be
+  saved as "always" (denied in read-only mode, allowed in unattended). The listing counts toward the
+  window floor.
+  The model may not pick a skill up on its own; `/<name>` asks it to.
+
 ## [0.21.1] — 2026-10-24
 
 The installed phone app shows a "can't reach your box" page instead of a white screen when the box is unreachable.
