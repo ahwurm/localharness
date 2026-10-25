@@ -18,8 +18,8 @@ Skills: procedures the model loads when a request matches, and a bundled `skill-
   while a task is live, for the sitting where the four-reference limit allows, and anything it leads
   to meets the same gates. `/<name>` asks the model to run a skill; `localharness skills` lists what
   was found and why anything was skipped. The bundled `skill-creator` writes the next one with you;
-  the skills directories are protected paths, so each file it writes is an approval that cannot be
-  saved as "always" (denied in read-only mode, allowed in unattended). The listing counts toward the
+  the user and project skills directories are protected paths, so each file it writes is an approval
+  that cannot be saved as "always" (denied in read-only mode, allowed in unattended). The listing counts toward the
   window floor.
   The model may not pick a skill up on its own; `/<name>` asks it to.
 
@@ -30,7 +30,7 @@ Skills: procedures the model loads when a request matches, and a bundled `skill-
   `localharness skills` is read-only and never asks.
 
 ### Removed
-- **`context.microagents`** — declared since v2 planning, never read by anything; a config that
+- **`context.microagents`** — declared but never read by anything; a config that
   still sets it now fails validation naming the key path: delete it.
 
 ## [0.21.1] — 2026-10-24

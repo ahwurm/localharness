@@ -238,9 +238,9 @@ A project's skills load with its config under the workspace rule above: in a clo
 and from a workspace outside your project only after the trust question, which names them. Only the
 `name` and `description` of a skill are read and every other key is ignored, so `allowed-tools`
 grants nothing. A skill runs no command of its own and installs nothing. A project skill's listing
-line and the body the model loads when cued sit after the guardrails inside a fence that marks them
-as the project's own text, the way a project's instructions file does ([Project instructions
-files](#project-instructions-files)); the fence is a marker, not a sandbox, because it labels the
+line sits after the guardrails and the body the model loads when cued arrives as a tool result, each
+inside a fence that marks it as the project's own text, the way a project's instructions file does
+([Project instructions files](#project-instructions-files)); the fence is a marker, not a sandbox, because it labels the
 text and does not stop a model from following it. A project skill's body is stored as untrusted
 content, which keeps it from a child agent that holds a host-dangerous tool. The description alone
 steers which skill a model picks ("Under the Hood of SKILL.md", https://arxiv.org/abs/2605.11418),
@@ -248,7 +248,7 @@ and the malicious skills found in public marketplaces hid their payload in a "Pr
 step (Snyk's ToxicSkills audit,
 https://snyk.io/blog/toxicskills-malicious-ai-agent-skills-clawhub/): there is no hub and no install
 command here, and the bundled `skill-creator` writes no install or setup step. Every skills
-directory is a protected path: the protected list under the approval gate holds `skills/**`, and
+directory except the bundled one is a protected path: the protected list under the approval gate holds `skills/**`, and
 `.agents/skills/` is protected beside it, so a write there asks with no "always" in `guarded`,
 `trusted` and `auto`, is denied in `read-only` and is allowed without an ask in `unattended`. The
 bundled `skill-creator` writes one file per `write`, with one approval per file, and never switches
@@ -261,11 +261,15 @@ signature covers a file the agent just wrote, the same gap as a granted `python3
 approval gate's named gaps; a cloned repository's skill descriptions enter the root prompt, and the
 bodies the model loads when cued, silently, as its agent files do; in `unattended` the model can
 write itself a skill without an ask, and it is listed from the next start; the protected-path ask
-shows only the path, so the body you read in the creator's proposal and the body written are tied by
-the model's discipline, not by the gate, and a write the gate denied whose content equals the body
+shows only the path, so the body you read in the creator's proposal and the body written are tied
+by the model's discipline, not by the gate, and a write the gate denied whose content equals the body
 on disk still suppresses the "changed since first use" notice, because the record is of the attempt;
-a boundary narrowed by `permissions.workspace_root` leaves `.agents/skills/` outside it when you
-work below the project root, where `auto` allows the write without an ask; `mv staged .agents` with
+the bundled set is not protected, so a write into the package directory runs without an ask in
+`trusted`, `auto` and `unattended`, and in `guarded` is the ordinary outside-the-project ask that
+can be saved as "always"; a boundary narrowed by `permissions.workspace_root` leaves
+`.localharness/skills/` and `.agents/skills/` alike outside it when you work below the project root,
+where `auto` allows the write without an ask, and `WriteTool` refuses such a target, so the route
+left open is `bash_exec` (`cp`, `mv`, `mkdir`); `mv staged .agents` with
 `.agents` absent makes a staged tree live, as a created `.localharness` is left alone; the untrusted
 mark does not survive the `[budget: …]` note; the 200 KiB size check is the only bound on a
 `SKILL.md`'s frontmatter, so a hostile file costs about a second to parse and two origins full at
@@ -1334,8 +1338,8 @@ floor, and in front of you at the next turn. It is no more than the model could 
 front of itself by reading any file. And the fence is smaller than one other door: a project agent
 file (`.localharness/agents/<name>.yaml`) replaces that agent's whole role, unfenced and ahead of
 the guardrails, with no prompt beyond the workspace's own. A project skill is not that door: its
-listing line and the body the model loads sit after the guardrails inside the same fence as this
-file (see [Skills](#skills)).
+listing line sits after the guardrails and the body the model loads arrives as a tool result, each
+inside the same fence as this file (see [Skills](#skills)).
 
 ### What a web fetch may reach
 
