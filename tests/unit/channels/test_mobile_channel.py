@@ -381,6 +381,21 @@ async def test_a_broken_instrument_reports_nothing_rather_than_raising(tmp_path)
     assert frame.phase == "waiting" and frame.tps is None and frame.model is None
 
 
+async def test_hello_model_is_the_source_label_and_none_without_one_or_when_it_raises():
+    channel = await _channel()
+    client = channel.attach_client()
+    assert (await channel.hello(client, None)).model is None
+    channel.model_source = lambda: "qwen3-27b"
+    assert (await channel.hello(client, None)).model == "qwen3-27b"
+    assert channel.status_frame().model == "qwen3-27b"
+
+    def _boom():
+        raise RuntimeError("the source went away")
+
+    channel.model_source = _boom
+    assert (await channel.hello(client, None)).model is None
+
+
 async def test_cancel_emits_the_frame_the_loop_never_publishes(tmp_path):
     """WEBCH-12: a cancelled turn publishes NEITHER TurnCompleted NOR TurnFailed, so without
     this frame the phone shows a turn that never ends."""

@@ -837,13 +837,6 @@ class MobileChannel(ChannelAdapter):
                     tps, verified = float(got[0]), bool(got[1])
             except Exception:  # noqa: BLE001
                 pass
-        model: Optional[str] = None
-        model_src = getattr(self, "model_source", None)
-        if model_src is not None:
-            try:
-                model = model_src()
-            except Exception:  # noqa: BLE001
-                pass
         return StatusTick(
             session_id=self.session_id,
             phase=snap.get("phase") or "waiting",
@@ -854,9 +847,19 @@ class MobileChannel(ChannelAdapter):
             silent=float(snap.get("silent") or 0.0),
             tps=tps,
             tps_verified=verified,
-            model=model,
+            model=self.model_label(),
             context_pct=self._context_pct,
         )
+
+    def model_label(self) -> Optional[str]:
+        """The short label of the bound model; None without a source or when the source raises."""
+        model_src = getattr(self, "model_source", None)
+        if model_src is None:
+            return None
+        try:
+            return model_src()
+        except Exception:  # noqa: BLE001
+            return None
 
     async def _start_status_ticker(self) -> None:
         if self._status_task is not None and not self._status_task.done():
@@ -1490,6 +1493,7 @@ class MobileChannel(ChannelAdapter):
             turn_in_progress=self._turn_running,
             model_state=self.model_state(),
             session_live=self.session_id is not None,
+            model=self.model_label(),
         )
 
     def model_state(self) -> str:

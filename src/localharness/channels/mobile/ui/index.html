@@ -902,6 +902,7 @@ function onFrame(name, d) {
       if (!d.synthetic && S.session && d.session_id && d.session_id !== S.session
           && location.reload) { location.reload(); return; }
       S.session = d.session_id; S.mode = d.mode; S.turn = d.turn_in_progress;
+      if (d.model) $("model").textContent = d.model;
       $("state").textContent = d.synthetic ? "REPLAY" : "connected";
       if (d.synthetic) add(el("div", "row sys",
         "REPLAY: the streaming and instrument frames on this connection are SYNTHESIZED from a " +
@@ -1782,7 +1783,11 @@ $("pushBtn").onclick = enablePush;
 $("recheck").onclick = async () => {
   // "unreachable" must not be a dead end: the probe only re-runs when something asks it to.
   $("state").textContent = "re-checking…";
-  try { const h = await get("/api/health"); paint(h.model_state); }
+  try {
+    const h = await get("/api/health");
+    if (h.model) $("model").textContent = h.model;
+    paint(h.model_state);
+  }
   catch (e) { S.offline = true; paint(); }
 };
 
@@ -1804,6 +1809,7 @@ $("recheck").onclick = async () => {
     S.session = health.session_id || S.session;
     if (health.mode) S.mode = health.mode;
     if (health.agent_id) $("agentline").textContent = "agent · " + health.agent_id;
+    if (health.model) $("model").textContent = health.model;
     paint(health.model_state);
     // WEBCH-29. The bring-up warning is one line on the wire, so a phone that connected after
     // it was sent would never know. This is the same fact, read as state on arrival.

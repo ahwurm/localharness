@@ -705,6 +705,7 @@ class MobileServer:
         return _json({
             "protocol_version": PROTOCOL_VERSION,
             "model_state": self.channel.model_state(),
+            "model": self.channel.model_label(),
             "session_id": self.channel.session_id,
             "agent_id": self.channel.agent_id,
             "session_live": self.channel.session_id is not None,
