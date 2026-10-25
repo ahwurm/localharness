@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from unittest import mock
 
 import pytest
 import yaml
@@ -142,7 +143,7 @@ def root_loop(client, cfg: AgentConfig, shape: Shape, skill_set: SkillSet, regis
 
 
 @contextlib.contextmanager
-def first_request_only(client, seen: list):
+def first_request_only(client, seen: list, errors: list):
     real = client.stream_complete
 
     @functools.wraps(real)
@@ -150,7 +151,11 @@ def first_request_only(client, seen: list):
         if seen:
             raise FirstStepDone
         seen.append(kwargs)
-        return await real(*args, **kwargs)
+        try:
+            return await real(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - kept for the report, re-raised to the loop
+            errors.append(exc)
+            raise
 
     client.stream_complete = guarded
     try:
@@ -221,12 +226,16 @@ async def first_step_run(client, skill_set: SkillSet, cfg: AgentConfig, shape: S
     gate = PermissionGate(boundary=None, workspace=work, grants=GrantStore(work.parent / "grants.yaml"), mode="read-only")
     loop = root_loop(client, cfg, shape, skill_set, registry, state, gate, bus)
     seen: list = []
-    with first_request_only(client, seen):
+    errors: list = []
+    with first_request_only(client, seen, errors):
         with contextlib.suppress(FirstStepDone):
             await loop.run_turn(prompt)
     if cause := failure(bus):
         raise RequestFailed(cause)
-    calls, finish, flaw = first_step(bus.history(event_types=[Action]), getattr(client.config, "tool_call_mode", "native"))
+    actions = bus.history(event_types=[Action])
+    if errors and not any(e.action_type == "llm_response" for e in actions):
+        raise RequestFailed(f"{type(errors[0]).__name__}: {str(errors[0])[:120]}")
+    calls, finish, flaw = first_step(actions, getattr(client.config, "tool_call_mode", "native"))
     return Step(calls, finish, seen[0]["messages"][0]["content"], flaw)
 
 
@@ -490,7 +499,7 @@ def bundled_under(root: Path):
 
 @contextlib.contextmanager
 def neutral_sitting(fake_home):
-    """A person's sitting: a fake home, a workspace holding `.localharness/` and the bundled skills, all under a temp dir whose name carries no user."""
+    """A person's sitting: a fake home, a workspace holding `.localharness/` and the bundled skills, all under a temp dir whose name carries no user, with `USER` and `LOGNAME` neutral."""
     base = Path(tempfile.mkdtemp(prefix="lh-")).resolve()
     here = Path.cwd()
     try:
@@ -498,7 +507,7 @@ def neutral_sitting(fake_home):
         work = home / "work"
         (work / ".localharness").mkdir(parents=True)
         os.chdir(work)
-        with bundled_under(home / "pkg"):
+        with bundled_under(home / "pkg"), mock.patch.dict(os.environ, {"USER": "user", "LOGNAME": "user"}):
             yield home, work
     finally:
         os.chdir(here)
