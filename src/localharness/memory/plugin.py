@@ -318,8 +318,8 @@ def _embedding_package_installed() -> bool:
 
 def _is_folder(model: str, config_dir: Any = None) -> bool:
     """Does `model` name a folder: an absolute path, or a relative one the config folder holds (R24:
-    never the current folder)? resonance.model_folder is the engine's own rule."""
-    from localharness.memory.resonance import model_folder
+    never the current folder)? config.paths.model_folder is the engine's own rule."""
+    from localharness.config.paths import model_folder
     return model_folder(model, config_dir) is not None
 
 
