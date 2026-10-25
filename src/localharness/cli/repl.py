@@ -19,7 +19,7 @@ from rich.protocol import is_renderable
 from localharness.agent.gate_types import MODE_STRICTNESS
 from localharness.channels import input_router
 from localharness.cli.model_ops import _hold_peer_session_key, _launch_key, _peer_session_key
-from localharness.cli.model_switch import ModelSwitch
+from localharness.cli.model_switch import LAUNCH_SLOW, ModelSwitch, launch_holder
 from localharness.cli.session_resume import RELOAD_ACTION
 from localharness.cli.skill_session import SkillSession, skill_row
 from localharness.cli.slash_commands import SlashCommand, add_plugin_row, find_row, help_text
@@ -2087,7 +2087,8 @@ class OrchestratorREPL:
             if decision.refusal is not None:
                 await self._channel.send_message(decision.refusal, metadata={"style": "system.error"})
                 return
-            if key_line:
+            local = getattr(self._channel, "local_operator", False)
+            if key_line and local:
                 await self._send_info(key_line)
             # The swap's target is the record the trust-resolved ladder chose for this peer (D-11,
             # SEC-02): a record the machine withholds is refused here, with spec 16's line, and
@@ -2100,6 +2101,24 @@ class OrchestratorREPL:
             swap_target = model_ops.heavy_for(serving, self._harness)
             swap_incumbent = (model_ops.incumbent_heavy(self._active_heavy, self._harness)
                               if self._active_heavy is not None else None)
+            redact = self._channel_redactor(ep.api_key)
+            build = await self._first_build_note(ep.lifecycle)
+
+            async def recheck():
+                if line := await asyncio.to_thread(self._foreign_incumbent, managed, target):
+                    return redact(line), "system.info"
+                if refusal := launch_decision(ep.lifecycle, keyed, peer=ep.name).refusal:
+                    return redact(refusal), "system.error"
+                return None
+
+            stop = await self._switch.confirm(
+                target, launch_holder(self._active_heavy, self._harness), build, recheck)
+            if stop is not None:
+                if stop[0]:
+                    await self._channel.send_message(stop[0], metadata={"style": stop[1]})
+                return
+            if key_line and not local:
+                await self._send_info(key_line)
             box_note = getattr(self._channel, "box_activity", None)
 
             def _cold_progress(elapsed: float) -> None:
@@ -2108,15 +2127,15 @@ class OrchestratorREPL:
 
             tradeoff = self._swap_tradeoff_note(cur_ptype, current, ep.provider_type, target)
             _, posture = effective_posture(ep.lifecycle, keyed=keyed, decision=decision)
-            redact = self._channel_redactor(ep.api_key)
             reporter = _ReplSwapReporter(
                 self, target=swap_target, incumbent=swap_incumbent,
                 launch_head=(f"Launching {ep.name}{f' ({posture})' if posture else ''} — "
-                             "the swap can take several minutes..."
+                             "the swap " + LAUNCH_SLOW + "..."
                              + (f" {_lifecycle.RUNS_OUTSIDE_AUTOSTART}"
                                 if _lifecycle.outside_autostart(ep.lifecycle, self._unit_state) else "")
-                             + await self._first_build_note(ep.lifecycle)),
+                             + build),
                 tradeoff=tradeoff, note=decision.note, redact=redact)
+            self._switch.launch(target)
             async with self._launch_lock():
                 try:
                     # free the accelerator, launch the peer with its own key (only when its lifecycle

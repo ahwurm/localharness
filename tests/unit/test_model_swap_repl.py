@@ -8,12 +8,22 @@ imports; serve_command stays REAL so the command the swap builds is asserted end
 """
 from __future__ import annotations
 
+import contextlib
 from types import SimpleNamespace as NS
 
 import pytest
 
 from localharness.cli import model_ops
-from localharness.cli.model_switch import LAUNCH_ELSEWHERE, LAUNCH_LOCKED
+from localharness.cli.model_switch import (
+    LAUNCH_ELSEWHERE,
+    LAUNCH_LOCKED,
+    LAUNCH_NO,
+    LAUNCH_NO_PHONE,
+    LAUNCH_STOPS,
+    LAUNCH_STOPS_NONE,
+    LAUNCH_YES,
+    launch_holder,
+)
 from localharness.cli.repl import OrchestratorREPL
 from localharness.config.models import EndpointRef, HarnessConfig, ManagedServerConfig, OrgConfig, ProviderConfig
 from localharness.core.bus import EventBus
@@ -432,3 +442,254 @@ async def test_a_local_operator_is_never_asked_or_refused_a_managed_restart(tmp_
 
     assert calls == ["stop", "start"] and llm.config.model == "qwen3.6-27b"
     assert chan.picked == [] and LAUNCH_LOCKED not in chan.msgs
+
+
+class _Phone:
+    def __init__(self, channel, *answers, attached=True, log=None):
+        self.answers, self.attached = list(answers), attached
+        self.log: list[str] = [] if log is None else log
+        self.asked: list = []
+        self.sent: list = []
+        self.activity: list = []
+        channel.local_operator = False
+        channel.can_run_picker = lambda: self.attached
+        channel.run_picker = self.run_picker
+        channel.send_message = self.send_message
+        channel.box_activity = self.box_activity
+
+    async def run_picker(self, options, current, prompt=None, confirm=None):
+        self.asked.append(NS(options=options, current=current, prompt=prompt, confirm=confirm))
+        self.log.append("ask")
+        return self.answers.pop(0) if self.answers else None
+
+    async def send_message(self, content, metadata=None):
+        self.sent.append((content, (metadata or {}).get("style")))
+        self.log.append(f"send:{content}")
+
+    def box_activity(self, text):
+        self.activity.append(text)
+        if text and text.startswith("launching "):
+            self.log.append("chip")
+
+    def steps(self) -> list[str]:
+        return [e for e in self.log if not e.startswith("send:")]
+
+
+def _logged_lock(repl, log):
+    @contextlib.asynccontextmanager
+    async def lock():
+        log.append("lock")
+        yield
+
+    repl._launch_lock = lock
+
+
+def _landing_swap(monkeypatch, repl, during=None, *, error=None):
+    from localharness.provider import lifecycle
+
+    calls: list = []
+
+    async def swap(incumbent, target, *, reporter, **kw):
+        calls.append(target)
+        if during is not None:
+            during.append(repl._switch.launching)
+        await reporter.freed()
+        if error is not None:
+            return lifecycle.SwapOutcome(None, None, None, error, "launch")
+        live = lifecycle.LiveEndpoint(PEER_URL, ["qwen-gguf"], None)
+        await reporter.launched(live)
+        return lifecycle.SwapOutcome(live, None, None, None, None)
+
+    monkeypatch.setattr(lifecycle, "swap", swap)
+    return calls
+
+
+def _phone_cold(tmp_path, monkeypatch, *answers, attached=True, peer=None, during=None, error=None):
+    stub_liveness(monkeypatch, False)
+    harness, repl, channel, agent = _session(tmp_path, peer or _launchable_peer())
+    phone = _Phone(channel, *answers, attached=attached)
+    repl._gate = NS(remote_unattended=True)
+    _logged_lock(repl, phone.log)
+    swaps = _landing_swap(monkeypatch, repl, during, error=error)
+    return harness, repl, phone, agent, swaps
+
+
+def _decision_refuses_from_foreign_call(monkeypatch, repl, n, line):
+    from localharness.provider import server
+
+    real, seen = server.launch_decision, []
+
+    def foreign(managed, target):
+        seen.append(target)
+
+    def decision(*a, **k):
+        return NS(refusal=line, note=None) if len(seen) >= n else real(*a, **k)
+
+    repl._foreign_incumbent = foreign
+    monkeypatch.setattr(server, "launch_decision", decision)
+
+
+def _refusal_of(monkeypatch, repl, which):
+    from localharness.cli import model_ops
+
+    if which == "foreign":
+        repl._foreign_incumbent = lambda managed, target: "SOMEONE ELSE HOLDS THE PORT"
+        return "SOMEONE ELSE HOLDS THE PORT", "system.info"
+    if which == "decision":
+        _decision_refuses_from_foreign_call(monkeypatch, repl, 1, "DECISION REFUSED")
+        return "DECISION REFUSED", "system.error"
+    monkeypatch.setattr(model_ops, "resolve_serving", lambda *a, **k: model_ops.ServingRefusal("WITHHELD", "withheld"))
+    return "WITHHELD", "system.error"
+
+
+@pytest.mark.parametrize("which", ["foreign", "decision", "serving"])
+async def test_phone_cold_peer_refusals_are_sent_as_today_and_never_asked(tmp_path, monkeypatch, which):
+    _, repl, phone, agent, swaps = _phone_cold(tmp_path, monkeypatch, LAUNCH_YES)
+    line, style = _refusal_of(monkeypatch, repl, which)
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    assert phone.sent == [(line, style)] and phone.asked == [] and swaps == []
+    assert agent._llm.rebinds == []
+
+
+async def test_phone_cold_peer_asks_once_naming_what_stops_and_takes_the_lock_after_the_chip(tmp_path, monkeypatch):
+    harness, repl, phone, agent, swaps = _phone_cold(tmp_path, monkeypatch, LAUNCH_YES)
+    repl._active_heavy = (harness.server, agent._llm.config.base_url)
+    holder = launch_holder(repl._active_heavy, harness)
+    assert holder
+    current = agent._llm.config.model
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    [ask] = phone.asked
+    assert ask.options == [LAUNCH_YES, LAUNCH_NO] and ask.confirm == LAUNCH_YES and ask.current == current
+    assert "qwen-gguf" in ask.prompt and LAUNCH_STOPS.format(holder=holder) in ask.prompt
+    assert len(swaps) == 1
+    assert phone.steps()[:3] == ["ask", "chip", "lock"]
+
+
+async def test_phone_cold_peer_with_nothing_to_stop_says_so(tmp_path, monkeypatch):
+    _, repl, phone, _agent, _swaps = _phone_cold(tmp_path, monkeypatch, LAUNCH_YES)
+    assert repl._active_heavy is None
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    assert LAUNCH_STOPS_NONE in phone.asked[0].prompt
+
+
+@pytest.mark.parametrize("answer", [LAUNCH_NO, None])
+async def test_phone_cold_peer_cancel_or_no_answer_sends_nothing_and_changes_nothing(tmp_path, monkeypatch, answer):
+    _, repl, phone, agent, swaps = _phone_cold(tmp_path, monkeypatch, answer)
+    before = (dict(vars(agent._llm.config)), repl._active_heavy)
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    assert len(phone.asked) == 1 and phone.sent == [] and swaps == []
+    assert (dict(vars(agent._llm.config)), repl._active_heavy) == before
+    assert repl._switch.launching is None and "chip" not in phone.log and "lock" not in phone.log
+
+
+async def test_phone_cold_peer_with_the_app_closed_says_so_and_does_not_ask(tmp_path, monkeypatch):
+    _, repl, phone, agent, swaps = _phone_cold(tmp_path, monkeypatch, LAUNCH_YES, attached=False)
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    expected = LAUNCH_NO_PHONE.format(target="qwen-gguf", current=agent._llm.config.model)
+    assert phone.sent == [(expected, "system.info")] and phone.asked == [] and swaps == []
+
+
+async def test_phone_cold_peer_foreign_holder_after_the_wait_is_sent_and_nothing_launches(tmp_path, monkeypatch):
+    _, repl, phone, agent, swaps = _phone_cold(tmp_path, monkeypatch, LAUNCH_YES)
+    answers = iter([None, "A SERVER APPEARED ON THE PORT"])
+    repl._foreign_incumbent = lambda managed, target: next(answers)
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    assert len(phone.asked) == 1
+    assert phone.sent == [("A SERVER APPEARED ON THE PORT", "system.info")]
+    assert swaps == [] and agent._llm.rebinds == [] and "chip" not in phone.log
+
+
+async def test_phone_cold_peer_decision_after_the_wait_is_masked_and_nothing_launches(tmp_path, monkeypatch):
+    key = "sk-PEER-SECRET-0123456789"
+    _, repl, phone, agent, swaps = _phone_cold(tmp_path, monkeypatch, LAUNCH_YES, peer=_launchable_peer(api_key=key))
+    _decision_refuses_from_foreign_call(monkeypatch, repl, 2, f"refused with {key} on argv")
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    [(line, style)] = phone.sent
+    assert len(phone.asked) == 1 and style == "system.error"
+    assert line.startswith("refused with ") and key not in line
+    assert swaps == [] and agent._llm.rebinds == [] and "chip" not in phone.log
+
+
+async def test_phone_cold_peer_key_line_is_sent_once_after_the_yes(tmp_path, monkeypatch):
+    monkeypatch.setattr("localharness.cli.repl._peer_session_key", lambda ep: (None, "KEY LINE"))
+    _, repl, phone, _agent, swaps = _phone_cold(tmp_path, monkeypatch, LAUNCH_NO, LAUNCH_YES)
+
+    await repl._handle_slash("/model qwen-gguf")
+    assert "send:KEY LINE" not in phone.log
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    asks = [i for i, e in enumerate(phone.log) if e == "ask"]
+    keys = [i for i, e in enumerate(phone.log) if e == "send:KEY LINE"]
+    assert len(asks) == 2 and len(keys) == 1 and keys[0] > asks[1] and len(swaps) == 1
+
+
+async def test_phone_cold_peer_build_note_is_computed_once_and_reaches_the_question_and_the_launch_line(
+        tmp_path, monkeypatch):
+    _, repl, phone, _agent, _swaps = _phone_cold(tmp_path, monkeypatch, LAUNCH_YES)
+    notes: list = []
+
+    async def build_note(spec):
+        notes.append(spec)
+        return " (first build x)"
+
+    repl._first_build_note = build_note
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    assert len(notes) == 1 and "(first build x)" in phone.asked[0].prompt
+    [launch] = [m for m, _ in phone.sent if m.startswith("Launching ")]
+    assert "the swap can take several minutes..." in launch and "(first build x)" in launch
+
+
+async def test_phone_cold_peer_launching_is_the_target_during_the_swap_and_the_landing(tmp_path, monkeypatch):
+    during: list = []
+    _, repl, phone, _agent, swaps = _phone_cold(tmp_path, monkeypatch, LAUNCH_YES, during=during)
+
+    async def refresh(model, **kw):
+        during.append(repl._switch.launching)
+        return ""
+
+    repl._refresh_token_counter = refresh
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    assert during == ["qwen-gguf", "qwen-gguf"] and len(swaps) == 1
+    assert repl._switch.launching is None and phone.activity[-1] is None
+
+
+async def test_terminal_cold_peer_key_line_then_the_refusal_keeps_today_order(tmp_path, monkeypatch):
+    from localharness.cli import model_ops
+
+    stub_liveness(monkeypatch, False)
+    monkeypatch.setattr("localharness.cli.repl._peer_session_key", lambda ep: (None, "KEY LINE"))
+    monkeypatch.setattr(model_ops, "resolve_serving", lambda *a, **k: model_ops.ServingRefusal("WITHHELD", "withheld"))
+    _, repl, channel, agent = _session(tmp_path, _launchable_peer())
+    sent: list = []
+    original = channel.send_message
+
+    async def send(text, metadata=None):
+        sent.append((text, (metadata or {}).get("style")))
+        await original(text, metadata)
+
+    channel.send_message = send
+    swaps = _landing_swap(monkeypatch, repl)
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    assert sent == [("KEY LINE", "system.info"), ("WITHHELD", "system.error")]
+    assert swaps == [] and agent._llm.rebinds == [] and not hasattr(channel, "run_picker")
