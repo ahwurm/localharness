@@ -620,7 +620,7 @@ def test_spec_00_lists_the_agent_loop_parameters() -> None:
     spec = _REPO / ".planning" / "specs" / "00-architecture-overview.md"
     if not spec.is_file():
         pytest.skip("spec 00 is local only")
-    line = next(l for l in spec.read_text(encoding="utf-8").splitlines() if l.startswith("- `AgentLoop.__init__`:"))
+    line = next(row for row in spec.read_text(encoding="utf-8").splitlines() if row.startswith("- `AgentLoop.__init__`:"))
     listed = re.findall(r"`([^`]+)`", line.split(":", 1)[1])
 
     assert listed == [p for p in inspect.signature(AgentLoop.__init__).parameters if p != "self"]
