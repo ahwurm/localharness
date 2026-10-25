@@ -285,6 +285,9 @@ class MemoryPlugin(MemorySlotPlugin):
     def browse(self) -> Any:
         return self._browse
 
+    def embedder(self) -> Any:
+        return self._engine
+
     def bind_subagent(self, ctx: PluginContext) -> None:
         # G1: no gist persistence exists on this tree (removed in v0.15.0); the seam is wired
         # (agent/subagent.py) and awaits the owner's ruling — persist gists here, or delete the verb.

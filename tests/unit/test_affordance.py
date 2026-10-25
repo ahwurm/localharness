@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import shlex
+import sys
 from itertools import combinations
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from localharness.agent import subagent
@@ -23,10 +26,17 @@ from localharness.config.loader import ConfigLoader
 from localharness.config.models import AgentConfig, ToolConfig
 from localharness.config.skills import SkillSet
 from localharness.core.bus import EventBus
+from localharness.memory import resonance
+from localharness.memory.plugin import MemoryPlugin
+from localharness.memory.resonance import EMBED_MAX_TOKENS, ResonanceEngine, ResonanceUnavailable, local_folder
+from localharness.plugins.api import MemorySlotPlugin, QueryEmbedder
+from localharness.plugins.slot import MemorySlot
 from localharness.tools.builtin.agent_tool import BUILTIN_AGENT_NAMES
 from localharness.tools.builtin.skill_tool import SkillTool, render_listing
 from localharness.tools.builtin.task_tool import TaskTool
 from tests.unit.test_capabilities import _production_registry
+from tests.unit.test_embedding_model_source import MODEL, PURE, SHIPS_CODE, _cached, _write
+from tests.unit.test_memory_plugin import _ctx
 from tests.unit.test_loop_project_instructions import _FakeHandle, _build
 from tests.unit.test_skills_discovery import _skill
 from tests.unit.test_skills_listing import _CFG, _MODES, _ROOT, _notes, _spy_floor, _start_world, pkg  # noqa: F401
@@ -361,3 +371,160 @@ async def test_a_floor_schemas_that_raises_keeps_every_line_the_root_registered(
     else:
         assert _line(index, "Skills: ") is None
         assert _line(index, "Work: ") == "Work: " + AGENT_CLAUSE
+
+
+# --- the embedder seam ----------------------------------------------------------------------------
+
+@pytest.fixture
+def hub(tmp_path, monkeypatch):
+    from huggingface_hub import constants
+
+    path = tmp_path / "hub"
+    path.mkdir()
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(path))
+    return path
+
+
+@pytest.fixture
+def st(monkeypatch):
+    """A stand-in sentence-transformers: records each folder it loads and each encode, refuses a folder
+    with no modules.json."""
+    seen = SimpleNamespace(loaded=[], encoded=[])
+
+    class SentenceTransformer:
+        prompts: dict = {}
+
+        def __init__(self, folder, **kwargs):
+            if not (Path(folder) / "modules.json").is_file():
+                raise OSError(f"no modules.json in {folder}")
+            seen.loaded.append(folder)
+
+        def encode(self, texts, **kwargs):
+            seen.encoded.append(texts)
+            return [[0.6, 0.8] for _ in texts]
+
+    seen.factory = SentenceTransformer
+    monkeypatch.setitem(sys.modules, "sentence_transformers", SimpleNamespace(SentenceTransformer=SentenceTransformer))
+    return seen
+
+
+async def test_the_slot_hands_core_the_engine_which_loads_locally_and_encodes_without_waiting(tmp_path, hub, st):
+    folder = _cached(hub, MODEL, {"modules.json": PURE})
+    plugin, ctx = MemoryPlugin(), _ctx(tmp_path, embedding_model=MODEL)
+    assert plugin.embedder() is None
+    await plugin.tools(ctx)
+    engine = MemorySlot(plugin, ctx, "memory").embedder()
+    assert engine is plugin._engine and isinstance(engine, QueryEmbedder)
+    assert engine.try_embed_query("x") is None and st.loaded == []
+    assert engine.ensure_local() == folder and st.loaded == [str(folder)]
+    vec = engine.try_embed_query("x")
+    assert vec.shape == (2,) and vec.dtype == np.float32
+    await plugin.stop(ctx)
+    assert plugin.embedder() is None
+
+
+class _Answers(MemorySlotPlugin):
+    def __init__(self, answer) -> None:
+        self._answer = answer
+
+    def embedder(self):
+        if isinstance(self._answer, Exception):
+            raise self._answer
+        return self._answer
+
+
+def test_an_empty_slot_and_an_occupant_that_keeps_the_default_have_no_embedder():
+    assert MemorySlot().embedder() is None
+    assert MemorySlot(type("Quiet", (MemorySlotPlugin,), {})(), None, "quiet").embedder() is None
+
+
+@pytest.mark.parametrize("answer, why", [(RuntimeError("boom"), "raised RuntimeError: boom"),
+                                         ("vectors", "returned str, not a QueryEmbedder")])
+def test_a_raising_or_wrong_typed_embedder_is_none_with_one_warning(caplog, answer, why):
+    with caplog.at_level(logging.WARNING, logger="localharness.plugins.slot"):
+        assert MemorySlot(_Answers(answer), None, "odd").embedder() is None
+    (record,) = [r for r in caplog.records if r.name == "localharness.plugins.slot"]
+    assert "embedder()" in record.getMessage() and why in record.getMessage()
+
+
+def test_try_embed_query_never_waits_never_loads_and_always_releases_the_lock(hub, st):
+    unloaded = ResonanceEngine(MODEL)
+    assert unloaded.try_embed_query("x") is None and st.loaded == [] and not unloaded._lock.locked()
+    _cached(hub, MODEL, {"modules.json": PURE})
+    engine = ResonanceEngine(MODEL)
+    assert engine.ensure_local() is not None
+    with engine._lock:
+        assert engine.try_embed_query("x") is None
+    assert st.encoded == []
+    assert engine.try_embed_query("x").shape == (2,) and not engine._lock.locked()
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("encode failed")
+
+    engine._model.encode = boom
+    with pytest.raises(RuntimeError):
+        engine.try_embed_query("x")
+    assert not engine._lock.locked()
+
+
+def test_local_folder_prefers_a_configured_folder_then_the_cache(tmp_path, hub):
+    cfg = tmp_path / "cfg"
+    configured = _write(cfg / MODEL, {"modules.json": PURE})
+    cached = _cached(hub, MODEL, {"modules.json": PURE})
+    assert local_folder(MODEL, cfg) == configured
+    assert local_folder(str(tmp_path / "anywhere"), cfg) == tmp_path / "anywhere"
+    assert local_folder(MODEL, tmp_path / "elsewhere") == cached
+    assert local_folder("lh-test/absent", tmp_path / "elsewhere") is None
+
+
+def test_load_reads_the_folder_local_folder_names(tmp_path, st, monkeypatch):
+    folder, asked = _write(tmp_path / "chosen", {"modules.json": PURE}), []
+    monkeypatch.setattr(resonance, "local_folder", lambda *args: asked.append(args) or folder)
+    model, got = resonance._load(st.factory, MODEL, tmp_path / "cfg", download=False)
+    assert got == folder and isinstance(model, st.factory) and st.loaded == [str(folder)]
+    assert asked == [(MODEL, tmp_path / "cfg", st.factory)]
+
+
+def test_a_local_only_load_stops_at_a_missing_or_partial_copy(tmp_path, hub, st):
+    cfg = tmp_path / "cfg"
+    assert resonance._load(st.factory, MODEL, cfg, download=False) is None
+    _cached(hub, MODEL, {"config.json": {"model_type": "bert"}})
+    assert resonance._load(st.factory, MODEL, cfg, download=False) is None
+    whole = _cached(hub, "lh-test/whole", {"modules.json": PURE})
+    model, folder = resonance._load(st.factory, "lh-test/whole", cfg, download=False)
+    assert folder == whole and isinstance(model, st.factory) and st.loaded == [str(whole)]
+
+
+def test_ensure_local_returns_the_folder_each_load_route_recorded(tmp_path, hub, st, monkeypatch):
+    configured = _write(tmp_path / "mine", {"modules.json": PURE})
+    cached = _cached(hub, MODEL, {"modules.json": PURE})
+    fetched, asked = _write(tmp_path / "fetched", {"modules.json": PURE}), []
+    monkeypatch.setattr("huggingface_hub.snapshot_download", lambda repo, *a, **k: asked.append(repo) or str(fetched))
+    engines = {configured: ResonanceEngine(str(configured)), cached: ResonanceEngine(MODEL),
+               fetched: ResonanceEngine("lh-test/remote")}
+    engines[fetched].embed_query("x")
+    for folder, engine in engines.items():
+        assert engine.ensure_local() == folder == engine._folder
+        assert engine._model.max_seq_length == EMBED_MAX_TOKENS
+    assert asked == ["lh-test/remote"]
+
+
+def test_a_model_that_ships_its_own_code_is_refused_through_ensure_local(hub, st):
+    _cached(hub, MODEL, SHIPS_CODE["its module list names its own module"])
+    engine = ResonanceEngine(MODEL)
+    with pytest.raises(ResonanceUnavailable):
+        engine.ensure_local()
+    assert engine._refused and st.loaded == []
+
+
+def test_a_partial_snapshot_is_none_and_never_downloaded(hub, st, monkeypatch):
+    _cached(hub, MODEL, {"config.json": {"model_type": "bert"}})
+    asked = []
+
+    def refuse(repo, *args, **kwargs):
+        asked.append(repo)
+        raise RuntimeError("a local-only load downloaded")
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", refuse)
+    engine = ResonanceEngine(MODEL)
+    assert engine.ensure_local() is None and engine._folder is None and asked == []

@@ -95,12 +95,13 @@ class ResonanceEngine:
         self.model_name = model_name
         self.config_dir = config_dir  # where a relative folder is read from (None: the machine's)
         self._model = None
+        self._folder: Path | None = None
         self._refused = False
         self._lock = threading.Lock()
 
     # -- loading -----------------------------------------------------------
 
-    def _ensure_loaded(self):
+    def _ensure_loaded(self, download: bool = True):
         if self._model is not None:
             return self._model
         if self._refused:
@@ -111,7 +112,11 @@ class ResonanceEngine:
             with _quiet_ml_output():
                 from sentence_transformers import SentenceTransformer
 
-                self._model = _bound(_load(SentenceTransformer, self.model_name, self.config_dir))
+                loaded = _load(SentenceTransformer, self.model_name, self.config_dir, download)
+                if loaded is None:
+                    return None
+                model, self._folder = loaded
+                self._model = _bound(model)
         except EmbeddingModelRefused as exc:  # said once; every later use is refused as it stands
             self._refused = True
             log.warning("%s", exc)
@@ -143,16 +148,34 @@ class ResonanceEngine:
         defines one (Qwen3-Embedding is instruction-aware and ships a `query`
         prompt in its config — the model's metadata, not a hand rule)."""
         with self._lock:
-            model = self._ensure_loaded()
-            from localharness.memory.embeddings import _quiet_ml_output
+            return self._encode_query(self._ensure_loaded(), text)
 
-            kwargs = {}
-            if "query" in (getattr(model, "prompts", None) or {}):
-                kwargs["prompt_name"] = "query"
-            with _quiet_ml_output():
-                vec = model.encode(
-                    [text], normalize_embeddings=True, show_progress_bar=False, **kwargs,
-                )
+    def try_embed_query(self, text: str) -> np.ndarray | None:
+        """embed_query without waiting: None while another call holds the lock or before the model
+        is loaded; never loads."""
+        if not self._lock.acquire(blocking=False):
+            return None
+        try:
+            return None if self._model is None else self._encode_query(self._model, text)
+        finally:
+            self._lock.release()
+
+    def ensure_local(self) -> Path | None:
+        """Loads only from a complete local snapshot, never downloading; the folder it loaded from, or
+        None."""
+        if self._model is not None:
+            return self._folder
+        with self._lock:
+            return self._folder if self._ensure_loaded(download=False) is not None else None
+
+    def _encode_query(self, model, text: str) -> np.ndarray:
+        from localharness.memory.embeddings import _quiet_ml_output
+
+        kwargs = {}
+        if "query" in (getattr(model, "prompts", None) or {}):
+            kwargs["prompt_name"] = "query"
+        with _quiet_ml_output():
+            vec = model.encode([text], normalize_embeddings=True, show_progress_bar=False, **kwargs)
         return np.asarray(vec, dtype=np.float32)[0]
 
 
@@ -209,7 +232,17 @@ def model_folder(model: str, config_dir: str | os.PathLike | None = None) -> Pat
     return path.absolute()
 
 
-def _load(factory, model: str, config_dir: str | os.PathLike | None = None):
+def local_folder(model: str, config_dir: str | os.PathLike | None, factory=None) -> Path | None:
+    """The folder a load of `model` reads: its configured folder, else its copy in the local Hugging
+    Face cache, else None."""
+    folder = model_folder(model, config_dir)
+    if folder is not None:
+        return folder
+    cached = cached_copy(_repo(factory, model))
+    return Path(cached) if cached is not None else None
+
+
+def _load(factory, model: str, config_dir: str | os.PathLike | None = None, download: bool = True):
     """`model` loaded by `factory` (SentenceTransformer), only from a vetted folder and only by its
     absolute path (R24): the library is never handed a name, which it would resolve against the
     current folder first. A model id is its snapshot in the local Hugging Face cache, and
@@ -220,28 +253,33 @@ def _load(factory, model: str, config_dir: str | os.PathLike | None = None):
     user-agent header whenever its own copy of that list was missing or a day old (huggingface_hub
     1.x). HF_HUB_OFFLINE is no way round it: the library reads it once, at import, and setting it for
     the process would change it for everything else the session runs. A cached copy missing a file
-    the model needs (an interrupted download) is a cache miss: the download completes it."""
-    folder = model_folder(model, config_dir)
-    if folder is not None:
+    the model needs (an interrupted download) is a cache miss: the download completes it. It returns
+    the loaded model and the folder it loaded from, or None when download is false and no complete
+    local copy exists."""
+    folder = local_folder(model, config_dir, factory)
+    if folder is not None and model_folder(model, config_dir) is not None:
         if not Path(model).expanduser().is_absolute():
             log.warning(RELATIVE_FOLDER_LINE.format(model=model, folder=folder))
         if not folder.is_dir():
             raise FileNotFoundError(f"no such folder: {folder}")
-        return _vetted(factory, folder, model)
-    repo = _repo(factory, model)
-    cached = cached_copy(repo)
-    if cached is not None:
+        return _vetted(factory, folder, model), folder
+    if folder is not None:
         try:
-            return _vetted(factory, cached, model)
+            return _vetted(factory, folder, model), folder
         except OSError:
+            if not download:
+                return None
             log.debug("the cached copy of %s is incomplete — downloading the rest", model,
                       exc_info=True)
+    if not download:
+        return None
     from huggingface_hub import snapshot_download
 
     from localharness.memory.plugin import embedding_download_line
 
     log.warning(embedding_download_line(model))
-    return _vetted(factory, snapshot_download(repo), model)
+    fetched = Path(snapshot_download(_repo(factory, model)))
+    return _vetted(factory, fetched, model), fetched
 
 
 def _repo(factory, model: str) -> str:

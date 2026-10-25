@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from localharness.plugins.api import (
     ContextBudget, ContextContribution, MemoryBrowse, MemorySlotPlugin, MemoryWriteHandle,
-    PluginContext,
+    PluginContext, QueryEmbedder,
 )
 
 log = logging.getLogger(__name__)
@@ -61,6 +61,10 @@ class MemorySlot:
         """A write handle for one subagent from the occupant; None — that subagent then persists
         nothing — with no occupant, none offered, or a failure (named)."""
         return self._ask("bind_subagent", MemoryWriteHandle, self._ctx)
+
+    def embedder(self) -> QueryEmbedder | None:
+        """The occupant's query embedder; None with no occupant, none offered, or a failure (named)."""
+        return self._ask("embedder", QueryEmbedder)
 
     def _ask(self, verb: str, kind: type, *args: object) -> object | None:
         if self._occupant is None:
