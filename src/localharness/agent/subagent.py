@@ -171,8 +171,9 @@ def _not_wired_text(
     name: str,
     searched_paths: list[str],
     available_agents: Iterable[str] | None = None,
+    reason: str | None = None,
 ) -> str:
-    """The two-line refusal for an agent id nothing can dispatch.
+    """The two-line refusal (three with a ``reason``) for an agent id nothing can dispatch.
 
     Line 1 leads with the closest roster names (difflib, else the first few of the roster); line 2
     says where the loader looked. There is no second loader: the directories come from the not-found
@@ -193,11 +194,16 @@ def _not_wired_text(
         difflib.get_close_matches(agent_id, ordered, n=3, cutoff=0.6)
         or ordered[:_NOT_WIRED_FALLBACK_NAMES]
     )
-    searched = ", ".join(repr(d) for d in dirs) if dirs else "none"
-    return (
+    clauses = [f"searched: {', '.join(repr(d) for d in dirs) if dirs else 'none'}"]
+    if len(searched_paths) == 1:
+        clauses.append("no project layer in this session")
+    if agent_id != name:
+        clauses.append(f"looked for {f'{name}.yaml'!r} (_ becomes -)")
+    text = (
         f"{', '.join(closest)}: the closest available to {agent_id!r}, which is not wired.\n"
-        f"searched: {searched}"
+        + "; ".join(clauses)
     )
+    return f"{text}\n{reason}" if reason else text
 
 
 _FAILURE_REASON_FALLBACK = "value rejected by validation"
@@ -294,7 +300,7 @@ def _declared_field_path(field_path: str) -> str:
 def _load_failure_text(agent_id: str, exc: BaseException) -> str | None:
     """The refusal for an agent whose definition EXISTS but would not load (a parse or validation
     error), so the model is not told "not wired" about a file that is there. None for a plain
-    not-found (the loader's ``searched_paths``, or ``FileNotFoundError``), which keeps the two-line
+    not-found (the loader's ``searched_paths``, or an ``OSError`` from reading the file), which keeps the two-line
     not-wired text.
 
     The agent file is untrusted project text, so a validation or reference error is built only from
@@ -303,7 +309,7 @@ def _load_failure_text(agent_id: str, exc: BaseException) -> str | None:
     (a value, a key, the validator's own message) is ever copied in; the loader's full report, with
     its bounded and masked ``got:`` value, is for the person at the terminal. Any other error shows
     its first line, capped."""
-    if hasattr(exc, "searched_paths") or isinstance(exc, FileNotFoundError):
+    if hasattr(exc, "searched_paths") or isinstance(exc, OSError):
         return None
     from localharness.config.loader import ConfigReferenceError, ConfigValidationError
 
@@ -2069,6 +2075,7 @@ def make_explore_agent_runner(
             cfg = None
             searched: list[str] = []
             load_failure: str | None = None
+            reason: str | None = None
             # Phase 33.1: the root agent is 'orchestrator' — never loadable as a delegation child
             if load_agent is not None and name != "orchestrator":
                 try:
@@ -2077,11 +2084,12 @@ def make_explore_agent_runner(
                     # Duck-typed: ConfigNotFoundError carries the directories it searched.
                     searched = list(getattr(exc, "searched_paths", None) or [])
                     load_failure = _load_failure_text(agent_id, exc)
+                    reason = INVALID_AGENT_NAME if str(exc.__cause__) == INVALID_AGENT_NAME else None
                     cfg = None
             if cfg is None:
                 if load_failure is not None:
                     raise ValueError(load_failure)
-                raise ValueError(_not_wired_text(agent_id, name, searched, available_agents))
+                raise ValueError(_not_wired_text(agent_id, name, searched, available_agents, reason))
             return await dispatch_config_subagent(
                 task,
                 agent_config=cfg,

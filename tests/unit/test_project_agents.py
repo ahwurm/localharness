@@ -14,7 +14,8 @@ from rich.console import Console
 from rich.markup import escape
 
 import localharness.agent.subagent as subagent
-from localharness.agent.subagent import make_explore_agent_runner
+from localharness.agent.gate_types import DEFAULT_MODE
+from localharness.agent.subagent import _not_wired_text, make_explore_agent_runner
 from localharness.channels.base import one_line
 from localharness.config.loader import (
     PROBLEM_LINE_CAP,
@@ -520,3 +521,76 @@ def test_a_link_leading_outside_is_never_refreshed_in(tmp_path):
     _write(m, "x", _agent("x"))
     assert registry.refresh() == []
     assert registry.get("x").origin == "machine"
+
+
+def test_not_wired_line_two_says_when_there_is_no_project_layer(tmp_path):
+    m, p = tmp_path / "m", tmp_path / "p"
+    assert _not_wired_text("zzzz", "zzzz", [str(m / "zzzz.yaml")]).split("\n")[1] == (
+        f"searched: {str(m)!r}; no project layer in this session")
+    assert _not_wired_text("zzzz", "zzzz", [str(p / "zzzz.yaml"), str(m / "zzzz.yaml")]).split("\n")[1] == (
+        f"searched: {str(p)!r}, {str(m)!r}")
+    assert _not_wired_text("z", "z", []).split("\n")[1:] == ["searched: none"]
+
+
+def test_an_unbound_my_agent_gets_the_three_clauses_in_order(tmp_path):
+    m = tmp_path / "m"
+    lines = _not_wired_text("my_agent", "my-agent", [str(m / "my-agent.yaml")]).split("\n")
+    assert len(lines) == 2
+    assert lines[1] == (f"searched: {str(m)!r}; no project layer in this session; "
+                        "looked for 'my-agent.yaml' (_ becomes -)")
+    assert _not_wired_text("my_agent", "my-agent", [], reason="r").split("\n")[2:] == ["r"]
+
+
+async def test_dispatching_an_invalid_name_prints_the_not_wired_text_and_the_reason(tmp_path, monkeypatch):
+    loader, m, p = _layers(tmp_path)
+    runner = _runner(AgentCardRegistry(loader=loader), monkeypatch)
+    with pytest.raises(ValueError) as e:
+        await runner("../x", "t")
+    lines = str(e.value).split("\n")
+    assert "the closest available to '../x', which is not wired." in lines[0]
+    assert lines[-1] == INVALID_AGENT_NAME and "could not be loaded" not in str(e.value)
+    with pytest.raises(ValueError) as e:
+        await runner("ab\n", "t")
+    lines = str(e.value).split("\n")
+    assert len(lines) == 3 and "'ab\\n'" in lines[0] and lines[2] == INVALID_AGENT_NAME
+
+
+async def test_a_sanitized_miss_prints_the_rename_notice_and_no_third_line(tmp_path, monkeypatch):
+    loader, m, p = _layers(tmp_path)
+    runner = _runner(AgentCardRegistry(loader=loader), monkeypatch)
+    with pytest.raises(ValueError) as e:
+        await runner("my_agent", "t")
+    lines = str(e.value).split("\n")
+    assert len(lines) == 2 and lines[1].endswith("; looked for 'my-agent.yaml' (_ becomes -)")
+    assert "no project layer" not in lines[1]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+async def test_an_unreadable_project_file_prints_two_lines_and_no_errno(tmp_path, monkeypatch):
+    loader, m, p = _layers(tmp_path)
+    locked = _write(p, "locked", _agent("locked"))
+    locked.chmod(0)
+    try:
+        runner = _runner(AgentCardRegistry(loader=loader), monkeypatch)
+        with pytest.raises(ValueError) as e:
+            await runner("locked", "t")
+    finally:
+        locked.chmod(0o600)
+    text = str(e.value)
+    assert len(text.split("\n")) == 2
+    assert "Errno" not in text and "Permission denied" not in text and str(locked) not in text
+
+
+@pytest.mark.parametrize("trusted", [True, False])
+async def test_a_live_dispatched_project_agent_keeps_the_narrowing(tmp_path, monkeypatch, trusted):
+    loader, m, p = _layers(tmp_path, trusted=trusted)
+    server = {"name": "evil", "transport": "stdio", "command": "/bin/echo", "args": ["pwned"]}
+    _write(p, "worker", {"name": "worker", "role": "r", "tools": {"mcp_servers": [server]},
+                         "permissions": {"mode": "unattended"}})
+    seen: list = []
+    await _runner(AgentCardRegistry(loader=loader), monkeypatch, seen)("worker", "t")
+    (cfg,) = seen
+    if trusted:
+        assert [s.name for s in cfg.tools.mcp_servers] == ["evil"]
+    else:
+        assert cfg.tools.mcp_servers == [] and cfg.permissions.mode == DEFAULT_MODE
