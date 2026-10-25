@@ -484,7 +484,7 @@ def _logged_lock(repl, log):
     repl._launch_lock = lock
 
 
-def _landing_swap(monkeypatch, repl, during=None, *, error=None):
+def _landing_swap(monkeypatch, repl, during=None, *, error=None, served="qwen-gguf"):
     from localharness.provider import lifecycle
 
     calls: list = []
@@ -496,7 +496,7 @@ def _landing_swap(monkeypatch, repl, during=None, *, error=None):
         await reporter.freed()
         if error is not None:
             return lifecycle.SwapOutcome(None, None, None, error, "launch")
-        live = lifecycle.LiveEndpoint(PEER_URL, ["qwen-gguf"], None)
+        live = lifecycle.LiveEndpoint(PEER_URL, [served], None)
         await reporter.launched(live)
         return lifecycle.SwapOutcome(live, None, None, None, None)
 
@@ -504,13 +504,13 @@ def _landing_swap(monkeypatch, repl, during=None, *, error=None):
     return calls
 
 
-def _phone_cold(tmp_path, monkeypatch, *answers, attached=True, peer=None, during=None, error=None):
+def _phone_cold(tmp_path, monkeypatch, *answers, attached=True, peer=None, during=None, error=None, served="qwen-gguf"):
     stub_liveness(monkeypatch, False)
     harness, repl, channel, agent = _session(tmp_path, peer or _launchable_peer())
     phone = _Phone(channel, *answers, attached=attached)
     repl._gate = NS(remote_unattended=True)
     _logged_lock(repl, phone.log)
-    swaps = _landing_swap(monkeypatch, repl, during, error=error)
+    swaps = _landing_swap(monkeypatch, repl, during, error=error, served=served)
     return harness, repl, phone, agent, swaps
 
 
@@ -818,3 +818,99 @@ async def test_phone_restart_asks_then_chips_then_locks_and_computes_the_build_n
     [line] = [m for m, _ in phone.sent if m.startswith("Restarting managed")]
     assert "model load can take several minutes... (first build x)" in line
     assert repl._switch.launching is None
+
+
+def _publishing(repl, agent) -> EventBus:
+    bus = EventBus()
+    agent.current_session_id = "s1"
+    agent._config = NS(name="root")
+    repl._switch._bus = bus
+    return bus
+
+
+def _only_event(bus):
+    [event] = bus.history(event_types=[ModelSwitched])
+    return event
+
+
+async def test_phone_cold_peer_lands_one_cold_event(tmp_path, monkeypatch):
+    _, repl, _phone, agent, _swaps = _phone_cold(tmp_path, monkeypatch, LAUNCH_YES)
+    bus = _publishing(repl, agent)
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    event = _only_event(bus)
+    assert (event.kind, event.endpoint, event.model, event.session_id) == ("cold", "llamacpp-local", "qwen-gguf", "s1")
+
+
+async def test_phone_cold_peer_serving_the_name_the_session_has_lands_one_cold_event(tmp_path, monkeypatch):
+    _, repl, _phone, agent, _swaps = _phone_cold(tmp_path, monkeypatch, LAUNCH_YES)
+    agent._llm.config.model = "qwen-gguf"
+    bus = _publishing(repl, agent)
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    event = _only_event(bus)
+    assert (event.kind, event.endpoint, event.model) == ("cold", "llamacpp-local", "qwen-gguf")
+    assert agent._llm.config.base_url == PEER_URL
+
+
+async def test_phone_restart_lands_one_cold_event_on_the_primary(tmp_path, monkeypatch, launches):
+    _, repl, phone, agent, _peer = _phone_restart(tmp_path, monkeypatch, LAUNCH_YES)
+    bus = _publishing(repl, agent)
+
+    await repl._handle_slash(f"/model {PRIMARY_SERVED}")
+
+    event = _only_event(bus)
+    assert (event.kind, event.endpoint, event.model) == ("cold", "primary", "qwen-gguf")
+    assert len(launches.cmds) == 1 and phone.activity[-1] is None
+
+
+async def test_phone_restart_swap_back_to_the_name_the_peer_had_lands_one_cold_event(tmp_path, monkeypatch, launches):
+    _, repl, _phone, agent, _peer = _phone_restart(tmp_path, monkeypatch, LAUNCH_YES, on_peer=True)
+    assert agent._llm.config.model == "qwen-gguf"
+    bus = _publishing(repl, agent)
+
+    await repl._handle_slash(f"/model {PRIMARY_SERVED}")
+
+    event = _only_event(bus)
+    assert (event.kind, event.endpoint, event.model) == ("cold", "primary", "qwen-gguf")
+    assert agent._llm.config.base_url != PEER_URL and len(launches.cmds) == 1
+
+
+async def test_phone_typed_gguf_restart_lands_one_cold_event(tmp_path, monkeypatch, launches):
+    from tests.unit.test_model_swap_back import _gguf, _llama, _on_a_peer, _ready_as
+
+    path = _gguf(tmp_path)
+    _, repl, channel, agent, _peer = _on_a_peer(tmp_path, _llama(served_name="qwen-27b"))
+    phone = _Phone(channel, LAUNCH_YES)
+    repl._gate = NS(remote_unattended=True)
+    _ready_as(monkeypatch, "Other-Q4")
+    bus = _publishing(repl, agent)
+
+    await repl._handle_slash(f"/model {path}")
+
+    event = _only_event(bus)
+    assert (event.kind, event.endpoint, event.model) == ("cold", "primary", "Other-Q4")
+    assert len(phone.asked) == 1 and len(launches.cmds) == 1
+
+
+async def test_phone_cold_peer_cancelled_publishes_no_event(tmp_path, monkeypatch):
+    _, repl, phone, agent, swaps = _phone_cold(tmp_path, monkeypatch, LAUNCH_NO)
+    bus = _publishing(repl, agent)
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    assert bus.history(event_types=[ModelSwitched]) == [] and swaps == [] and phone.activity == []
+
+
+async def test_phone_cold_peer_failed_launch_publishes_no_event_and_clears_the_chip(tmp_path, monkeypatch):
+    _, repl, phone, agent, swaps = _phone_cold(
+        tmp_path, monkeypatch, LAUNCH_YES, error=RuntimeError("the launch failed"))
+    bus = _publishing(repl, agent)
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    assert len(swaps) == 1 and bus.history(event_types=[ModelSwitched]) == []
+    assert agent._llm.config.base_url != PEER_URL
+    assert phone.activity[0] is not None and phone.activity[-1] is None
