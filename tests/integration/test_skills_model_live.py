@@ -6,9 +6,11 @@ import functools
 import hashlib
 import itertools
 import json
+import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import date
@@ -19,7 +21,7 @@ import yaml
 from typer.testing import CliRunner
 
 from localharness.agent.context import ContentStore, ContextManager, context_size_kwargs, probe_served_window
-from localharness.agent.gate import PermissionGate
+from localharness.agent.gate import PermissionGate, derive_session_boundary
 from localharness.agent.gate_types import Decision, PermissionRequest
 from localharness.agent.loop import AgentLoop
 from localharness.agent.permissions import PermissionEvaluator
@@ -413,24 +415,43 @@ def subject_served(model: str) -> bool:
     return "qwen" in model.lower()
 
 
-def inside(params: dict, root: Path) -> bool:
+def where(params: dict) -> Path | None:
     path = params.get("path")
     if not isinstance(path, str):
-        return False
+        return None
     try:
-        return root in resolve_user_path(path).parents
+        return resolve_user_path(path)
     except (OSError, RuntimeError, ValueError):
-        return False
+        return None
 
 
 def creator_asker(skills_dir: Path, asks: list):
-    """Allows a `write` under the skills directory and nothing else."""
+    """Allows a `write` under the skills directory and nothing else; a denied write records the path as the model wrote it."""
     async def asker(req: PermissionRequest) -> Decision:
-        allowed = req.tool_name == "write" and inside(req.tool_params, skills_dir)
-        asks.append((req.tool_name, req.display, allowed))
+        target = where(req.tool_params)
+        allowed = req.tool_name == "write" and target is not None and skills_dir in target.parents
+        shown = req.display if allowed or req.tool_name != "write" else (
+            f"{req.display} (the model wrote {req.tool_params.get('path')!r}, resolved to {target})")
+        asks.append((req.tool_name, shown, allowed))
         return Decision("allow_once" if allowed else "reject_once")
 
     return asker
+
+
+@contextlib.contextmanager
+def neutral_sitting(fake_home):
+    """A person's sitting: a fake home and a workspace holding `.localharness/` inside it, all under a temp dir whose name carries no user."""
+    base = Path(tempfile.mkdtemp(prefix="lh-")).resolve()
+    here = Path.cwd()
+    try:
+        home = fake_home(base / "home")
+        work = home / "work"
+        (work / ".localharness").mkdir(parents=True)
+        os.chdir(work)
+        yield home, work
+    finally:
+        os.chdir(here)
+        shutil.rmtree(base, ignore_errors=True)
 
 
 async def creator_run(client, home: Path, request: str, work: Path, base_url: str, served: int | None) -> CreatorRun:
@@ -445,8 +466,8 @@ async def creator_run(client, home: Path, request: str, work: Path, base_url: st
     asks: list[tuple[str, str, bool]] = []
     skills_dir = (cfg_dir / "skills").resolve()
     gate = PermissionGate(
-        boundary=None, workspace=work, grants=GrantStore(work.parent / f"{work.name}-grants.yaml"), mode="guarded",
-        asker=creator_asker(skills_dir, asks))
+        boundary=derive_session_boundary(cwd=work, local_dir=work / ".localharness"), workspace=work,
+        grants=GrantStore(home.parent / "grants.yaml"), mode="guarded", asker=creator_asker(skills_dir, asks))
     registry, state = await root_registry(skill_set, cfg)
     loop = root_loop(client, cfg, loop_shape(cfg_dir, cfg, base_url, served), skill_set, registry, state, gate, EventBus())
     try:
@@ -512,12 +533,9 @@ async def test_the_subject_model_picks_a_listed_skill_on_its_own(live_endpoint, 
             await one("xml", 1, *request)
         client.config.tool_call_mode = "native"
         creator = []
-        for i in range(1, CREATOR_BAR[1] + 1):
-            creator_work = tmp_path / f"creator-{i}"
-            creator_work.mkdir()
-            monkeypatch.chdir(creator_work)
-            creator.append(await creator_run(
-                client, fake_home(tmp_path / f"home-{i}"), prompts()["creator"], creator_work, base_url, window))
+        for _ in range(CREATOR_BAR[1]):
+            with neutral_sitting(fake_home) as (home, creator_work):
+                creator.append(await creator_run(client, home, prompts()["creator"], creator_work, base_url, window))
         meta = {
             "day": day, "run": number, "commit": commit, "tree": tree, "sha": sha, "model": model, "base_url": base_url, "window": window,
             "temperature": TEMPERATURE, "effort": shape.effort, "loop_window": shape.window, "tools": tools, "listing": listing,

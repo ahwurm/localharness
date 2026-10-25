@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from localharness.agent.gate import derive_session_boundary
 from localharness.agent.gate_types import PermissionRequest
 from localharness.config.skills import LISTING_BUDGET_CHARS, shown
 from localharness.core.events import Action
@@ -16,7 +17,7 @@ from tests.conftest import FakeLLMResponse, FakeToolCall, MockLLMClient
 from tests.integration.test_skills_model_live import (
     CREATOR_BAR, CREATOR_MAX_ACTIONS, CREATOR_MAX_MINUTES, FALSE_BAR, FIXTURES, KINDS, MATCHING_BAR, NOT_FINISHED, NOT_SERVING, NOT_SUBJECT,
     RUNS, TEMPERATURE, VARIANT_A, VARIANT_B, CreatorRun, Run, Step, count, creator_asker, creator_run, first_step, first_step_run, hit,
-    install, judge, loop_shape, meets, not_run_report, out_of_list, passed, prompts, render_report, root_config, run_number, settled,
+    install, judge, loop_shape, meets, neutral_sitting, not_run_report, out_of_list, passed, prompts, render_report, root_config, run_number, settled,
     sizes, subject_served, write_report)
 from tests.unit.test_image_hygiene import FORBIDDEN
 from tests.unit.test_skills_misc import lures
@@ -493,24 +494,20 @@ def test_only_a_qwen_model_is_the_subject():
     assert [subject_served(m) for m in ("qwen-27b-swift-1.5", "Qwen3.6-27B", "llama-3.3-70b")] == [True, True, False]
 
 
-async def creator_turn(tmp_path, monkeypatch, fake_home, *calls, client=None):
-    home = fake_home(tmp_path / "home")
-    work = tmp_path / "work"
-    work.mkdir()
-    monkeypatch.chdir(work)
+async def creator_turn(fake_home, *calls, client=None):
     client = client or MockLLMClient([reply(calls=[call(0, "skill", name="skill-creator")]),
                                       *(reply(calls=[c]) for c in calls), reply("Done.")])
-    return home, await creator_run(client, home, prompts()["creator"], work, URL, None)
+    with neutral_sitting(fake_home) as (home, work):
+        return await creator_run(client, home, prompts()["creator"], work, URL, None)
 
 
-async def test_a_scripted_creator_turn_leaves_a_skill_the_verb_lists(tmp_path, monkeypatch, fake_home):
+async def test_a_scripted_creator_turn_leaves_a_skill_the_verb_lists(tmp_path, fake_home):
     outside = tmp_path / "outside.txt"
-    home, run = await creator_turn(
-        tmp_path, monkeypatch, fake_home,
+    run = await creator_turn(
+        fake_home,
         call(1, "write", path="~/.localharness/skills/weekly-status/SKILL.md", content=WEEKLY, mode="overwrite"),
         call(2, "write", path=str(outside), content="x", mode="overwrite"))
     assert run.valid is True
-    assert (home / ".localharness" / "skills" / "weekly-status" / "SKILL.md").read_text(encoding="utf-8") == WEEKLY
     assert not outside.exists()
     assert "weekly-status (machine, " in run.listing and "Skipped:" not in run.listing
     assert run.files == (("weekly-status/SKILL.md", WEEKLY),)
@@ -519,17 +516,38 @@ async def test_a_scripted_creator_turn_leaves_a_skill_the_verb_lists(tmp_path, m
     assert [ask[0] for ask in run.asks if not ask[2]] == ["write"]
 
 
-async def test_a_creator_turn_that_writes_nothing_is_not_valid(tmp_path, monkeypatch, fake_home):
-    home, run = await creator_turn(tmp_path, monkeypatch, fake_home)
+async def test_a_creator_turn_that_writes_nothing_is_not_valid(fake_home):
+    run = await creator_turn(fake_home)
     assert run.valid is False
     assert "skill-creator (bundled, " in run.listing and " (machine, " not in run.listing
     assert run.asks == () and run.files == ()
-    assert not (home / ".localharness" / "skills").exists()
 
 
-async def test_a_creator_turn_that_dies_is_an_invalid_run_not_a_lost_report(tmp_path, monkeypatch, fake_home):
-    _, run = await creator_turn(tmp_path, monkeypatch, fake_home, client=Flaky(99))
+async def test_a_creator_turn_that_dies_is_an_invalid_run_not_a_lost_report(fake_home):
+    run = await creator_turn(fake_home, client=Flaky(99))
     assert run.valid is False and run.terminated.startswith("error")
+
+
+async def test_a_path_in_the_real_home_is_denied_and_reported_as_written_and_as_resolved(fake_home):
+    target = REAL_HOME / ".localharness" / "skills" / "never-written-probe" / "SKILL.md"
+    run = await creator_turn(fake_home, call(1, "write", path=str(target), content=WEEKLY, mode="overwrite"))
+    assert run.valid is False and run.files == ()
+    [(tool, shown, allowed)] = run.asks
+    assert (tool, allowed) == ("write", False)
+    assert f"the model wrote {str(target)!r}, resolved to {target}" in shown
+    assert not target.exists()
+
+
+def test_the_sitting_has_a_workspace_in_a_fake_home_and_no_user_name_in_any_path(fake_home):
+    here = Path.cwd()
+    with neutral_sitting(fake_home) as (home, work):
+        base = home.parent
+        assert Path.home() == home and Path.cwd() == work and home in work.parents
+        assert (work / ".localharness").is_dir()
+        assert derive_session_boundary(cwd=work, local_dir=work / ".localharness") == work
+        assert REAL_HOME.name not in {*home.parts, *work.parts}
+        assert REAL_HOME.name not in str(base)
+    assert not base.exists() and Path.cwd() == here
 
 
 def ask(tool, **params) -> PermissionRequest:
