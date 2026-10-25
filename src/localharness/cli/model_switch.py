@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Awaitable, Callable
+from functools import partial
 from pathlib import Path
 
 from localharness.cli import model_ops
@@ -70,6 +71,44 @@ def _why_text(reason: str) -> str:
     if len(text) > ROW_WHY_MAX and " — " in text:
         text = text.split(" — ")[0] + ROW_CUT
     return visible_text(text)
+
+
+def _row(entry, *, foreign: bool, refused: bool, locked: bool, harness, active_heavy, primary_url: str, current_url: str) -> dict:
+    peer = entry.endpoint or (entry.record.peer if entry.record else None)
+    cold = entry.kind == "cold"
+    offered = cold and not foreign and not refused
+    holder = None
+    if offered:
+        holder = launch_holder(active_heavy, harness) if peer else launch_holder(active_heavy, harness, (harness.server, primary_url))
+    if entry.kind == "setup" and not refused:
+        why = ROW_SETUP
+    elif entry.name.isascii() and entry.name.isdigit():
+        why = ROW_DIGITS
+    elif cold and foreign:
+        why = ROW_FOREIGN
+    elif refused:
+        why = _why_text(model_ops.not_offered_reason(entry.refusal or "", entry.name))
+    else:
+        why = ROW_LOCKED if cold and locked else None
+    return {
+        "name": entry.name, "label": _label(entry.name),
+        "kind": model_ops.switch_kind(entry, primary_url, current_url),
+        "endpoint": peer.name if peer else "primary", "active": entry.active,
+        "stops": None if holder is None else visible_text(holder), "why": why,
+    }
+
+
+def list_payload(entries, *, llm, harness, active_heavy, locked: bool, launching: str | None) -> dict:
+    primary_url, current_url = harness.provider.base_url, llm.config.base_url
+    row = partial(_row, locked=locked, harness=harness, active_heavy=active_heavy, primary_url=primary_url, current_url=current_url)
+    rows = [row(e, foreign=not g.numbered, refused=False) for g in entries.groups for e in g.entries]
+    rows += [row(e, foreign=False, refused=True) for e in sorted(entries.not_offered, key=lambda e: e.name)]
+    whys = [r["why"] or "" for r in rows]
+    footer = [text for text, shown in (
+        (MODEL_SETUP_FOOTER, ROW_SETUP in whys), (MODEL_FOREIGN_FOOTER, ROW_FOREIGN in whys),
+        (MODEL_LOCKED_FOOTER, ROW_LOCKED in whys), (MODEL_NOT_HERE_FOOTER, any(ROW_WITHHELD in w for w in whys))) if shown]
+    return {"active": _label(llm.config.model), "endpoint": _endpoint_name(harness, current_url),
+            "launching": launching, "models": rows, "footer": footer}
 
 
 def _phone_enrolled(config_dir) -> bool:

@@ -4,10 +4,12 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from localharness.cli import model_ops, workspace
+from localharness.cli.model_switch import ROW_CUT, list_payload
 from localharness.config.models import ManagedServerConfig
 from localharness.provider import lifecycle, model_library, server, speed_stats, tuning
 from localharness.provider.autosense import FreeMemory
@@ -250,6 +252,25 @@ def test_not_offered_lines_follow_every_numbered_entry_in_name_order(world, tmp_
 
     assert [line.split(" — ")[0] for line in lines[-2:]] == ["  not offered: alpha/model", "  not offered: zeta/model"]
     assert lines[-3].startswith("  2. ")
+
+
+def test_payload_rows_of_a_planned_list_cut_the_long_reason_and_keep_the_terminals_text(world, tmp_path, monkeypatch):
+    repo = cache_repo(tmp_path, "org/remote")
+    (repo.revisions[0].snapshot_path / "tokenizer_config.json").write_text('{"auto_map": {}}', encoding="utf-8")
+    cached(monkeypatch, gemma(tmp_path), repo)
+    with_vllm(tmp_path, monkeypatch)
+    entries = listed(world)
+
+    payload = list_payload(
+        entries, llm=SimpleNamespace(config=SimpleNamespace(base_url=PRIMARY_URL, model=PRIMARY)),
+        harness=harness_of(world), active_heavy=None, locked=False, launching=None)
+
+    why = {row["name"]: row["why"] for row in payload["models"]}
+    assert why[GEMMA] == GEMMA_REASON + ROW_CUT
+    [line] = [l for l in not_offered(entries) if "org/remote" in l]
+    assert why["org/remote"] == line.removeprefix("  not offered: org/remote — ")
+    headers = {group.header for group in entries.groups}
+    assert not headers & {row["name"] for row in payload["models"]}
 
 
 UNIT_SERVES = "qwen-27b-swift-1.5"

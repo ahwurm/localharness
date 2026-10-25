@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace as NS
 
 import pytest
@@ -551,3 +552,140 @@ def test_cut_keeps_a_first_clause_over_the_limit_and_points_at_the_list():
 def test_cut_screens_a_raw_newline_before_escaping_and_escapes_control_characters():
     assert ms._why_text("dir=/opt/x\nnext line — fix") == "dir=[path withheld] — fix"
     assert "\x1b" not in ms._why_text("bad\x1bthing")
+
+
+STRATA_DIRS = ("/home/u/My Engines/strata", "/home/o'brien/strata")
+LIVE_PATH = "/home/u/live/serving.gguf"
+INCUMBENT = "available once llm-service.service (pid 48213) is stopped"
+KEY = "sk-held-secret"
+
+
+def _strata_refusal(tmp_path, name, engine_dir):
+    from localharness.provider import strata
+
+    spec = NS(served_name=name, model="/w/x.gguf", engine_dir=engine_dir, engine_config=engine_dir + "/c.json")
+    return strata.verify_recorded(tmp_path, spec, None, None)
+
+
+def _payload_world(tmp_path, with_ckpt=True):
+    from localharness.cli.model_ops import Entries, EntryGroup, PlanEntry, ServingRecord
+
+    peer_b = NS(name="peer-b", base_url=PEER_B, api_key=KEY)
+    peer_c = NS(name="peer-c", base_url=PEER_C, lifecycle=NS())
+    held = NS(served_name=None, model="/home/u/weights/held.gguf")
+    harness = NS(provider=NS(base_url=PRIMARY, api_key="none"), extra_endpoints=[peer_b, peer_c], server=held)
+
+    def record(name, peer):
+        return ServingRecord(name, name, PEER_C, "llamacpp", peer, None, "p")
+
+    sentence = f"{INCUMBENT}: run systemctl --user stop llm-service.service"
+    groups = (
+        EntryGroup("llama.cpp · primary", (
+            PlanEntry(LIVE_PATH, "live", "llamacpp", active=True),
+            PlanEntry("llama3.1:8b", "live", "llamacpp", endpoint=peer_b)), True),
+        EntryGroup("this box can launch", (
+            PlanEntry("mixtral", "cold", "llamacpp", record=record("mixtral", NS(name="peer-c"))),
+            PlanEntry("qwen-27b", "cold", "llamacpp", record=record("qwen-27b", None)),
+            PlanEntry("Qwen/Qwen3-4B", "setup", "vllm"),
+            PlanEntry("70", "cold", "llamacpp")), True),
+        EntryGroup(INCUMBENT, (PlanEntry("held-model", "cold", "llamacpp", refusal=sentence),), False))
+    refused = [PlanEntry(n, "cold", "strata", refusal=_strata_refusal(tmp_path, n, d))
+               for n, d in zip(("strata-b", "strata-a"), STRATA_DIRS[::-1])]
+    if with_ckpt:
+        refused.append(PlanEntry("ckpt", "cold", "vllm", refusal="ckpt cannot run here: its checkpoint at /home/u/ckpt/model is not readable — fix its permissions."))
+    entries = Entries(groups, not_offered=tuple(refused), notes=("skipped peer-d (http://10.0.0.9:8000/v1): unreachable",), foreign=sentence)
+    llm = NS(config=NS(base_url=PRIMARY, model=LIVE_PATH))
+    return entries, llm, harness, (held, PRIMARY)
+
+
+def _payload(tmp_path, locked=False, launching=None, with_ckpt=True):
+    entries, llm, harness, heavy = _payload_world(tmp_path, with_ckpt)
+    return ms.list_payload(entries, llm=llm, harness=harness, active_heavy=heavy, locked=locked, launching=launching), harness, heavy
+
+
+def test_payload_has_the_five_keys_and_seven_per_row(tmp_path):
+    payload, _, _ = _payload(tmp_path)
+    assert set(payload) == {"active", "endpoint", "launching", "models", "footer"}
+    assert all(set(r) == {"name", "label", "kind", "endpoint", "active", "stops", "why"} for r in payload["models"])
+    assert (payload["active"], payload["endpoint"], payload["launching"]) == ("serving.gguf", "primary", None)
+
+
+def test_payload_rows_follow_display_order_then_the_not_offered_by_name(tmp_path):
+    rows = _payload(tmp_path)[0]["models"]
+    assert [r["name"] for r in rows] == [LIVE_PATH, "llama3.1:8b", "mixtral", "qwen-27b", "Qwen/Qwen3-4B", "70", "held-model", "ckpt", "strata-a", "strata-b"]
+    assert [r["kind"] for r in rows] == ["hot", "cross", "cold", "cold", "setup", "cold", "cold", "cold", "cold", "cold"]
+    assert [r["endpoint"] for r in rows][:6] == ["primary", "peer-b", "peer-c", "primary", "primary", "primary"]
+    assert [r["active"] for r in rows] == [True] + [False] * 9
+    assert rows[0]["label"] == "serving.gguf"
+
+
+def test_payload_launching_is_the_raw_target(tmp_path):
+    assert _payload(tmp_path, launching="/home/u/w/big.gguf")[0]["launching"] == "/home/u/w/big.gguf"
+
+
+def test_payload_stops_names_the_holder_on_offered_cold_rows_only(tmp_path):
+    payload, harness, heavy = _payload(tmp_path)
+    stops = {r["name"]: r["stops"] for r in payload["models"]}
+    assert stops["mixtral"] == launch_holder(heavy, harness) == "held.gguf"
+    assert stops["qwen-27b"] == launch_holder(heavy, harness, (harness.server, PRIMARY)) == "held.gguf"
+    for name in (LIVE_PATH, "llama3.1:8b", "Qwen/Qwen3-4B", "held-model", "ckpt", "strata-a", "strata-b"):
+        assert stops[name] is None
+
+
+def test_payload_why_follows_setup_digits_foreign_not_offered(tmp_path):
+    why = {r["name"]: r["why"] for r in _payload(tmp_path)[0]["models"]}
+    assert (why["Qwen/Qwen3-4B"], why["70"], why["held-model"]) == (ms.ROW_SETUP, ms.ROW_DIGITS, ms.ROW_FOREIGN)
+    assert why["ckpt"] == "its checkpoint at [path withheld] — fix its permissions"
+    for name in ("strata-a", "strata-b"):
+        assert "strata" in why[name] and "owner and mode checks" in why[name]
+    assert why["strata-a"].startswith("its Strata install at strata no longer passes the owner and mode checks")
+    assert [why[n] for n in (LIVE_PATH, "llama3.1:8b", "mixtral", "qwen-27b")] == [None] * 4
+
+
+def test_payload_locked_marks_offered_cold_rows_and_keeps_not_offered_reasons(tmp_path):
+    unlocked = {r["name"]: r for r in _payload(tmp_path)[0]["models"]}
+    rows = {r["name"]: r for r in _payload(tmp_path, locked=True)[0]["models"]}
+    assert (rows["mixtral"]["why"], rows["qwen-27b"]["why"]) == (ms.ROW_LOCKED, ms.ROW_LOCKED)
+    assert (rows["mixtral"]["stops"], rows["qwen-27b"]["stops"]) == ("held.gguf", "held.gguf")
+    assert rows["70"]["why"] == ms.ROW_DIGITS
+    for name in ("ckpt", "strata-a", "strata-b", "held-model"):
+        assert rows[name] == unlocked[name]
+
+
+def test_payload_footer_holds_each_line_once_in_order(tmp_path):
+    assert _payload(tmp_path)[0]["footer"] == [ms.MODEL_SETUP_FOOTER, ms.MODEL_FOREIGN_FOOTER, ms.MODEL_NOT_HERE_FOOTER]
+    assert _payload(tmp_path, locked=True)[0]["footer"] == [
+        ms.MODEL_SETUP_FOOTER, ms.MODEL_FOREIGN_FOOTER, ms.MODEL_LOCKED_FOOTER, ms.MODEL_NOT_HERE_FOOTER]
+    assert ms.MODEL_NOT_HERE_FOOTER not in _payload(tmp_path, with_ckpt=False)[0]["footer"]
+
+
+FORBIDDEN = [
+    PRIMARY, PEER_B, PEER_C, "10.0.0.9", "127.0.0.1", KEY, "48213", "llm-service", "systemctl",
+    "/home/u/weights", "/home/u/My Engines", "o'brien", "available once", "turn_running",
+]
+
+
+@pytest.mark.parametrize("item", FORBIDDEN)
+def test_payload_privacy_holds_no_address_key_pid_unit_or_directory(tmp_path, item):
+    assert item not in json.dumps(_payload(tmp_path)[0])
+
+
+def test_payload_privacy_holds_no_config_dir(tmp_path):
+    assert str(tmp_path) not in json.dumps(_payload(tmp_path)[0])
+
+
+def test_payload_privacy_shows_the_live_weights_directory_only_in_its_own_name(tmp_path):
+    payload = _payload(tmp_path)[0]
+    assert "/home/u/live" not in payload["active"]
+    for r in payload["models"]:
+        assert all("/home/u/live" not in str(v) for k, v in r.items() if k != "name")
+    assert payload["models"][0]["name"] == LIVE_PATH
+
+
+def test_payload_bidi_override_is_escaped_in_the_label_and_raw_in_the_name(tmp_path):
+    from localharness.cli.model_ops import Entries, EntryGroup, PlanEntry
+
+    entries = Entries((EntryGroup("g", (PlanEntry("evil‮name", "live", "llamacpp"),), True),))
+    _, llm, harness, heavy = _payload_world(tmp_path)
+    [row] = ms.list_payload(entries, llm=llm, harness=harness, active_heavy=heavy, locked=False, launching=None)["models"]
+    assert "‮" not in row["label"] and row["name"] == "evil‮name"
