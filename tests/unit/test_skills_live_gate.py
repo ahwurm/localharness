@@ -149,10 +149,30 @@ def test_near_misses_share_a_word_only_their_skill_uses(tmp_path):
     assert bare == []
 
 
+QUESTION_WORDS = {
+    "what", "who", "whom", "whose", "which", "why", "how", "when", "where", "is", "are", "was", "were", "does", "did", "has", "have",
+    "should", "can", "could", "would", "will", "may", "might"}
+
+
+def is_question(text: str) -> bool:
+    return text.strip().endswith("?") or text.split()[0].lower() in QUESTION_WORDS
+
+
+def leans(text: str, name: str, own: dict[str, set[str]]) -> bool:
+    """Does a request carry the skill's name, hyphen or space, or a word only its description uses?"""
+    return name.replace("-", " ") in re.sub(r"[-\s]+", " ", text.casefold()) or bool(words(text) & own[name])
+
+
 def test_matching_requests_vary_their_wording(tmp_path):
     own = distinctive(install(tmp_path / "cfg"))
     for name, groups in prompts()["skills"].items():
-        assert sum(not words(text) & own[name] for text in groups["matching"]) >= 3, name
+        assert sum(not leans(text, name, own) for text in groups["matching"]) >= 5, name
+
+
+def test_near_misses_and_matching_requests_are_not_told_apart_by_their_form():
+    for name, groups in prompts()["skills"].items():
+        assert sum(not is_question(text) for text in groups["near_miss"]) >= 4, name
+        assert sum(is_question(text) for text in groups["matching"]) >= 4, name
 
 
 def test_unrelated_requests_share_no_word_with_any_description(tmp_path):
