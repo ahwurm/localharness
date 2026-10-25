@@ -1260,6 +1260,7 @@ class AgentLoop:
         unattended_max_actions: int | None = None,
         project_instructions: "ProjectInstructions | None" = None,
         skills: str = "",
+        index: str = "",
     ) -> None:
         self._config = config
         self._llm = llm
@@ -1347,6 +1348,7 @@ class AgentLoop:
         # hashes or writes the file (D-03); the handle owns the store.
         self._project_instructions = project_instructions
         self._skills = skills
+        self._index = index
         # The reconnect seam: a supplier of the shared ServerRecovery pair for this loop's server (None
         # when the caller has none); a loop with no usable pair keeps one loop-local poll-only pair.
         self._server_recovery = server_recovery
@@ -1502,6 +1504,7 @@ class AgentLoop:
             tool_call_mode=getattr(getattr(self._llm, "config", None), "tool_call_mode", "native"),
             guardrails=self._read_guardrails(),
             skills=self._skills,
+            index=self._index,
         )
         return fixed_tokens(self._ctx._token_counter, prompt, schemas)
 
@@ -2028,6 +2031,7 @@ class AgentLoop:
             tool_call_mode=tool_call_mode,
             guardrails=self._read_guardrails(),
             skills=self._skills,
+            index=self._index,
         )
         # D-37: the project's own file, fenced, directly after Guardrails and ahead of the memory slot.
         # The role is built once per turn, so this is the one call at assembly (the turn-end check is

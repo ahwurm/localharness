@@ -1696,7 +1696,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         TokenCounter,
         context_size_kwargs,
     )
-    from localharness.agent.loop import AgentLoop
+    from localharness.agent.loop import AgentLoop, render_index
     from localharness.agent.permissions import PermissionEvaluator
     from localharness.channels.terminal import TerminalChannel
     from localharness.cli import model_ops, start_serving
@@ -3155,12 +3155,13 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             await tool_registry.register(
                 SkillTool(skill_set, eviction_store, task_state, result_cap=lambda: tool_registry.result_size_cap_chars),
                 scope="global")
-            from localharness.agent.context import floor_schemas
-            try:
-                held = floor_schemas(tool_registry, agent_config.name, agent_config.division or "", agent_config.tools)
-                skill_listing = skill_listing if any(t.name == "skill" for t in held) else ""
-            except Exception:  # noqa: BLE001 — the loop's own resolution degrades the same way: keep the listing
-                pass
+        from localharness.agent.context import floor_schemas
+        try:
+            held = {t.name for t in floor_schemas(
+                tool_registry, agent_config.name, agent_config.division or "", agent_config.tools)}
+        except Exception:  # noqa: BLE001 — the loop's own resolution degrades the same way: keep every line the root registered
+            held = {"agent", "task", "skill"} if skill_set.skills else {"agent", "task"}
+        skill_listing = skill_listing if "skill" in held else ""
 
         # --- 10. Agent loop ---
         # #35: resolve the kill-file value against THIS config dir (a bare default 'KILL' lands at
@@ -3196,6 +3197,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             unattended_max_actions=harness.channels.unattended_max_actions,
             project_instructions=instructions_handle,
             skills=skill_listing,
+            index=render_index(root, cfg_path, held, config_dir_flag, slash=acp_channel is None),
             # PAPI-04: the memory slot — the lifecycle's; its occupant (the memory plugin) feeds the
             # prompt's memory section.
             memory_slot=memory_slot,
