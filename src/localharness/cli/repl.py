@@ -2223,8 +2223,10 @@ class OrchestratorREPL:
             return
         # And what `serve` would refuse at its start (an `autostart.env` the machine record does not cover),
         # still before anything is stopped: the cold branch's `lifecycle.swap` asks the same question.
-        refusal = await asyncio.to_thread(
-            _lifecycle.unit_launch_refusal, managed, None, self._unit_state, self._server_config_dir)
+        def unit_refusal():
+            return _lifecycle.unit_launch_refusal(managed, None, self._unit_state, self._server_config_dir)
+
+        refusal = await asyncio.to_thread(unit_refusal)
         if refusal is not None:
             await self._channel.send_message(
                 self._channel_redactor()(_lifecycle.SWAP_REFUSED.format(name=target, why=refusal)),
@@ -2243,10 +2245,12 @@ class OrchestratorREPL:
         incumbent_heavy = model_ops.incumbent_heavy(self._active_heavy or (managed, primary_url), self._harness)
         target_heavy = model_ops.incumbent_heavy((planned, primary_url), self._harness)
         floor = self._live_floor()
-        unplanned = await asyncio.to_thread(
-            _lifecycle.swap_refusal, target_heavy, incumbent_heavy, config_dir=self._server_config_dir,
-            autosense=getattr(self._harness, "autosense", None), floor=floor,
-            unit=self._unit_state)
+        def plan_refusal():
+            return _lifecycle.swap_refusal(
+                target_heavy, incumbent_heavy, config_dir=self._server_config_dir,
+                autosense=getattr(self._harness, "autosense", None), floor=floor, unit=self._unit_state)
+
+        unplanned = await asyncio.to_thread(plan_refusal)
         if unplanned is not None:
             await self._channel.send_message(
                 self._channel_redactor()(unplanned), metadata={"style": "system.error"})
@@ -2259,12 +2263,9 @@ class OrchestratorREPL:
                 return redact(line), "system.info"
             if line := launch_decision(managed, bool(launch_kw)).refusal:
                 return redact(line), "system.error"
-            if why := await asyncio.to_thread(
-                    _lifecycle.unit_launch_refusal, managed, None, self._unit_state, self._server_config_dir):
+            if why := await asyncio.to_thread(unit_refusal):
                 return redact(_lifecycle.SWAP_REFUSED.format(name=target, why=why)), "system.error"
-            if line := await asyncio.to_thread(
-                    _lifecycle.swap_refusal, target_heavy, incumbent_heavy, config_dir=self._server_config_dir,
-                    autosense=getattr(self._harness, "autosense", None), floor=floor, unit=self._unit_state):
+            if line := await asyncio.to_thread(plan_refusal):
                 return redact(line), "system.error"
             return None
 
