@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from importlib import resources
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,7 +17,7 @@ from localharness.config.models import AgentConfig, ContextConfig, ToolConfig
 from localharness.config.paths import WORKSPACE_DIR_NAME
 from localharness.config import skills
 from localharness.cli.app import app
-from localharness.config.skills import BUNDLED_NAME, ORIGINS, SkillSet
+from localharness.config.skills import BUNDLED_NAME, ORIGINS, SkillSet, Skipped, skip_line
 from localharness.agent import subagent
 from localharness.agent.context import ContentStore
 from localharness.agent.task_record import TaskState
@@ -343,3 +344,50 @@ async def test_a_real_start_lists_the_creator_and_registers_the_tool(tmp_path, m
 
     assert f"- skill-creator: {DESCRIPTION}" in loop._skills
     assert loop._tools.schema_of("skill").parameters["properties"]["name"]["enum"] == ["skill-creator"]
+
+
+BUNDLED = resources.files("localharness").joinpath("assets", "skills", "skill-creator")
+CREATOR = BUNDLED.joinpath("SKILL.md").read_text(encoding="utf-8")
+FORMAT = BUNDLED.joinpath("references", "format.md").read_text(encoding="utf-8")
+RULE_LINES = [skip_line(Skipped(reason, fix, Path())) for reason, fix in skills.RULES]
+
+
+def quoted_rules(text: str) -> list[str]:
+    return [m.group(1) for line in text.splitlines() if (m := re.fullmatch(r"- `(skipped: [^`]+)`", line))]
+
+
+def test_format_md_quotes_the_skip_lines_of_the_data() -> None:
+    assert quoted_rules(FORMAT) == RULE_LINES
+
+
+def test_the_quoted_rules_comparison_bites() -> None:
+    lines = FORMAT.splitlines()
+    first = next(i for i, line in enumerate(lines) if line.startswith("- `skipped: "))
+    dropped = [*lines[:first], *lines[first + 1:]]
+    edited = [line.replace("rename yours to keep both", "rename it") for line in lines]
+    swapped = [*lines[:first], lines[first + 1], lines[first], *lines[first + 2:]]
+
+    assert len(RULE_LINES) == 22
+    for mutated in (dropped, edited, swapped):
+        assert quoted_rules("\n".join(mutated)) != RULE_LINES
+
+
+def test_the_worked_example_is_a_valid_skill(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(skills, "PACKAGE_DIR", tmp_path / "pkg")
+    example = re.search(r"^```[^\n]*\n(---\n.*?\n)```", FORMAT, re.S | re.M).group(1)
+    _skill(tmp_path / "cfg" / "skills", "release-notes", example)
+
+    found = SkillSet.discover(tmp_path / "cfg", None)
+
+    assert [s.name for s in found.skills] == ["release-notes"] and found.skipped == ()
+    assert len(found.skills[0].description) <= 250
+    assert len(example.split("\n---\n", 1)[1].strip().splitlines()) == 15
+
+
+def test_format_md_is_short_and_names_what_a_skill_holds() -> None:
+    needles = ("name", "description", "allowed-tools", "references/", "scripts/", "assets/")
+    places = ("~/.localharness/skills/", ".localharness/skills/", ".agents/skills/")
+
+    assert len(FORMAT.splitlines()) <= 80
+    assert all(f"`{needle}`" in FORMAT for needle in needles)
+    assert all(f"`{place}" in FORMAT for place in places) and "250" in FORMAT
