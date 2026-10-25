@@ -47,6 +47,7 @@ from localharness.plugins.api import ContextBudget
 from localharness.tools.capabilities import CoResidenceError
 
 if TYPE_CHECKING:
+    from localharness.agent.affordance import Affordances
     from localharness.config.models import ChildBudget
     from localharness.config.project_records import ProjectInstructions
     from localharness.provider.lifecycle import ServerRecovery
@@ -1261,6 +1262,7 @@ class AgentLoop:
         project_instructions: "ProjectInstructions | None" = None,
         skills: str = "",
         index: str = "",
+        affordances: Affordances | None = None,
     ) -> None:
         self._config = config
         self._llm = llm
@@ -1349,6 +1351,7 @@ class AgentLoop:
         self._project_instructions = project_instructions
         self._skills = skills
         self._index = index
+        self._affordances = affordances
         # The reconnect seam: a supplier of the shared ServerRecovery pair for this loop's server (None
         # when the caller has none); a loop with no usable pair keeps one loop-local poll-only pair.
         self._server_recovery = server_recovery
@@ -1995,7 +1998,7 @@ class AgentLoop:
             context_overflow_limit,
             is_context_overflow,
         )
-        from localharness.core.events import Action, ArtifactRef, Observation, Escalation, Heartbeat, TaskComplete, ParseFailed, StuckRecovered
+        from localharness.core.events import Action, AffordanceCued, ArtifactRef, Observation, Escalation, Heartbeat, TaskComplete, ParseFailed, StuckRecovered
         from pydantic import ValidationError
         self._presence_penalty_next = None  # a degenerate retry's penalty lasts one turn
         self._thinking_off_next = False  # so does a reasoning cut's thinking-off retry
@@ -2022,81 +2025,91 @@ class AgentLoop:
         bg_cfg = self._config.baton_gate
         rg_cfg = self._config.repetition_guard
 
-        # Build system prompt
-        tool_call_mode = getattr(
-            getattr(self._llm, "config", None), "tool_call_mode", "native"
-        )
-        system_prompt = base_system_prompt(
-            self._config,
-            tool_call_mode=tool_call_mode,
-            guardrails=self._read_guardrails(),
-            skills=self._skills,
-            index=self._index,
-        )
-        # D-37: the project's own file, fenced, directly after Guardrails and ahead of the memory slot.
-        # The role is built once per turn, so this is the one call at assembly (the turn-end check is
-        # run_turn's finally). Not through role_sections: the header and the tag are core's.
-        if self._project_instructions is not None:
-            _text, _notice = self._project_instructions.section(self._ctx.max_context_tokens)
-            if _text is not None:
-                system_prompt += "\n\n" + _fence_instructions(
-                    _text, self._project_instructions.state.name
-                )
-            if _notice is not None:
-                await self._publish_instructions(_notice, session)
-        slot = self._memory_slot
-        if slot is not None and slot.occupied:
-            # G3: the budget is core's — a CEILING from the usable context window, not a share and
-            # not the plugin's own settings (the occupant applies min(own config, ceiling)). At the
-            # default window it is far above every value agent.memory accepts, so the prompt is
-            # unchanged; on a small window it stops the memory section from outgrowing the context.
-            window = self._ctx.max_context_tokens
-            slot_budget = ContextBudget(
-                max_chars=max(0, window - response_reserve(window, self._ctx.max_response_tokens))
-                * APPROX_CHARS_PER_TOKEN,
-                max_session_history=_SLOT_MAX_SESSION_HISTORY,
+        pending = asyncio.ensure_future(self._affordances.cue(task, session.messages)) if self._affordances else None
+        try:
+            # Build system prompt
+            tool_call_mode = getattr(
+                getattr(self._llm, "config", None), "tool_call_mode", "native"
             )
-            contribution = await slot.context(task, slot_budget)
-            for heading, body in contribution.sections:
-                if body:
-                    system_prompt += f"\n\n## {heading}\n{body}"
+            system_prompt = base_system_prompt(
+                self._config,
+                tool_call_mode=tool_call_mode,
+                guardrails=self._read_guardrails(),
+                skills=self._skills,
+                index=self._index,
+            )
+            # The project's own file, fenced, directly after Guardrails and ahead of the memory slot.
+            # The role is built once per turn, so this is the one call at assembly (the turn-end check is
+            # run_turn's finally). Not through role_sections: the header and the tag are core's.
+            if self._project_instructions is not None:
+                _text, _notice = self._project_instructions.section(self._ctx.max_context_tokens)
+                if _text is not None:
+                    system_prompt += "\n\n" + _fence_instructions(
+                        _text, self._project_instructions.state.name
+                    )
+                if _notice is not None:
+                    await self._publish_instructions(_notice, session)
+            slot = self._memory_slot
+            if slot is not None and slot.occupied:
+                # The budget is core's — a CEILING from the usable context window, not a share and
+                # not the plugin's own settings (the occupant applies min(own config, ceiling)). At the
+                # default window it is far above every value agent.memory accepts, so the prompt is
+                # unchanged; on a small window it stops the memory section from outgrowing the context.
+                window = self._ctx.max_context_tokens
+                slot_budget = ContextBudget(
+                    max_chars=max(0, window - response_reserve(window, self._ctx.max_response_tokens))
+                    * APPROX_CHARS_PER_TOKEN,
+                    max_session_history=_SLOT_MAX_SESSION_HISTORY,
+                )
+                contribution = await slot.context(task, slot_budget)
+                for heading, body in contribution.sections:
+                    if body:
+                        system_prompt += f"\n\n## {heading}\n{body}"
 
-        # Get tool schemas
-        tool_schemas: list = []
-        if self._tools is not None:
-            try:
-                agent_id = self._config.name
-                division_id = self._config.division or ""
-                tool_config = self._config.tools
-                tool_schemas_dict = self._tools.get_tools_for_agent(agent_id, division_id, tool_config)
-                tool_schemas = list(tool_schemas_dict.values())
-                session.resolved_tool_names = sorted(tool_schemas_dict)
-            except CoResidenceError:
-                raise  # capability floor must fail LOUD, never be swallowed into an empty toolset
-            except Exception:
-                tool_schemas = []
-                session.resolved_tool_names = []
+            # Get tool schemas
+            tool_schemas: list = []
+            if self._tools is not None:
+                try:
+                    agent_id = self._config.name
+                    division_id = self._config.division or ""
+                    tool_config = self._config.tools
+                    tool_schemas_dict = self._tools.get_tools_for_agent(agent_id, division_id, tool_config)
+                    tool_schemas = list(tool_schemas_dict.values())
+                    session.resolved_tool_names = sorted(tool_schemas_dict)
+                except CoResidenceError:
+                    raise  # capability floor must fail LOUD, never be swallowed into an empty toolset
+                except Exception:
+                    tool_schemas = []
+                    session.resolved_tool_names = []
 
-        # Initialize or continue session messages. Prior-session context (compact.md) is FOLDED
-        # into this ONE system message's content — never a second system message (strict chat
-        # templates reject a non-leading system role; the SEMA-05 P0). Folded every turn so it
-        # survives the continuing-conversation refresh below.
-        if self._prior_session_context:
-            system_prompt = f"{system_prompt}\n\n{self._prior_session_context}"
-        # Gate on the LIST'S OWN SHAPE, never on "does a user turn exist": a persisted
-        # conversation can carry the leading system message with no user turn (sentinel
-        # stripping empties one), and a has-user-turn gate then inserted a SECOND system
-        # message — the non-leading system role strict templates reject, permanently, for the
-        # rest of the sitting.
-        if session.messages and session.messages[0].get("role") == "system":
-            # Existing leading system message — refresh it, never duplicate it
-            session.messages[0] = {"role": "system", "content": system_prompt}
-        else:
-            # First turn — insert the single leading system message at front
-            session.messages.insert(0, {"role": "system", "content": system_prompt})
-        session.push(human_message(
-            [*([text_part(task)] if task else []), *images] if images else task
-        ))
+            # Initialize or continue session messages. Prior-session context (compact.md) is FOLDED
+            # into this ONE system message's content — never a second system message (strict chat
+            # templates reject a non-leading system role). Folded every turn so it
+            # survives the continuing-conversation refresh below.
+            if self._prior_session_context:
+                system_prompt = f"{system_prompt}\n\n{self._prior_session_context}"
+            # Gate on the LIST'S OWN SHAPE, never on "does a user turn exist": a persisted
+            # conversation can carry the leading system message with no user turn (sentinel
+            # stripping empties one), and a has-user-turn gate then inserted a SECOND system
+            # message — the non-leading system role strict templates reject, permanently, for the
+            # rest of the sitting.
+            if session.messages and session.messages[0].get("role") == "system":
+                # Existing leading system message — refresh it, never duplicate it
+                session.messages[0] = {"role": "system", "content": system_prompt}
+            else:
+                # First turn — insert the single leading system message at front
+                session.messages.insert(0, {"role": "system", "content": system_prompt})
+            session.push(human_message(
+                [*([text_part(task)] if task else []), *images] if images else task
+            ))
+            cue = await pending if pending else None
+        finally:
+            if pending:
+                pending.cancel()
+        if cue:
+            session.push(harness_message(cue.line, "affordance_cue"))
+            await self._bus.publish(AffordanceCued(name=cue.name, origin=cue.origin, agent_id=session.agent_id,
+                                                   session_id=session.session_id))
         if self._task_context is not None:
             self._task_context.observe_human(task)
         # #91: mark where THIS turn's assistant replies will begin, so the CONFIRMED-sentinel

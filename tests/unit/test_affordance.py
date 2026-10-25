@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 import yaml
 
-from localharness.agent import affordance, subagent
+from localharness.agent import affordance, loop as loop_module, subagent
 from localharness.agent.affordance import (
     Affordances, Calibration, Cue, calibrate, cued_skills, descriptions_digest, held_skills, load_calibration, normalise, pick,
     scores, snapshot_files, task_skills,
@@ -34,7 +34,8 @@ from localharness.config.loader import ConfigLoader
 from localharness.config.models import AgentConfig, ToolConfig
 from localharness.config.skills import Skill, SkillSet
 from localharness.core.bus import EventBus
-from localharness.core.types import harness_message, human_message
+from localharness.core.events import AffordanceCued
+from localharness.core.types import harness_message, human_message, is_harness_message, provider_messages
 from localharness.memory import resonance
 from localharness.memory.plugin import MemoryPlugin
 from localharness.memory.resonance import EMBED_MAX_TOKENS, ResonanceEngine, ResonanceUnavailable, local_folder
@@ -45,7 +46,7 @@ from localharness.tools.builtin.agent_tool import BUILTIN_AGENT_NAMES
 from localharness.tools.builtin.skill_tool import SkillTool, render_listing
 from localharness.tools.builtin.task_tool import TaskTool
 from localharness.tools.registry import ToolRegistry, allowed_by_config
-from tests.conftest import FakeToolCall
+from tests.conftest import FakeLLMResponse, FakeToolCall, MockLLMClient
 from tests.unit.test_capabilities import _production_registry
 from tests.unit.test_embedding_model_source import DEFAULT, MODEL, PURE, SHIPS_CODE, _cached, _write
 from tests.unit.test_memory_plugin import _ctx
@@ -970,3 +971,123 @@ async def test_a_skill_found_after_warm_is_neither_embedded_nor_cued(tmp_path, m
     assert skill_set.find("late").name == "late" and [s.name for s in skill_set.skills] == ["commit-message", "late"]
     fake.answer = [0.0, 1.0]
     assert fake.embedded == [["Use commit-message when asked."]] and await holder.cue("late", []) is None
+
+
+# --- the cue: the loop ----------------------------------------------------------------------------
+
+PREFIX = "[Harness control: affordance_cue; not human feedback]\n"
+
+
+def _cue_loop(tmp_path, affordances=None):
+    """A root loop answering "Done."; records each request, the session and its turn_start_idx at the first."""
+    llm = MockLLMClient([FakeLLMResponse(content="Done.")])
+    seen, original, bus = SimpleNamespace(requests=[], events=[]), llm.stream_complete, EventBus()
+
+    async def recording(messages=None, tools=None, on_token=None, **kw):
+        if not seen.requests:
+            seen.session = loop._live_turn[0]
+            seen.turn_start_idx = seen.session.turn_start_idx
+        seen.requests.append(list(messages))
+        return await original(messages=messages, tools=tools, on_token=on_token, **kw)
+
+    llm.stream_complete = recording
+    bus.subscribe(AffordanceCued, seen.events.append)
+    loop = AgentLoop(config=AgentConfig(name="cue-agent", role="You are a test assistant."), llm=llm, bus=bus,
+                     context_manager=ContextManager(), tool_registry=None, permission_evaluator=PermissionEvaluator(),
+                     guardrails_path=tmp_path / "GUARDRAILS.md", affordances=affordances)
+    return loop, seen
+
+
+def _cues(messages):
+    return [m for m in messages if is_harness_message(m) and m["_lh"].get("subtype") == "affordance_cue"]
+
+
+async def test_a_turn_resembling_a_skill_reaches_the_model_with_one_harness_line_after_the_person(tmp_path,
+                                                                                                  monkeypatch):
+    holder, _ = _warmed(tmp_path, monkeypatch)
+    loop, seen = _cue_loop(tmp_path, holder)
+    await loop.run_turn(TURN)
+    first = seen.requests[0]
+    i = next(n for n, m in enumerate(first) if m["role"] == "user" and m["content"] == TURN)
+    cue = first[i + 1]
+    assert cue["role"] == "user" and cue["_lh"]["origin"] == "harness" and cue["_lh"]["subtype"] == "affordance_cue"
+    assert cue["content"] == affordance._line(COMMIT) and _cues(first) == [cue]
+    wire = provider_messages([cue])[0]["content"]
+    assert wire == PREFIX + affordance._line(COMMIT) and wire.count("commit-message") == 1
+    assert [(e.name, e.origin, e.agent_id, e.session_id) for e in seen.events] == [
+        ("commit-message", "machine", "cue-agent", loop._current_session_id)]
+
+
+async def test_a_loop_without_a_holder_sends_no_cue_and_publishes_none(tmp_path):
+    loop, seen = _cue_loop(tmp_path)
+    await loop.run_turn(TURN)
+    assert _cues(seen.requests[0]) == [] and seen.events == []
+
+
+class _Holder:
+    """A cue holder that records each call and answers `answer`, after `gate` opens when one is given."""
+
+    def __init__(self, order, answer=None, gate=None):
+        self.order, self.answer, self.gate, self.calls = order, answer, gate, []
+
+    def cue(self, turn, messages):
+        self.order.append("cue")
+        self.calls.append((turn, messages))
+
+        async def answering():
+            if self.gate is not None:
+                await self.gate.wait()
+            return self.answer
+
+        self.coro = answering()
+        return self.coro
+
+
+NOTES_CUE = Cue("notes", "project", affordance._line(NOTES))
+
+
+async def test_the_cue_starts_before_the_prompt_is_built_and_reads_the_sessions_own_messages(tmp_path, monkeypatch):
+    order = []
+    holder = _Holder(order, NOTES_CUE)
+    loop, seen = _cue_loop(tmp_path, holder)
+    real = loop_module.base_system_prompt
+    monkeypatch.setattr(loop_module, "base_system_prompt", lambda *a, **k: order.append("prompt") or real(*a, **k))
+    await loop.run_turn(TURN)
+    assert order == ["cue", "prompt"]
+    ((turn, messages),) = holder.calls
+    assert turn == TURN and messages is seen.session.messages
+
+
+async def test_the_cue_lands_right_after_the_persons_message_and_the_turn_starts_past_both(tmp_path):
+    loop, seen = _cue_loop(tmp_path, _Holder([], NOTES_CUE))
+    await loop.run_turn(TURN)
+    first = seen.requests[0]
+    i = next(n for n, m in enumerate(first) if m["role"] == "user" and m["content"] == TURN)
+    assert first[i + 1] == harness_message(NOTES_CUE.line, "affordance_cue")
+    assert seen.turn_start_idx == i + 2
+    assert [(e.name, e.origin) for e in seen.events] == [("notes", "project")]
+
+
+async def test_a_holder_answering_none_pushes_nothing_and_publishes_nothing(tmp_path):
+    loop, seen = _cue_loop(tmp_path, _Holder([], None))
+    await loop.run_turn(TURN)
+    assert _cues(seen.requests[0]) == [] and seen.events == []
+
+
+async def test_the_pending_cue_is_cancelled_when_the_assembly_raises(tmp_path, monkeypatch):
+    holder = _Holder([], NOTES_CUE, gate=asyncio.Event())
+    loop, seen = _cue_loop(tmp_path, holder)
+    real, tasks = asyncio.ensure_future, []
+
+    def recording(coro, **kw):
+        task = real(coro, **kw)
+        if task.get_coro() is getattr(holder, "coro", None):
+            tasks.append(task)
+        return task
+
+    monkeypatch.setattr(asyncio, "ensure_future", recording)
+    monkeypatch.setattr(loop_module, "base_system_prompt", _raise(RuntimeError("assembly failed")))
+    await loop.run_turn(TURN)
+    await asyncio.sleep(0)
+    (task,) = tasks
+    assert task.cancelled() and seen.requests == [] and seen.events == []

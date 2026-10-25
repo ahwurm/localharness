@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from localharness.agent.affordance import Affordances
 from localharness.cli.repl import OrchestratorREPL
 from localharness.cli.skill_session import SkillSession, skill_row
 from localharness.cli.slash_commands import (
@@ -740,7 +741,8 @@ def _watch_run(monkeypatch, *lines):
     seen = {"followups": []}
 
     async def run(self):
-        seen.update(rows=all_rows(), session=self._skills, tool=self._agent._tools._tools["global"].get("skill"))
+        seen.update(rows=all_rows(), session=self._skills, tool=self._agent._tools._tools["global"].get("skill"),
+                    agent=self._agent)
         for line in lines:
             await self._handle_slash(line)
             seen["followups"].append(self._slash_followup)
@@ -769,9 +771,62 @@ async def test_a_start_with_no_skill_has_no_skill_row_and_no_session(tmp_path, p
     from tests.unit.test_skills_listing import _start_world
 
     _start_world(tmp_path, monkeypatch, skill=False)
-    seen = _watch_run(monkeypatch)
+    seen, warmed = _watch_run(monkeypatch), _record_warm(monkeypatch)
     await _start_async(None, False, False, str(tmp_path))
     assert seen["session"] is None and not [r for r in seen["rows"] if r.plugin == "skill"]
+    assert seen["agent"]._affordances is None and warmed == []
+
+
+def _record_warm(monkeypatch):
+    warmed = []
+    monkeypatch.setattr(Affordances, "warm", lambda self: warmed.append(self))
+    return warmed
+
+
+async def test_a_start_with_a_skill_hands_one_warmed_holder_to_the_loop_and_the_session(tmp_path, pkg, rows,
+                                                                                         monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+    from tests.unit.test_skills_listing import _start_world
+
+    _start_world(tmp_path, monkeypatch)
+    seen, warmed = _watch_run(monkeypatch), _record_warm(monkeypatch)
+    await _start_async(None, False, False, str(tmp_path))
+    holder = seen["agent"]._affordances
+    assert isinstance(holder, Affordances) and warmed == [holder]
+    assert seen["session"]._affordances is holder and holder._task_state is seen["tool"]._state
+
+
+async def test_a_root_denied_the_skill_tool_gets_no_holder(tmp_path, pkg, rows, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+    from tests.unit.test_skills_listing import _start_world
+
+    _start_world(tmp_path, monkeypatch)
+    (tmp_path / "agents").mkdir()
+    (tmp_path / "agents" / "orchestrator.yaml").write_text(
+        "name: orchestrator\nrole: Test role\nmodel: inherit\ntools:\n  deny: [skill]\n")
+    seen, warmed = _watch_run(monkeypatch), _record_warm(monkeypatch)
+    await _start_async(None, False, False, str(tmp_path))
+    assert seen["agent"]._affordances is None and seen["session"]._affordances is None and warmed == []
+
+
+async def test_a_floor_schemas_that_raises_keeps_the_holder_with_the_listing(tmp_path, pkg, rows, monkeypatch):
+    from localharness.agent import context
+    from localharness.cli.start_cmd import _start_async
+    from tests.unit.test_skills_listing import _start_world
+
+    _start_world(tmp_path, monkeypatch)
+    real, calls = context.floor_schemas, []
+
+    def boom_once(*a, **k):
+        calls.append(a)
+        if len(calls) == 1:
+            raise RuntimeError("tool info failed")
+        return real(*a, **k)
+
+    monkeypatch.setattr(context, "floor_schemas", boom_once)
+    seen, warmed = _watch_run(monkeypatch), _record_warm(monkeypatch)
+    await _start_async(None, False, False, str(tmp_path))
+    assert isinstance(seen["agent"]._affordances, Affordances) and warmed == [seen["agent"]._affordances]
 
 
 def _rows_seen(monkeypatch, fail=None):
