@@ -40,7 +40,7 @@ from localharness.core.content import redact_images, text_part
 from localharness.core.fence import fence_project_text
 from localharness.agent.context import (
     APPROX_CHARS_PER_TOKEN, fixed_tokens, floor_schemas, harness_floor, response_reserve)
-from localharness.agent.context import ActiveReferenceError, ActiveReferenceOverflow
+from localharness.agent.context import MAX_ACTIVE_REFERENCES, ActiveReferenceError, ActiveReferenceOverflow
 from localharness.agent.task_context import TaskContext
 from localharness.agent.task_record import TaskState
 from localharness.plugins.api import ContextBudget
@@ -1156,8 +1156,8 @@ def _assemble_role(cfg) -> str:
     return "\n\n".join([base, *extra])
 
 
-def base_system_prompt(cfg, *, tool_call_mode: str, guardrails: str, skills: str = "") -> str:
-    """The turn-invariant system prompt: role, facts, rules, guardrails and the skills listing; no instructions or memory."""
+def base_system_prompt(cfg, *, tool_call_mode: str, guardrails: str, skills: str = "", index: str = "") -> str:
+    """The turn-invariant system prompt: role, facts, rules, guardrails, the skills listing and the index; no instructions or memory."""
     system_prompt = _assemble_role(cfg)
     # Date only (no clock time) so the vLLM prefix cache churns daily, not per-turn.
     _now = datetime.now().astimezone()
@@ -1193,7 +1193,43 @@ def base_system_prompt(cfg, *, tool_call_mode: str, guardrails: str, skills: str
         system_prompt += "\n\n## Guardrails\n" + guardrails
     if skills:
         system_prompt += "\n\n" + skills
+    if index:
+        system_prompt += "\n\n" + index
     return system_prompt
+
+
+def render_index(root: Path | None, machine_dir: Path, held: set[str], config_dir_flag: bool, slash: bool) -> str:
+    """The root's map of the project and where its skills and agents live and enter a task."""
+    from shlex import quote
+    from localharness.channels.base import one_line, sanitize_for_display
+    from localharness.config.skills import ORIGINS
+
+    def shown(x) -> str:
+        return repr(one_line(str(x)))
+
+    machine = str(machine_dir)
+    project = [d for label, d in ORIGINS if label == "project"]
+    mine = shown(f"{machine}/{next(d for label, d in ORIGINS if label == 'machine')}")
+    write = (f"{shown(project[0])} under the project root; also read: {shown(project[1])} under it, and {mine}"
+             if root is not None else mine)
+    flag = f" --config-dir {quote(sanitize_for_display(machine))}" if config_dir_flag else ""
+    unquotable = config_dir_flag and sanitize_for_display(machine) != one_line(machine)
+    pointer = "" if unquotable else f"`localharness skills{flag}` also shows any skipped"
+    tail = "; ".join(c for c in ("`/help` lists them as `/<name>` rows" if slash else "", pointer) if c)
+    work = " ".join(c for c in (
+        f"A skill loaded during a live task can be one of its {MAX_ACTIVE_REFERENCES} references, and stays in view; "
+        "otherwise only for the current step." if "skill" in held else "",
+        "While a task is live, each agent call is a delegation it records; integrate it before closing."
+        if "agent" in held else "") if c)
+    lines = (
+        "## Where things are",
+        f"Project: {shown(root)}." if root is not None else "No project layer.",
+        f"Skills: listed above. New ones go in {write}.{f' {tail}.' if tail else ''}" if "skill" in held else "",
+        "Agents: listed in the agent tool. A delegated agent never has skill or task"
+        f"{'; `/agents` lists them for the person' if slash else ''}." if "agent" in held else "",
+        f"Work: {work}" if "task" in held and work else "",
+    )
+    return "\n".join(line for line in lines if line)
 
 
 class AgentLoop:
