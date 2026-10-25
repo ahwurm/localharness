@@ -1447,6 +1447,19 @@ console.log(JSON.stringify({idle, held, closed, fetched, free: buttons().every((
     assert got["head"] == "mixtral:8x7b not switched — the model is unchanged"
 
 
+@NODE_ONLY
+def test_launch_list_a_hello_naming_a_new_model_counts_as_the_switch_the_stream_missed(page, tmp_path):
+    got = _launch(page, tmp_path, """
+$("model").textContent = "qwen3:32b";
+await openList(withLaunch("mixtral:8x7b", "qwen3:32b"));
+onFrame("Hello", {session_id: "s", mode: "repl", turn_in_progress: false, model: "mixtral:8x7b",
+  protocol_version: PROTOCOL_VERSION, synthetic: false, model_state: "ready"});
+await tick(); await answer(withLaunch(null, "mixtral:8x7b"));
+console.log(JSON.stringify([head(), $("model").textContent]));
+""")
+    assert got == ["Model", "mixtral:8x7b"]
+
+
 ASK_PRELUDE = """
 const answers = [{status: "confirm_required", confirm_token: "tok-1", detail: "sure?"},
                  {status: "recorded", decision: "Launch"}];
