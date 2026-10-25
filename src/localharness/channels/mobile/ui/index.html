@@ -381,7 +381,8 @@
 
 <dialog id="cfg">
   <h3>session</h3>
-  <div id="cfgModel" class="meta"></div>
+  <h4 id="cfgModelHead"></h4>
+  <div id="cfgModel"></div>
   <button class="small" id="reasonBtn">reasoning: off</button>
   <button class="small" id="verboseBtn">verbose: off</button>
   <div id="modes"></div>
@@ -419,6 +420,23 @@ const post = (path, body) =>
   fetch(path, { method: "POST", headers: H(), body: JSON.stringify(body || {}) })
     .then(r => r.json().catch(() => ({ status: r.status })));
 const get = (path) => fetch(path, { headers: { "Authorization": "Bearer " + token } }).then(r => r.json());
+const MODEL_HEADER = "Model";
+const MODEL_TAG_ACTIVE = "active";
+const MODEL_TAG_ON = "on {endpoint}";
+const MODEL_TAG_LAUNCHES = "launches";
+const MODEL_TAG_STOPS = "stops {stops}";
+const MODEL_LOADING = "loading…";
+const MODEL_TURN = "a turn is running — a tap waits for it";
+const MODEL_QUEUED = "queued — runs when this turn ends";
+const MODEL_QUEUED_ASK = "queued — asks to launch when this turn ends; keep the app open to answer";
+const MODEL_CHECKING = "checking {name}…";
+const MODEL_LAUNCHING = "launching {launching}…";
+const MODEL_NOT_LAUNCHED = "{launching} not switched — {notice}";
+const MODEL_NO_NOTICE = "the model is unchanged";
+const MODEL_WAKE = "wake chat and list";
+const MODEL_UNAVAILABLE_PAGE = "model list unavailable";
+const PICKER_TITLE = "Choose";
+const CONFIRM_TITLE = "Confirm";
 
 // ---------------------------------------------------------------- state
 const S = {
@@ -426,6 +444,7 @@ const S = {
   tools: {}, calls: new Map(), prov: null, lastSent: "", parked: new Map(), asks: new Map(),
   reasoning: false, offline: false, modes: [], verbose: false, burst: null, lastRow: null,
   webNoted: false, bring: null, echoes: [], working: null, sent: false, activity: "",
+  modelFetch: 0, wakeRefetch: false,
 };
 const $ = id => document.getElementById(id);
 const log = $("log");
@@ -1655,13 +1674,63 @@ function paintModes() {
     box.appendChild(b);
   }
 }
-$("modelBtn").onclick = () => {
-  $("cfgModel").textContent = [$("model").textContent, $("ctx").textContent, $("tps").textContent]
-    .filter(t => t && t !== "settings").join(" · ")
-    || "no model reading yet — the instruments arrive with the first turn";
+const modelHeader = () => S.turn ? MODEL_TURN : MODEL_HEADER;
+function tapModel(r) {
+  $("cfg").close();
+  post(`/api/sessions/${S.session || "current"}/command`, { text: "/model " + r.name });
+}
+function modelRow(r) {
+  const tags = [];
+  if (r.active) tags.push(MODEL_TAG_ACTIVE);
+  if (r.why) tags.push(r.why);
+  if (r.kind === "cross") tags.push(MODEL_TAG_ON.replace("{endpoint}", r.endpoint));
+  if (r.kind === "cold") {
+    tags.push(MODEL_TAG_LAUNCHES);
+    if (r.stops) tags.push(MODEL_TAG_STOPS.replace("{stops}", r.stops));
+  }
+  const text = [r.label || r.name, ...tags].join(" · ");
+  if (r.active || r.why) return el("div", "meta", text);
+  const b = el("button", "small", text);
+  b.onclick = () => tapModel(r);
+  return b;
+}
+function renderModels(p) {
+  $("cfgModelHead").textContent = modelHeader();
+  $("cfgModel").replaceChildren(
+    ...(p.models || []).map(modelRow), ...(p.footer || []).map(f => el("div", "meta", f)));
+}
+async function loadModels() {
+  const n = ++S.modelFetch;
+  const show = (...nodes) => { if (n === S.modelFetch) $("cfgModel").replaceChildren(...nodes); };
+  let r, body;
+  try {
+    r = await fetch("/api/model", { headers: { "Authorization": "Bearer " + token } });
+    body = r.status === 503 || r.ok ? await r.json() : null;
+  } catch (e) { body = null; }
+  if (n !== S.modelFetch) return;
+  if (r && r.status === 503 && body && body.error) {
+    const nodes = [el("div", "meta", body.error)];
+    if (body.asleep) {
+      const w = el("button", "small", MODEL_WAKE);
+      w.onclick = () => {
+        S.wakeRefetch = true;
+        post(`/api/sessions/${S.session || "current"}/command`, { text: "/model list" });
+      };
+      nodes.push(w);
+    }
+    show(...nodes);
+  } else if (!body || !r.ok) show(el("div", "meta", MODEL_UNAVAILABLE_PAGE));
+  else renderModels(body);
+}
+function openModels() {
+  S.wakeRefetch = false;
+  $("cfgModelHead").textContent = modelHeader();
+  $("cfgModel").replaceChildren(el("div", "meta", MODEL_LOADING));
   paintModes();
   $("cfg").showModal();
-};
+  loadModels();
+}
+$("modelBtn").onclick = openModels;
 $("verboseBtn").onclick = () => {
   // Client-side only, unlike the reasoning toggle: reasoning DELTAS are gated server-side, but
   // every event already reaches this page — density is this client's half. Posting /verbose
