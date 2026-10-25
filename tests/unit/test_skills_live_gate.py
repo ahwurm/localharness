@@ -1,6 +1,7 @@
 """The no-model checks of the live skills gate: the bar, the fixture skills, the request sets and the first-step reader."""
 from __future__ import annotations
 
+import dataclasses
 import re
 
 import pytest
@@ -11,8 +12,9 @@ from localharness.tools.builtin.skill_tool import render_listing
 from tests.integration.test_injection_redteam import MockLLMClient
 import tests.integration.test_skills_model_live as live
 from tests.integration.test_skills_model_live import (
-    CREATOR_BAR, FALSE_BAR, FIXTURES, MATCHING_BAR, RUNS, TEMPERATURE, VARIANT_A, CreatorRun, Run, Step,
-    first_step, first_step_run, hit, install, passed, prompts, render_report, root_config, write_report)
+    CREATOR_BAR, FALSE_BAR, FIXTURES, MATCHING_BAR, RUNS, TEMPERATURE, NOT_FINISHED, NOT_SERVING, NOT_SUBJECT, VARIANT_A, VARIANT_B, CreatorRun, Run, Step,
+    first_step, first_step_run, hit, install, not_run_report, out_of_list, passed, prompts, render_report, root_config,
+    tally, write_report)
 from tests.unit.test_image_hygiene import FORBIDDEN
 from tests.unit.test_skills_misc import lures
 
@@ -189,3 +191,121 @@ def test_a_matching_run_passes_only_on_the_matching_name():
 
     assert hit(matching("release-notes")) is True
     assert hit(matching("commit-message")) is False
+
+
+def at(skill, matching, others):
+    """Every skill hits all its matching runs and no other; `skill` hits the first `matching` and `others` of its near-misses."""
+    def hits(name, kind, n):
+        if name != skill:
+            return kind == "matching"
+        return n < matching if kind == "matching" else kind == "near_miss" and n < others
+    return hits
+
+
+def verdict(hits, valid=(True, True, True), extra=()):
+    return passed([*synthetic(hits), *extra], list(valid))
+
+
+def test_the_bar_holds_at_its_thresholds():
+    assert verdict(at("release-notes", 24, 0)) is True
+    assert verdict(at("release-notes", 23, 0)) is False
+    assert verdict(at("release-notes", 30, 3)) is True
+    assert verdict(at("release-notes", 30, 4)) is False
+    assert verdict(at("release-notes", 24, 3)) is True
+    assert verdict(at("release-notes", 30, 0), valid=(True, True, False)) is True
+    assert verdict(at("release-notes", 30, 0), valid=(True, False, False)) is False
+    assert verdict(at("release-notes", 30, 0), valid=(False, False, False)) is False
+
+
+def test_one_skill_below_the_bar_misses_the_gate():
+    assert tally(synthetic(at("release-notes", 23, 0)), "release-notes") == (23, 30, 0, 60)
+    assert verdict(at("release-notes", 23, 0)) is False
+    assert verdict(at("commit-message", 30, 0)) is True
+
+
+def test_xml_runs_never_enter_the_bar():
+    native = synthetic(at("release-notes", 23, 0))
+    for xml in (synthetic(lambda s, k, n: True, "xml", 1), synthetic(lambda s, k, n: False, "xml", 1)):
+        assert passed([*native, *xml], [True, True, True]) is False
+        assert tally([*native, *xml], "release-notes") == tally(native, "release-notes")
+    good = synthetic(at("release-notes", 30, 0))
+    assert passed([*good, *synthetic(lambda s, k, n: k != "matching", "xml", 1)], [True, True, True]) is True
+
+
+def test_a_set_of_the_wrong_size_is_refused():
+    runs = synthetic(at("release-notes", 30, 0))
+    with pytest.raises(AssertionError):
+        passed(runs[1:], [True, True, True])
+    with pytest.raises(AssertionError):
+        passed(runs, [True, True, True, True])
+    with pytest.raises(AssertionError):
+        passed(runs, [True, True])
+    with pytest.raises(AssertionError):
+        passed([], [True, True, True])
+
+
+def odd_run(leg, called, kind="matching", prompt="p") -> Run:
+    return Run(leg, "release-notes", kind, prompt, 1, Step((("skill", called),), "tool_calls", ""))
+
+
+ODD = [{"name": "Release-Notes"}, {"name": " release-notes"}, {"name": "made-up"}, {}, {"name": 7}]
+ODD_REPR = ["'Release-Notes'", "' release-notes'", "'made-up'", "None", "7"]
+
+
+def test_out_of_list_names_are_kept_per_leg():
+    native = [odd_run("native", called, prompt=f"p{i}") for i, called in enumerate(ODD)]
+    assert out_of_list(native, NAMES) == {"native": [(f"p{i}", r) for i, r in enumerate(ODD_REPR)], "xml": []}
+    xml = [odd_run("xml", called, prompt=f"p{i}") for i, called in enumerate(ODD)]
+    assert out_of_list(xml, NAMES) == {"native": [], "xml": [(f"p{i}", r) for i, r in enumerate(ODD_REPR)]}
+    assert out_of_list([odd_run("native", {"name": "release-notes"})], NAMES) == {"native": [], "xml": []}
+    assert [hit(odd_run("native", called)) for called in ODD[:2]] == [False, False]
+
+
+def test_a_skill_call_beside_another_in_the_first_step_counts():
+    beside = Run("native", "release-notes", "matching", "p", 1,
+                 Step((("read", {"path": "notes.md"}), ("skill", {"name": "release-notes"})), "tool_calls", ""))
+    assert hit(beside) is True
+    own = Run("native", "commit-message", "near_miss", "p", 1, Step((("skill", {"name": "commit-message"}),), "tool_calls", ""))
+    assert hit(own) is True
+    assert tally([beside, own], "commit-message") == (0, 0, 1, 1)
+    assert tally([beside, own], "release-notes") == (1, 1, 0, 0)
+
+
+@pytest.mark.parametrize("reason", [NOT_SERVING, NOT_SUBJECT, NOT_FINISHED])
+def test_a_report_that_did_not_run_holds_no_number(reason):
+    text = not_run_report("2026-10-24", "qwen3.8-27b", "http://localhost:8080/v1", reason)
+    assert "Outcome: not run" in text and reason in text and VARIANT_B in text
+    assert not [line for line in text.splitlines() if re.search(r"\d", line) and not line.startswith(("Date:", "Model:", "Endpoint:"))]
+    assert not any(needle in text for needle in ("of 30", "of 60", "%"))
+    assert "Model: none configured" in not_run_report("2026-10-24", None, None, reason)
+    assert "Endpoint: none configured" in not_run_report("2026-10-24", None, None, reason)
+
+
+def test_the_fixed_sentences_hold_no_digit():
+    assert not any(re.search(r"\d", s) for s in (NOT_SERVING, NOT_SUBJECT, NOT_FINISHED, VARIANT_B))
+
+
+def test_a_report_is_never_overwritten(tmp_path, monkeypatch):
+    monkeypatch.setattr(live, "REPORTS", tmp_path / "reports")
+    path = write_report(DAY, "first")
+    with pytest.raises(FileExistsError):
+        write_report(DAY, "second")
+    assert path.read_text(encoding="utf-8") == "first"
+
+
+def test_a_table_cell_cannot_break_its_row():
+    runs = synthetic(lambda s, k, n: k == "matching")
+    runs[0] = dataclasses.replace(runs[0], prompt="a | b\nc")
+    text = render_report(META, runs, creator_runs(True, True, True))
+    rows = [line for line in text.splitlines() if "a \\| b c" in line]
+    assert len(rows) == 1 and rows[0].startswith("| native |") and rows[0].endswith(" |")
+    assert "a | b" not in text and "b\nc" not in text
+
+
+def test_a_report_names_the_shape_of_the_root():
+    text = render_report(META, synthetic(lambda s, k, n: k == "matching"), creator_runs(True, True, True))
+    for fragment in ("no plugins", "no memory", "no guardrails file", "no project instructions", "web verbs are denied"):
+        assert fragment in text
+    assert "Window: 131072" in text
+    assert "Window: not exposed by the server" in render_report(
+        {**META, "window": None}, synthetic(lambda s, k, n: k == "matching"), creator_runs(True, True, True))

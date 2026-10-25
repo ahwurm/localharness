@@ -49,6 +49,9 @@ CREATOR_MAX_ACTIONS = 40
 CREATOR_MAX_MINUTES = 30.0
 VARIANT_A = "On the subject model, the model picked a matching skill from the listing on its own in at least 80 % of test runs."
 VARIANT_B = "The model may not pick a skill up on its own; `/<name>` asks it to."
+NOT_SERVING = "the subject model was not being served at the endpoint"
+NOT_SUBJECT = "the endpoint served a model the reference architectures do not name as the subject model"
+NOT_FINISHED = "the run did not finish, so no result exists"
 ROOT = ("a fresh install's orchestrator with the built-in tools, agent, task and skill; no plugins, no memory, "
         "no guardrails file, no project instructions; the web verbs are denied to it, as in a real start")
 
@@ -269,6 +272,18 @@ def render_report(meta: dict, runs, creator) -> str:
                 for r in runs]),
     ]
     return "\n".join(lines) + "\n"
+
+
+def not_run_report(day: str, model: str | None, endpoint: str | None, reason: str) -> str:
+    return "\n".join([
+        "# Skills live-model gate", "",
+        f"Date: {day}",
+        f"Model: {model or 'none configured'}",
+        f"Endpoint: {endpoint or 'none configured'}",
+        "Outcome: not run",
+        f"Why: {reason}",
+        f"The claim kept: {VARIANT_B}",
+        "No run finished, so this report holds no result.", ""])
 
 
 async def test_the_subject_model_picks_a_listed_skill_on_its_own(live_endpoint, tmp_path, monkeypatch):
