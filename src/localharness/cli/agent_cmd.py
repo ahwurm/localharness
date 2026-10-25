@@ -15,7 +15,6 @@ from rich.markup import escape
 from rich.table import Table
 
 from localharness.cli.workspace import NO_INPUT_HELP
-from localharness.core.private_files import touch_private
 from localharness.config.paths import WORKSPACE_DIR_NAME, resolve_config_dir
 
 console = Console()
@@ -161,10 +160,12 @@ def agent_create(
         console.print(yaml_text)
         return
 
-    # Determine target directory
+    from localharness.config.loader import ConfigLoader
+
     if use_global:
-        target_dir = resolve_config_dir(config_dir) / "agents"
+        layer, local = "machine", None
     else:
+        layer = "project"
         # --project means "this project's workspace". Route through the SAME resolution the
         # readers use (agent list, start), or creation and discovery disagree from any
         # subdirectory. The relative literal (not `Path.cwd() / ...`) keeps the success/refusal
@@ -190,8 +191,8 @@ def agent_create(
             )
             raise typer.Exit(code=2)
 
-        layer = resolve_workspace_layer(config_dir, interactive=False if no_input else None)
-        if layer is None:
+        found_layer = resolve_workspace_layer(config_dir, interactive=False if no_input else None)
+        if found_layer is None:
             # B5/B6: None here is one of two very different situations. Nothing found at all is
             # the BOOTSTRAP case — a fresh project's first agent creates the workspace, silently,
             # exactly as v0.12 did (LAYR-03). Found-but-not-in-use (outside the project and
@@ -207,46 +208,26 @@ def agent_create(
                     style="dim",
                     soft_wrap=True,
                 )
-            target_dir = Path(WORKSPACE_DIR_NAME) / "agents"
+            local = Path(WORKSPACE_DIR_NAME)
         else:
-            target_dir = layer / "agents"
+            local = found_layer
 
-    target_path = target_dir / f"{name}.yaml"
-    # #55: never silently overwrite an existing agent — a live receipt erased a user's
-    # tools.deny restriction under a "✓ created". The chat flow already refuses (#28
-    # workflow.deploy_config); enforce the same invariant here. --force is the escape hatch.
-    #
-    # Decided BEFORE the mkdir, not after: a command that has already refused must not have
-    # created anything on its way to refusing (E's "crash after write").
-    if target_path.exists() and not force:
-        err_console.print(
-            "[bold red]Error:[/bold red] "
-            + escape(f"Agent '{name}' already exists at {target_path}. ")
-            + "Choose a different name, edit the file directly, or pass --force to overwrite.",
-            soft_wrap=True,
-        )
-        raise typer.Exit(code=1)
-
-    # The target is validated before anything is written, so a failure cannot leave a half-made
-    # tree behind an error message. `agents` as a FILE (H4), a dangling symlink (H2), a symlink
-    # loop (H3) and an unwritable parent (H5) all land here as OSError subclasses; each one is
-    # something the user can fix once they are told which path is wrong.
+    loader = ConfigLoader(config_dir=resolve_config_dir(config_dir), local_config_dir=local)
+    target = loader.agents_dir(layer) / f"{name}.yaml"
     try:
-        target_dir.mkdir(parents=True, exist_ok=True)
-        touch_private(target_path)
-        target_path.write_text(yaml_text, encoding="utf-8")
-    except OSError as exc:
-        err_console.print(
-            "[bold red]Error:[/bold red] "
-            + escape(f"cannot write {target_path}: {exc.strerror or exc}"),
-            soft_wrap=True,
-        )
+        (local or resolve_config_dir(config_dir)).mkdir(parents=True, exist_ok=True)
+        target = loader.write_agent(name, yaml_text, layer=layer, overwrite=force)
+    except (ValueError, OSError) as exc:
+        reason = getattr(exc, "strerror", None) or str(exc)
+        if isinstance(exc, FileExistsError) and not exc.strerror:
+            reason += " pass --force to overwrite"
+        err_console.print("[bold red]Error:[/bold red] " + escape(f"cannot write {target}: {reason}"), soft_wrap=True)
         raise typer.Exit(code=1)
 
     # escape() around the path, markup outside it: the target lives under the user's own
     # directory names, and a project folder named `[old] proj` would otherwise print as a path
     # that does not exist — under a green checkmark saying the file is there (39-05).
-    console.print("[green]✓[/green] " + escape(f"Agent '{name}' created at {target_path}"),
+    console.print("[green]✓[/green] " + escape(f"Agent '{name}' created at {target}"),
                   soft_wrap=True)
     console.print("  Edit the YAML to customize role, tools, and permissions.")
 

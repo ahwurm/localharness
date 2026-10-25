@@ -525,3 +525,66 @@ def test_agents_only_and_unread_project_agents_return_lists(tmp_path, monkeypatc
     monkeypatch.chdir(tmp_path)
     assert skills_cmd.agents_only(tmp_path) == []
     assert unread_project_agents(tmp_path, str(tmp_path / "cfg")) == []
+
+
+# ---------------------------------------------------------------------------
+# agent create — through the one writer
+# ---------------------------------------------------------------------------
+
+def test_agent_create_goes_through_the_one_writer(tmp_path, monkeypatch):
+    from localharness.config.loader import ConfigLoader
+
+    calls: list[tuple] = []
+    real = ConfigLoader.write_agent
+
+    def spy(self, name, yaml_text, *, layer, overwrite=False):
+        calls.append((name, layer, overwrite))
+        return real(self, name, yaml_text, layer=layer, overwrite=overwrite)
+
+    monkeypatch.setattr(ConfigLoader, "write_agent", spy)
+    cfg = tmp_path / "cfg"
+    runner.invoke(agent_app, ["create", "a1", "--global", "--config-dir", str(cfg)])
+    runner.invoke(agent_app, ["create", "a1", "--global", "--force", "--config-dir", str(cfg)])
+    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    monkeypatch.chdir(proj)
+    runner.invoke(agent_app, ["create", "p1", "--project"])
+    assert calls == [("a1", "machine", False), ("a1", "machine", True), ("p1", "project", False)]
+    for written in (cfg / "agents" / "a1.yaml", proj / ".localharness" / "agents" / "p1.yaml"):
+        assert written.stat().st_mode & 0o777 == 0o600
+
+
+def test_agent_create_prints_cannot_write_for_a_symlinked_agent_file(tmp_path):
+    victim = tmp_path / "victim"
+    victim.write_text("untouched")
+    agents = tmp_path / "cfg" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "x.yaml").symlink_to(victim)
+    result = runner.invoke(agent_app, ["create", "x", "--global", "--config-dir", str(tmp_path / "cfg")])
+    flat = result.output.replace("\n", "")
+    assert result.exit_code == 1
+    assert "cannot write" in flat and "x.yaml is a symlink; replace it with a file" in flat
+    assert victim.read_text() == "untouched" and (agents / "x.yaml").is_symlink()
+
+
+def test_agent_create_collision_prints_cannot_write(tmp_path):
+    args = ["create", "dup", "--global", "--config-dir", str(tmp_path)]
+    runner.invoke(agent_app, args)
+    path = tmp_path / "agents" / "dup.yaml"
+    before = path.read_bytes()
+    result = runner.invoke(agent_app, args)
+    flat = result.output.replace("\n", "")
+    assert result.exit_code == 1
+    assert "cannot write" in flat and "already exists at" in flat and "pass --force to overwrite" in flat
+    assert path.read_bytes() == before
+
+
+def test_the_bootstrap_receipt_is_byte_identical(tmp_path, monkeypatch):
+    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(agent_app, ["create", "boot", "--project"])
+    assert "Agent 'boot' created at .localharness/agents/boot.yaml" in result.stdout
+    assert "Edit the YAML to customize role, tools, and permissions." in result.stdout
