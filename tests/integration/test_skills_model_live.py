@@ -15,16 +15,19 @@ import time
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from statistics import median
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
 import yaml
 from typer.testing import CliRunner
 
-from localharness.agent.context import ContentStore, ContextManager, context_size_kwargs, probe_served_window
+from localharness.agent.affordance import CALIBRATION, Affordances, load_calibration, snapshot_files
+from localharness.agent.context import ContentStore, ContextManager, context_size_kwargs, floor_schemas, probe_served_window
 from localharness.agent.gate import PermissionGate, derive_session_boundary
 from localharness.agent.gate_types import Decision, PermissionRequest
-from localharness.agent.loop import AgentLoop
+from localharness.agent.loop import AgentLoop, render_index
 from localharness.agent.permissions import PermissionEvaluator
 from localharness.agent.task_record import TaskState
 from localharness.bench.config import MatrixEntry
@@ -40,7 +43,8 @@ from localharness.config import skills as skill_config
 from localharness.config.models import AgentConfig
 from localharness.config.skills import SkillSet
 from localharness.core.bus import EventBus
-from localharness.core.events import Action, TurnFailed
+from localharness.core.events import Action, AffordanceCued, TurnFailed
+from localharness.memory.resonance import DEFAULT_EMBEDDING_MODEL, ResonanceEngine
 from localharness.provider.fn_call import FnCallConverter
 from localharness.tools.builtin import register_builtin_tools
 from localharness.tools.builtin.paths import resolve_user_path
@@ -72,6 +76,10 @@ NO_WINDOW = "not exposed by the server"
 NOT_SERVING = "the subject model was not being served at the endpoint"
 NOT_SUBJECT = "the endpoint served a model the reference architectures do not name as the subject model"
 NOT_FINISHED = "the run did not finish, so no result exists"
+# matching and false hits per skill of reports/skills-live-gate-2026-10-24-2.md, code f4329641
+RUN_2 = {"bug-repro-test": (26, 0), "commit-message": (21, 0), "docstring-pass": (30, 0), "incident-summary": (24, 0),
+         "release-notes": (30, 0), "skill-creator": (25, 0)}
+MODEL_ABSENT = "model absent"
 ROOT = ("a fresh install's orchestrator with the built-in tools, agent, task and skill; no plugins, no memory, "
         "no guardrails file, no project instructions; the web verbs are denied to it, as in a real start")
 
@@ -95,6 +103,9 @@ class Step:
     system: str
     flaw: str | None = None
     error: str | None = None
+    cue: str | None = None
+    cue_s: float | None = None
+    ttft_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +117,10 @@ class Shape:
 
 def prompts() -> dict:
     return yaml.safe_load((FIXTURES / "prompts.yaml").read_text(encoding="utf-8"))
+
+
+def holdout() -> dict:
+    return yaml.safe_load((FIXTURES / "prompts_holdout.yaml").read_text(encoding="utf-8"))
 
 
 def install(config_dir: Path) -> SkillSet:
@@ -132,25 +147,44 @@ def loop_shape(config_dir: Path, cfg: AgentConfig, base_url: str, served: int | 
         (harness.effort_budget.low_ratio, harness.effort_budget.high_ratio))
 
 
-def root_loop(client, cfg: AgentConfig, shape: Shape, skill_set: SkillSet, registry, state, gate, bus) -> AgentLoop:
+def machine_dir(skill_set: SkillSet) -> Path:
+    return next(lexical for label, lexical, _ in skill_set.origins if label == "machine").parent
+
+
+def root_loop(client, cfg: AgentConfig, shape: Shape, skill_set: SkillSet, registry, state, gate, bus,
+              affordances=None) -> AgentLoop:
+    held = {s.name for s in floor_schemas(registry, cfg.name, cfg.division or "", cfg.tools)}
     return AgentLoop(
         config=cfg, llm=client, bus=bus, tool_registry=registry, permission_evaluator=PermissionEvaluator(), gate=gate,
         context_manager=ContextManager(
             max_context_tokens=shape.window, preserve_first_n=cfg.context.preserve_first_n_messages,
             preserve_last_n=cfg.context.preserve_last_n_messages, **context_size_kwargs(cfg.context)),
         kill_file_path=None, skills=render_listing(skill_set.skills), task_context=state,
-        effort=shape.effort, effort_ratios=shape.ratios)
+        effort=shape.effort, effort_ratios=shape.ratios,
+        index=render_index(None, machine_dir(skill_set), held, False, True), affordances=affordances)
 
 
 @contextlib.contextmanager
-def first_request_only(client, seen: list, errors: list):
-    real = client.stream_complete
+def first_request_only(client, seen: list, errors: list, first: list | None = None):
+    real, previous = client.stream_complete, getattr(client, "on_reasoning", None)
 
     @functools.wraps(real)
     async def guarded(*args, **kwargs):
         if seen:
             raise FirstStepDone
         seen.append(kwargs)
+        if first is not None:
+            sent = time.monotonic()
+
+            def stamped(forward):
+                async def on_piece(piece):
+                    if not first:
+                        first.append(time.monotonic() - sent)
+                    if forward is not None:
+                        await forward(piece)
+                return on_piece
+
+            kwargs["on_token"], client.on_reasoning = stamped(kwargs.get("on_token")), stamped(previous)
         try:
             return await real(*args, **kwargs)
         except Exception as exc:  # noqa: BLE001 - kept for the report, re-raised to the loop
@@ -162,6 +196,8 @@ def first_request_only(client, seen: list, errors: list):
         yield
     finally:
         del client.stream_complete
+        if first is not None:
+            client.on_reasoning = previous
 
 
 @contextlib.contextmanager
@@ -220,14 +256,30 @@ async def root_registry(skill_set: SkillSet, cfg: AgentConfig) -> tuple[ToolRegi
     return registry, state
 
 
-async def first_step_run(client, skill_set: SkillSet, cfg: AgentConfig, shape: Shape, prompt: str, work: Path) -> Step:
+async def first_step_run(client, skill_set: SkillSet, cfg: AgentConfig, shape: Shape, prompt: str, work: Path,
+                         engine=None) -> Step:
     registry, state = await root_registry(skill_set, cfg)
     bus = EventBus()
     gate = PermissionGate(boundary=None, workspace=work, grants=GrantStore(work.parent / "grants.yaml"), mode="read-only")
-    loop = root_loop(client, cfg, shape, skill_set, registry, state, gate, bus)
+    holder, spent = None, []
+    if engine is not None:
+        holder = Affordances(skill_set, SimpleNamespace(embedder=lambda: engine), state)
+        holder.warm().join(timeout=300)
+        cue = holder.cue
+
+        async def timed(turn, messages):
+            start = time.perf_counter()
+            try:
+                return await cue(turn, messages)
+            finally:
+                spent.append(time.perf_counter() - start)
+
+        holder.cue = timed
+    loop = root_loop(client, cfg, shape, skill_set, registry, state, gate, bus, holder)
     seen: list = []
     errors: list = []
-    with first_request_only(client, seen, errors):
+    firsts: list = []
+    with first_request_only(client, seen, errors, firsts):
         with contextlib.suppress(FirstStepDone):
             await loop.run_turn(prompt)
     if cause := failure(bus):
@@ -236,14 +288,17 @@ async def first_step_run(client, skill_set: SkillSet, cfg: AgentConfig, shape: S
     if errors and not any(e.action_type == "llm_response" for e in actions):
         raise RequestFailed(f"{type(errors[0]).__name__}: {str(errors[0])[:120]}")
     calls, finish, flaw = first_step(actions, getattr(client.config, "tool_call_mode", "native"))
-    return Step(calls, finish, seen[0]["messages"][0]["content"], flaw)
+    cued = bus.history(event_types=[AffordanceCued])
+    return Step(calls, finish, seen[0]["messages"][0]["content"], flaw, cue=cued[0].name if cued else None,
+                cue_s=spent[0] if spent else None, ttft_s=firsts[0] if firsts else None)
 
 
-async def settled(client, skill_set: SkillSet, cfg: AgentConfig, shape: Shape, prompt: str, work: Path) -> Step:
+async def settled(client, skill_set: SkillSet, cfg: AgentConfig, shape: Shape, prompt: str, work: Path,
+                  engine=None) -> Step:
     """One request, tried twice; a second failure is an `error` step, which the bar counts against the model."""
     for _ in range(2):
         try:
-            step = await first_step_run(client, skill_set, cfg, shape, prompt, work)
+            step = await first_step_run(client, skill_set, cfg, shape, prompt, work, engine)
             assert render_listing(skill_set.skills) in step.system
             return step
         except Exception as exc:  # noqa: BLE001 - any failure of one request is recorded, not fatal to the run
@@ -331,11 +386,109 @@ def passed(runs, creator_valid) -> bool:
 def out_of_list(runs, names) -> dict[str, list[tuple[str, str]]]:
     found: dict[str, list[tuple[str, str]]] = {"native": [], "xml": []}
     for run in runs:
+        found.setdefault(run.leg, [])
         for params in skill_params(run):
             name = params.get("name")
             if not (isinstance(name, str) and name in names):
                 found[run.leg].append((run.prompt, repr(name)))
     return found
+
+
+def cue_reason(folder, calibration, files) -> str | None:
+    if folder is None:
+        return MODEL_ABSENT
+    if calibration is None:
+        return "no calibration record for the embedding model"
+    return "the cached embedding model is not the calibrated one" if files != calibration.snapshot_files else None
+
+
+def cue_setup() -> tuple[ResonanceEngine | None, str | None, object | None]:
+    engine = ResonanceEngine(DEFAULT_EMBEDDING_MODEL)
+    try:
+        folder = engine.ensure_local()
+    except Exception:  # noqa: BLE001 - a model that cannot load is absent to the cue arm
+        folder = None
+    calibration = load_calibration(engine.model_name) if folder is not None else None
+    reason = cue_reason(folder, calibration, snapshot_files(folder) if folder is not None else None)
+    return engine if reason is None else None, reason, calibration
+
+
+def cue_counts(runs, leg: str, skill: str) -> tuple[int, int, int, int, int]:
+    """Runs, fired, precise (a matching prompt cued for its own skill), followed and ignored, for one leg and skill."""
+    own = [r for r in runs if r.leg == leg and r.skill == skill]
+    fired = [r for r in own if r.step.cue is not None]
+    followed = sum(any(p.get("name") == r.step.cue for p in skill_params(r)) for r in fired)
+    precise = sum(r.kind == "matching" and r.step.cue == r.skill for r in fired)
+    return len(own), len(fired), precise, followed, len(fired) - followed
+
+
+def closed_misses(runs) -> list[str]:
+    """Commit-message holdout requests the no-cue leg missed in every run and the cued leg hit in every run."""
+    def hits(leg):
+        found: dict[str, list[bool]] = {}
+        for r in runs:
+            if r.leg == leg and r.skill == "commit-message" and r.kind == "matching":
+                found.setdefault(r.prompt, []).append(hit(r))
+        return found
+    without, cued = hits("holdout"), hits("cue-holdout")
+    return [p for p, h in without.items() if len(h) == RUNS and not any(h) and len(cued.get(p, ())) == RUNS and all(cued[p])]
+
+
+def fit(rows, threshold: float, skill: str) -> tuple[int, int]:
+    matching = [(top, score) for item, label, top, score in rows if item == skill and label == "matching"]
+    return sum(top == skill and score > threshold for top, score in matching), len(matching)
+
+
+def cue_passed(runs) -> bool:
+    skills = sorted({r.skill for r in runs})
+    return bool(skills) and bool(closed_misses(runs)) and all(
+        meets(count(runs, "cue-holdout", s)[0], count(runs, "cue-holdout", s)[2]) and count(runs, "cue", s)[2] <= FALSE_BAR[0]
+        for s in skills)
+
+
+def cue_false_within_bar(runs) -> bool:
+    return all(count(runs, leg, s)[2] <= FALSE_BAR[0] for s in {r.skill for r in runs} for leg in ("cue", "cue-holdout"))
+
+
+def spread(values) -> str:
+    return f"median {median(values):.3f} s, maximum {max(values):.3f} s" if values else "not measured"
+
+
+def cue_section(cue: dict, runs) -> list[str]:
+    skills = sorted({r.skill for r in runs})
+    if cue["reason"]:
+        return ["## The cue", "", f"cue arm not run: {cue['reason']}", "",
+                *table(["skill", "holdout matching without the cue", "holdout near-miss plus unrelated without the cue"],
+                       [(s, f"{m} of {mt}", f"{f} of {ft}") for s in skills for m, mt, f, ft in [count(runs, "holdout", s)]]), ""]
+    rows = []
+    for s in skills:
+        for label, leg, without in (("calibration", "cue", f"{RUN_2[s][0]} of 30 (run 2)"),
+                                    ("holdout", "cue-holdout", "{} of {}".format(*count(runs, "holdout", s)[:2]))):
+            m, mt, f, ft = count(runs, leg, s)
+            n, fired, precise, followed, ignored = cue_counts(runs, leg, s)
+            rows.append((s, label, f"{m} of {mt}", without, f"{f} of {ft}", f"{f - RUN_2[s][1]:+d}", f"{fired} of {n}",
+                         f"{precise} of {fired}" if fired else "none fired", followed, ignored))
+    cue_s = [r.step.cue_s for r in runs if r.step.cue_s is not None]
+    ttft = [r.step.ttft_s for r in runs if r.step.ttft_s is not None]
+    fired = [r for r in runs if r.step.cue is not None]
+    return [
+        "## The cue", "",
+        f"Embedder: {cue['embedder']} · Threshold: {cue['threshold']} (derived at load from the stored rows of the record "
+        f"dated {cue['date'].isoformat()})",
+        "Calibration-set recall (fit: the prompts the threshold was derived from): "
+        + "; ".join(f"{s} {k} of {n}" for s in skills for k, n in [fit(cue["rows"], cue["threshold"], s)]), "",
+        *table(["skill", "set", "matching with the cue", "matching without", "near-miss plus unrelated with the cue",
+                "change from run 2", "fired", "precision", "followed", "ignored"], rows), "",
+        f"cue() wall time per turn: {spread(cue_s)} over {len(cue_s)} turns · first-token latency: {spread(ttft)} "
+        f"over {len(ttft)} responses that streamed a token",
+        "Closed misses (commit-message holdout, missed in every no-cue run, hit in every cued run): "
+        + ("; ".join(json.dumps(p) for p in closed_misses(runs)) or "none"),
+        f"Cue outcome: {'pass' if cue_passed(runs) else 'miss'}", "",
+        "### Fired cues", "",
+        *(table(["leg", "skill", "kind", "run", "request", "cued", "followed"],
+                [(r.leg, r.skill, r.kind, r.index, r.prompt, r.step.cue,
+                  "yes" if any(p.get("name") == r.step.cue for p in skill_params(r)) else "no") for r in fired])
+          if fired else ["none"]), ""]
 
 
 def report_path(day: str, run: int = 1) -> Path:
@@ -378,8 +531,8 @@ def creator_section(i: int, c: CreatorRun) -> list[str]:
         f"Other files written: {', '.join(others) or 'none'}", ""]
 
 
-def per_leg(found) -> str:
-    return ", ".join(f"{leg}: {sum(r.leg == leg for r in found)}" for leg in ("native", "xml"))
+def per_leg(found, legs=("native", "xml")) -> str:
+    return ", ".join(f"{leg}: {sum(r.leg == leg for r in found)}" for leg in legs)
 
 
 def render_report(meta: dict, runs, creator, stopped: str | None = None) -> str:
@@ -420,14 +573,15 @@ def render_report(meta: dict, runs, creator, stopped: str | None = None) -> str:
         "## XML tool-call mode, one run of the whole set (recorded, not judged)", "",
         *table(["skill", "matching", "near-miss plus unrelated", "no answer", "errors"],
                [(s, f"{m} of {mt}", f"{f} of {ft}", na, er) for s, m, mt, f, ft, na, er in xml]), "",
-        "## Requests that errored twice", "", f"Count: {per_leg(errored)}", "",
+        *(cue_section(meta["cue"], runs) if "cue" in meta else []),
+        "## Requests that errored twice", "", f"Count: {per_leg(errored, tuple(outside))}", "",
         *(table(["leg", "skill", "kind", "run", "request", "exception"],
                 [(r.leg, r.skill, r.kind, r.index, r.prompt, r.step.error) for r in errored]) if errored else ["none"]), "",
-        "## First responses that were no answer", "", f"Count: {per_leg(unanswered)}", "",
+        "## First responses that were no answer", "", f"Count: {per_leg(unanswered, tuple(outside))}", "",
         *(table(["leg", "skill", "kind", "run", "request", "what it was"],
                 [(r.leg, r.skill, r.kind, r.index, r.prompt, r.step.flaw) for r in unanswered]) if unanswered else ["none"]), "",
         "## Names outside the listing", "",
-        f"native: {names['native']}", f"xml: {names['xml']}", "",
+        *(f"{leg}: {text}" for leg, text in names.items()), "",
         "## Creator runs", "",
         f"Harness limits per run, not part of the bar: {CREATOR_MAX_ACTIONS} actions, {int(CREATOR_MAX_MINUTES)} minutes.", "",
         *table(["run", "request", "valid", "asks", "terminated"],
@@ -580,11 +734,14 @@ async def test_the_subject_model_picks_a_listed_skill_on_its_own(live_endpoint, 
         registry, _ = await root_registry(skill_set, cfg)
         tools = sorted(registry.get_tools_for_agent(cfg.name, cfg.division or "", cfg.tools))
         requests = [(skill, kind, text) for skill in names for kind in KINDS for text in sets[skill][kind]]
-        total = (RUNS + 1) * len(requests)
+        assert set(holdout()["skills"]) == set(names)
+        held_out = [(skill, kind, text) for skill in names for kind in KINDS for text in holdout()["skills"][skill][kind]]
+        engine, reason, calibration = cue_setup()
+        total = (RUNS + 1) * len(requests) + RUNS * len(held_out) + (RUNS * (len(requests) + len(held_out)) if engine else 0)
         runs: list[Run] = []
 
-        async def one(leg: str, index: int, skill: str, kind: str, text: str) -> None:
-            step = await settled(client, skill_set, cfg, shape, text, work)
+        async def one(leg: str, index: int, skill: str, kind: str, text: str, engine=None) -> None:
+            step = await settled(client, skill_set, cfg, shape, text, work, engine)
             runs.append(Run(leg, skill, kind, text, index, step))
             print(f"{leg} {len(runs)}/{total} {skill} {kind} run {index}: {[name for name, _ in step.calls]}"
                   f"{' ' + step.error if step.error else ''}", flush=True)
@@ -602,12 +759,22 @@ async def test_the_subject_model_picks_a_listed_skill_on_its_own(live_endpoint, 
             for _ in range(CREATOR_BAR[1]):
                 with neutral_sitting(fake_home) as (home, creator_work):
                     creator.append(await creator_run(client, home, prompts()["creator"], creator_work, base_url, window))
+            for index in range(1, RUNS + 1):
+                for request in held_out:
+                    await one("holdout", index, *request)
+            for leg, chosen in (("cue", requests), ("cue-holdout", held_out)) if engine is not None else ():
+                for index in range(1, RUNS + 1):
+                    for request in chosen:
+                        await one(leg, index, *request, engine=engine)
         except RunStopped as stop:
             stopped = str(stop)
         meta = {
             "day": day, "run": number, "commit": commit, "tree": tree, "sha": sha, "model": model, "base_url": base_url, "window": window,
             "temperature": TEMPERATURE, "effort": shape.effort, "loop_window": shape.window, "tools": tools, "listing": listing,
-            "minutes": int((time.monotonic() - started) // 60)}
+            "minutes": int((time.monotonic() - started) // 60),
+            "cue": {"reason": reason, "embedder": DEFAULT_EMBEDDING_MODEL, "threshold": calibration.threshold if calibration else None,
+                    "date": calibration.date if calibration else None,
+                    "rows": yaml.safe_load(CALIBRATION.read_text(encoding="utf-8"))[DEFAULT_EMBEDDING_MODEL]["rows"] if calibration else []}}
         path = write_report(day, render_report(meta, runs, creator, stopped), number)
     except BaseException:
         with contextlib.suppress(FileExistsError):
@@ -617,3 +784,6 @@ async def test_the_subject_model_picks_a_listed_skill_on_its_own(live_endpoint, 
     assert stopped is None, stopped
     valid = [c.valid for c in creator]
     assert passed(runs, valid), "; ".join(f"{s} {count(runs, 'native', s)}" for s in names) + f"; creator {sum(valid)} of {len(valid)}"
+    if reason is None:
+        assert cue_false_within_bar(runs), "; ".join(
+            f"{s}: cue {count(runs, 'cue', s)[2]}, cue-holdout {count(runs, 'cue-holdout', s)[2]} false" for s in names)

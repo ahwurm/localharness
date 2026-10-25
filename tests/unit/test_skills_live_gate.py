@@ -2,19 +2,24 @@
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import getpass
 import json
 import os
 import re
 from pathlib import Path
 
+import numpy as np
 import pytest
 
+from localharness.agent import affordance
+from localharness.agent.affordance import Calibration
 from localharness.agent.gate import derive_session_boundary
 from localharness.agent.gate_types import PermissionRequest
 from localharness.config import skills as skill_config
 from localharness.config.skills import LISTING_BUDGET_CHARS, shown
 from localharness.core.events import Action
+from localharness.core.types import is_harness_message
 from localharness.provider.client import ProviderAPIError, ProviderConnectionError
 from localharness.tools.builtin.skill_tool import render_listing
 import tests.integration.test_skills_model_live as live
@@ -24,6 +29,7 @@ from tests.integration.test_skills_model_live import (
     NOT_SUBJECT, RUNS, TEMPERATURE, VARIANT_A, VARIANT_B, CreatorRun, Run, RunStopped, Step, count, creator_asker, creator_run, first_step, first_step_run, hit,
     flaw_of, install, judge, loop_shape, meets, neutral_sitting, not_run_report, out_of_list, passed, prompts, render_report, root_config, run_number, settled,
     sizes, stop_on_failing_server, subject_served, write_report, xml_mode)
+from tests.unit.test_affordance import FakeEmbedder
 from tests.unit.test_image_hygiene import FORBIDDEN
 from tests.unit.test_skills_misc import lures
 
@@ -42,6 +48,8 @@ def test_the_bar_is_the_architects():
     assert TEMPERATURE == 0.6
     assert (CREATOR_MAX_ACTIONS, CREATOR_MAX_MINUTES) == (40, 30.0)
     assert MAX_ERROR_STREAK == 10
+    assert live.RUN_2 == {"bug-repro-test": (26, 0), "commit-message": (21, 0), "docstring-pass": (30, 0),
+                          "incident-summary": (24, 0), "release-notes": (30, 0), "skill-creator": (25, 0)}
 
 
 def reply(content=None, calls=(), finish="stop", reasoning=None) -> FakeLLMResponse:
@@ -66,8 +74,30 @@ async def test_a_scripted_first_step_that_loads_the_skill_is_read_from_a_real_ro
     step, skill_set, client = await scripted(tmp_path, monkeypatch, reply(calls=[SKILL]))
     assert step.calls == (("skill", {"name": "release-notes"}),)
     assert render_listing(skill_set.skills) in step.system
+    assert "## Where things are" in step.system
     assert client._index == 1
     assert step.flaw is None and step.error is None
+
+
+async def test_a_cued_first_step_records_the_cue_its_line_and_its_time(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    skill_set = install(tmp_path / "cfg")
+    cfg = root_config(tmp_path / "cfg")
+    (tmp_path / "snapshot").mkdir()
+    fake = FakeEmbedder(tmp_path / "snapshot")
+    fake.docs = np.eye(len(skill_set.skills))
+    fake.answer = fake.docs[[s.name for s in skill_set.skills].index("release-notes")]
+    monkeypatch.setattr(affordance, "load_calibration", lambda name: Calibration(0.5, {}, datetime.date(2026, 10, 25)))
+    client = Spy(reply(calls=[SKILL]), reply("second request"))
+    step = await first_step_run(client, skill_set, cfg, loop_shape(tmp_path / "cfg", cfg, URL, None), "Draft the release notes.",
+                                work, engine=fake)
+    assert step.cue == "release-notes" and step.cue_s is not None
+    messages = json.loads(client.sent[0])[0]
+    i = next(n for n, m in enumerate(messages) if m["role"] == "user" and m["content"] == "Draft the release notes.")
+    assert is_harness_message(messages[i + 1]) and messages[i + 1]["_lh"]["subtype"] == "affordance_cue"
+    assert "skill('release-notes')" in messages[i + 1]["content"]
 
 
 async def test_a_first_step_that_answers_in_text_calls_nothing(tmp_path, monkeypatch):
@@ -725,3 +755,67 @@ async def test_the_creator_asker_denies_everything_but_a_write_under_the_skills_
     allowed = ask("write", path=str(skills_dir / "x" / "SKILL.md"), content="x", mode="overwrite")
     assert (await asker(allowed)).kind == "allow_once"
     assert [a[2] for a in asks] == [False] * len(denied_asks(skills_dir)) + [True]
+
+
+def test_the_cue_arm_names_why_it_did_not_run(tmp_path):
+    calibration = Calibration(0.5, {"model.safetensors": "aa11"}, datetime.date(2026, 10, 25))
+    assert live.cue_reason(None, None, None) == live.MODEL_ABSENT == "model absent"
+    assert live.cue_reason(tmp_path, None, {}) == "no calibration record for the embedding model"
+    assert live.cue_reason(tmp_path, calibration, {"model.safetensors": "bb22"}) == "the cached embedding model is not the calibrated one"
+    assert live.cue_reason(tmp_path, calibration, {"model.safetensors": "aa11"}) is None
+
+
+def cue_meta(reason=None) -> dict:
+    rows = [[s, kind, s, score] for s in NAMES for kind, score in (("matching", 0.9), ("near_miss", 0.2), ("unrelated", 0.1))]
+    return {**META, "cue": {"reason": reason, "embedder": "Qwen/Qwen3-Embedding-0.6B", "threshold": 0.55,
+                            "date": datetime.date(2026, 10, 25), "rows": rows}}
+
+
+def cued(runs, cue_s=0.01, ttft_s=0.2) -> list[Run]:
+    return [dataclasses.replace(r, step=dataclasses.replace(r.step, cue=r.skill if r.kind == "matching" else None,
+                                                             cue_s=cue_s, ttft_s=ttft_s)) for r in runs]
+
+
+def test_a_report_without_the_embedder_says_the_cue_arm_did_not_run():
+    runs = [*synthetic(lambda s, k, n: k == "matching"), *synthetic(lambda s, k, n: k == "matching", "holdout")]
+    text = render_report(cue_meta("model absent"), runs, creator_runs(True, True, True))
+    assert "cue arm not run: model absent" in text
+    assert "| skill | holdout matching without the cue | holdout near-miss plus unrelated without the cue |" in text
+    assert "| release-notes | 30 of 30 | 0 of 60 |" in text and "Cue outcome:" not in text
+
+
+def test_a_cued_report_shows_the_cue_beside_run_2_and_the_closed_miss():
+    native = synthetic(lambda s, k, n: k == "matching")
+    without = synthetic(lambda s, k, n: k == "matching" and s != "commit-message", "holdout")
+    cue = cued(synthetic(lambda s, k, n: k == "matching", "cue"))
+    text = render_report(cue_meta(), [*native, *without, *cue, *cued(synthetic(lambda s, k, n: k == "matching", "cue-holdout"))],
+                         creator_runs(True, True, True))
+    assert "Calibration-set recall (fit" in text and "bug-repro-test 1 of 1;" in text
+    assert "Threshold: 0.55 (derived at load from the stored rows of the record dated 2026-10-25)" in text
+    assert "| bug-repro-test | calibration | 30 of 30 | 26 of 30 (run 2) | 0 of 60 | +0 | 30 of 90 | 30 of 30 | 30 | 0 |" in text
+    assert "| commit-message | holdout | 30 of 30 | 0 of 30 | 0 of 60 | +0 | 30 of 90 | 30 of 30 | 30 | 0 |" in text
+    assert "cue() wall time per turn: median 0.010 s" in text and "first-token latency: median 0.200 s" in text
+    closed = prompts()["skills"]["commit-message"]["matching"]
+    assert f"Closed misses (commit-message holdout, missed in every no-cue run, hit in every cued run): {json.dumps(closed[0])}" in text
+    assert "Cue outcome: pass" in text
+    low = cued(synthetic(at("release-notes", 23, 0), "cue-holdout"))
+    assert "Cue outcome: miss" in render_report(cue_meta(), [*native, *without, *cue, *low], creator_runs(True, True, True))
+    assert "Cue outcome: miss" in render_report(
+        cue_meta(), [*native, *synthetic(lambda s, k, n: k == "matching", "holdout"), *cue,
+                     *cued(synthetic(lambda s, k, n: k == "matching", "cue-holdout"))], creator_runs(True, True, True))
+
+
+def test_followed_and_ignored_are_read_from_the_cue_and_the_first_step():
+    def run(kind, cue, called=()):
+        return Run("cue", "release-notes", kind, "p", 1, Step(tuple(("skill", {"name": n}) for n in called), "stop", "", cue=cue))
+
+    runs = [run("matching", "release-notes", ["release-notes"]), run("matching", "release-notes"),
+            run("near_miss", "release-notes"), run("matching", "commit-message"), run("matching", None)]
+    assert live.cue_counts(runs, "cue", "release-notes") == (5, 4, 2, 1, 3)
+
+
+def test_false_triggers_on_either_cue_leg_fail_the_cue_assertion():
+    calibration = synthetic(lambda s, k, n: k == "matching", "cue")
+    assert live.cue_false_within_bar([*calibration, *synthetic(at("release-notes", 30, 3), "cue-holdout")]) is True
+    assert live.cue_false_within_bar([*calibration, *synthetic(at("release-notes", 30, 4), "cue-holdout")]) is False
+    assert live.cue_false_within_bar([*synthetic(at("release-notes", 30, 4), "cue"), *synthetic(at("release-notes", 30, 0), "cue-holdout")]) is False
