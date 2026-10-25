@@ -1062,3 +1062,111 @@ const row = $("cfgModel").children[0];
 console.log(JSON.stringify([row.textContent, row.children.length]));
 """)
     assert got == ["<img src=x onerror=alert(1)> · on e", 0]
+
+
+NODE_ONLY = pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+
+
+@NODE_ONLY
+@pytest.mark.parametrize("failure", [
+    "rej(new Error('down'))",
+    "res({status: 500, ok: false})",
+    "res({status: 200, ok: true, json: async () => { throw new Error('x'); }})",
+])
+def test_model_list_unavailable_keeps_the_rest_of_the_dialog(page, tmp_path, failure):
+    got = _models(page, tmp_path, f"""
+hello(false);
+S.modes = ["auto"];
+$("modelBtn").onclick(); await tick();
+{{ const {{res, rej}} = waiting[0]; {failure}; }}
+await tick();
+console.log(JSON.stringify({{rows: kids(), modes: $("modes").children.length}}));
+""")
+    assert got["rows"] == [["div", "model list unavailable"]] and got["modes"] >= 1
+
+
+@NODE_ONLY
+def test_model_list_asleep_offers_one_wake_that_refetches_once_on_the_next_notice(page, tmp_path):
+    got = _models(page, tmp_path, """
+hello(false);
+$("modelBtn").onclick(); await tick();
+const asleep = {status: 503, ok: false, json: async () => ({error: "chat asleep — /model list wakes it", asleep: true})};
+waiting[0].res(asleep); await tick();
+const shown = kids();
+$("cfgModel").children[1].onclick(); await tick();
+onFrame("Notice", {text: "listing"}); await tick();
+const afterFirst = waiting.length;
+onFrame("Notice", {text: "listing"}); await tick();
+console.log(JSON.stringify({shown, posts, afterFirst, afterSecond: waiting.length}));
+""")
+    assert got["shown"] == [["div", "chat asleep — /model list wakes it"], ["button", "wake chat and list"]]
+    assert got["posts"] == [["/api/sessions/s/command", {"text": "/model list"}]]
+    assert got["afterFirst"] == 2 and got["afterSecond"] == 2
+
+
+@NODE_ONLY
+def test_model_list_asleep_a_reopen_disarms_a_wake_tapped_before_the_close(page, tmp_path):
+    got = _models(page, tmp_path, """
+hello(false);
+$("modelBtn").onclick(); await tick();
+waiting[0].res({status: 503, ok: false, json: async () => ({error: "e", asleep: true})}); await tick();
+$("cfgModel").children[1].onclick(); await tick();
+$("cfg").close();
+$("modelBtn").onclick(); await tick();
+onFrame("Notice", {text: "listing"}); await tick();
+console.log(JSON.stringify(waiting.length));
+""")
+    assert got == 2
+
+
+@NODE_ONLY
+def test_model_list_not_ready_shows_the_error_and_no_wake(page, tmp_path):
+    got = _models(page, tmp_path, """
+hello(false);
+$("modelBtn").onclick(); await tick();
+waiting[0].res({status: 503, ok: false, json: async () => ({error: "chat not ready — building", asleep: false})});
+await tick();
+console.log(JSON.stringify(kids()));
+""")
+    assert got == [["div", "chat not ready — building"]]
+
+
+@NODE_ONLY
+def test_model_list_typed_bare_model_opens_the_list_and_every_other_line_posts(page, tmp_path):
+    got = _models(page, tmp_path, """
+hello(false);
+$("text").value = "/model"; await send(null); await tick();
+const opened = [$("cfg").open, waiting.length, posts.length, $("text").value];
+for (const t of ["/model list", "/model qwen3:32b"]) { $("text").value = t; await send(null); }
+console.log(JSON.stringify({opened, posts}));
+""")
+    assert got["opened"] == [True, 1, 0, ""]
+    assert got["posts"] == [["/api/sessions/s/message", {"text": "/model list"}],
+                            ["/api/sessions/s/message", {"text": "/model qwen3:32b"}]]
+
+
+@NODE_ONLY
+def test_model_list_queue_during_a_turn_says_the_tap_waits(page, tmp_path):
+    got = _models(page, tmp_path, """
+hello(true);
+$("modelBtn").onclick(); await tick();
+waiting[0].res(ok(LIST)); await tick();
+const head = $("cfgModelHead").textContent, cold = $("cfgModel").children[2].tagName;
+const sys = () => rows().filter((r) => r.cls === "row sys").map((r) => r.text);
+$("cfgModel").children[2].onclick(); await tick();
+$("modelBtn").onclick(); await tick();
+waiting[1].res(ok(LIST)); await tick();
+$("cfgModel").children[1].onclick(); await tick();
+const turn = sys();
+onFrame("Hello", {session_id: "s", mode: "repl", turn_in_progress: false,
+  protocol_version: PROTOCOL_VERSION, synthetic: false, model_state: "ready"});
+$("modelBtn").onclick(); await tick();
+waiting[2].res(ok(LIST)); await tick();
+$("cfgModel").children[1].onclick(); await tick();
+console.log(JSON.stringify({head, cold, turn, idle: sys().length, posts: posts.map((p) => p[1].text)}));
+""")
+    assert got["head"] == "a turn is running — a tap waits for it" and got["cold"] == "button"
+    assert got["turn"] == ["queued — asks to launch when this turn ends; keep the app open to answer",
+                           "queued — runs when this turn ends"]
+    assert got["idle"] == 2
+    assert got["posts"] == ["/model mixtral:8x7b", "/model llama3.1:8b", "/model llama3.1:8b"]
