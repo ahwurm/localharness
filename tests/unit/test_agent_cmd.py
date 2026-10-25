@@ -425,6 +425,23 @@ def test_agent_list_warns_and_skips_unreadable_agent_file(tmp_path, monkeypatch)
     assert line.endswith("; edit the file")
 
 
+@pytest.mark.parametrize("body", [b"\xff\xfe", b"- a\n"], ids=["not-utf8", "not-a-mapping"])
+def test_agent_list_reports_a_file_of_the_wrong_shape_and_lists_the_rest(tmp_path, monkeypatch, body):
+    monkeypatch.chdir(tmp_path)
+    cfg = tmp_path / "cfg"
+    _yaml(cfg / "agents", "healthy", {"name": "healthy", "role": "Parses fine"})
+    (cfg / "agents" / "odd.yaml").write_bytes(body)
+    result = runner.invoke(agent_app, ["list", "--config-dir", str(cfg)])
+    assert result.exit_code == 0 and result.exception is None
+    assert "healthy" in result.stdout and "odd" not in result.stdout
+    (line,) = [ln for ln in result.stderr.splitlines() if "odd.yaml" in ln]
+    assert line.endswith("; edit the file")
+    as_json = runner.invoke(agent_app, ["list", "--json", "--config-dir", str(cfg)])
+    assert as_json.exit_code == 0 and as_json.exception is None
+    assert [a["name"] for a in json.loads(as_json.stdout)] == ["healthy"]
+    assert "odd.yaml" in as_json.stderr
+
+
 # ---------------------------------------------------------------------------
 # agent list — shadows, --json fields, the unread-files line
 # ---------------------------------------------------------------------------

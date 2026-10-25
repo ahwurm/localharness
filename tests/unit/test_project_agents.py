@@ -489,6 +489,20 @@ def test_problem_kinds_come_from_the_exception(tmp_path, monkeypatch):
     assert by_stem["y"].kind == "load"
 
 
+def test_a_file_that_is_not_utf8_or_not_a_mapping_is_a_parse_problem(tmp_path):
+    loader, m, p = _layers(tmp_path)
+    p.mkdir(parents=True, exist_ok=True)
+    (p / "binary.yaml").write_bytes(b"\xff\xfe name: SECRETTEXT")
+    _write(p, "listy", "- SECRETTEXT\n")
+    _write(p, "scalar", "SECRETTEXT\n")
+    problems = {pr.path.stem: pr for pr in AgentCardRegistry(loader=loader).refresh()}
+    assert set(problems) == {"binary", "listy", "scalar"}
+    assert {pr.kind for pr in problems.values()} == {"parse"}
+    assert problems["binary"].reason == "not valid UTF-8"
+    assert problems["listy"].reason == problems["scalar"].reason == "top level is not a mapping"
+    assert all("SECRETTEXT" not in pr.line for pr in problems.values())
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
 def test_an_unreadable_file_is_no_problem(tmp_path):
     loader, m, p = _layers(tmp_path)
