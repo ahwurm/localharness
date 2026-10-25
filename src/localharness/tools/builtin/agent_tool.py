@@ -1,7 +1,8 @@
 """AgentTool: delegate tasks to subagents (Claude Code agent-as-tool pattern)."""
 from __future__ import annotations
 
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterable
+from pathlib import Path
 from typing import Any
 
 from localharness.tools.base import Tool, ToolResult, ToolSchema
@@ -15,6 +16,10 @@ HANDOFF_INSTRUCTION = (
 # The two budget shares a delegation can ask for (`org.children_budget.lookup_share` / `review_share`).
 # A shape picks only the share; a child's ceiling never moves with it.
 SHAPES = ("lookup", "review")
+
+BUILTIN_AGENT_NAMES = ("explore", "web-researcher", "cruncher", "search-verifier")
+INVALID_AGENT_NAME = "the file name is the agent name: lowercase letters, digits, hyphens"
+ROSTER_NAME_CAP = 24
 
 
 def compose_brief(
@@ -55,10 +60,46 @@ class AgentTool(Tool):
     def __init__(
         self,
         agent_runner: Callable[..., Coroutine[Any, Any, Any]],
-        available_agents: list[str] | None = None,
+        available_agents: Iterable[str] | None = None,
+        machine_agents_dir: Path | None = None,
+        project_agents_dir: Path | None = None,
     ) -> None:
         self._agent_runner = agent_runner
         self._available_agents = available_agents or []
+        self._machine_agents_dir = machine_agents_dir
+        self._project_agents_dir = project_agents_dir
+
+    def _build_text(self) -> str:
+        machine = self._machine_agents_dir
+        agents = str(machine) if machine else "~/.localharness/agents"
+        tools = f"{machine.parent / 'tools'}/" if machine else "~/.localharness/tools/"
+        where = (
+            f"A project specialist goes at {self._project_agents_dir}/<name>.yaml and is read by "
+            f"every session started in this project; a machine specialist goes at {agents}/<name>.yaml "
+            "and serves every project. "
+            if self._project_agents_dir is not None else
+            f"There is no project layer in this session, so write it at {agents}/<name>.yaml; "
+            "a project gets a layer with `localharness init --workspace` in its folder if it has "
+            "none yet; it is read from the next start made from that folder without `--config-dir` "
+            "or LOCALHARNESS_DIR/LOCALHARNESS_HOME. "
+        )
+        tighten = (
+            "A project specialist's permissions can only tighten the machine's. "
+            if self._project_agents_dir is not None else ""
+        )
+        return (
+            "You can also BUILD a new specialist as a YAML file (fields: name, role, "
+            "tools: {add: [tool names]}, permissions: {budget: {max_actions, "
+            "max_duration_minutes}}), then delegate to that name immediately. "
+            + where
+            + f"{INVALID_AGENT_NAME.capitalize()}. "
+            "Compose specialists from the existing tools; "
+            "never write your own tool for something the harness already provides (web search, fetch, files, delegation). "
+            "A specialist gets no MCP servers of its own: compose it from the harness tools (`tools.add`). "
+            + tighten
+            + f"A script you add under {tools} runs only as an unconfirmed shell command "
+            "(asked about in guarded mode) until they confirm it at their next `localharness start`. "
+        )
 
     def info(self) -> ToolSchema:
         agent_list = ", ".join(self._available_agents) if self._available_agents else "none configured"
@@ -69,16 +110,8 @@ class AgentTool(Tool):
             description=(
                 f"Delegate a task to a subagent. Available agents: {agent_list}. "
                 "Use this when a specialized agent would handle the task better than you. "
-                "Returns the agent's summary response. You can also BUILD a new specialist: "
-                "write ~/.localharness/agents/<name>.yaml (fields: name, role, "
-                "tools: {add: [tool names]}, permissions: {budget: {max_actions, "
-                "max_duration_minutes}}), then delegate to that name immediately. "
-                "Compose specialists from the existing tools; "
-                "never write your own tool for something the harness already provides (web search, fetch, files, delegation). "
-                "An MCP server, an embedding model or a looser permission you put in an agent "
-                "file waits for the user's confirmation at their next `localharness start`, and a "
-                "script you add under ~/.localharness/tools/ runs only as an unconfirmed shell "
-                "command (asked about in guarded mode) until they confirm it there. "
+                "Returns the agent's summary response. "
+                f"{self._build_text()}"
                 "If you only hold a LARGE document as a handle (you saw a stub like "
                 "\"[tool result evicted — call tool_result_get('<id>')]\" or a 'pg-N' page), pass "
                 "that id in grant_handles to let the subagent read the full body by handle — the "

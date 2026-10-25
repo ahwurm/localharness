@@ -1,14 +1,23 @@
 """Tests for the agent delegation tool."""
+import re
+
 import pytest
 from unittest.mock import AsyncMock
 
 from localharness.tools.builtin.agent_tool import AgentTool
 
+BOUND = (
+    "You can also BUILD a new specialist as a YAML file (fields: name, role, tools: {add: [tool names]}, permissions: {budget: {max_actions, max_duration_minutes}}), then delegate to that name immediately. A project specialist goes at <P>/<name>.yaml and is read by every session started in this project; a machine specialist goes at <M>/agents/<name>.yaml and serves every project. The file name is the agent name: lowercase letters, digits, hyphens. Compose specialists from the existing tools; never write your own tool for something the harness already provides (web search, fetch, files, delegation). A specialist gets no MCP servers of its own: compose it from the harness tools (`tools.add`). A project specialist's permissions can only tighten the machine's. A script you add under <M>/tools/ runs only as an unconfirmed shell command (asked about in guarded mode) until they confirm it at their next `localharness start`."
+)
+UNBOUND = (
+    'You can also BUILD a new specialist as a YAML file (fields: name, role, tools: {add: [tool names]}, permissions: {budget: {max_actions, max_duration_minutes}}), then delegate to that name immediately. There is no project layer in this session, so write it at <M>/agents/<name>.yaml; a project gets a layer with `localharness init --workspace` in its folder if it has none yet; it is read from the next start made from that folder without `--config-dir` or LOCALHARNESS_DIR/LOCALHARNESS_HOME. The file name is the agent name: lowercase letters, digits, hyphens. Compose specialists from the existing tools; never write your own tool for something the harness already provides (web search, fetch, files, delegation). A specialist gets no MCP servers of its own: compose it from the harness tools (`tools.add`). A script you add under <M>/tools/ runs only as an unconfirmed shell command (asked about in guarded mode) until they confirm it at their next `localharness start`.'
+)
 
-def _make_agent_tool(runner=None, agents=None):
+
+def _make_agent_tool(runner=None, agents=None, **kw):
     if runner is None:
         runner = AsyncMock(return_value="Task completed successfully.")
-    return AgentTool(agent_runner=runner, available_agents=agents or ["coder", "researcher"])
+    return AgentTool(agent_runner=runner, available_agents=agents or ["coder", "researcher"], **kw)
 
 
 def test_agent_tool_info_schema():
@@ -245,3 +254,59 @@ async def test_a_shape_through_run_reaches_the_runner():
     result = await _make_agent_tool(runner=runner).run(agent_id="coder", task="x", shape="review")
     assert result.success
     runner.assert_awaited_once_with("coder", "x", None, shape="review")
+
+
+def _text(**kw):
+    return _make_agent_tool(**kw).info().description
+
+
+def test_the_bound_text_names_both_dirs_verbatim(tmp_path):
+    machine = tmp_path / "home" / "agents"
+    project = tmp_path / "[old] proj" / ".localharness" / "agents"
+    description = _text(machine_agents_dir=machine, project_agents_dir=project)
+
+    assert BOUND.replace("<P>", str(project)).replace("<M>", str(machine.parent)) in description
+    assert "<P>" not in description and "<M>" not in description
+    assert "read by every session started in this project" in description
+
+
+def test_the_unbound_text_says_there_is_no_project_layer(tmp_path):
+    machine = tmp_path / "home" / "agents"
+    description = _text(machine_agents_dir=machine, project_agents_dir=None)
+
+    assert UNBOUND.replace("<M>", str(machine.parent)) in description
+    assert "no project layer in this session" in description
+    assert "agent create --project" not in description
+    assert "permissions can only tighten" not in description
+
+
+@pytest.mark.parametrize("project", [None, "bound"])
+def test_a_custom_home_is_rendered_never_the_tilde(tmp_path, project):
+    home = tmp_path / "custom home"
+    description = _text(machine_agents_dir=home / "agents",
+                        project_agents_dir=tmp_path / "p" / "agents" if project else None)
+
+    assert f"{home}/agents/<name>.yaml" in description and f"{home}/tools/" in description
+    assert "~/.localharness" not in description
+
+
+def test_no_machine_dir_renders_the_default_paths():
+    for project in (None, "p"):
+        description = _text(project_agents_dir=project)
+        assert "~/.localharness/agents/<name>.yaml" in description
+        assert "~/.localharness/tools/" in description
+
+
+@pytest.mark.parametrize("project", [None, "bound"])
+def test_neither_text_claims_git_or_a_confirmation_wait(tmp_path, project):
+    description = _text(machine_agents_dir=tmp_path / "agents",
+                        project_agents_dir=tmp_path / "p" if project else None)
+
+    assert "waits for the user's confirmation" not in description
+    assert "count only after" not in description
+    assert re.search(r"\bgit\b|commit", description, re.I) is None
+    assert "The file name is the agent name: lowercase letters, digits, hyphens." in description
+    assert ("A specialist gets no MCP servers of its own: compose it from the harness tools "
+            "(`tools.add`).") in description
+    assert ("A project specialist's permissions can only tighten the machine's." in description) == bool(project)
+
