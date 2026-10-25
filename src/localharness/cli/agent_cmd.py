@@ -134,7 +134,7 @@ def agent_create(
         use_global = False
     elif no_input:
         # --no-input means nobody is watching, and this prompt has no safe default: writing to the
-        # wrong layer is exactly the mistake the flag exists to prevent (A-B3's whole story).
+        # wrong layer is exactly the mistake the flag exists to prevent.
         err_console.print(
             "[bold red]Error:[/bold red] --no-input needs a scope: pass --global or --project."
         )
@@ -194,12 +194,7 @@ def agent_create(
 
         found_layer = resolve_workspace_layer(config_dir, interactive=False if no_input else None)
         if found_layer is None:
-            # B5/B6: None here is one of two very different situations. Nothing found at all is
-            # the BOOTSTRAP case — a fresh project's first agent creates the workspace, silently,
-            # exactly as v0.12 did (LAYR-03). Found-but-not-in-use (outside the project and
-            # untrusted, or undecided with no terminal to ask) is not: falling back silently mints
-            # a SECOND dotdir beside the one the user already has, and the receipt below would
-            # name a path that looks like the workspace they meant. Announce it and name both.
+            # None: nothing found (bootstrap ./.localharness), or found but not in use (name both paths)
             skipped = discover_workspace_dir()
             if skipped is not None:
                 err_console.print(
@@ -225,9 +220,7 @@ def agent_create(
         err_console.print("[bold red]Error:[/bold red] " + escape(f"cannot write {target}: {reason}"), soft_wrap=True)
         raise typer.Exit(code=1)
 
-    # escape() around the path, markup outside it: the target lives under the user's own
-    # directory names, and a project folder named `[old] proj` would otherwise print as a path
-    # that does not exist — under a green checkmark saying the file is there (39-05).
+    # escape() the path: a folder named "[old] proj" is data, not markup
     console.print("[green]✓[/green] " + escape(f"Agent '{name}' created at {target}"),
                   soft_wrap=True)
     console.print("  Edit the YAML to customize role, tools, and permissions.")
