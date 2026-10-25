@@ -614,7 +614,7 @@ async def test_a_bound_start_advertises_project_and_machine_agents_from_the_regi
     assert isinstance(registry, AgentCardRegistry) and registry.loader is not None
     assert kw["load_agent"] == registry.load
     assert list(registry) == [*BUILTIN_AGENT_NAMES, "proj-helper", "solo", "mach-helper"]
-    assert _one(rec, "repl")["on_agent_deployed"] == registry.load
+    assert "on_agent_deployed" not in _one(rec, "repl")
     (loop,) = agents
     tool = loop._tools._tools["global"]["agent"]
     assert tool._available_agents is registry

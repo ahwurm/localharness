@@ -315,7 +315,6 @@ class OrchestratorREPL:
         config_dir: Path | None = None,
         workspace: Path | None = None,
         harness_config: Any = None,
-        on_agent_deployed: Any = None,
         gate: Any = None,
         instructions: Any = None,
         on_plugin_switch: Any = None,
@@ -361,11 +360,6 @@ class OrchestratorREPL:
         # The normalized base_url of the endpoint the ledger entry is being tracked for; None until a
         # live client answers (a test double without one stays None).
         self._effort_endpoint: Optional[str] = self._llm_base_url()
-        # #58: called with the deployed agent's name after a successful in-session creation,
-        # to register it into the LIVE session (card registry + AgentTool advertisement) so
-        # /agents lists it and the model can delegate to it without a restart. None in tests
-        # / non-interactive paths that don't wire it.
-        self._on_agent_deployed = on_agent_deployed
         # /plugins enable|disable NAME: the session's answer, `await hook(verb, name)` — a line to
         # show, or None to restart (`hook("list", "")` is bare /plugins). start_cmd passes it for a
         # terminal session only; None elsewhere.
@@ -1762,7 +1756,11 @@ class OrchestratorREPL:
                 clear()
 
     async def _slash_agents(self, args: str, args_lower: str) -> None:
-        cards = self._orchestrator._card_registry.all_cards()
+        from localharness.channels.base import one_line
+
+        registry = self._orchestrator._card_registry
+        registry.refresh()
+        cards = registry.all_cards()
         if not cards:
             await self._channel.send_message(
                 "No agents configured. Describe what you need and I'll create one.",
@@ -1770,13 +1768,11 @@ class OrchestratorREPL:
             )
         else:
             lines = ["Configured agents:"]
-            for card in cards:
-                status_mark = f"[{card.status}]" if hasattr(card, "status") else ""
-                lines.append(f"  {card.name} -- {card.description[:80]} {status_mark}")
-            await self._channel.send_message(
-                "\n".join(lines),
-                metadata={"style": "system.info"},
-            )
+            lines += [
+                f"  {card.name} -- {one_line(card.description)[:80]}" + (f" ({card.origin})" if card.origin else "")
+                for card in cards
+            ]
+            await self._channel.send_message("\n".join(lines), metadata={"style": "system.info"})
 
     # ------------------------------------------------------------------ #
     # /model — list and swap models
@@ -3072,15 +3068,10 @@ class OrchestratorREPL:
             # Per user decision: after creation, back to prompt (no auto-handoff)
             workflow.transition("done")
             self._orchestrator._active_workflow = None
-            # #58: register the new agent into the LIVE session so /agents lists it and the
-            # model can delegate to it without a restart. config_path.stem is the deployed
-            # name (deploy_config honors the confirmed YAML's own name). Best-effort: a
-            # registration hiccup must not turn a successful deploy into a failure.
-            if self._on_agent_deployed is not None:
-                try:
-                    self._on_agent_deployed(config_path.stem)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("post-deploy live registration failed for %s: %s", config_path.stem, exc)
+            try:  # a registration hiccup must not turn a written agent into a failed deploy
+                self._orchestrator._card_registry.load(config_path.stem)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("post-deploy live registration failed for %s: %s", config_path.stem, exc)
             await self._channel.send_message(
                 f"Agent deployed to {config_path}",
                 metadata={"style": "system.info"},
