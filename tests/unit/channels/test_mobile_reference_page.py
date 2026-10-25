@@ -1389,6 +1389,33 @@ console.log(JSON.stringify(out));
     assert got == [0, 1, 1, 2, 3, 3, 3]
 
 
+@NODE_ONLY
+def test_launch_list_a_hello_with_the_dialog_open_on_a_launch_refetches_and_frees_the_rows(page, tmp_path):
+    got = _launch(page, tmp_path, """
+const buttons = () => rowKinds().filter((r) => r[0] === "button");
+const hello2 = () => onFrame("Hello", {session_id: "s", mode: "repl", turn_in_progress: false,
+  protocol_version: PROTOCOL_VERSION, synthetic: false, model_state: "ready"});
+await openList(LIST);
+hello2(); await tick();
+const idle = waiting.length;
+$("cfg").close();
+await openList(withLaunch("mixtral:8x7b", "qwen3:32b"));
+const held = buttons().every((r) => r[1]);
+$("cfg").close();
+hello2(); await tick();
+const closed = waiting.length;
+$("modelBtn").onclick(); await tick(); await answer(withLaunch("mixtral:8x7b", "qwen3:32b"));
+hello2(); await tick();
+const fetched = waiting.length;
+await answer(withLaunch(null, "qwen3:32b"));
+console.log(JSON.stringify({idle, held, closed, fetched, free: buttons().every((r) => !r[1]),
+  head: head()}));
+""")
+    assert got["idle"] == 0 and got["held"] is True and got["closed"] == 0
+    assert got["fetched"] == 1 and got["free"] is True
+    assert got["head"] == "mixtral:8x7b not switched — the model is unchanged"
+
+
 ASK_PRELUDE = """
 const answers = [{status: "confirm_required", confirm_token: "tok-1", detail: "sure?"},
                  {status: "recorded", decision: "Launch"}];

@@ -925,6 +925,7 @@ function onFrame(name, d) {
           && location.reload) { location.reload(); return; }
       S.session = d.session_id; S.mode = d.mode; S.turn = d.turn_in_progress; S.activity = "";
       if (d.model) $("model").textContent = d.model;
+      if (S.launchName && $("cfg").open) loadModels();
       $("state").textContent = d.synthetic ? "REPLAY" : "connected";
       if (d.synthetic) add(el("div", "row sys",
         "REPLAY: the streaming and instrument frames on this connection are SYNTHESIZED from a " +
