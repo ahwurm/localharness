@@ -982,6 +982,13 @@ async def test_protocol_serves_the_commands_and_modes_from_their_own_sources(tmp
     assert any("must not be rendered" in rule.lower() for rule in body["transcript_rules"])
 
 
+async def test_protocol_says_the_answer_verb_covers_the_picker_confirm_option(tmp_path):
+    _, _, _, client = await _stack(tmp_path)
+    verbs = (await client.get("/api/protocol", headers=BEARER)).json()["verbs"]
+    note = next(v["note"] for v in verbs if v["path"] == "/api/permissions/{request_id}/answer")
+    assert "the kinds that need a second POST: the _always kinds and a picker's confirm option" in note
+
+
 async def test_schema_is_generated_from_the_models(tmp_path):
     _, _, _, client = await _stack(tmp_path)
     body = (await client.get("/api/schema", headers=BEARER)).json()

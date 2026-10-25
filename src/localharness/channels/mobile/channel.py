@@ -1127,7 +1127,12 @@ class MobileChannel(ChannelAdapter):
         return self.client_count > 0
 
     async def run_picker(
-        self, options: Sequence[str], current: str | None, *, prompt: str | None = None
+        self,
+        options: Sequence[str],
+        current: str | None,
+        *,
+        prompt: str | None = None,
+        confirm: str | None = None,
     ) -> str | None:
         """The phone's picker (spec 16 7.1, D-33): one option per button, the existing ask frame.
 
@@ -1156,7 +1161,7 @@ class MobileChannel(ChannelAdapter):
             reason=text,
             display=text,
             options_legend=PICKER_LEGEND_TEMPLATE.format(current=current or "none"),
-            options=[AskOption(kind=o, name=o) for o in opts],
+            options=[AskOption(kind=o, name=o, confirm_required=o == confirm) for o in opts],
         )
         ask = _OpenAsk(request_id, None, frame)
         self._open_asks[request_id] = ask
@@ -1248,7 +1253,7 @@ class MobileChannel(ChannelAdapter):
         return [json.loads(a.frame.model_dump_json()) for a in self._open_asks.values()]
 
     def answer_ask(self, request_id: str, kind: str, confirm: Optional[str] = None) -> dict:
-        """Answer a blocking ask. Idempotent, and two-phase for the `_always` kinds.
+        """Answer a blocking ask. Idempotent, and two-phase for the `_always` kinds and a picker's confirm option.
 
         **The second tap is enforced HERE, on the server, not in the page.** `allow_always`
         writes a grant to the global `~/.localharness/grants.yaml` keyed by workspace realpath
@@ -1267,7 +1272,8 @@ class MobileChannel(ChannelAdapter):
         if not isinstance(kind, str) or kind not in {o.kind for o in ask.frame.options}:
             return {"status": "invalid", "detail": f"{kind!r} is not offered for this question"}
 
-        if kind in ALWAYS_KINDS and ask.frame.klass != TRUST_KLASS:
+        option = next(o for o in ask.frame.options if o.kind == kind)
+        if kind in ALWAYS_KINDS and ask.frame.klass != TRUST_KLASS or option.confirm_required:
             now = time.monotonic()
             held = ask.confirm
             live = held if (held and held[1] == kind and held[2] > now) else None
@@ -1289,8 +1295,11 @@ class MobileChannel(ChannelAdapter):
                     "status": "confirm_required",
                     "confirm_token": live[0],
                     "expires_in": round(live[2] - now, 3),
-                    "detail": "this answer is permanent, global and has no revoke command; "
-                              "repeat the request with confirm_token to record it",
+                    "detail": (
+                        "this answer is permanent, global and has no revoke command; "
+                        "repeat the request with confirm_token to record it"
+                        if kind in ALWAYS_KINDS else ask.frame.reason
+                    ),
                 }
         self._settle(ask, kind)
         return {"status": "recorded", "decision": kind}
