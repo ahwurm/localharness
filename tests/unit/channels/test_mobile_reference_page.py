@@ -1235,6 +1235,37 @@ console.log(JSON.stringify([checking, chip()]));
 
 
 @NODE_ONLY
+@pytest.mark.parametrize("failure", [
+    "Promise.reject(new Error('down'))",
+    "Promise.resolve({status: 409, json: async () => ({error: 'not ready'})})",
+    "Promise.resolve({status: 502, json: async () => { throw new Error('x'); }})",
+])
+def test_chip_a_failed_post_clears_the_pending_check(page, tmp_path, failure):
+    got = _chip(page, tmp_path, """
+const mock = globalThis.fetch;
+globalThis.fetch = (path, opts) => opts && opts.method === "POST" ? FAILURE : mock(path, opts);
+$("modelBtn").onclick(); await tick();
+waiting[0].res(ok(LIST)); await tick();
+$("cfgModel").children[2].onclick(); await tick();
+console.log(JSON.stringify([S.checking, chip()]));
+""".replace("FAILURE", failure))
+    assert got == [None, "harness"]
+
+
+@NODE_ONLY
+def test_chip_a_hello_ends_a_pending_check(page, tmp_path):
+    got = _chip(page, tmp_path, """
+$("modelBtn").onclick(); await tick();
+waiting[0].res(ok(LIST)); await tick();
+$("cfgModel").children[2].onclick(); await tick();
+const checking = chip();
+hello(false);
+console.log(JSON.stringify([checking, chip(), S.checking]));
+""")
+    assert got == ["checking mixtral:8x7b…", "harness", None]
+
+
+@NODE_ONLY
 def test_chip_a_tap_during_a_turn_shows_no_check(page, tmp_path):
     got = _chip(page, tmp_path, """
 hello(true);

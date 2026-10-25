@@ -924,6 +924,7 @@ function onFrame(name, d) {
       if (!d.synthetic && S.session && d.session_id && d.session_id !== S.session
           && location.reload) { location.reload(); return; }
       S.session = d.session_id; S.mode = d.mode; S.turn = d.turn_in_progress; S.activity = "";
+      S.checking = null;
       if (d.model) $("model").textContent = d.model;
       if (S.launchName && $("cfg").open) loadModels();
       $("state").textContent = d.synthetic ? "REPLAY" : "connected";
@@ -1700,7 +1701,9 @@ function tapModel(r) {
   if (!S.turn && r.kind === "cold") { S.checking = r.label || r.name; paint(); }
   if (S.turn) add(el("div", "row sys", r.kind === "cold" ? MODEL_QUEUED_ASK : MODEL_QUEUED));
   $("cfg").close();
-  post(`/api/sessions/${S.session || "current"}/command`, { text: "/model " + r.name });
+  const unchecked = () => { S.checking = null; paint(); };
+  post(`/api/sessions/${S.session || "current"}/command`, { text: "/model " + r.name })
+    .then(res => { if (res.error || typeof res.status === "number") unchecked(); }, unchecked);
 }
 function modelRow(r, off) {
   const tags = [];
