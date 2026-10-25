@@ -1199,6 +1199,11 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers",
+        "live_embed: opt-in embedder-only test of the skill cue against the local embedding model, no chat model; "
+        "skipped by default unless LOCALHARNESS_LIVE_EMBED=1 is set",
+    )
+    config.addinivalue_line(
+        "markers",
         "unsets_home: this test deletes the home env vars on purpose (going without a $HOME is the "
         "behaviour under test), so it escapes the session-wide fake home; the tripwire fingerprints "
         "the real ~/.localharness around it instead. Never add this to silence the tripwire",
@@ -1230,6 +1235,16 @@ def _skip_off_plugin(request):
 def _skip_live_vllm(request):
     if request.node.get_closest_marker("live_vllm") and not os.environ.get("LOCALHARNESS_LIVE_VLLM"):
         pytest.skip("live_vllm opt-in (set LOCALHARNESS_LIVE_VLLM=1 with a vLLM endpoint up)")
+
+
+LIVE_EMBED_SKIP = ("live_embed opt-in (set LOCALHARNESS_LIVE_EMBED=1 with the default embedding model in the local "
+                   "Hugging Face cache)")
+
+
+@pytest.fixture(autouse=True)
+def _skip_live_embed(request):
+    if request.node.get_closest_marker("live_embed") and not os.environ.get("LOCALHARNESS_LIVE_EMBED"):
+        pytest.skip(LIVE_EMBED_SKIP)
 
 
 # -----------------------------------------------------------------------------
@@ -1323,3 +1338,21 @@ def live_endpoint():
             "Set LOCALHARNESS_LIVE_MODEL to a model the endpoint actually serves."
         )
     return base
+
+
+@pytest.fixture(scope="module")
+def live_embedder():
+    if not os.environ.get("LOCALHARNESS_LIVE_EMBED"):
+        pytest.skip(LIVE_EMBED_SKIP)
+    from localharness.memory.resonance import DEFAULT_EMBEDDING_MODEL, ResonanceEngine
+
+    engine = ResonanceEngine(DEFAULT_EMBEDDING_MODEL)
+    try:
+        folder = engine.ensure_local()
+    except Exception as exc:  # noqa: BLE001 — an opted-in run that cannot load is a hard fail
+        pytest.fail(f"LOCALHARNESS_LIVE_EMBED is set but {DEFAULT_EMBEDDING_MODEL} cannot load: {exc}")
+    if folder is None:
+        pytest.fail(f"LOCALHARNESS_LIVE_EMBED is set but {DEFAULT_EMBEDDING_MODEL} is not complete in the local "
+                    "Hugging Face cache; the suite fakes HOME, so point HF_HOME at your real cache, or run "
+                    f"`hf download {DEFAULT_EMBEDDING_MODEL}`")
+    return engine, folder
