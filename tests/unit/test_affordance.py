@@ -18,7 +18,7 @@ import yaml
 
 from localharness.agent import affordance, subagent
 from localharness.agent.affordance import (
-    Calibration, Cue, calibrate, cued_skills, descriptions_digest, held_skills, load_calibration, normalise, pick,
+    Affordances, Calibration, Cue, calibrate, cued_skills, descriptions_digest, held_skills, load_calibration, normalise, pick,
     scores, snapshot_files, task_skills,
 )
 from localharness.agent.context import ContentStore, ContextManager, TokenCounter, fixed_tokens
@@ -766,3 +766,207 @@ def test_task_skills_reads_only_the_live_records_skill_references(tmp_path):
 ])
 def test_a_name_is_named_by_a_whole_token_up_to_punctuation_and_case(turn, named):
     assert affordance._named_in(turn, ["commit-message", "review"]) == named
+
+
+# --- the cue: the holder --------------------------------------------------------------------------
+
+SKILLS = (COMMIT, NOTES, REVIEW)
+TURN = "what goes in the history entry"
+VECTORS = {COMMIT.description: [1.0, 0.0, 0.0], NOTES.description: [0.0, 1.0, 0.0],
+           REVIEW.description: [0.0, 0.0, 1.0], TURN: [1.0, 0.0, 0.0]}
+
+
+class FakeEmbedder:
+    """A query embedder over a text -> vector table; records each call. `answer` overrides every turn's vector."""
+
+    def __init__(self, folder, table=VECTORS, model_name=MODEL):
+        self.folder, self.table, self.model_name = folder, table, model_name
+        self.docs = self.answer = None
+        self.busy = False
+        self.located, self.embedded, self.asked = 0, [], []
+
+    def ensure_local(self):
+        self.located += 1
+        if isinstance(self.folder, Exception):
+            raise self.folder
+        return self.folder
+
+    def embed_docs(self, texts):
+        self.embedded.append(list(texts))
+        return np.array([self.table[t] for t in texts]) if self.docs is None else self.docs
+
+    def try_embed_query(self, text):
+        self.asked.append(text)
+        return None if self.busy else np.array(self.table[text] if self.answer is None else self.answer)
+
+
+def _slot(embedder):
+    return MemorySlot(_Answers(embedder), None, "memory")
+
+
+def _record(tmp_path, monkeypatch, model_name=MODEL):
+    """A calibration record for model_name deriving 0.50, pinned to a linked snapshot it builds; returns its folder."""
+    folder = _snapshot(tmp_path / "hub" / "snapshots" / "rev", {"config.json": "aa11", "model.safetensors": "bb22"})
+    _patch_record(tmp_path, monkeypatch, {model_name: _entry(files=snapshot_files(folder))})
+    return folder
+
+
+def _warmed(tmp_path, monkeypatch, task_state=None, skills=SKILLS):
+    fake = FakeEmbedder(_record(tmp_path, monkeypatch))
+    holder = Affordances(SkillSet(skills, (), ()), _slot(fake), task_state)
+    holder.warm().join(timeout=5)
+    return holder, fake
+
+
+async def test_a_warmed_holder_cues_the_top_skill_for_a_turn_that_resembles_it(tmp_path, monkeypatch):
+    holder, fake = _warmed(tmp_path, monkeypatch)
+    assert await holder.cue(TURN, []) == Cue("commit-message", "machine", affordance._line(COMMIT))
+    assert fake.embedded == [[s.description for s in SKILLS]] and fake.asked == [TURN]
+
+
+def _raise(exc):
+    def raising(*args, **kwargs):
+        raise exc
+    return raising
+
+
+@pytest.mark.parametrize("mutate, located, embedded", [
+    (lambda f, t, m: setattr(f, "model_name", "lh-test/custom"), 0, 0),
+    (lambda f, t, m: setattr(f, "folder", None), 1, 0),
+    (lambda f, t, m: _patch_record(t, m, "- a list\n"), 0, 0),
+    (lambda f, t, m: m.setattr(affordance, "snapshot_files", _raise(OSError("unreadable"))), 1, 0),
+    (lambda f, t, m: setattr(f, "folder", ResonanceUnavailable(MODEL, "no package")), 1, 0),
+    (lambda f, t, m: _patch_record(t, m, {MODEL: _entry(files={"config.json": "ff99"})}), 1, 0),
+    (lambda f, t, m: setattr(f, "docs", np.eye(3)[:2]), 1, 1),
+    (lambda f, t, m: setattr(f, "docs", np.array([[np.nan, 0, 0], [0, 1, 0], [0, 0, 1]])), 1, 1),
+    (lambda f, t, m: setattr(f, "docs", np.array([[0.0, 0, 0], [0, 1, 0], [0, 0, 1]])), 1, 1),
+], ids=["no entry", "not local", "not a mapping", "pin raises", "refused", "other snapshot", "short", "nan", "zero row"])
+def test_warm_turns_the_cue_off_cheapest_first_with_one_info_line(tmp_path, monkeypatch, caplog, mutate, located,
+                                                                   embedded):
+    fake, hooked = FakeEmbedder(_record(tmp_path, monkeypatch)), []
+    mutate(fake, tmp_path, monkeypatch)
+    monkeypatch.setattr("threading.excepthook", hooked.append)
+    holder = Affordances(SkillSet(SKILLS, (), ()), _slot(fake), None)
+    with caplog.at_level(logging.INFO, logger="localharness.agent.affordance"):
+        holder.warm().join(timeout=5)
+    assert holder._ready is None and hooked == []
+    assert fake.located == located and len(fake.embedded) == embedded
+    assert [r.levelno for r in caplog.records if r.name == "localharness.agent.affordance"] == [logging.INFO]
+
+
+async def test_an_empty_slot_or_a_holder_never_warmed_never_cues(tmp_path, monkeypatch):
+    holder = Affordances(SkillSet(SKILLS, (), ()), MemorySlot(), None)
+    holder.warm().join(timeout=5)
+    assert holder._ready is None and await holder.cue(TURN, []) is None
+    fake = FakeEmbedder(_record(tmp_path, monkeypatch))
+    assert await Affordances(SkillSet(SKILLS, (), ()), _slot(fake), None).cue(TURN, []) is None and fake.asked == []
+
+
+async def test_a_blank_turn_is_not_embedded(tmp_path, monkeypatch):
+    holder, fake = _warmed(tmp_path, monkeypatch)
+    assert await holder.cue("  \n", []) is None and fake.asked == []
+
+
+async def test_a_busy_embedder_skips_this_turn_and_the_next_still_cues(tmp_path, monkeypatch):
+    holder, fake = _warmed(tmp_path, monkeypatch)
+    fake.busy = True
+    assert await holder.cue(TURN, []) is None
+    fake.busy = False
+    assert (await holder.cue(TURN, [])).name == "commit-message"
+
+
+@pytest.mark.parametrize("answer", [[1.0, 0.0], [np.nan, 0.0, 0.0], [0.0, 0.0, 0.0]], ids=["width", "nan", "zero"])
+async def test_a_bad_turn_vector_turns_the_holder_off_for_the_sitting_with_one_warning(tmp_path, monkeypatch, caplog,
+                                                                                       answer):
+    holder, fake = _warmed(tmp_path, monkeypatch)
+    fake.answer = answer
+    with caplog.at_level(logging.WARNING, logger="localharness.agent.affordance"):
+        assert await holder.cue(TURN, []) is None
+    fake.answer = None
+    assert await holder.cue(TURN, []) is None and holder._ready is None
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+
+@pytest.mark.parametrize("turn, named, answer, cued", [
+    ("a turn", "commit-message", [0.8, 0.6, 0.0], "notes"),
+    ("/commit-message", None, [0.8, 0.6, 0.0], "notes"),
+    ("commit-message, please", None, [0.8, 0.6, 0.0], "notes"),
+    ("Commit-Message", None, [0.8, 0.6, 0.0], "notes"),
+    ("commit-messages", None, [0.8, 0.6, 0.0], "commit-message"),
+    ("please review this", None, [0.6, 0.0, 0.8], "commit-message"),
+    ("commit-message review", "notes", [0.8, 0.6, 0.0], None),
+])
+async def test_a_named_skill_leaves_the_candidates_and_only_it(tmp_path, monkeypatch, turn, named, answer, cued):
+    holder, fake = _warmed(tmp_path, monkeypatch)
+    holder.named, fake.answer = named, answer
+    got = await holder.cue(turn, [])
+    assert (got and got.name) == cued
+
+
+@pytest.mark.parametrize("call", [FakeToolCall("c1", "skill", {"name": "commit-message"}),
+                                  _call('{"name": "commit-message"}')], ids=["object", "dict"])
+async def test_a_skill_the_model_called_is_in_view_even_when_the_call_errored(tmp_path, monkeypatch, call):
+    holder, _ = _warmed(tmp_path, monkeypatch)
+    errored = [_assistant(call), {"role": "tool", "tool_call_id": "c1", "content": "error: unreadable"}]
+    assert await holder.cue(TURN, [_assistant(call)]) is None
+    assert await holder.cue(TURN, errored) is None
+
+
+async def test_malformed_skill_calls_in_the_history_still_let_the_cue_answer(tmp_path, monkeypatch):
+    holder, _ = _warmed(tmp_path, monkeypatch)
+    messages = [_assistant(_call('["commit-message"]'), _call("3"), _call("null"), _call("{bad"),
+                           {"id": "c9", "type": "function"})]
+    assert (await holder.cue(TURN, messages)).name == "commit-message"
+
+
+async def test_a_cue_still_in_the_window_is_not_repeated_and_one_compacted_away_re_arms(tmp_path, monkeypatch):
+    holder, _ = _warmed(tmp_path, monkeypatch)
+    first = await holder.cue(TURN, [])
+    window = [human_message(TURN), harness_message(first.line, "affordance_cue")]
+    assert await holder.cue(TURN, window) is None
+    assert await holder.cue(TURN, [human_message(TURN)]) == first
+    assert await holder.cue(TURN, [human_message(TURN), human_message(first.line)]) == first
+
+
+async def test_a_dropped_skill_call_re_arms(tmp_path, monkeypatch):
+    holder, _ = _warmed(tmp_path, monkeypatch)
+    call = _assistant(FakeToolCall("c1", "skill", {"name": "commit-message"}))
+    assert await holder.cue(TURN, [human_message(TURN), call]) is None
+    assert (await holder.cue(TURN, [human_message(TURN)])).name == "commit-message"
+
+
+async def test_a_skill_the_live_task_references_is_in_view_after_compaction(tmp_path, monkeypatch):
+    holder, fake = _warmed(tmp_path, monkeypatch, task_state=_task(tmp_path, "skill commit-message"))
+    assert await holder.cue(TURN, [human_message(TURN)]) is None
+    fake.answer = [0.0, 1.0, 0.0]
+    assert (await holder.cue("keep a note", [])).name == "notes"
+
+
+def _paused(state):
+    state.paused = True
+    return state
+
+
+@pytest.mark.parametrize("state", [
+    lambda t: _paused(_task(t, "skill commit-message")),
+    lambda t: _task(t, "skill commit-message", closed=True),
+    lambda t: _task(t, "skill notes"),
+], ids=["paused", "closed and settled", "another skill"])
+async def test_a_task_that_is_not_live_or_references_another_skill_does_not_suppress(tmp_path, monkeypatch, state):
+    holder, _ = _warmed(tmp_path, monkeypatch, task_state=state(tmp_path))
+    assert (await holder.cue(TURN, [])).name == "commit-message"
+
+
+@pytest.mark.usefixtures("pkg")
+async def test_a_skill_found_after_warm_is_neither_embedded_nor_cued(tmp_path, monkeypatch):
+    cfg = tmp_path / "cfg"
+    _skill(cfg / "skills", "commit-message")
+    skill_set = SkillSet.discover(cfg, None)
+    folder, table = _record(tmp_path, monkeypatch), {"Use commit-message when asked.": [1.0, 0.0]}
+    fake = FakeEmbedder(folder, table)
+    holder = Affordances(skill_set, _slot(fake), None)
+    holder.warm().join(timeout=5)
+    _skill(cfg / "skills", "late")
+    assert skill_set.find("late").name == "late" and [s.name for s in skill_set.skills] == ["commit-message", "late"]
+    fake.answer = [0.0, 1.0]
+    assert fake.embedded == [["Use commit-message when asked."]] and await holder.cue("late", []) is None
