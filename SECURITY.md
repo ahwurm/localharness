@@ -1913,7 +1913,10 @@ agent behind it does. Three things hold it, and each is there for a reason:
   token: it is a value derived from it (an HMAC), `Secure`, `HttpOnly`,
   `SameSite=Strict` and sent only to `/api`. Only GET routes accept it, and no route
   hands the token back for it, so whoever holds the cookie can read what the GET routes
-  serve but cannot drive the session. The cookie an older release set, which was the
+  serve, except `GET /api/model`, bearer only, but cannot drive the session. A cookie
+  request to `GET /api/model` is a 401; the route lists what `/model` offers and carries
+  no address, key, header, pid or unit, and a path in a model's reason is shown as
+  `[path withheld]`. The cookie an older release set, which was the
   token itself, is cleared at the next enrolment and accepted nowhere; a phone paired
   before the upgrade picks up the new one by itself. A credential that is not plain
   text — a non-ASCII bearer or cookie — gets a 401, never a server error.
@@ -1941,13 +1944,14 @@ durable copy of the token, and owner-only stops other accounts, not the agent: w
 `localharness mobile` runs, a process running as you — one the agent starts included — holds what a
 paired phone holds (see [A paired phone or Discord account](#a-paired-phone-or-discord-account)),
 and with `channels.remote_unattended` left at its default that includes the switch to
-`unattended` (setting it to `false` closes that path too).
+`unattended` and a model launch, whose confirm it can answer as the phone would (setting it to
+`false` closes both paths).
 The QR drawn on a terminal carries the token into that terminal's scrollback (a tmux
 history, a `script` log). A token an older release printed — into a `localharness mobile | tee`
 log, or journald — is still in those logs; `--rotate-token` makes those copies useless.
 Cookies are scoped by host name, not by port, so another service published under the same
-host name receives the stream cookie and could read what the GET routes serve, though it
-could not drive the session.
+host name receives the stream cookie and could read what the GET routes other than
+`GET /api/model` serve, though it could not drive the session.
 
 Three more, added with the installable app and notifications:
 
