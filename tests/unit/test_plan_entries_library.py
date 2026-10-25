@@ -163,8 +163,8 @@ def test_the_second_nvfp4_snapshot_is_listed_beside_the_first(world, tmp_path, m
 GEMMA = "DavidAU/gemma-4-31B-it-The-DECKARD-HERETIC-UNCENSORED-Thinking"
 GEMMA_SHARDS = (31_273_169_132, 31_273_169_132)
 GEMMA_REASON = "58.3 GiB of bf16 weights, and vLLM keeps them all on the 31.8 GiB GPU"
-GEMMA_SENTENCE = (f"{GEMMA} cannot run here: {GEMMA_REASON} — a 4-bit build of it "
-                  "(a GGUF Q4_K_M for llama.cpp, or NVFP4 for vLLM) would fit.")
+GEMMA_FIX = "a 4-bit build of it (a GGUF Q4_K_M for llama.cpp, or NVFP4 for vLLM) would fit"
+GEMMA_SENTENCE = f"{GEMMA} cannot run here: {GEMMA_REASON} — {GEMMA_FIX}."
 
 
 def gemma(tmp_path):
@@ -175,13 +175,17 @@ def not_offered(entries):
     return [line for line in model_ops.entry_lines(entries) if line.startswith("  not offered:")]
 
 
+def test_not_offered_reason_keeps_the_fix_clause():
+    assert model_ops.not_offered_reason(GEMMA_SENTENCE, GEMMA) == f"{GEMMA_REASON} — {GEMMA_FIX}"
+
+
 def test_the_gemma_bf16_snapshot_is_one_unnumbered_line_with_its_reason(world, tmp_path, monkeypatch):
     cached(monkeypatch, gemma(tmp_path))
     with_vllm(tmp_path, monkeypatch)
 
     entries = listed(world)
 
-    assert not_offered(entries) == [f"  not offered: {GEMMA} — {GEMMA_REASON}"]
+    assert not_offered(entries) == [f"  not offered: {GEMMA} — {GEMMA_REASON} — {GEMMA_FIX}"]
     assert [e.name for e in entries.numbered()] == [PRIMARY]
     assert entries.pick(GEMMA) == GEMMA_SENTENCE
 
@@ -194,7 +198,8 @@ def test_a_snapshot_with_an_auto_map_needs_trust_remote_code(world, tmp_path, mo
 
     entries = listed(world)
 
-    assert not_offered(entries) == ["  not offered: org/remote — needs trust_remote_code"]
+    assert not_offered(entries) == [
+        "  not offered: org/remote — needs trust_remote_code — the harness never passes --trust-remote-code"]
     assert entries.pick("org/remote") == (
         "org/remote cannot run here: needs trust_remote_code — the harness never passes --trust-remote-code.")
 
@@ -206,8 +211,8 @@ def test_with_no_vllm_binary_each_vllm_snapshot_says_so(world, tmp_path, monkeyp
     entries = listed(world)
 
     assert not_offered(entries) == [
-        f"  not offered: {GEMMA} — no vllm binary on PATH or in the harness's venv",
-        f"  not offered: {NVIDIA} — no vllm binary on PATH or in the harness's venv"]
+        f"  not offered: {GEMMA} — no vllm binary on PATH or in the harness's venv — install vllm or put it on PATH",
+        f"  not offered: {NVIDIA} — no vllm binary on PATH or in the harness's venv — install vllm or put it on PATH"]
     assert entries.pick(NVIDIA) == (
         f"{NVIDIA} cannot run here: no vllm binary on PATH or in the harness's venv — install vllm or put it on PATH.")
     assert [e.name for e in entries.numbered()] == [PRIMARY]

@@ -247,7 +247,7 @@ def verify_recorded(config_dir: Path, spec: ManagedServerConfig, peer: str | Non
     known = {os.path.realpath(os.path.expanduser(str(spec.model)))}
     install = model_library.strata_install((_root(spec),), known)
     if install is None or str(spec.engine_config) not in dict(install.configs):
-        return NOT_AN_INSTALL.format(name=name, engine_dir=_shown(str(spec.engine_dir), 200))
+        return NOT_AN_INSTALL.format(name=name, engine_dir=_shown(Path(spec.engine_dir).name, 200))
     recorded = trust.recorded_machine(config_dir)
     if recorded is None:
         return UNCONFIRMED.format(name=name)
