@@ -780,6 +780,15 @@ class TurnEndMicroPassCompleted(BaseEvent):
     cancelled: bool = False
 
 
+class ModelSwitched(BaseEvent):
+    """The session's model binding changed: which model, on which endpoint name, and how."""
+
+    event_type: str = "ModelSwitched"
+    model: str
+    endpoint: str
+    kind: Literal["hot", "cross", "cold"]
+
+
 AnyEvent = Union[
     SystemReady,
     AgentCreated,

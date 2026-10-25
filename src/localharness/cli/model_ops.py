@@ -603,6 +603,14 @@ def _norm_url(url: Any) -> str:
     return str(url or "").rstrip("/")
 
 
+def switch_kind(entry: Any, primary_url: str, current_url: str) -> str:
+    """"hot" for a live entry on the bound endpoint, "cross" for a live entry elsewhere, else the entry's kind."""
+    if entry.kind != "live":
+        return entry.kind
+    url = entry.endpoint.base_url if entry.endpoint else primary_url
+    return "hot" if _norm_url(url) == _norm_url(current_url) else "cross"
+
+
 def _primary_record(harness: Any) -> ServingRecord:
     provider = harness.provider
     server = getattr(harness, "server", None)
