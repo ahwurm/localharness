@@ -3560,3 +3560,22 @@ async def test_manage_a_flow_that_raises_is_the_hooks_one_line_and_never_a_reloa
 
     (line,) = answers
     assert line.startswith("/plugins could not read the plugin settings (RuntimeError)")
+
+
+async def test_start_wires_model_source_to_the_short_label(tmp_path, monkeypatch):
+    from localharness.cli.model_switch import ModelSwitch
+    from localharness.cli.start_cmd import _start_async
+
+    seen = []
+
+    async def capture(self):
+        for model in ("/home/u/w/qwen3-27b-q4.gguf", "qwen3:32b"):
+            self._agent._llm.config.model = model
+            seen.append((self._channel.model_source(), self._switch))
+
+    _stub_start_boundaries(tmp_path, monkeypatch, repl_run=capture)
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    assert [label for label, _ in seen] == ["qwen3-27b-q4.gguf", "qwen3:32b"]
+    assert all(isinstance(switch, ModelSwitch) for _, switch in seen)

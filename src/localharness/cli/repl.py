@@ -19,6 +19,7 @@ from rich.protocol import is_renderable
 from localharness.agent.gate_types import MODE_STRICTNESS
 from localharness.channels import input_router
 from localharness.cli.model_ops import _hold_peer_session_key, _launch_key, _peer_session_key
+from localharness.cli.model_switch import ModelSwitch
 from localharness.cli.session_resume import RELOAD_ACTION
 from localharness.cli.skill_session import SkillSession, skill_row
 from localharness.cli.slash_commands import SlashCommand, add_plugin_row, find_row, help_text
@@ -305,6 +306,7 @@ class OrchestratorREPL:
     All other input is dispatched to the agent loop.
     """
     _skills: SkillSession | None = None
+    _switch: ModelSwitch | None = None
 
     def __init__(
         self,
@@ -383,6 +385,7 @@ class OrchestratorREPL:
         # cleared by _dispatch_input; None the rest of the time.
         self._slash_followup: Optional[str] = None
         self._skills = skills
+        self._switch = ModelSwitch(agent_loop, bus, channel, harness_config, self._session_gate, config_dir)
         # Pictures attached for the NEXT turn (/image, Ctrl+V, a dropped path), consumed by
         # _start_user_turn together with whatever the channel's own transport carried.
         self._staged_images: list[dict] = []
@@ -1599,7 +1602,7 @@ class OrchestratorREPL:
 
     async def _slash_model(self, args: str, args_lower: str) -> None:
         # The ORIGINAL case — model ids are case-sensitive.
-        await self._handle_model_cmd(args.strip())
+        await self._switch.run(self._handle_model_cmd, args.strip())
 
     async def _slash_reasoning(self, args: str, args_lower: str) -> None:
         await self._handle_reasoning_cmd(args_lower.strip())

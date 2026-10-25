@@ -13,7 +13,9 @@ from types import SimpleNamespace as NS
 import pytest
 
 from localharness.cli.repl import OrchestratorREPL
-from localharness.config.models import HarnessConfig, ManagedServerConfig, OrgConfig, ProviderConfig
+from localharness.config.models import EndpointRef, HarnessConfig, ManagedServerConfig, OrgConfig, ProviderConfig
+from localharness.core.bus import EventBus
+from localharness.core.events import ModelSwitched
 from tests.unit.launch_support import offer_primary_as, stub_liveness
 
 
@@ -47,30 +49,36 @@ def _managed() -> ManagedServerConfig:
     )
 
 
-def _mk(tmp_path, managed, monkeypatch):
+def _mk(tmp_path, managed, monkeypatch, *, bus=None, session_id=None, peers=(), live=None):
     stub_liveness(monkeypatch, False)
     harness = HarnessConfig(
         provider=ProviderConfig(provider_type="vllm", base_url="http://x/v1",
                                 default_model="qwen3.6-35b-a3b", available_models=["qwen3.6-35b-a3b"]),
-        org=OrgConfig(default_model="qwen3.6-35b-a3b"), server=managed)
+        org=OrgConfig(default_model="qwen3.6-35b-a3b"), server=managed, extra_endpoints=list(peers))
     llm = NS(config=NS(base_url="http://x/v1", model="qwen3.6-35b-a3b"))
+
+    def rebind(base_url, *, api_key=None, extra_headers=None, provider_type=None):
+        llm.config.base_url = base_url
 
     async def caps():
         return NS(tool_call_mode="native")
 
     llm.detect_capabilities = caps
+    llm.rebind_endpoint = rebind
     chan = _Chan()
+    agent = NS(_llm=llm, _config=NS(name="root"), current_session_id=session_id) if session_id else NS(_llm=llm)
     r = OrchestratorREPL(
-        orchestrator=None, agent_loop=NS(_llm=llm), channel=chan, bus=None,
+        orchestrator=None, agent_loop=agent, channel=chan, bus=bus,
         config_dir=tmp_path, harness_config=harness,
     )
+    served = live or {}
 
     async def fake_live(base_url):
-        return (["qwen3.6-35b-a3b"], True)
+        return (served.get(base_url, ["qwen3.6-35b-a3b"]), True)
 
     r._live_models = fake_live
 
-    async def fake_refresh(model):
+    async def fake_refresh(model, **kw):
         return ""
 
     r._refresh_token_counter = fake_refresh
@@ -152,3 +160,43 @@ async def test_swap_failure_reports_and_keeps_current_model(tmp_path, monkeypatc
     assert llm.config.model == "qwen3.6-35b-a3b"          # session model untouched
     assert persisted == []
     assert chan.activity and chan.activity[-1] is None    # progress line cleared on failure too
+
+
+async def test_a_hot_model_through_the_switch_publishes_one_hot_event(tmp_path, monkeypatch):
+    bus = EventBus()
+    r, _chan, llm, _p = _mk(tmp_path, _managed(), monkeypatch, bus=bus, session_id="s1",
+                            live={"http://x/v1": ["qwen3.6-35b-a3b", "qwen3.6-27b"]})
+
+    await r._handle_slash("/model qwen3.6-27b")
+    [event] = bus.history(event_types=[ModelSwitched])
+
+    assert (event.kind, event.endpoint, event.model, event.session_id) == ("hot", "primary", "qwen3.6-27b", "s1")
+    assert llm.config.model == "qwen3.6-27b"
+
+
+async def test_an_already_active_pick_through_the_switch_publishes_nothing(tmp_path, monkeypatch):
+    bus = EventBus()
+    r, _chan, _llm, _p = _mk(tmp_path, _managed(), monkeypatch, bus=bus, session_id="s1",
+                             live={"http://x/v1": ["qwen3.6-35b-a3b", "qwen3.6-27b"]})
+
+    await r._handle_slash("/model qwen3.6-35b-a3b")
+
+    assert bus.history(event_types=[ModelSwitched]) == []
+
+
+async def test_a_cross_model_through_the_switch_publishes_one_cross_event(tmp_path, monkeypatch):
+    bus = EventBus()
+    peer = EndpointRef(name="side", base_url="http://side/v1", provider_type="ollama", api_key="none")
+    r, _chan, llm, _p = _mk(tmp_path, _managed(), monkeypatch, bus=bus, session_id="s1", peers=[peer],
+                            live={"http://x/v1": ["qwen3.6-35b-a3b"], "http://side/v1": ["gpt-oss:20b"]})
+
+    async def persist_active(endpoint, model):
+        return None
+
+    r._persist_active_endpoint = persist_active
+
+    await r._handle_slash("/model gpt-oss:20b")
+    [event] = bus.history(event_types=[ModelSwitched])
+
+    assert (event.kind, event.endpoint, event.model) == ("cross", "side", "gpt-oss:20b")
+    assert llm.config.base_url == "http://side/v1"
