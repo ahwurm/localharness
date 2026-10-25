@@ -24,6 +24,8 @@ from typing import (
 from pydantic import AfterValidator, BaseModel, ConfigDict, model_validator
 
 if TYPE_CHECKING:
+    import numpy as np
+
     from localharness.channels.base import ChannelAdapter
     from localharness.core.bus import EventBus
     from localharness.core.reduce import ReduceLevel
@@ -281,6 +283,17 @@ class MemoryWriteHandle(Protocol):
     async def persist_reduce_trace(self, question: str, trace: Sequence[ReduceLevel]) -> None: ...
 
 
+@runtime_checkable
+class QueryEmbedder(Protocol):
+    """The memory slot's query embedder: embeds text on this machine and loads only from a complete
+    local snapshot."""
+
+    model_name: str
+    def ensure_local(self) -> Path | None: ...                          # loads from a complete local snapshot, returns its folder; None, never a download
+    def try_embed_query(self, text: str) -> np.ndarray | None: ...      # 1-D; None when not loaded or the lock is held
+    def embed_docs(self, texts: list[str]) -> np.ndarray: ...           # (n, d)
+
+
 @dataclass(frozen=True)
 class PluginPaths:
     """Where things live for one plugin — every path computed by core, never by the plugin.
@@ -433,6 +446,10 @@ class MemorySlotPlugin(Plugin):
 
     def bind_subagent(self, ctx: PluginContext) -> MemoryWriteHandle | None:
         """A write handle for one subagent, or None — that subagent then persists nothing."""
+        return None
+
+    def embedder(self) -> QueryEmbedder | None:
+        """The query embedder core's skill cue scores with, or None when this occupant has none."""
         return None
 
 
