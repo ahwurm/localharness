@@ -327,3 +327,47 @@ async def test_start_channel_web_without_a_server_is_refused_not_silently_a_term
         await _start_async(None, False, False, str(tmp_path), channel_mode="mobile")
     assert "localharness mobile" in str(exc.value)
     assert MOBILE_NEEDS_ITS_OWN_COMMAND in str(exc.value)
+
+
+def _switched_repl(channel):
+    from types import SimpleNamespace
+
+    from localharness.cli.model_switch import ModelSwitch
+
+    repl = _repl(channel)
+    repl._active_heavy = None
+    llm = SimpleNamespace(config=SimpleNamespace(base_url="http://x/v1", model="m"))
+    repl._switch = ModelSwitch(SimpleNamespace(_llm=llm), repl._bus, channel, SimpleNamespace(), lambda: None, None)
+    return repl
+
+
+class _Declares:
+    _model_list_resolver = None
+
+
+async def test_the_repl_installs_the_model_list_resolver_where_it_is_declared():
+    from localharness.cli.model_switch import MODEL_UNAVAILABLE
+
+    channel = _Declares()
+    repl = _switched_repl(channel)
+    repl._subscribe_pending()
+
+    assert await channel._model_list_resolver() == {"active": None, "models": [], "footer": [MODEL_UNAVAILABLE]}
+
+
+async def test_the_model_list_resolver_waits_for_a_switch():
+    channel = _Declares()
+    repl = _repl(channel)
+    repl._subscribe_pending()
+
+    assert channel._model_list_resolver is None
+
+
+async def test_a_channel_that_declares_no_model_list_resolver_gains_none():
+    class _Bare:
+        pass
+
+    bare = _Bare()
+    _switched_repl(bare)._subscribe_pending()
+
+    assert not hasattr(bare, "_model_list_resolver")

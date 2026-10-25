@@ -546,6 +546,8 @@ class OrchestratorREPL:
             self._channel._nudge_resolver = self._nudge_from_channel
         if getattr(self._channel, "_cancel_resolver", "absent") is None:
             self._channel._cancel_resolver = self._cancel_from_channel
+        if self._switch is not None and getattr(self._channel, "_model_list_resolver", "absent") is None:
+            self._channel._model_list_resolver = lambda: self._switch.model_list(self._plan_model_entries, self._active_heavy)
 
     async def _nudge_from_channel(self, text: str, intent: str = "nudge") -> bool:
         """Steer the running turn with a line a channel already classified.
