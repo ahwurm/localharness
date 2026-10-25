@@ -5,6 +5,7 @@ Offline: the live-model probe is faked at model_ops.list_live_models so no runti
 from __future__ import annotations
 
 import json as _json
+from types import SimpleNamespace as NS
 
 import pytest
 import yaml
@@ -568,8 +569,6 @@ def test_model_switch_under_a_runner_without_a_tty_is_not_a_local_operator(compo
 
 
 def _entry(kind, url=None):
-    from types import SimpleNamespace as NS
-
     return model_ops.PlanEntry(name="m", kind=kind, runtime=None, endpoint=NS(base_url=url) if url else None)
 
 

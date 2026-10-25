@@ -7,9 +7,9 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from localharness.cli import model_switch as ms
 from localharness.agent.gate import PermissionGate
 from localharness.channels.mobile.auth import token_path
+from localharness.cli import model_switch as ms
 from localharness.cli.model_switch import ModelSwitch, launch_holder, short_label
 from localharness.cli.workspace import visible_text
 from localharness.config.grants import GrantStore
@@ -496,8 +496,6 @@ async def test_confirm_closed_app_line_escapes_the_target_and_keeps_the_raw_curr
     line, style = await switch.confirm("evil\x1bx", None, "", _recheck()[1])
     assert line == ms.LAUNCH_NO_PHONE.format(target=visible_text("evil\x1bx"), current="/home/u/live/serving.gguf")
     assert style == "system.info" and "\x1b" not in line
-
-
 
 
 @pytest.mark.parametrize("args", [(None, HARNESS), (None, HARNESS, None)])
