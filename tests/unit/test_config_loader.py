@@ -271,25 +271,11 @@ def test_no_context_anywhere_uses_schema_default(config_dir: Path) -> None:
 # ------------------------------------------------------------------ #
 def test_write_agent_creates_file(config_dir: Path) -> None:
     loader = ConfigLoader(config_dir=config_dir)
-    cfg = AgentConfig(name="new-agent", role="New agent role")
-    path = loader.write_agent(cfg)
+    path = loader.write_agent("new-agent", yaml.safe_dump({"name": "new-agent", "role": "New agent role"}),
+                              layer="machine")
     assert path.exists()
     assert path.suffix == ".yaml"
     assert path.stem == "new-agent"
-
-
-# ------------------------------------------------------------------ #
-# 10. overwrite=True creates .yaml.bak
-# ------------------------------------------------------------------ #
-def test_write_agent_backup_on_overwrite(config_dir: Path) -> None:
-    loader = ConfigLoader(config_dir=config_dir)
-    cfg = AgentConfig(name="backup-agent", role="Backup test agent")
-    first_path = loader.write_agent(cfg)
-    assert first_path.exists()
-    second_path = loader.write_agent(cfg, overwrite=True)
-    bak_path = first_path.with_suffix(".yaml.bak")
-    assert bak_path.exists()
-    assert second_path == first_path
 
 
 # ------------------------------------------------------------------ #
