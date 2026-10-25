@@ -617,6 +617,20 @@ async def test_phone_cold_peer_foreign_holder_after_the_wait_is_sent_and_nothing
     assert swaps == [] and agent._llm.rebinds == [] and "chip" not in phone.log
 
 
+async def test_phone_cold_peer_foreign_holder_after_the_wait_is_masked_and_nothing_launches(tmp_path, monkeypatch):
+    key = "sk-PEER-SECRET-0123456789"
+    _, repl, phone, agent, swaps = _phone_cold(tmp_path, monkeypatch, LAUNCH_YES, peer=_launchable_peer(api_key=key))
+    answers = iter([None, f"holder started with --api-key {key}"])
+    repl._foreign_incumbent = lambda managed, target: next(answers)
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    [(line, style)] = phone.sent
+    assert len(phone.asked) == 1 and style == "system.info"
+    assert line.startswith("holder started with --api-key ") and key not in line
+    assert swaps == [] and agent._llm.rebinds == [] and "chip" not in phone.log
+
+
 async def test_phone_cold_peer_decision_after_the_wait_is_masked_and_nothing_launches(tmp_path, monkeypatch):
     key = "sk-PEER-SECRET-0123456789"
     _, repl, phone, agent, swaps = _phone_cold(tmp_path, monkeypatch, LAUNCH_YES, peer=_launchable_peer(api_key=key))
