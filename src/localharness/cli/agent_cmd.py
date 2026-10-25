@@ -59,7 +59,7 @@ def config_dir_source(config_dir: str | None) -> Literal["flag", "LOCALHARNESS_D
 def unread_project_agents(cwd: Path | None, config_dir: str | None) -> list[str]:
     """The one line saying project agent files sit unread because an explicit config dir skipped the project."""
     from localharness.config.loader import layer_files
-    from localharness.config.paths import discover_workspace_dir, resolve_config_dir
+    from localharness.config.paths import discover_workspace_dir
 
     source = config_dir_source(config_dir)
     found = discover_workspace_dir(cwd) if source else None
