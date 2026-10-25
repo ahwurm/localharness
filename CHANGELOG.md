@@ -4,6 +4,49 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.23.0] — 2026-10-25
+
+**The phone switches models.** Settings on the phone lists what `/model` offers and switches with a tap, the pill names the serving model as soon as the session is up, and a switch that starts a model server or restarts the managed one asks first and runs only where the machine allows remote launches. Discord, headless terminals and agent-launched Zed sessions no longer launch a model.
+
+### Added
+- **A model list in the phone's settings.** Each row says `active`, the endpoint it runs on, or
+  `launches` and what it stops, and a row you cannot pick here says why. A tap on a model already
+  served switches at once; a tap during a turn waits for it. Typing bare `/model` opens the list,
+  and `/model list` still prints the full text.
+- **A launch from the phone asks first.** A cold launch or managed restart shows one question
+  naming what it stops for every client, with `Launch` and `Cancel`. `Launch` is one tap that the
+  server takes only as a second request carrying a single-use token, and what a wait can change is
+  checked again before anything stops. The state chip shows the launch while it runs, and the list
+  says whether it landed.
+- **Mobile protocol 9.** A `ModelSwitched` event on every switch from any surface (also written to
+  the session's event log), an `Activity` frame for launch progress, `Hello.model`, `model` in
+  `/api/health`, and `GET /api/model`, the list as data (bearer only). All additive: a client
+  written against 8 ignores them.
+
+### Changed
+- **Discord, a `--no-input`, piped or agent-launched terminal, and a Zed session the agent
+  launched no longer launch a model.** At the default setting too, a `/model` pick that starts a
+  model server or restarts the managed one gets one line pointing at the terminal (or the phone
+  app); switching to a model already served works as before.
+- **`channels.remote_unattended: false` now also refuses launches.** A cold launch or managed
+  restart from any channel it limits gets one line naming the setting before anything is stopped,
+  and the phone's list marks those rows `launch from the terminal`. Switches to a model already
+  served are not locked.
+- **The terminal's `not offered:` lines keep their fix.** A reason no longer stops at its first
+  ` — `, so the line ends with what to change, as the phone's list row does.
+- **A Strata install that no longer passes the owner and mode checks is named by its directory's
+  name only**, in the `/model` list and in the launch-time refusal.
+- **A managed restart that does not land leaves the session where it was.** A restart begun from a
+  peer that fails, or is cancelled before the peer is stopped, puts the session back on that peer;
+  one interrupted after the stop leaves it bound to the stopped peer, so the next turn fails and
+  `/model` relaunches. When the managed server is left down, the line says you are still on the
+  endpoint you were using. Before, the session was left bound to the primary.
+- **The footer chip shows the model's short name**: a model named by its weights path shows the
+  file name.
+- **A pick of a model on another endpoint goes through while the bound server's reply is not
+  understood**, so a healthy peer is the way out; other picks still get the "wasn't understood"
+  line.
+
 ## [0.22.1] — 2026-10-25
 
 **Project agents.** An agent file in a project's `.localharness/agents/` is now listed to the model and in `/agents` as soon as it is used or created, the agent tool tells the model about both the project and machine directories (the machine one as the session actually reads it) (and says when a session has no project layer), `agent create` and the in-session creation flow share one writer that never writes through a link and refuses a symlinked file, the in-session flow saves to the project when one is bound (say `machine` to change it), and `localharness agent list` shows each agent's origin and what a project file shadows. Project agents keep their narrowing: permissions can only tighten, and a specialist gets no MCP servers of its own.
