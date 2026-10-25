@@ -62,8 +62,7 @@ def _bare_name(entry: str) -> str:
 
 
 def allowed_by_config(agent_tools: Any, name: str, scope: str) -> bool:
-    """Whether an agent's tool config admits the global- or division-scope tool `name`: inherited or
-    added, and not denied."""
+    """Whether `agent_tools` inherits or adds the global- or division-scope tool `name` and does not deny it."""
     inherit = agent_tools.inherit if agent_tools.inherit is not None else ["global", "division"]
     return (scope in inherit or name in (agent_tools.add or [])) and name not in (agent_tools.deny or [])
 

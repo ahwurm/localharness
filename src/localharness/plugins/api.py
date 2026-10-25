@@ -285,8 +285,7 @@ class MemoryWriteHandle(Protocol):
 
 @runtime_checkable
 class QueryEmbedder(Protocol):
-    """The memory slot's query embedder: embeds text on this machine and loads only from a complete
-    local snapshot."""
+    """The memory slot's query embedder: embeds on this machine, loading only from a complete local snapshot."""
 
     model_name: str
     def ensure_local(self) -> Path | None: ...                          # loads from a complete local snapshot, returns its folder; None, never a download

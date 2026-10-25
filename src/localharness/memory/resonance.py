@@ -152,8 +152,7 @@ class ResonanceEngine:
             return self._encode_query(self._ensure_loaded(), text)
 
     def try_embed_query(self, text: str) -> np.ndarray | None:
-        """embed_query without waiting: None while another call holds the lock or before the model
-        is loaded; never loads."""
+        """embed_query without waiting or loading: None while the lock is held or the model is unloaded."""
         if not self._lock.acquire(blocking=False):
             return None
         try:
@@ -162,8 +161,7 @@ class ResonanceEngine:
             self._lock.release()
 
     def ensure_local(self) -> Path | None:
-        """Loads only from a complete local snapshot, never downloading; the folder it loaded from, or
-        None."""
+        """The folder the model loaded from, loading only from a complete local copy; None when there is none."""
         if self._model is not None:
             return self._folder
         with self._lock:
@@ -212,9 +210,7 @@ def _load(factory, model: str, config_dir: str | os.PathLike | None = None, down
     user-agent header whenever its own copy of that list was missing or a day old (huggingface_hub
     1.x). HF_HUB_OFFLINE is no way round it: the library reads it once, at import, and setting it for
     the process would change it for everything else the session runs. A cached copy missing a file
-    the model needs (an interrupted download) is a cache miss: the download completes it. It returns
-    the loaded model and the folder it loaded from, or None when download is false and no complete
-    local copy exists."""
+    the model needs (an interrupted download) is a cache miss: the download completes it."""
     folder = local_folder(model, config_dir, factory)
     if folder is not None and model_folder(model, config_dir) is not None:
         if not Path(model).expanduser().is_absolute():

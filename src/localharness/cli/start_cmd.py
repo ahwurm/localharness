@@ -3159,7 +3159,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         try:
             held = {t.name for t in floor_schemas(
                 tool_registry, agent_config.name, agent_config.division or "", agent_config.tools)}
-        except Exception:  # noqa: BLE001 — the loop's own resolution degrades the same way: keep every line the root registered
+        except Exception:  # noqa: BLE001 — names every tool the root registered, though the loop's own resolution then holds none
             held = {"agent", "task", "skill"} if skill_set.skills else {"agent", "task"}
         skill_listing = skill_listing if "skill" in held else ""
         affordances = None
