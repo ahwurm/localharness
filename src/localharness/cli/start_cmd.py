@@ -1417,6 +1417,14 @@ def _skipped_agent_file(f: Path, exc: Exception) -> None:
     )
 
 
+def _warn_agent_problems(problems: list) -> None:
+    """Warn the project-layer agent files that do not load, after discover_agents' parse warnings."""
+    from localharness.config.loader import PROBLEM_LINE_CAP, problem_lines
+    shown = [p for p in problems if p.origin == "project" and not p.loads and p.kind != "parse"]
+    for line in problem_lines(shown, PROBLEM_LINE_CAP):
+        err_console.print("[yellow]⚠ " + escape(line) + "[/yellow]", soft_wrap=True)
+
+
 def _migrate_legacy_root_agent_yaml(agents_dir: Path) -> None:
     """Phase 33.1 (ORCH-01/03): one-time root-agent rename on the global agents dir —
     agents/default.yaml -> agents/orchestrator.yaml with the name: field REWRITTEN
@@ -2938,14 +2946,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # --- 9. Orchestrator layer ---
         from localharness.orchestrator.router import AgentCreationFlow
         from localharness.orchestrator.cards import AgentCardRegistry
-        card_registry = AgentCardRegistry()
-        for agent_data in agents:
-            try:
-                a_name = agent_data.get("name", "")
-                a_cfg = loader.load_agent(a_name)
-                card_registry.register_from_config(a_cfg)
-            except Exception:
-                pass  # skip agents that fail to load — non-fatal
+        card_registry = AgentCardRegistry(loader=loader)
+        _warn_agent_problems(card_registry.refresh())
         orchestrator = AgentCreationFlow(card_registry=card_registry)
 
         # --- 9a. Project instructions (spec 17; D-48, D-67, D-69) ---
@@ -3070,16 +3072,6 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 except Exception as exc:  # noqa: BLE001 — only a file can carry a mode the gate refuses
                     warnings.append(f"resume: kept mode {gate.mode} ({exc})")
 
-        # Built-in subagents wired in the runner (subagent.make_explore_agent_runner) — advertise them
-        # alongside any configured agent cards so the model knows it can delegate to them. search-verifier
-        # is a standalone capability (route a user's "re-check X" straight to it); the web-researcher
-        # nests it only when its task asks for verification (rigor=on-request default) or under
-        # RESEARCH_RIGOR=high (auto-verify material claims).
-        # v0.5.3: every default builtin is quarantined-or-read-only; bash-holding specialist roles
-        # (data-analyst, frontend-designer) ship as opt-in examples/agents/ configs instead.
-        available_agent_names = ["explore", "web-researcher", "cruncher",
-                                 "search-verifier"] + [c.name for c in card_registry.all_cards()]
-
         async def _override_builtin(n: str, base: Any) -> Any:
             """The overlay of a built-in subagent at dispatch. A rejection the start set did not
             hold reaches the channel's status line once per sitting through the bus; it is awaited
@@ -3109,8 +3101,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # prompt as the parent's.
             gate=gate,
             get_parent_session_id=lambda: agent_loop.current_session_id,
-            # bypass_cache: a yaml the model just WROTE must be dispatchable in the same turn
-            load_agent=lambda n: loader.load_agent(n, bypass_cache=True),
+            load_agent=card_registry.load,
             # Built-in subagents (explore/web-researcher/search-verifier) are TUNABLE: an optional
             # agents/<name>.yaml overlays the code-defined base (e.g. a bigger web-researcher
             # budget) — absent file = built-in defaults, malformed = explicit error, never silent.
@@ -3121,7 +3112,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # (e.g. web-researcher) may nest a grandchild (search-verifier) up to this cap.
             depth=0,
             max_subagent_depth=agent_config.max_subagent_depth,
-            available_agents=available_agent_names,
+            available_agents=card_registry,
             memory_handle=memory_slot.bind_subagent,  # bound per delegation (PAPI-04); the slot answers None when empty
             # Grant keystone: the root's ContentStore is the parent store children read through when the
             # model delegates with grant_handles (it IS `eviction_store` — start_cmd:315/406 — so an
@@ -3154,7 +3145,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
 
         agent_tool = AgentTool(
             agent_runner=_run_agent,
-            available_agents=available_agent_names,
+            available_agents=card_registry,
+            machine_agents_dir=loader.agents_dir("machine"),
+            project_agents_dir=loader.agents_dir("project"),
         )
         await tool_registry.register(agent_tool, scope="global")
         # The working task record (0.16.5): root only, loaded from this agent's folder; children
@@ -3412,23 +3405,6 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # --- Run REPL ---
         from localharness.cli.repl import OrchestratorREPL
 
-        def _register_deployed_agent(name: str) -> None:
-            """#58: make a just-deployed agent reachable in THIS session — no restart. Load its
-            freshly-written yaml (bypass_cache, exactly like the dispatch path at :815), register
-            its card so /agents lists it, and append it to `available_agent_names` — which IS the
-            list `agent_tool` advertises (AgentTool stores the same list object), so the model sees
-            it as a delegation target. Delegation itself already resolved fresh yamls by name via
-            the bypass_cache loader; this closes the visibility/advertisement gap so same-session
-            delegation genuinely works."""
-            try:
-                a_cfg = loader.load_agent(name, bypass_cache=True)
-            except Exception as exc:  # noqa: BLE001 — never turn a successful deploy into a failure
-                log.warning("post-deploy live registration failed for %s: %s", name, exc)
-                return
-            card_registry.register_from_config(a_cfg)
-            if name not in available_agent_names:
-                available_agent_names.append(name)
-
         touched: dict = {}
 
         async def _plugin_switch(verb: str, name: str) -> bool | str | None:
@@ -3549,7 +3525,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # `or self._config_dir` fallback, so a None here IS the signal "no workspace applies".
             workspace=workspace,
             harness_config=harness,
-            on_agent_deployed=_register_deployed_agent,
+            on_agent_deployed=card_registry.load,
             gate=gate,  # what /mode switches; the same object the loop and subagents hold
             instructions=instructions_handle,  # /instructions and the session-trust pass-through
             # /mcp: the live MCPClientManager so list-status / hot-add / hot-remove reach it.

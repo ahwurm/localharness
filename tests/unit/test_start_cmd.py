@@ -2571,10 +2571,7 @@ def test_hard_fail_in_resource_window_process_exits_not_hangs(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_agent_tool_advertises_shared_list_mutations():
-    """#58 invariant the start_cmd post-deploy callback (_register_deployed_agent) relies on:
-    AgentTool advertises the SAME list object it was constructed with, so appending a
-    just-deployed agent name to `available_agent_names` updates what info() advertises — no
-    rebuild, so the model sees the new agent as a delegation target in the same session."""
+    """AgentTool advertises the iterable it was built with, so a name added later is in the next description."""
     from localharness.tools.builtin.agent_tool import AgentTool
 
     async def _noop(*a, **k):
@@ -2583,7 +2580,7 @@ def test_agent_tool_advertises_shared_list_mutations():
     names = ["explore", "web-researcher"]
     tool = AgentTool(agent_runner=_noop, available_agents=names)
     assert "hn-monitor" not in tool.info().description
-    names.append("hn-monitor")  # what _register_deployed_agent does on deploy
+    names.append("hn-monitor")
     assert "hn-monitor" in tool.info().description
 
 
