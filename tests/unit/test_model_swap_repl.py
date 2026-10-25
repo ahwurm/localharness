@@ -19,6 +19,9 @@ from localharness.config.models import EndpointRef, HarnessConfig, ManagedServer
 from localharness.core.bus import EventBus
 from localharness.core.events import ModelSwitched
 from tests.unit.launch_support import offer_primary_as, stub_liveness
+from tests.unit.test_launch_paths_repl import PEER_URL, _launchable_peer, _session
+from tests.unit.test_launch_paths_repl import _no_machine_probes as _probes  # noqa: F401 — autouse fixture
+from tests.unit.test_launch_paths_repl import boundaries as _boundaries  # noqa: F401 — the fixture
 from tests.unit.test_plan_entries import harness_of, twin_files
 from tests.unit.test_serve_cmd import PRIMARY, PRIMARY_URL, serve_world
 
@@ -380,3 +383,52 @@ async def test_hot_and_cross_from_a_locked_channel_land_unasked(tmp_path, monkey
     assert [e.kind for e in bus.history(event_types=[ModelSwitched])] == ["hot", "cross"]
     assert chan.picked == [] and LAUNCH_LOCKED not in chan.msgs
     assert llm.config.base_url == "http://side/v1"
+
+
+class _AskedNothing(_Chan):
+    def __init__(self):
+        super().__init__()
+        self.picked: list = []
+        self.can_run_picker = lambda: True
+
+    async def run_picker(self, options, current):
+        self.picked.append(options)
+        return None
+
+
+async def test_a_local_operator_is_never_asked_or_refused_a_cold_launch(tmp_path, request):
+    boundaries = request.getfixturevalue("_boundaries")
+    _, repl, channel, agent = _session(tmp_path, _launchable_peer())
+    channel.local_operator = True
+    channel.picked = []
+    channel.can_run_picker = lambda: True
+    channel.run_picker = lambda options, current: channel.picked.append(options)
+    repl._gate = NS(remote_unattended=False)
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    assert boundaries.cmds and agent._llm.rebinds[-1][0] == PEER_URL
+    assert channel.picked == [] and LAUNCH_LOCKED not in channel.messages
+    assert not any(m.startswith("qwen-gguf needs a launch") for m in channel.messages)
+
+
+async def test_a_local_operator_is_never_asked_or_refused_a_managed_restart(tmp_path, monkeypatch):
+    from localharness.provider import server as ms
+
+    chan = _AskedNothing()
+    r, chan, llm, _p = _mk(tmp_path, _managed(), monkeypatch, chan=chan)
+    r._gate = NS(remote_unattended=False)
+    offer_primary_as(monkeypatch, "qwen3.6-27b")
+    calls: list = []
+
+    async def fake_ready(base_url, config_dir=None, on_poll=None, **kw):
+        return ["qwen3.6-27b"]
+
+    monkeypatch.setattr(ms, "stop_server", lambda cfg, launch="binary", **kw: calls.append("stop"))
+    monkeypatch.setattr(ms, "start_server", lambda cfg, cmd, **kw: calls.append("start") or 1)
+    monkeypatch.setattr(ms, "wait_ready", fake_ready)
+
+    await r._handle_slash("/model qwen3.6-27b")
+
+    assert calls == ["stop", "start"] and llm.config.model == "qwen3.6-27b"
+    assert chan.picked == [] and LAUNCH_LOCKED not in chan.msgs

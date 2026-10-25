@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import shutil
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -229,6 +230,22 @@ async def test_a_channel_with_no_local_operator_is_told_where_to_set_it_up(befor
 
     assert channel.messages[-1] == OFF_TERMINAL
     assert channel.requests == [] and swaps == []
+    assert (written(before), machine(before)) == before.before
+
+
+@pytest.mark.asyncio
+async def test_a_setup_entry_posted_from_a_phone_is_sent_to_the_terminal(before, session, swaps):
+    _, repl, channel = session
+    answering(channel, local_operator=False, can_ask=True)
+    picked = []
+    channel.can_run_picker = lambda: True
+    channel.run_picker = lambda options, current: picked.append(options)
+    repl._gate = SimpleNamespace(remote_unattended=True)
+
+    await repl._handle_slash(f"/model {NVIDIA}")
+
+    assert channel.messages[-1] == OFF_TERMINAL
+    assert channel.requests == [] and picked == [] and swaps == []
     assert (written(before), machine(before)) == before.before
 
 
