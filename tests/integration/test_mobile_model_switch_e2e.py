@@ -8,9 +8,10 @@ from types import SimpleNamespace
 
 import httpx
 
+from localharness.channels.mobile import channel as channel_mod
 from localharness.channels.mobile.channel import MobileChannel
 from localharness.channels.mobile.server import MobileServer
-from localharness.cli.model_switch import ModelSwitch, short_label
+from localharness.cli.model_switch import LAUNCH_LOCKED, LAUNCH_NO_PHONE, ModelSwitch, short_label
 from localharness.core.bus import EventBus
 from localharness.provider import lifecycle
 from tests.unit.channels.test_mobile_server import BEARER, JSON, TOKEN
@@ -182,3 +183,69 @@ async def test_a_phone_launches_a_cold_model_through_one_confirm(tmp_path, monke
         landed = await p.models()
         assert landed["launching"] is None and landed["active"] == "qwen-gguf"
         assert len(p.swaps) == 1
+
+
+async def _launch_confirmed(p: Phone) -> asyncio.Task:
+    task = await p.start("/model qwen-gguf")
+    ask = await p.ask()
+    token = (await p.answer(ask, "Launch"))["confirm_token"]
+    await p.answer(ask, "Launch", token)
+    return task
+
+
+async def test_a_failed_launch_ends_both_chips_with_its_notice_and_no_switch(tmp_path, monkeypatch):
+    async with _phone(tmp_path, monkeypatch, dict(COLD), swap=_failing_swap) as p:
+        await asyncio.wait_for(await _launch_confirmed(p), 5)
+
+        texts = p.activity()
+        assert texts[0] == "launching qwen-gguf" and texts[-2:] == ["", ""]
+        assert any(n["style"] == "system.error" and "the launch failed" in n["text"] for n in p.of("Notice"))
+        assert p.of("ModelSwitched") == [] and len(p.swaps) == 1
+        listed = await p.models()
+        assert listed["launching"] is None and listed["active"] == "model-a"
+
+
+async def test_a_cancelled_launch_sends_nothing(tmp_path, monkeypatch):
+    async with _phone(tmp_path, monkeypatch, dict(COLD)) as p:
+        task = await p.start("/model qwen-gguf")
+        assert (await p.answer(await p.ask(), "Cancel"))["status"] == "recorded"
+        await asyncio.wait_for(task, 5)
+
+        assert p.of("Notice") == [] and p.of("ModelSwitched") == [] and p.of("Activity") == []
+        assert p.swaps == []
+
+
+async def test_an_unanswered_launch_question_expires(tmp_path, monkeypatch):
+    monkeypatch.setattr(channel_mod, "PICKER_ASK_TIMEOUT_S", 0.05)
+    async with _phone(tmp_path, monkeypatch, dict(COLD)) as p:
+        await asyncio.wait_for(await p.start("/model qwen-gguf"), 5)
+
+        assert len(p.of("BlockingAsk")) == 1
+        [expired] = p.of("AskExpired")
+        assert expired["decision"] == "unchanged"
+        assert p.of("Notice") == [] and p.of("ModelSwitched") == [] and p.swaps == []
+
+
+async def test_a_locked_machine_refuses_the_launch_without_asking(tmp_path, monkeypatch):
+    async with _phone(tmp_path, monkeypatch, dict(COLD)) as p:
+        p.repl._gate = SimpleNamespace(remote_unattended=False)
+        await p.line("/model qwen-gguf")
+
+        [notice] = p.of("Notice")
+        assert (notice["text"], notice["style"]) == (LAUNCH_LOCKED, "system.info")
+        assert p.of("BlockingAsk") == [] and p.swaps == []
+
+
+async def test_a_launch_with_no_phone_attached_says_so_and_does_not_ask(tmp_path, monkeypatch):
+    async with _phone(tmp_path, monkeypatch, dict(COLD)) as p:
+        pushed: list = []
+        real = p.channel.push
+        p.channel.push = lambda frame: (pushed.append(frame), real(frame))[1]
+        p.channel.detach_client(p.client)
+        await p.line("/model qwen-gguf")
+
+        [notice] = [f for f in pushed if f.frame_type == "Notice"]
+        assert notice.text == LAUNCH_NO_PHONE.format(target="qwen-gguf", current="model-a")
+        assert notice.style == "system.info"
+        assert not any(f.frame_type == "BlockingAsk" for f in pushed)
+        assert p.swaps == [] and (await p.models())["launching"] is None
