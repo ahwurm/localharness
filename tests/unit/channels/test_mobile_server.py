@@ -989,6 +989,109 @@ async def test_protocol_says_the_answer_verb_covers_the_picker_confirm_option(tm
     assert "the kinds that need a second POST: the _always kinds and a picker's confirm option" in note
 
 
+# ------------------------------------------------------------------ the model list
+
+MODEL_LIST = {
+    "active": "qwen3:32b", "endpoint": "primary", "launching": None,
+    "models": [
+        {"name": "qwen3:32b", "kind": "hot", "endpoint": "primary", "active": True, "stops": None, "why": None},
+        {"name": "mixtral:8x7b", "kind": "cold", "endpoint": "peer-c", "active": False,
+         "stops": "qwen3:32b", "why": None},
+    ],
+    "footer": ["Terminal: localharness model --setup"],
+}
+
+
+async def _resolves():
+    return MODEL_LIST
+
+
+async def test_model_list_returns_the_resolvers_dict_unchanged_to_a_bearer(tmp_path):
+    _, channel, _, client = await _stack(tmp_path)
+    channel._model_list_resolver = _resolves
+    got = await client.get("/api/model", headers=BEARER)
+    assert got.status_code == 200 and got.json() == MODEL_LIST
+
+
+async def test_model_list_refuses_the_cookie_and_no_credentials_but_health_keeps_the_cookie(tmp_path):
+    _, channel, _, client = await _stack(tmp_path)
+    channel._model_list_resolver = _resolves
+    client.cookies.set(auth.AUTH_COOKIE, auth.get_cookie_value(TOKEN))
+    got = await client.get("/api/model")
+    assert got.status_code == 401 and "models" not in got.json()
+    assert (await client.get("/api/health")).status_code == 200
+    client.cookies.clear()
+    got = await client.get("/api/model")
+    assert got.status_code == 401 and "models" not in got.json()
+
+
+async def test_model_list_says_asleep_while_the_chat_sleeps(tmp_path):
+    from localharness.channels.mobile.protocol import ASLEEP_STAGE
+    from localharness.channels.mobile.server import MODEL_LIST_NO_SESSION
+
+    _, channel, _, client = await _stack(tmp_path)
+    channel.set_bringup(ASLEEP_STAGE, detail="asleep")
+    channel.reset_session()
+    got = await client.get("/api/model", headers=BEARER)
+    assert got.status_code == 503
+    assert got.json() == {"error": MODEL_LIST_NO_SESSION, "asleep": True}
+
+
+async def test_model_list_says_not_ready_on_a_bound_channel_with_no_resolver(tmp_path):
+    from localharness.channels.mobile.server import MODEL_LIST_NOT_READY
+
+    _, channel, _, client = await _stack(tmp_path)
+    got = await client.get("/api/model", headers=BEARER)
+    assert got.status_code == 503
+    assert got.json() == {"error": MODEL_LIST_NOT_READY.format(state=channel.model_state()), "asleep": False}
+
+
+async def test_model_list_says_cold_on_a_started_channel_that_never_bound(tmp_path):
+    from localharness.channels.mobile.server import MODEL_LIST_NOT_READY
+
+    channel = MobileChannel(bus=EventBus(), config={})
+    await channel.start()
+    client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=MobileServer(channel, token=TOKEN).app), base_url="http://web.test"
+    )
+    got = await client.get("/api/model", headers=BEARER)
+    assert got.status_code == 503
+    assert got.json() == {"error": MODEL_LIST_NOT_READY.format(state="cold"), "asleep": False}
+
+
+async def test_model_list_hides_a_raising_resolvers_detail(tmp_path):
+    from localharness.cli.model_switch import MODEL_UNAVAILABLE
+
+    async def boom():
+        raise RuntimeError("secret detail http://10.0.0.5:8000")
+
+    _, channel, _, client = await _stack(tmp_path)
+    channel._model_list_resolver = boom
+    got = await client.get("/api/model", headers=BEARER)
+    assert got.status_code == 503
+    assert got.json() == {"error": MODEL_UNAVAILABLE, "asleep": False}
+    assert "secret detail" not in got.text and "10.0.0.5" not in got.text
+
+
+async def test_model_list_never_starts_a_session_or_probes_the_endpoint(tmp_path):
+    started, probed = [], []
+    channel = MobileChannel(bus=EventBus(), config={})
+    await channel.start()
+    channel.probe_model = lambda *a, **k: probed.append(1)
+    server = MobileServer(channel, token=TOKEN, on_first_message=lambda: started.append(1))
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url="http://web.test")
+    assert (await client.get("/api/model", headers=BEARER)).status_code == 503
+    assert not started and not probed
+    assert channel.session_id is None and server._bringup_started is False
+
+
+async def test_model_list_is_listed_among_the_protocol_verbs(tmp_path):
+    _, _, _, client = await _stack(tmp_path)
+    verbs = (await client.get("/api/protocol", headers=BEARER)).json()["verbs"]
+    assert {"method": "GET", "path": "/api/model",
+            "note": "the models /model offers, as data, and which is active"} in verbs
+
+
 async def test_schema_is_generated_from_the_models(tmp_path):
     _, _, _, client = await _stack(tmp_path)
     body = (await client.get("/api/schema", headers=BEARER)).json()
