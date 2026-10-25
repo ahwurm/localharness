@@ -3512,7 +3512,6 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # `or self._config_dir` fallback, so a None here IS the signal "no workspace applies".
             workspace=workspace,
             harness_config=harness,
-            on_agent_deployed=card_registry.load,
             gate=gate,  # what /mode switches; the same object the loop and subagents hold
             instructions=instructions_handle,  # /instructions and the session-trust pass-through
             # /mcp: the live MCPClientManager so list-status / hot-add / hot-remove reach it.

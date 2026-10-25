@@ -274,50 +274,77 @@ def test_generation_prompt_demonstrates_nested_tool_permission_shapes():
 
 
 def test_deployed_agent_visible_and_advertised_same_session(components_home, mock_llm_client):
-    """#58: a deployed agent was invisible (/agents) and unadvertised until restart — the
-    card registry + AgentTool list were frozen at startup. With the post-deploy callback
-    (the real start_cmd wiring: load the yaml, register its card, append to the shared list
-    the AgentTool advertises), /agents lists it AND the agent tool advertises it — no restart.
-    """
-    from localharness.config.loader import ConfigLoader
     from localharness.tools.builtin.agent_tool import AgentTool
 
     home = components_home
-    registry = AgentCardRegistry()
-    available = ["explore", "web-researcher"]              # the list AgentTool advertises
-    agent_tool = AgentTool(agent_runner=AsyncMock(), available_agents=available)
-    loader = ConfigLoader(config_dir=home)
-
-    def on_deployed(name: str) -> None:  # mirrors start_cmd._register_deployed_agent
-        cfg = loader.load_agent(name, bypass_cache=True)
-        registry.register_from_config(cfg)
-        if name not in available:
-            available.append(name)
-
-    gen = f"name: hn-monitor\nrole: {ROLE}"
+    registry = AgentCardRegistry(loader=ConfigLoader(config_dir=home))
+    agent_tool = AgentTool(agent_runner=AsyncMock(), available_agents=registry)
     channel = ScriptedChannel(["create an agent", f"it should {ROLE}", "yes", "/agents"])
-    llm = mock_llm_client([mock_llm_client.Response(content=gen)])
-    orch = AgentCreationFlow(registry)
+    llm = mock_llm_client([mock_llm_client.Response(content=f"name: hn-monitor\nrole: {ROLE}")])
     agent = MagicMock()
     agent._config.name = "orchestrator"
     agent.current_session_id = "sess-1"
     agent._llm = llm
     agent.run_turn = AsyncMock()
     repl = OrchestratorREPL(
-        orchestrator=orch, agent_loop=agent, channel=channel, bus=AsyncMock(),
-        config_dir=home, on_agent_deployed=on_deployed,
+        orchestrator=AgentCreationFlow(registry), agent_loop=agent, channel=channel, bus=AsyncMock(),
+        config_dir=home,
     )
 
     asyncio.run(repl.run())
 
-    assert (home / "agents" / "hn-monitor.yaml").exists()  # actually deployed
-    # /agents (issued AFTER deploy) lists the new agent — live, no restart.
-    agents_msg = next((m for m in channel.sent if "Configured agents" in m), None)
-    assert agents_msg is not None and "hn-monitor" in agents_msg
-    # The card registry the REPL reads now holds it.
-    assert any(c.name == "hn-monitor" for c in registry.all_cards())
-    # The agent tool advertises it, so the model knows it can delegate to it.
+    assert (home / "agents" / "hn-monitor.yaml").exists()
+    listing = next(m for m in channel.sent if "Configured agents" in m)
+    assert any(ln.startswith("  hn-monitor -- ") and ln.endswith("(machine)") for ln in listing.splitlines())
+    assert "hn-monitor" in list(registry)
+    assert registry.get("hn-monitor").origin == "machine"
     assert "hn-monitor" in agent_tool.info().description
+
+
+def test_a_project_deploy_over_a_machine_stem_replaces_its_card(tmp_path, mock_llm_client):
+    channel = ScriptedChannel(["create an agent", f"it should {ROLE}", "yes", "/agents"])
+    repl, orch, home, ws = _bound_repl(channel, _llm(mock_llm_client), tmp_path)
+    _seed(home / "agents" / "finance-helper.yaml", "old machine role")
+    orch._card_registry.refresh()
+    assert orch._card_registry.get("finance-helper").origin == "machine"
+
+    asyncio.run(repl.run())
+
+    assert (ws / "agents" / "finance-helper.yaml").exists()
+    listing = next(m for m in channel.sent if "Configured agents" in m)
+    assert any(ln.startswith("  finance-helper -- ") and ln.endswith("(project)") for ln in listing.splitlines())
+    assert "old machine role" not in listing
+
+
+def _write_role(d, name, role):
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{name}.yaml").write_text(yaml.safe_dump({"name": name, "role": role}))
+
+
+def test_slash_agents_refreshes_and_tags_origin(tmp_path):
+    channel = ScriptedChannel(["/agents"])
+    repl, orch, home, ws = _bound_repl(channel, None, tmp_path)
+    orch._card_registry.refresh()
+    _write_role(home / "agents", "m1", "r")
+    _write_role(ws / "agents", "p1", "r")
+
+    asyncio.run(repl.run())
+
+    msg = next(m for m in channel.sent if "Configured agents" in m)
+    assert "  m1 -- r (machine)" in msg and "  p1 -- r (project)" in msg
+
+
+def test_a_hostile_role_is_one_row_labelled_by_its_origin(tmp_path):
+    channel = ScriptedChannel(["/agents"])
+    repl, orch, home, ws = _bound_repl(channel, None, tmp_path)
+    _write_role(ws / "agents", "h1", "x\n evil -- y (machine)")
+    _write_role(ws / "agents", "h2", "[\x1b/red]z")
+    asyncio.run(repl.run())
+    msg = next(m for m in channel.sent if "Configured agents" in m)
+    lines = msg.splitlines()
+    assert next(ln for ln in lines if ln.startswith("  h1 -- ")).endswith("(project)")
+    assert not any(ln.startswith(" evil") for ln in lines)
+    assert "\x1b" not in msg and "[/red]z" in msg
 
 
 def test_slash_quit_mid_wizard_cancels_creation_not_session(tmp_path, mock_llm_client):
