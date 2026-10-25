@@ -105,7 +105,7 @@ def test_an_agent_file_that_does_not_parse_names_the_line_never_the_source(tmp_p
     result = runner.invoke(app, ["agent", "list", "--config-dir", str(g)])
 
     _clean(result.stdout, result.stderr, repr(result.exception))
-    assert f"helper.yaml:{_problem_line(text)}:" in " ".join(result.output.split()), result.output
+    assert f"helper.yaml: {_problem_line(text)}:" in " ".join(result.output.split()), result.output
 
 
 def test_a_generated_agent_yaml_that_does_not_parse_names_the_line_never_the_source() -> None:
