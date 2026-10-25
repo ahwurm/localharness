@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import hashlib
+import itertools
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -15,7 +18,7 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
-from localharness.agent.context import ContentStore, ContextManager, probe_served_window
+from localharness.agent.context import ContentStore, ContextManager, context_size_kwargs, probe_served_window
 from localharness.agent.gate import PermissionGate
 from localharness.agent.gate_types import Decision, PermissionRequest
 from localharness.agent.loop import AgentLoop
@@ -26,6 +29,8 @@ from localharness.bench.orchestrator import _build_bench_client
 from localharness.cli.agent_cmd import _build_agent_yaml
 from localharness.cli.app import app
 from localharness.cli.skill_session import SkillSession
+from localharness.cli.start_cmd import _effective_max_context
+from localharness.config.effort import resolve_effort
 from localharness.config.grants import GrantStore
 from localharness.config.loader import ConfigLoader
 from localharness.config.models import AgentConfig
@@ -40,6 +45,7 @@ from localharness.tools.builtin.task_tool import TaskTool
 from localharness.tools.capabilities import apply_root_capability_floor
 from localharness.tools.registry import ToolRegistry
 from tests.conftest import _minimal_config, live_target
+from tests.unit.test_skills_misc import VARIANT_A, VARIANT_B
 
 pytestmark = pytest.mark.live_vllm
 
@@ -48,15 +54,15 @@ MATCHING_BAR = (24, 30)
 FALSE_BAR = (3, 60)
 CREATOR_BAR = (2, 3)
 TEMPERATURE = 0.6
-FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "skills_live"
-NO_CHILD_AGENTS = ["explore", "web-researcher", "cruncher", "search-verifier"]
-KINDS = ("matching", "near_miss", "unrelated")
-REPORTS = Path(__file__).resolve().parents[2] / "reports"
-NO_WINDOW = "not exposed by the server"
 CREATOR_MAX_ACTIONS = 40
 CREATOR_MAX_MINUTES = 30.0
-VARIANT_A = "On the subject model, the model picked a matching skill from the listing on its own in at least 80 % of test runs."
-VARIANT_B = "The model may not pick a skill up on its own; `/<name>` asks it to."
+ROOT_DIR = Path(__file__).resolve().parents[2]
+FIXTURES = ROOT_DIR / "tests" / "fixtures" / "skills_live"
+NO_CHILD_AGENTS = ["explore", "web-researcher", "cruncher", "search-verifier"]
+KINDS = ("matching", "near_miss", "unrelated")
+NON_ANSWERS = ("degenerate", "reasoning_cut", "length")
+REPORTS = ROOT_DIR / "reports"
+NO_WINDOW = "not exposed by the server"
 NOT_SERVING = "the subject model was not being served at the endpoint"
 NOT_SUBJECT = "the endpoint served a model the reference architectures do not name as the subject model"
 NOT_FINISHED = "the run did not finish, so no result exists"
@@ -73,6 +79,15 @@ class Step:
     calls: tuple[tuple[str, dict], ...]
     finish_reason: str | None
     system: str
+    flaw: str | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class Shape:
+    window: int
+    effort: tuple[str, str]
+    ratios: tuple[float, float]
 
 
 def prompts() -> dict:
@@ -94,6 +109,25 @@ def root_config(config_dir: Path) -> AgentConfig:
     return ConfigLoader(config_dir=config_dir).load_agent("orchestrator")
 
 
+def loop_shape(config_dir: Path, cfg: AgentConfig, base_url: str, served: int | None) -> Shape:
+    """The window and effort a real `start` hands its root loop."""
+    harness = ConfigLoader(config_dir=config_dir).load_harness()
+    return Shape(
+        _effective_max_context(served, cfg.context.max_context_tokens),
+        resolve_effort(None, cfg.effort, harness, base_url),
+        (harness.effort_budget.low_ratio, harness.effort_budget.high_ratio))
+
+
+def root_loop(client, cfg: AgentConfig, shape: Shape, skill_set: SkillSet, registry, state, gate, bus) -> AgentLoop:
+    return AgentLoop(
+        config=cfg, llm=client, bus=bus, tool_registry=registry, permission_evaluator=PermissionEvaluator(), gate=gate,
+        context_manager=ContextManager(
+            max_context_tokens=shape.window, preserve_first_n=cfg.context.preserve_first_n_messages,
+            preserve_last_n=cfg.context.preserve_last_n_messages, **context_size_kwargs(cfg.context)),
+        kill_file_path=None, skills=render_listing(skill_set.skills), task_context=state,
+        effort=shape.effort, effort_ratios=shape.ratios)
+
+
 @contextlib.contextmanager
 def first_request_only(client, seen: list):
     real = client.stream_complete
@@ -102,7 +136,7 @@ def first_request_only(client, seen: list):
     async def guarded(*args, **kwargs):
         if seen:
             raise FirstStepDone
-        seen.append((args, kwargs))
+        seen.append(kwargs)
         return await real(*args, **kwargs)
 
     client.stream_complete = guarded
@@ -112,14 +146,24 @@ def first_request_only(client, seen: list):
         del client.stream_complete
 
 
-def first_step(events) -> tuple[tuple[tuple[str, dict], ...], str | None]:
+def first_step(events) -> tuple[tuple[tuple[str, dict], ...], str | None, str | None]:
     actions = [e for e in events if isinstance(e, Action)]
     start = next((i for i, e in enumerate(actions) if e.action_type == "llm_response"), None)
     if start is None:
         raise AssertionError("the model never answered")
     end = next((i for i, e in enumerate(actions) if i > start and e.action_type == "llm_response"), len(actions))
     calls = tuple((e.tool_name, dict(e.tool_params or {})) for e in actions[start + 1:end] if e.action_type == "tool_call")
-    return calls, actions[start].finish_reason
+    first = actions[start]
+    return calls, first.finish_reason, flaw_of(first, calls)
+
+
+def flaw_of(response: Action, calls) -> str | None:
+    """Why a first response is no answer: a cut or aborted generation, or nothing said and nothing called."""
+    if response.finish_reason in NON_ANSWERS:
+        return response.finish_reason
+    if not calls and not (response.content or "").strip():
+        return "reasoning only" if response.reasoning_chars else "empty"
+    return None
 
 
 async def no_child(agent_id, brief, grant_handles, shape=None) -> str:
@@ -139,22 +183,29 @@ async def root_registry(skill_set: SkillSet, cfg: AgentConfig) -> tuple[ToolRegi
     return registry, state
 
 
-async def first_step_run(client, skill_set: SkillSet, cfg: AgentConfig, prompt: str, work: Path) -> Step:
+async def first_step_run(client, skill_set: SkillSet, cfg: AgentConfig, shape: Shape, prompt: str, work: Path) -> Step:
     registry, state = await root_registry(skill_set, cfg)
     bus = EventBus()
     gate = PermissionGate(boundary=None, workspace=work, grants=GrantStore(work.parent / "grants.yaml"), mode="read-only")
-    loop = AgentLoop(
-        config=cfg, llm=client, bus=bus, context_manager=ContextManager(), tool_registry=registry,
-        permission_evaluator=PermissionEvaluator(), gate=gate, kill_file_path=None,
-        skills=render_listing(skill_set.skills), task_context=state)
+    loop = root_loop(client, cfg, shape, skill_set, registry, state, gate, bus)
     seen: list = []
     with first_request_only(client, seen):
         with contextlib.suppress(FirstStepDone):
             await loop.run_turn(prompt)
-    calls, finish = first_step(bus.history(event_types=[Action]))
-    args, kwargs = seen[0]
-    messages = kwargs["messages"] if "messages" in kwargs else args[0]
-    return Step(calls, finish, messages[0]["content"])
+    calls, finish, flaw = first_step(bus.history(event_types=[Action]))
+    return Step(calls, finish, seen[0]["messages"][0]["content"], flaw)
+
+
+async def settled(client, skill_set: SkillSet, cfg: AgentConfig, shape: Shape, prompt: str, work: Path) -> Step:
+    """One request, tried twice; a second failure is an `error` step, which the bar counts against the model."""
+    for _ in range(2):
+        try:
+            step = await first_step_run(client, skill_set, cfg, shape, prompt, work)
+            assert render_listing(skill_set.skills) in step.system
+            return step
+        except Exception as exc:  # noqa: BLE001 - any failure of one request is recorded, not fatal to the run
+            failure = exc
+    return Step((), None, "", error=type(failure).__name__)
 
 
 @dataclass(frozen=True)
@@ -174,6 +225,7 @@ class CreatorRun:
     terminated: str | None
     listing: str
     valid: bool
+    files: tuple[tuple[str, str], ...] = ()
 
 
 def skill_params(run: Run) -> list[dict]:
@@ -181,6 +233,8 @@ def skill_params(run: Run) -> list[dict]:
 
 
 def hit(run: Run) -> bool:
+    if run.step.error:
+        return run.kind != "matching"
     params = skill_params(run)
     return any(p.get("name") == run.skill for p in params) if run.kind == "matching" else bool(params)
 
@@ -192,19 +246,37 @@ def count(runs, leg: str, skill: str) -> tuple[int, int, int, int]:
     return sum(map(hit, matching)), len(matching), sum(map(hit, others)), len(others)
 
 
-def tally(runs, skill: str) -> tuple[int, int, int, int]:
-    return count(runs, "native", skill)
+def flaws(runs, leg: str, skill: str) -> tuple[int, int]:
+    own = [r for r in runs if r.leg == leg and r.skill == skill]
+    return sum(r.step.flaw is not None for r in own), sum(r.step.error is not None for r in own)
+
+
+def meets(matching: int, false: int) -> bool:
+    return matching >= MATCHING_BAR[0] and false <= FALSE_BAR[0]
+
+
+def sizes(runs, creator_valid) -> list[str]:
+    """What is wrong with the shape of the result set, empty when it is the one the bar counts."""
+    skills = sorted({r.skill for r in runs})
+    if not skills:
+        return ["no runs to judge"]
+    short = [f"{len(creator_valid)} creator runs, the bar counts {CREATOR_BAR[1]}"] if len(creator_valid) != CREATOR_BAR[1] else []
+    for skill in skills:
+        _, matching, _, others = count(runs, "native", skill)
+        if (matching, others) != (MATCHING_BAR[1], FALSE_BAR[1]):
+            short.append(f"{skill}: {matching} matching and {others} other native runs")
+    return short
+
+
+def judge(runs, creator_valid) -> bool:
+    rows = [count(runs, "native", s) for s in sorted({r.skill for r in runs})]
+    return bool(rows) and all(meets(m, f) for m, _, f, _ in rows) and sum(creator_valid) >= CREATOR_BAR[0]
 
 
 def passed(runs, creator_valid) -> bool:
-    skills = sorted({r.skill for r in runs})
-    assert skills, "no runs to judge"
-    assert len(creator_valid) == CREATOR_BAR[1], f"{len(creator_valid)} creator runs, the bar counts {CREATOR_BAR[1]}"
-    rows = [tally(runs, s) for s in skills]
-    for skill, (_, matching, _, others) in zip(skills, rows):
-        assert (matching, others) == (MATCHING_BAR[1], FALSE_BAR[1]), f"{skill}: {matching} matching and {others} other native runs"
-    return (all(m >= MATCHING_BAR[0] and f <= FALSE_BAR[0] for m, _, f, _ in rows)
-            and sum(creator_valid) >= CREATOR_BAR[0])
+    short = sizes(runs, creator_valid)
+    assert not short, "; ".join(short)
+    return judge(runs, creator_valid)
 
 
 def out_of_list(runs, names) -> dict[str, list[tuple[str, str]]]:
@@ -217,12 +289,17 @@ def out_of_list(runs, names) -> dict[str, list[tuple[str, str]]]:
     return found
 
 
-def report_path(day: str) -> Path:
-    return REPORTS / f"skills-live-gate-{day}.md"
+def report_path(day: str, run: int = 1) -> Path:
+    return REPORTS / (f"skills-live-gate-{day}.md" if run == 1 else f"skills-live-gate-{day}-{run}.md")
 
 
-def write_report(day: str, text: str) -> Path:
-    path = report_path(day)
+def run_number(day: str) -> int:
+    """The first run of the day whose report does not exist yet."""
+    return next(n for n in itertools.count(1) if not report_path(day, n).exists())
+
+
+def write_report(day: str, text: str, run: int = 1) -> Path:
+    path = report_path(day, run)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "x", encoding="utf-8") as f:
         f.write(text)
@@ -238,21 +315,46 @@ def table(header: list[str], rows) -> list[str]:
             *(f"| {' | '.join(cell(c) for c in row)} |" for row in rows)]
 
 
+def fenced(text: str) -> list[str]:
+    ticks = "`" * max(3, max(map(len, re.findall(r"`+", text)), default=0) + 1)
+    return [f"{ticks}text", text, ticks]
+
+
+def creator_section(i: int, c: CreatorRun) -> list[str]:
+    skill_files = [(path, text) for path, text in c.files if Path(path).name == "SKILL.md"]
+    others = [path for path, _ in c.files if Path(path).name != "SKILL.md"]
+    return [
+        f"### Creator run {i}", "", "Output of `localharness skills`:", "", *fenced(c.listing), "",
+        *(line for path, text in skill_files for line in (f"Written `{path}`:", "", *fenced(text), "")),
+        f"Other files written: {', '.join(others) or 'none'}", ""]
+
+
+def per_leg(found) -> str:
+    return ", ".join(f"{leg}: {sum(r.leg == leg for r in found)}" for leg in ("native", "xml"))
+
+
 def render_report(meta: dict, runs, creator) -> str:
-    ok = passed(runs, [c.valid for c in creator])
+    valid = [c.valid for c in creator]
+    short = sizes(runs, valid)
+    ok = not short and judge(runs, valid)
     skills = sorted({r.skill for r in runs})
     window = NO_WINDOW if meta["window"] is None else meta["window"]
+    level, rung = meta["effort"]
     outside = out_of_list(runs, skills)
     names = {leg: "; ".join(f"{name} on {json.dumps(prompt)}" for prompt, name in found) or "none"
              for leg, found in outside.items()}
-    native = [(s, *count(runs, "native", s)) for s in skills]
-    xml = [(s, *count(runs, "xml", s)) for s in skills]
+    native = [(s, *count(runs, "native", s), *flaws(runs, "native", s)) for s in skills]
+    xml = [(s, *count(runs, "xml", s), *flaws(runs, "xml", s)) for s in skills]
+    errored = [r for r in runs if r.step.error]
+    unanswered = [r for r in runs if r.step.flaw]
     lines = [
         "# Skills live-model gate", "",
-        f"Date: {meta['day']} · Repo: {meta['commit']}",
-        f"Outcome: {'pass' if ok else 'miss'}",
+        f"Date: {meta['day']} · Run: {meta['run']} · Repo: {meta['commit']} ({meta['tree']} tree) · Gate module sha256: {meta['sha']}",
+        f"Outcome: {'incomplete' if short else 'pass' if ok else 'miss'}",
+        *([f"Incomplete because: {'; '.join(short)}"] if short else []),
         f"The claim: {VARIANT_A if ok else VARIANT_B}",
         f"Model: {meta['model']} · Base URL: {meta['base_url']} · Window: {window} · Temperature: {meta['temperature']}",
+        f"Loop: effort {level} ({rung} rung) · context window {meta['loop_window']}",
         f"Wall time: {meta['minutes']} minutes",
         f"Root: {ROOT}",
         f"Tools: {', '.join(meta['tools'])}", "",
@@ -260,28 +362,36 @@ def render_report(meta: dict, runs, creator) -> str:
         f"- Matching requests: at least {MATCHING_BAR[0]} of {MATCHING_BAR[1]} per skill, no averaging across skills.",
         f"- Near-miss and unrelated requests: at most {FALSE_BAR[0]} of {FALSE_BAR[1]} per skill.",
         f"- Creator runs: at least {CREATOR_BAR[0]} of {CREATOR_BAR[1]} valid.",
-        f"- Every request runs {RUNS} times in native tool-call mode; the XML pass runs the set once and is not judged.", "",
+        f"- Every request runs {RUNS} times in native tool-call mode; the XML pass runs the set once and is not judged.",
+        "- A request that errored twice counts as no pick on a matching request and as a false pick on any other.",
+        "- A response that was no answer (cut, aborted, empty) counts as no pick; its count is beside each figure.", "",
         "## Native, per skill", "",
-        *table(["skill", "matching", "near-miss plus unrelated", "meets the bar"],
-               [(s, f"{m} of {mt}", f"{f} of {ft}", "yes" if m >= MATCHING_BAR[0] and f <= FALSE_BAR[0] else "no")
-                for s, m, mt, f, ft in native]), "",
+        *table(["skill", "matching", "near-miss plus unrelated", "meets the bar", "no answer", "errors"],
+               [(s, f"{m} of {mt}", f"{f} of {ft}", "yes" if meets(m, f) else "no", na, er) for s, m, mt, f, ft, na, er in native]), "",
         "## XML tool-call mode, one run of the whole set (recorded, not judged)", "",
-        *table(["skill", "matching", "near-miss plus unrelated"],
-               [(s, f"{m} of {mt}", f"{f} of {ft}") for s, m, mt, f, ft in xml]), "",
+        *table(["skill", "matching", "near-miss plus unrelated", "no answer", "errors"],
+               [(s, f"{m} of {mt}", f"{f} of {ft}", na, er) for s, m, mt, f, ft, na, er in xml]), "",
+        "## Requests that errored twice", "", f"Count: {per_leg(errored)}", "",
+        *(table(["leg", "skill", "kind", "run", "request", "exception"],
+                [(r.leg, r.skill, r.kind, r.index, r.prompt, r.step.error) for r in errored]) if errored else ["none"]), "",
+        "## First responses that were no answer", "", f"Count: {per_leg(unanswered)}", "",
+        *(table(["leg", "skill", "kind", "run", "request", "what it was"],
+                [(r.leg, r.skill, r.kind, r.index, r.prompt, r.step.flaw) for r in unanswered]) if unanswered else ["none"]), "",
         "## Names outside the listing", "",
         f"native: {names['native']}", f"xml: {names['xml']}", "",
         "## Creator runs", "",
-        f"Limits per run: {CREATOR_MAX_ACTIONS} actions, {int(CREATOR_MAX_MINUTES)} minutes.", "",
+        f"Harness limits per run, not part of the bar: {CREATOR_MAX_ACTIONS} actions, {int(CREATOR_MAX_MINUTES)} minutes.", "",
         *table(["run", "request", "valid", "asks", "terminated"],
                [(i, c.request, "yes" if c.valid else "no",
                  "; ".join(f"{tool} {'allowed' if allowed else 'denied'}: {display}" for tool, display, allowed in c.asks),
                  c.terminated) for i, c in enumerate(creator, 1)]), "",
-        "## The listing as rendered", "", "```text", meta["listing"], "```", "",
+        *(line for i, c in enumerate(creator, 1) for line in creator_section(i, c)),
+        "## The listing as rendered", "", *fenced(meta["listing"]), "",
         "## Every run", "",
-        *table(["leg", "skill", "kind", "run", "request", "first-step calls", "finish reason", "hit", "counted"],
+        *table(["leg", "skill", "kind", "run", "request", "first-step calls", "finish reason", "problem", "hit", "counted"],
                [(r.leg, r.skill, r.kind, r.index, r.prompt,
                  json.dumps(r.step.calls, sort_keys=True, default=repr), r.step.finish_reason,
-                 "yes" if hit(r) else "no", "yes" if r.leg == "native" else "no")
+                 r.step.error or r.step.flaw or "", "yes" if hit(r) else "no", "yes" if r.leg == "native" else "no")
                 for r in runs]),
     ]
     return "\n".join(lines) + "\n"
@@ -299,6 +409,10 @@ def not_run_report(day: str, model: str | None, endpoint: str | None, reason: st
         "No run finished, so this report holds no result.", ""])
 
 
+def subject_served(model: str) -> bool:
+    return "qwen" in model.lower()
+
+
 def inside(params: dict, root: Path) -> bool:
     path = params.get("path")
     if not isinstance(path, str):
@@ -309,7 +423,17 @@ def inside(params: dict, root: Path) -> bool:
         return False
 
 
-async def creator_run(client, home: Path, request: str, work: Path) -> CreatorRun:
+def creator_asker(skills_dir: Path, asks: list):
+    """Allows a `write` under the skills directory and nothing else."""
+    async def asker(req: PermissionRequest) -> Decision:
+        allowed = req.tool_name == "write" and inside(req.tool_params, skills_dir)
+        asks.append((req.tool_name, req.display, allowed))
+        return Decision("allow_once" if allowed else "reject_once")
+
+    return asker
+
+
+async def creator_run(client, home: Path, request: str, work: Path, base_url: str, served: int | None) -> CreatorRun:
     cfg_dir = home / ".localharness"
     base = root_config(cfg_dir)
     budget = base.permissions.budget.model_copy(
@@ -320,75 +444,89 @@ async def creator_run(client, home: Path, request: str, work: Path) -> CreatorRu
     assert isinstance(invoked, tuple), invoked
     asks: list[tuple[str, str, bool]] = []
     skills_dir = (cfg_dir / "skills").resolve()
-
-    async def asker(req: PermissionRequest) -> Decision:
-        allowed = req.tool_name == "write" and inside(req.tool_params, skills_dir)
-        asks.append((req.tool_name, req.display, allowed))
-        return Decision("allow_once" if allowed else "reject_once")
-
     gate = PermissionGate(
-        boundary=None, workspace=work, grants=GrantStore(work.parent / f"{work.name}-grants.yaml"), mode="guarded", asker=asker)
+        boundary=None, workspace=work, grants=GrantStore(work.parent / f"{work.name}-grants.yaml"), mode="guarded",
+        asker=creator_asker(skills_dir, asks))
     registry, state = await root_registry(skill_set, cfg)
-    loop = AgentLoop(
-        config=cfg, llm=client, bus=EventBus(), context_manager=ContextManager(), tool_registry=registry,
-        permission_evaluator=PermissionEvaluator(), gate=gate, kill_file_path=None,
-        skills=render_listing(skill_set.skills), task_context=state)
-    await loop.run_turn(invoked[0])
+    loop = root_loop(client, cfg, loop_shape(cfg_dir, cfg, base_url, served), skill_set, registry, state, gate, EventBus())
+    try:
+        await loop.run_turn(invoked[0])
+        terminated, failed = loop.last_terminated_reason, False
+    except Exception as exc:  # noqa: BLE001 - a creator turn that died is an invalid run, not a lost report
+        terminated, failed = f"error: {type(exc).__name__}", True
     result = CliRunner().invoke(app, ["skills", "--config-dir", str(cfg_dir)])
-    valid = result.exit_code == 0 and "Skipped:" not in result.output and " (machine, " in result.output
-    return CreatorRun(request, tuple(asks), loop.last_terminated_reason, result.output, valid)
+    valid = not failed and result.exit_code == 0 and "Skipped:" not in result.output and " (machine, " in result.output
+    files = tuple(sorted(
+        (str(p.relative_to(skills_dir)), p.read_text(encoding="utf-8", errors="replace"))
+        for p in skills_dir.rglob("*") if p.is_file()))
+    return CreatorRun(request, tuple(asks), terminated, result.output, valid, files)
+
+
+def git(*args: str) -> str:
+    return subprocess.run(["git", *args], capture_output=True, text=True, check=True, cwd=ROOT_DIR).stdout.strip()
 
 
 async def test_the_subject_model_picks_a_listed_skill_on_its_own(live_endpoint, fake_home, tmp_path, monkeypatch):
     day = date.today().isoformat()
-    assert not report_path(day).exists(), f"{report_path(day)} exists; one report per day, never overwritten"
-    started = time.monotonic()
+    number = run_number(day)
     model, base_url = live_target()
-    client = _build_bench_client(MatrixEntry(name=model, provider="vllm", model_id=model, base_url=base_url))
-    await client.detect_capabilities()
-    assert client.config.tool_call_mode == "native"
-    client.config.temperature = TEMPERATURE
-    window = probe_served_window(base_url, model)
-    commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True, cwd=Path(__file__).resolve().parents[2]).stdout.strip()
-    work = tmp_path / "work"
-    work.mkdir()
-    monkeypatch.chdir(work)
-    skill_set = install(tmp_path / "cfg")
-    cfg = root_config(tmp_path / "cfg")
-    listing = render_listing(skill_set.skills)
-    names = sorted(s.name for s in skill_set.skills)
-    sets = prompts()["skills"]
-    assert set(sets) == set(names)
-    registry, _ = await root_registry(skill_set, cfg)
-    tools = sorted(registry.get_tools_for_agent(cfg.name, cfg.division or "", cfg.tools))
-    requests = [(skill, kind, text) for skill in names for kind in KINDS for text in sets[skill][kind]]
-    total = (RUNS + 1) * len(requests)
-    runs: list[Run] = []
+    if not subject_served(model):
+        write_report(day, not_run_report(day, model, base_url, NOT_SUBJECT), number)
+        pytest.fail(f"{NOT_SUBJECT}: {model}")
+    started = time.monotonic()
+    try:
+        commit, tree = git("rev-parse", "HEAD"), "dirty" if git("status", "--porcelain") else "clean"
+        sha = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        client = _build_bench_client(MatrixEntry(name=model, provider="vllm", model_id=model, base_url=base_url))
+        await client.detect_capabilities()
+        assert client.config.tool_call_mode == "native"
+        client.config.temperature = TEMPERATURE
+        window = probe_served_window(base_url, model)
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        skill_set = install(tmp_path / "cfg")
+        cfg = root_config(tmp_path / "cfg")
+        shape = loop_shape(tmp_path / "cfg", cfg, base_url, window)
+        listing = render_listing(skill_set.skills)
+        names = sorted(s.name for s in skill_set.skills)
+        sets = prompts()["skills"]
+        assert set(sets) == set(names)
+        registry, _ = await root_registry(skill_set, cfg)
+        tools = sorted(registry.get_tools_for_agent(cfg.name, cfg.division or "", cfg.tools))
+        requests = [(skill, kind, text) for skill in names for kind in KINDS for text in sets[skill][kind]]
+        total = (RUNS + 1) * len(requests)
+        runs: list[Run] = []
 
-    async def one(leg: str, index: int, skill: str, kind: str, text: str) -> None:
-        step = await first_step_run(client, skill_set, cfg, text, work)
-        assert listing in step.system
-        runs.append(Run(leg, skill, kind, text, index, step))
-        print(f"{leg} {len(runs)}/{total} {skill} {kind} run {index}: {[name for name, _ in step.calls]}", flush=True)
+        async def one(leg: str, index: int, skill: str, kind: str, text: str) -> None:
+            step = await settled(client, skill_set, cfg, shape, text, work)
+            runs.append(Run(leg, skill, kind, text, index, step))
+            print(f"{leg} {len(runs)}/{total} {skill} {kind} run {index}: {[name for name, _ in step.calls]}"
+                  f"{' ' + step.error if step.error else ''}", flush=True)
 
-    for index in range(1, RUNS + 1):
+        for index in range(1, RUNS + 1):
+            for request in requests:
+                await one("native", index, *request)
+        client.config.tool_call_mode = "xml"
         for request in requests:
-            await one("native", index, *request)
-    client.config.tool_call_mode = "xml"
-    for request in requests:
-        await one("xml", 1, *request)
-    client.config.tool_call_mode = "native"
-    creator = []
-    for i in range(1, CREATOR_BAR[1] + 1):
-        creator_work = tmp_path / f"creator-{i}"
-        creator_work.mkdir()
-        monkeypatch.chdir(creator_work)
-        creator.append(await creator_run(client, fake_home(tmp_path / f"home-{i}"), prompts()["creator"], creator_work))
-    meta = {
-        "day": day, "commit": commit, "model": model, "base_url": base_url, "window": window, "temperature": TEMPERATURE,
-        "tools": tools, "listing": listing, "minutes": int((time.monotonic() - started) // 60)}
-    path = write_report(day, render_report(meta, runs, creator))
+            await one("xml", 1, *request)
+        client.config.tool_call_mode = "native"
+        creator = []
+        for i in range(1, CREATOR_BAR[1] + 1):
+            creator_work = tmp_path / f"creator-{i}"
+            creator_work.mkdir()
+            monkeypatch.chdir(creator_work)
+            creator.append(await creator_run(
+                client, fake_home(tmp_path / f"home-{i}"), prompts()["creator"], creator_work, base_url, window))
+        meta = {
+            "day": day, "run": number, "commit": commit, "tree": tree, "sha": sha, "model": model, "base_url": base_url, "window": window,
+            "temperature": TEMPERATURE, "effort": shape.effort, "loop_window": shape.window, "tools": tools, "listing": listing,
+            "minutes": int((time.monotonic() - started) // 60)}
+        path = write_report(day, render_report(meta, runs, creator), number)
+    except BaseException:
+        with contextlib.suppress(FileExistsError):
+            write_report(day, not_run_report(day, model, base_url, NOT_FINISHED), number)
+        raise
     print(f"report: {path}", flush=True)
     valid = [c.valid for c in creator]
-    assert passed(runs, valid), "; ".join(f"{s} {tally(runs, s)}" for s in names) + f"; creator {sum(valid)} of {len(valid)}"
+    assert passed(runs, valid), "; ".join(f"{s} {count(runs, 'native', s)}" for s in names) + f"; creator {sum(valid)} of {len(valid)}"
