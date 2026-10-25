@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from typer.testing import CliRunner
 
 from localharness.agent.gate_types import PROTECTED_CONFIG_DIR_ENTRIES, Verdict
 from localharness.agent.subagent import CONFIG_CHILD_DEFAULT_TOOLS, _config_child_allowed
@@ -14,7 +15,8 @@ from localharness.config.loader import ConfigLoader, ConfigValidationError
 from localharness.config.models import AgentConfig, ContextConfig, ToolConfig
 from localharness.config.paths import WORKSPACE_DIR_NAME
 from localharness.config import skills
-from localharness.config.skills import ORIGINS, SkillSet
+from localharness.cli.app import app
+from localharness.config.skills import BUNDLED_NAME, ORIGINS, SkillSet
 from localharness.agent import subagent
 from localharness.agent.context import ContentStore
 from localharness.agent.task_record import TaskState
@@ -25,6 +27,7 @@ from tests.unit.test_docs_convergence import check_protected_entries_doc
 from tests.unit.test_capabilities import _production_registry
 from tests.unit.test_leftover_plugin_section import _CONFIG, _agent_file
 from tests.unit.test_skills_discovery import _skill
+from tests.unit.test_skills_listing import _start_world
 
 
 @pytest.fixture
@@ -294,3 +297,49 @@ async def test_the_grant_target_toolset_omits_skill(root_registry) -> None:
 @pytest.mark.parametrize("name", [*subagent._STATIC_TOOLSETS, *subagent._WEB_ROLES])
 async def test_no_built_in_role_holds_the_skill_tool(root_registry, name) -> None:
     assert "skill" not in subagent.builtin_toolset(name, root_registry), name
+
+
+DESCRIPTION = (
+    "Creates or improves a LocalHarness skill, a reusable procedure in a SKILL.md. Use when the person says "
+    "make a skill, turn this into a skill, new skill, save this as a procedure or improve this skill."
+)
+
+
+def test_the_bundled_creator_is_a_valid_bundled_skill(tmp_path) -> None:
+    found = SkillSet.discover(tmp_path / "cfg", None)
+
+    assert [(s.name, s.origin, s.untrusted) for s in found.skills] == [("skill-creator", "bundled", False)]
+    assert found.skills[0].description == DESCRIPTION and len(DESCRIPTION) == 199
+    assert found.skipped == ()
+
+
+def test_a_machine_skill_cannot_take_the_bundled_name(tmp_path) -> None:
+    _skill(tmp_path / "cfg" / "skills", "skill-creator")
+
+    found = SkillSet.discover(tmp_path / "cfg", None)
+
+    assert [(s.name, s.origin) for s in found.skills] == [("skill-creator", "bundled")]
+    assert [s.fix for s in found.skipped] == [BUNDLED_NAME[1]]
+
+
+def test_the_verb_lists_the_creator_as_valid(fake_home, monkeypatch) -> None:
+    home = fake_home()
+    (home / "proj").mkdir()
+    monkeypatch.chdir(home / "proj")
+
+    result = CliRunner().invoke(app, ["skills"])
+
+    assert result.exit_code == 0
+    assert result.output.splitlines()[0].startswith("skill-creator (bundled, ")
+    assert "Skipped:" not in result.output
+
+
+async def test_a_real_start_lists_the_creator_and_registers_the_tool(tmp_path, monkeypatch) -> None:
+    from localharness.cli.start_cmd import _start_async
+
+    _, agents = _start_world(tmp_path, monkeypatch, skill=False)
+    await _start_async(None, False, False, str(tmp_path))
+    (loop,) = agents
+
+    assert f"- skill-creator: {DESCRIPTION}" in loop._skills
+    assert loop._tools.schema_of("skill").parameters["properties"]["name"]["enum"] == ["skill-creator"]
