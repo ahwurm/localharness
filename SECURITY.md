@@ -83,13 +83,24 @@ ignored, with one warning naming the link (`localharness validate` names it the 
 not check it), and the machine's file of that name is used instead: a project's agent files must be
 files inside its `.localharness/`, judged by where they sit, never by where they point. That rule is
 for a project's files only: a symlink among your machine's own agent files loads as the file it
-points to, as a dotfiles setup expects. What your machine's agent files and the `agent:` section of
-your `overrides.yaml` start, load or loosen waits for one Yes instead — see the paragraph on what
+points to, as a dotfiles setup expects. So does a machine `agents/` folder that is itself a symlink.
+The harness's agent writer never writes through a link in either layer: it refuses to write over an
+agent file that is a symlink, in a project it also refuses an `agents/` folder that is a symlink or
+leads outside `.localharness/`, and it never creates a project's `.localharness/`. What your
+machine's agent files and the `agent:` section of your `overrides.yaml` start, load or loosen waits
+for one Yes instead — see the paragraph on what
 the agent may change about its own setup, under the approval gate.
 
 **What this does NOT cover.** If you clone someone's repository and run the harness inside it, that
 repository's `.localharness/` config, agent files and skills load with no prompt, because you are
-inside that project. They decide an agent's role, prompt, model and tools, so read them in an unfamiliar
+inside that project. Its agent files are also listed to the model as delegates once loaded. The write
+runs the other way too: the agent tool tells the model where a project specialist goes, so a
+prompt-injected model can be steered to write a `.localharness/agents/` file that sets a role and
+tools, and if the project commits that folder every teammate's session loads it with no prompt. The
+approval gate already allows that write and it shows in a diff; the harness cannot tell whether a
+project commits its `.localharness/`. With a project layer, the in-session creation flow saves a new
+agent to the project by default: the confirmation names the full path, and answering `machine` saves
+it to your machine's agents folder instead. They decide an agent's role, prompt, model and tools, so read them in an unfamiliar
 repository before you run the harness there, the same way you would read its build scripts. A trust
 Yes covers what you were shown and no more: the scripts and files an approved server's command runs
 from inside the repository are not fingerprinted (the same gap as a granted `python3 <script>`,
@@ -645,10 +656,14 @@ change an answer; there is no CLI verb for it, the prompt is the interface and t
 escape hatch.
 
 **What the agent may change about its own setup.** The agent may extend itself — that is a feature,
-not a leak: it can write a new specialist into `~/.localharness/agents/` and drop a helper script into
+not a leak: it can write a new specialist into `~/.localharness/agents/` or, in a session with a
+project layer, into that project's `.localharness/agents/`, and drop a helper script into
 `~/.localharness/tools/`. (A config `init` wrote before this release lists the `write(*/agents/*.yaml)`
 deny pattern, which refuses the agent's `write` tool there and stays; delete it from
-`org.permissions.deny_patterns` if you want the agent to create specialists with it.) It is told to
+`org.permissions.deny_patterns` if you want the agent to create specialists with it.) A project
+specialist is read by every session started in that project and is listed to the model as soon as it
+is used or created; its permissions can only tighten your machine's, and a specialist starts no MCP
+servers of its own. It is told to
 compose specialists from the tools the harness already has and never to write its own tool for
 something the harness already provides (web search, fetch, files, delegation). What it writes there
 is held back until you have seen it: an MCP server, an embedding model or a permission looser than
