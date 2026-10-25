@@ -1757,22 +1757,25 @@ class OrchestratorREPL:
 
     async def _slash_agents(self, args: str, args_lower: str) -> None:
         from localharness.channels.base import one_line
+        from localharness.config.loader import PROBLEM_LINE_CAP, problem_lines
 
         registry = self._orchestrator._card_registry
-        registry.refresh()
+        problems = registry.refresh()
         cards = registry.all_cards()
-        if not cards:
-            await self._channel.send_message(
-                "No agents configured. Describe what you need and I'll create one.",
-                metadata={"style": "system.info"},
-            )
-        else:
+        if cards:
             lines = ["Configured agents:"]
             lines += [
                 f"  {card.name} -- {one_line(card.description)[:80]}" + (f" ({card.origin})" if card.origin else "")
                 for card in cards
             ]
-            await self._channel.send_message("\n".join(lines), metadata={"style": "system.info"})
+        elif registry.loader is None:
+            lines = ["No agents configured. Describe what you need and I'll create one."]
+        else:
+            dirs = [d for d in (registry.loader.agents_dir("project"), registry.loader.agents_dir("machine")) if d]
+            lines = ["No agents configured. Searched: " + ", ".join(f"'{d}'" for d in dirs)
+                     + ". Describe what you need and I'll create one."]
+        lines += problem_lines(problems, PROBLEM_LINE_CAP)
+        await self._channel.send_message("\n".join(lines), metadata={"style": "system.info"})
 
     # ------------------------------------------------------------------ #
     # /model — list and swap models

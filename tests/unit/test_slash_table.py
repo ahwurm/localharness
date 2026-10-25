@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import yaml
 from prompt_toolkit.document import Document
 
 from localharness.channels.terminal import SlashCommandCompleter
@@ -268,6 +269,65 @@ async def test_agents_lists_the_cards():
     repl, _, _ = _build_repl(channel)
     assert await repl._handle_slash("/agents") is True
     assert channel.sent == [("No agents configured. Describe what you need and I'll create one.", INFO)]
+
+
+def _bound(tmp_path):
+    m, p = tmp_path / "machine", tmp_path / "project"
+    for d in (m / "agents", p / "agents"):
+        d.mkdir(parents=True)
+    channel = RecordingChannel([])
+    repl, _, _ = _build_repl(channel)
+    repl._orchestrator._card_registry.loader = ConfigLoader(config_dir=m, local_config_dir=p)
+    return channel, repl, m, p
+
+
+def _agent_file(d, name, **extra):
+    (d / f"{name}.yaml").write_text(yaml.safe_dump({"name": name, "role": "r", **extra}))
+
+
+async def test_agents_empty_state_names_the_dirs_searched(tmp_path):
+    channel, repl, m, p = _bound(tmp_path)
+    await repl._handle_slash("/agents")
+    assert channel.sent == [(f"No agents configured. Searched: '{p / 'agents'}', '{m / 'agents'}'. "
+                             "Describe what you need and I'll create one.", INFO)]
+
+    custom = tmp_path / "custom"
+    channel = RecordingChannel([])
+    repl, _, _ = _build_repl(channel)
+    repl._orchestrator._card_registry.loader = ConfigLoader(config_dir=custom)
+    await repl._handle_slash("/agents")
+    (text, meta), = channel.sent
+    assert text == f"No agents configured. Searched: '{custom / 'agents'}'. Describe what you need and I'll create one."
+    assert "~" not in text and meta == INFO
+
+
+@pytest.mark.parametrize("broken, tail", [(25, "...and 5 more; run localharness agent list"), (1, None)])
+async def test_agents_prints_problems_under_the_list_capped(tmp_path, broken, tail):
+    channel, repl, m, p = _bound(tmp_path)
+    _agent_file(p / "agents", "good")
+    for i in range(broken):
+        _agent_file(p / "agents", f"bad{i:02d}", capabilities="lots")
+    await repl._handle_slash("/agents")
+    (text, _), = channel.sent
+    lines = text.splitlines()
+    assert lines[0] == "Configured agents:" and lines[1].startswith("  good -- ")
+    problems = lines[2:]
+    assert all(ln.endswith("; edit the file") for ln in problems[:20])
+    assert len(problems) == (21 if tail else 1)
+    if tail:
+        assert problems[-1] == tail
+    else:
+        assert not any(ln.startswith("...and") for ln in lines)
+
+
+async def test_agents_prints_problems_under_the_empty_state(tmp_path):
+    channel, repl, m, p = _bound(tmp_path)
+    (p / "agents" / "a.yaml").write_text("a: [unclosed")
+    await repl._handle_slash("/agents")
+    (text, _), = channel.sent
+    first, problem = text.splitlines()
+    assert first.startswith("No agents configured. Searched: ")
+    assert str(p / "agents" / "a.yaml") in problem and problem.endswith("; edit the file")
 
 
 async def test_quit_mid_wizard_cancels_the_creation_and_a_second_quit_exits(tmp_path):
