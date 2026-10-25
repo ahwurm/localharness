@@ -6,7 +6,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from localharness.config.loader import ConfigLoader, Origin
+from localharness.config.loader import ConfigLoader, Origin, shadow_label
 from localharness.config.redact import yaml_problem, yaml_where
 
 
@@ -28,6 +28,9 @@ _CANCEL_PHRASES: tuple[tuple[str, ...], ...] = (
 _CANCEL_PREFIXES = ("actually", "no")
 # Ignorable filler tokens allowed ONLY after a cancel phrase anchored the match ("cancel that").
 _CANCEL_FILLERS = ("it", "that", "this", "please", "then", "now", "everything", "all")
+# What the confirm prompts print; _handle_confirm also accepts unlisted synonyms, and transition() takes "cancel" first.
+_BOUND_REPLIES = ("yes", "machine", "change", "cancel")
+_UNBOUND_REPLIES = ("yes", "no", "change", "cancel")
 
 
 def _cancel_phrase_len_at(words: list[str], i: int) -> int:
@@ -209,7 +212,38 @@ class AgentCreationWorkflow:
             self._state = WorkflowState.DEPLOY
         elif lower in ("no", "n", "change", "update", "edit", "redo"):
             self._state = WorkflowState.DISCUSS
+        elif lower == "machine" or (lower == "project" and self._loader.local_dir is not None):
+            self._layer = lower
+            self._state = WorkflowState.DEPLOY
         return self._state
+
+    def _offered(self) -> tuple[str, ...]:
+        return _BOUND_REPLIES if self._loader.local_dir is not None else _UNBOUND_REPLIES
+
+    def reply_line(self) -> str:
+        return "Reply: " + " / ".join(self._offered())
+
+    def confirm_prompt(self) -> str:
+        """The question under the generated config: where it will be saved, what that shadows, what to answer."""
+        name = self._gathered.get("name")
+        project = self._loader.agents_dir("project")
+        machine = self._loader.agents_dir("machine")
+        if project is None:
+            *rest, last = _UNBOUND_REPLIES
+            return (f"Does this look good? It will be saved to {machine / f'{name}.yaml'}. "
+                    f"({'/'.join(rest)}, or '{last}')")
+        found = self._loader.agent_file(name)
+        shadow = f" ({shadow_label(found.path)})" if found is not None and found.origin == "machine" else ""
+        return f"Save to {project / f'{name}.yaml'}{shadow}? " + " / ".join(_BOUND_REPLIES)
+
+    def machine_note(self) -> str | None:
+        """A line for a machine save that a project file of the same name will keep overriding."""
+        name = self._gathered.get("name")
+        found = self._loader.agent_file(name) if self._layer == "machine" else None
+        if found is None or found.origin != "project":
+            return None
+        return (f"note: {found.path} " + shadow_label(self._loader.agents_dir("machine") / f"{name}.yaml")
+                + "; it will not load here")
 
     def _handle_deploy(self, user_input: str) -> WorkflowState:
         self._state = WorkflowState.AFTERCARE

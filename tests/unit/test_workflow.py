@@ -310,3 +310,67 @@ def test_deploy_config_writes_the_bound_project_layer_through_the_writer(tmp_pat
         wf2.deploy_config()
     assert str(err.value).endswith("remove the existing config.")
     assert str(err.value).count("remove the existing config.") == 1
+
+
+def _at_confirm(tmp_path: Path, *, bound: bool = True, name: str = "x"):
+    m, p = tmp_path / "m", tmp_path / "p"
+    m.mkdir(exist_ok=True)
+    p.mkdir(exist_ok=True)
+    wf = AgentCreationWorkflow(loader=ConfigLoader(config_dir=m, local_config_dir=p if bound else None))
+    wf.transition("Build a research agent that searches the web for me")
+    wf.set_generated_yaml(f"name: {name}\nrole: r")
+    wf.transition("configure_done")
+    assert wf.state == WorkflowState.CONFIRM
+    return wf, m, p
+
+
+def test_machine_switches_the_layer_and_project_unbound_is_unknown(tmp_path: Path):
+    wf, _, _ = _at_confirm(tmp_path)
+    assert wf.transition("machine") == WorkflowState.DEPLOY and wf._layer == "machine"
+    wf, _, _ = _at_confirm(tmp_path)
+    assert wf.transition("project") == WorkflowState.DEPLOY and wf._layer == "project"
+    wf, _, _ = _at_confirm(tmp_path, bound=False)
+    assert wf.transition("project") == WorkflowState.CONFIRM
+
+
+@pytest.mark.parametrize("bound", [True, False])
+@pytest.mark.parametrize("token,expected", [
+    ("yes", WorkflowState.DEPLOY), ("y", WorkflowState.DEPLOY), ("ok", WorkflowState.DEPLOY),
+    ("looks good", WorkflowState.DEPLOY), ("lgtm", WorkflowState.DEPLOY), ("deploy", WorkflowState.DEPLOY),
+    ("no", WorkflowState.DISCUSS), ("n", WorkflowState.DISCUSS), ("change", WorkflowState.DISCUSS),
+    ("update", WorkflowState.DISCUSS), ("edit", WorkflowState.DISCUSS), ("redo", WorkflowState.DISCUSS),
+    ("cancel", WorkflowState.CANCELLED),
+])
+def test_every_offered_token_and_synonym_is_accepted(tmp_path: Path, bound, token, expected):
+    wf, _, _ = _at_confirm(tmp_path, bound=bound)
+    assert wf.transition(token) == expected
+
+
+def test_reply_line_is_built_from_the_offered_tuple(tmp_path: Path):
+    assert _at_confirm(tmp_path)[0].reply_line() == "Reply: yes / machine / change / cancel"
+    assert _at_confirm(tmp_path, bound=False)[0].reply_line() == "Reply: yes / no / change / cancel"
+
+
+def test_the_confirm_prompts_are_pinned(tmp_path: Path):
+    wf, m, p = _at_confirm(tmp_path)
+    assert wf.confirm_prompt() == f"Save to {p / 'agents' / 'x.yaml'}? yes / machine / change / cancel"
+    (m / "agents").mkdir()
+    (m / "agents" / "x.yaml").write_text("name: x\nrole: r\n")
+    assert wf.confirm_prompt() == (f"Save to {p / 'agents' / 'x.yaml'} (shadows {m / 'agents' / 'x.yaml'})? "
+                                   "yes / machine / change / cancel")
+    wf, m, _ = _at_confirm(tmp_path, bound=False)
+    assert wf.confirm_prompt() == (f"Does this look good? It will be saved to {m / 'agents' / 'x.yaml'}. "
+                                   "(yes/no/change, or 'cancel')")
+    assert "~" not in wf.confirm_prompt()
+
+
+def test_machine_note_names_the_project_file_it_will_not_override(tmp_path: Path):
+    wf, m, p = _at_confirm(tmp_path)
+    wf.transition("machine")
+    assert wf.machine_note() is None
+    (p / "agents").mkdir()
+    (p / "agents" / "x.yaml").write_text("name: x\nrole: r\n")
+    assert wf.machine_note() == (f"note: {p / 'agents' / 'x.yaml'} shadows {m / 'agents' / 'x.yaml'}; "
+                                 "it will not load here")
+    wf._layer = "project"
+    assert wf.machine_note() is None
