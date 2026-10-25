@@ -2,27 +2,38 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import shlex
 from itertools import combinations
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from localharness.agent import subagent
-from localharness.agent.context import ContentStore, TokenCounter, fixed_tokens
-from localharness.agent.loop import base_system_prompt, render_index
+from localharness.agent.context import ContentStore, ContextManager, TokenCounter, fixed_tokens
+from localharness.agent.loop import AgentLoop, base_system_prompt, render_index
+from localharness.agent.permissions import PermissionEvaluator
 from localharness.agent.task_record import TaskState
 from localharness.cli import model_cmd, start_serving
+from localharness.channels.base import one_line
 from localharness.cli.workspace import MachineTrust
+from localharness.config.paths import resolve_config_dir
 from localharness.config.loader import ConfigLoader
 from localharness.config.models import AgentConfig, ToolConfig
 from localharness.config.skills import SkillSet
+from localharness.core.bus import EventBus
 from localharness.tools.builtin.agent_tool import BUILTIN_AGENT_NAMES
 from localharness.tools.builtin.skill_tool import SkillTool, render_listing
 from localharness.tools.builtin.task_tool import TaskTool
 from tests.unit.test_capabilities import _production_registry
+from tests.unit.test_loop_project_instructions import _FakeHandle, _build
 from tests.unit.test_skills_discovery import _skill
-from tests.unit.test_skills_listing import _CFG, _MODES, _ROOT, _notes, _spy_floor, pkg  # noqa: F401
+from tests.unit.test_skills_listing import _CFG, _MODES, _ROOT, _notes, _spy_floor, _start_world, pkg  # noqa: F401
+from tests.unit.test_start_cmd import _stub_nonvllm_start, _write_agent
+from tests.unit.test_start_floor import _capture_agent
+from tests.unit.test_start_server_recovery import world  # noqa: F401
+from tests.unit.test_workspace_state_landing import _drive, _workspace_start
 
 
 # --- index text -----------------------------------------------------------------------------------
@@ -206,3 +217,147 @@ def test_the_swap_floor_prices_the_no_layer_index_with_the_machine_directory(tmp
     floor = model_cmd._swap_floor(MachineTrust(), cfg)
     assert seen == [{"root": None, "machine_dir": cfg, "config_dir_flag": False}]
     assert floor >= asyncio.run(real(_ROOT, SkillSet.discover(cfg, None).skills))
+
+
+def test_the_loop_floor_rises_by_the_index_alone():
+    counter = TokenCounter(offline=True)
+
+    def loop(**kw):
+        return AgentLoop(config=_CFG, llm=SimpleNamespace(config=None), bus=EventBus(),
+                         context_manager=ContextManager(token_counter=counter), tool_registry=None,
+                         permission_evaluator=PermissionEvaluator(), **kw)
+    rise = loop(index=FULL).fixed_tokens() - loop().fixed_tokens()
+    kw = dict(tool_call_mode="native", guardrails="")
+    assert rise == (fixed_tokens(counter, base_system_prompt(_CFG, index=FULL, **kw), [])
+                    - fixed_tokens(counter, base_system_prompt(_CFG, **kw), [])) > 0
+
+
+async def test_every_turn_carries_the_index_after_the_listing_and_before_the_instructions(bus, tmp_path):
+    listing = "## Skills\n- notes: d"
+    loop, llm = _build(bus, _FakeHandle(script=[("Use tabs.\n", None)]), guardrails="No pushes.",
+                       tmp_path=tmp_path, skills=listing, index=FULL)
+    await loop.run_turn("hi")
+    role = llm.roles[0]
+    assert role.count(FULL) == 1
+    at = [role.index(x) for x in ("## Guardrails\n", listing, FULL, "## Project instructions")]
+    assert at == sorted(at)
+
+
+def test_the_golden_first_prompt_carries_the_no_layer_config_dir_index():
+    golden = Path(__file__).resolve().parents[1] / "fixtures" / "memory_plugin" / "system_prompt_memory_on.txt"
+    block = render_index(None, Path("/TMP"), {"agent", "task", "skill"}, True, True).replace("/TMP", "<TMP>")
+    assert "\n\n" + block + "\n\n## Division Context\n" in golden.read_text(encoding="utf-8")
+
+
+@pytest.mark.usefixtures("pkg")
+async def test_the_launch_floor_prices_the_index_the_root_sends(tmp_path, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_nonvllm_start(tmp_path, monkeypatch, served=65_536, probe_window=None)
+    (tmp_path / "work").mkdir()
+    monkeypatch.chdir(tmp_path / "work")
+    _skill(tmp_path / "skills", "notes")
+    agents = _capture_agent(monkeypatch)
+    fixed, _ = _spy_floor(monkeypatch)
+    await _start_async(None, False, False, str(tmp_path))
+    (loop,) = agents
+    assert loop._index and fixed[0][0].endswith("\n\n" + loop._index)
+
+
+# --- index start wiring ---------------------------------------------------------------------------
+
+def _spy_render(monkeypatch):
+    real, calls = render_index, []
+
+    def spy(*a, **kw):
+        calls.append(inspect.signature(real).bind(*a, **kw).arguments)
+        return real(*a, **kw)
+
+    monkeypatch.setattr("localharness.agent.loop.render_index", spy)
+    return calls
+
+
+def _spy_launch(monkeypatch):
+    calls = []
+
+    async def spy(agent_config, skills=(), **kw):
+        calls.append(kw)
+        return 256
+
+    monkeypatch.setattr(start_serving, "launch_floor", spy)
+    return calls
+
+
+async def test_a_layer_start_passes_the_project_root_to_the_floor_and_the_index(tmp_path, monkeypatch, fake_home):
+    _, _, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
+    agents, renders, launches = _capture_agent(monkeypatch), _spy_render(monkeypatch), _spy_launch(monkeypatch)
+    await _drive()
+    root, machine = ws.resolve().parent, resolve_config_dir(None)
+    assert launches == [{"root": root, "machine_dir": machine, "config_dir_flag": False}]
+    (args,) = renders
+    assert (args["root"], args["machine_dir"], args["config_dir_flag"], args["slash"]) == (root, machine, False, True)
+    (loop,) = agents
+    assert loop._index == render_index(root, machine, args["held"], False, True)
+    assert loop._index.split("\n")[1] == "Project: " + repr(one_line(str(root))) + "."
+
+
+@pytest.mark.usefixtures("pkg")
+async def test_a_no_layer_start_renders_the_no_layer_index_with_the_flag(tmp_path, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+
+    _, agents = _start_world(tmp_path, monkeypatch)
+    renders, launches = _spy_render(monkeypatch), _spy_launch(monkeypatch)
+    await _start_async(None, False, False, str(tmp_path))
+    assert launches == [{"root": None, "machine_dir": tmp_path, "config_dir_flag": True}]
+    (args,) = renders
+    assert (args["root"], args["machine_dir"], args["config_dir_flag"], args["slash"]) == (None, tmp_path, True, True)
+    (loop,) = agents
+    assert loop._index.split("\n")[1] == "No project layer."
+
+
+async def test_an_acp_start_names_no_slash_command_and_keeps_the_skills_pointer(world, monkeypatch):  # noqa: F811
+    got: dict = {}
+
+    class _Acp:
+        async def serve(self, **kw):
+            got.update(kw)
+
+        def __getattr__(self, name):
+            raise AttributeError(name)
+
+    renders, _ = _spy_render(monkeypatch), _spy_launch(monkeypatch)
+    _write_agent(world.tmp_path / "agents", "solo")
+    await world.start(channel_mode="acp", no_input=True, acp_channel=_Acp())
+    (args,) = renders
+    assert args["slash"] is False
+    index = got["agent_loop"]._index
+    assert "/help" not in index and "/agents" not in index and "`localharness skills" in index
+
+
+@pytest.mark.usefixtures("pkg")
+@pytest.mark.parametrize("skill", [True, False])
+async def test_a_floor_schemas_that_raises_keeps_every_line_the_root_registered(tmp_path, monkeypatch, skill):
+    from localharness.agent import context
+    from localharness.cli.start_cmd import _start_async
+
+    _, agents = _start_world(tmp_path, monkeypatch, skill=skill)
+    real, calls = context.floor_schemas, []
+
+    def boom_once(*a, **k):
+        calls.append(a)
+        if len(calls) == 1:
+            raise RuntimeError("tool info failed")
+        return real(*a, **k)
+
+    monkeypatch.setattr(context, "floor_schemas", boom_once)
+    await _start_async(None, False, False, str(tmp_path))
+    (loop,) = agents
+    assert calls
+    index = loop._index
+    assert _line(index, "Agents: ") is not None
+    if skill:
+        assert _line(index, "Skills: ") is not None and "- notes: Use notes when asked." in loop._skills
+        assert _line(index, "Work: ") == f"Work: {SKILL_CLAUSE} {AGENT_CLAUSE}"
+    else:
+        assert _line(index, "Skills: ") is None
+        assert _line(index, "Work: ") == "Work: " + AGENT_CLAUSE

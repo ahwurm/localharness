@@ -18,6 +18,12 @@ BASELINE-GUARDRAILS-SENTINEL
 Procedures. When a request matches one, call skill(name) before starting the work it covers.
 - skill-creator: Creates or improves a LocalHarness skill, a reusable procedure in a SKILL.md. Use when the person says make a skill, turn this into a skill, new skill, save this as a procedure or improve this skill.
 
+## Where things are
+No project layer.
+Skills: listed above. New ones go in '<TMP>/skills'. `/help` lists them as `/<name>` rows; `localharness skills --config-dir <TMP>` also shows any skipped.
+Agents: listed in the agent tool. A delegated agent never has skill or task; `/agents` lists them for the person.
+Work: A skill loaded during a live task can be one of its 4 references, and stays in view; otherwise only for the current step. While a task is live, each agent call is a delegation it records; integrate it before closing.
+
 ## Division Context
 # Division
 BASELINE-DIVISION-SENTINEL
