@@ -17,6 +17,7 @@ import localharness.agent.subagent as subagent
 from localharness.agent.gate_types import DEFAULT_MODE
 from localharness.agent.subagent import _not_wired_text, make_explore_agent_runner
 from localharness.channels.base import one_line
+from localharness.cli.agent_cmd import UNREAD_PROJECT_AGENTS
 from localharness.config.loader import (
     PROBLEM_LINE_CAP,
     AgentFile,
@@ -30,10 +31,12 @@ from localharness.config.loader import (
     shadow_label,
 )
 from localharness.config.models import AgentConfig
+from localharness.config.paths import discover_workspace_dir
 from localharness.orchestrator.cards import AgentCardRegistry
 from localharness.orchestrator.workflow import AgentCreationWorkflow
 from localharness.tools.builtin.agent_tool import BUILTIN_AGENT_NAMES, INVALID_AGENT_NAME, AgentTool
 from tests.unit.test_start_cmd import _capture_err_console, _stub_start_boundaries, _write_agent
+from tests.unit.test_skills_listing import _start_world
 from tests.unit.test_start_floor import _capture_agent
 from tests.unit.test_workspace_state_landing import _drive, _install_recorders, _one, _workspace_start
 
@@ -733,3 +736,31 @@ def test_a_machine_agents_path_that_is_not_a_folder_is_a_value_error(tmp_path, k
     agents.symlink_to(tmp_path / "gone") if kind == "dangling" else agents.write_text("")
     with pytest.raises(ValueError, match="is not a folder; replace it with a folder$"):
         ConfigLoader(config_dir=tmp_path / "machine").write_agent("x", _text(), layer="machine")
+
+
+@pytest.mark.parametrize("cause, files, count", [
+    ("flag", True, 1), ("LOCALHARNESS_DIR", True, 0), ("LOCALHARNESS_HOME", True, 0), ("flag", False, 0),
+])
+async def test_start_prints_the_unread_line_only_for_the_flag(tmp_path, monkeypatch, fake_home, cause, files, count):
+    from localharness.cli import start_cmd
+
+    fake_home(tmp_path, clear_overrides=False)
+    _start_world(tmp_path, monkeypatch, skill=False)
+    work = tmp_path / "work"
+    if files:
+        _write_agent(work / ".localharness" / "agents", "a")
+    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+    config_dir = None if cause == "LOCALHARNESS_HOME" else str(tmp_path)
+    if cause == "LOCALHARNESS_DIR":
+        monkeypatch.setenv("LOCALHARNESS_DIR", str(tmp_path))
+    if cause == "LOCALHARNESS_HOME":
+        monkeypatch.setenv("LOCALHARNESS_HOME", str(tmp_path))
+    out = io.StringIO()
+    monkeypatch.setattr(start_cmd, "console", Console(file=out, width=400))
+
+    await start_cmd._start_async(None, False, False, config_dir)
+
+    line = UNREAD_PROJECT_AGENTS.format(n=1, dir=(discover_workspace_dir(work) or work / ".localharness") / "agents", why="--config-dir was given")
+    assert out.getvalue().count(line) == count
+    if not count:
+        assert "project agent files in" not in out.getvalue()
