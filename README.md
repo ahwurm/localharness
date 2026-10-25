@@ -71,6 +71,12 @@ Installed plugins live on your machine, not inside a project: a Python package w
 
 Copy [the example plugin](examples/plugin-template/README.md): one tool, one command, one slash command, one `doctor` check and two settings, tested in CI. The API is [`plugins/api.py`](src/localharness/plugins/api.py); its version is `"1"`, and changes since its first release have only added optional fields. Plugins written for the previous plugin API no longer load; [the example plugin](examples/plugin-template/README.md#plugins-written-for-015) says how to port one.
 
+## Skills
+
+A skill is a folder holding a `SKILL.md` in the open [Agent Skills](https://agentskills.io/specification) format: a name, a one-line description of when to use it, and a procedure. LocalHarness reads a project's `.localharness/skills/` and `.agents/skills/`, `~/.localharness/skills/` and the bundled set. The model sees one line per skill and loads the procedure with its `skill` tool when a request matches. The model may not pick a skill up on its own; `/<name>` asks it to.
+
+`localharness skills` lists what was found and why anything was skipped, and `/skill-creator` writes a new one with you, one approval per file. A skill is text: it grants no tool and installs nothing. A project's skills load with its config, so read them in a repository you did not write: [SECURITY.md](SECURITY.md#skills).
+
 ## Status
 
 Early stage (v0.21.1, pre-1.0). Interfaces and config schema may change without notice. Each release's known limitations are listed in the [CHANGELOG](CHANGELOG.md).
