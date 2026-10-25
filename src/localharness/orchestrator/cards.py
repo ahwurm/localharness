@@ -120,6 +120,22 @@ def score_card(task: str, card: AgentCard) -> float:
     return min(score, 1.0)
 
 
+def _problem(f: AgentFile, exc: ConfigError) -> AgentProblem:
+    """The problem record for a file that did not load, classified from the exception alone."""
+    from localharness.channels.base import one_line
+
+    if isinstance(exc, ConfigParseError):
+        kind, reason, fix = "parse", f"{exc.line}:{exc.column}: {exc.message}", "edit the file"
+    elif isinstance(exc, ConfigValidationError):
+        kind, fix = "validation", "edit the file"
+        reason = "; ".join(f"{e.field_path}: {e.message}" for e in exc.errors)
+    elif isinstance(exc, ConfigNotFoundError) and str(exc.__cause__) == INVALID_AGENT_NAME:
+        kind, reason, fix = "invalid-name", INVALID_AGENT_NAME, "rename the file"
+    else:
+        kind, reason, fix = "load", "does not load", "run localharness validate"
+    return AgentProblem(f.path, f.origin, kind, one_line(reason)[:200], fix)
+
+
 class AgentCardRegistry:
     """Manages Agent Cards for all configured agents."""
 
@@ -150,6 +166,32 @@ class AgentCardRegistry:
         card = self.generate_card(cfg.model_copy(update={"name": name}))
         self.register(card.model_copy(update={"origin": found.origin if found else None}))
         return cfg
+
+    def refresh(self) -> list[AgentProblem]:
+        """Register every winning agent file not yet registered; return one problem per file that did not load."""
+        from localharness.channels.base import one_line
+
+        if self.loader is None:
+            return []
+        problems: list[AgentProblem] = []
+        for stem, f in self.loader.agent_winners().items():
+            if stem in self._cards:
+                continue
+            try:
+                cfg = self.load(stem)
+            except ConfigError as exc:
+                problem = _problem(f, exc)
+            except Exception:
+                log.debug("agent file %s was skipped", f.path, exc_info=True)
+                continue
+            else:
+                if cfg.name == stem:
+                    continue
+                reason = one_line(f"name: {cfg.name!r} ignored; {stem}.yaml is agent {stem!r}")[:200]
+                problem = AgentProblem(f.path, f.origin, "mismatch", reason, "rename the file or the name: to match")
+            if stem not in BUILTIN_AGENT_NAMES:
+                problems.append(problem)
+        return problems
 
     def generate_card(self, config: "AgentConfig") -> AgentCard:
         """Generate an AgentCard from an AgentConfig."""
