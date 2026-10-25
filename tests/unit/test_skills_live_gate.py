@@ -17,8 +17,8 @@ from tests.conftest import FakeLLMResponse, FakeToolCall, MockLLMClient
 from tests.integration.test_skills_model_live import (
     CREATOR_BAR, CREATOR_MAX_ACTIONS, CREATOR_MAX_MINUTES, FALSE_BAR, FIXTURES, KINDS, MATCHING_BAR, NOT_FINISHED, NOT_SERVING, NOT_SUBJECT,
     RUNS, TEMPERATURE, VARIANT_A, VARIANT_B, CreatorRun, Run, Step, count, creator_asker, creator_run, first_step, first_step_run, hit,
-    install, judge, loop_shape, meets, neutral_sitting, not_run_report, out_of_list, passed, prompts, render_report, root_config, run_number, settled,
-    sizes, subject_served, write_report)
+    flaw_of, install, judge, loop_shape, meets, neutral_sitting, not_run_report, out_of_list, passed, prompts, render_report, root_config, run_number, settled,
+    sizes, subject_served, write_report, xml_mode)
 from tests.unit.test_image_hygiene import FORBIDDEN
 from tests.unit.test_skills_misc import lures
 
@@ -44,13 +44,14 @@ def reply(content=None, calls=(), finish="stop", reasoning=None) -> FakeLLMRespo
     return response
 
 
-async def scripted(tmp_path, monkeypatch, *responses, served=None):
+async def scripted(tmp_path, monkeypatch, *responses, served=None, mode="native"):
     work = tmp_path / "work"
     work.mkdir(parents=True)
     monkeypatch.chdir(work)
     skill_set = install(tmp_path / "cfg")
     cfg = root_config(tmp_path / "cfg")
     client = MockLLMClient([*responses, reply("second request")])
+    client.config.tool_call_mode = mode
     step = await first_step_run(client, skill_set, cfg, loop_shape(tmp_path / "cfg", cfg, URL, served), "Draft the release notes.", work)
     return step, skill_set, client
 
@@ -83,6 +84,33 @@ async def test_a_first_response_that_is_no_answer_is_named(tmp_path, monkeypatch
     assert (empty.calls, empty.flaw) == ((), "empty")
     thought, _, _ = await scripted(tmp_path / "c", monkeypatch, reply(reasoning="Let me think about release notes."))
     assert (thought.calls, thought.flaw) == ((), "reasoning only")
+
+
+XML_SKILL = '<tool_call>{"name": "skill", "arguments": {"name": "release-notes"}}</tool_call>'
+
+
+async def test_an_xml_mode_first_step_records_the_call_the_loop_dispatched(tmp_path, monkeypatch):
+    step, _, client = await scripted(tmp_path, monkeypatch, reply(XML_SKILL, finish="stop"), mode="xml")
+    assert step.calls == (("skill", {"name": "release-notes"}),)
+    assert step.flaw is None and client._index == 1
+
+
+async def test_a_server_that_answers_natively_in_xml_mode_is_named_not_recorded_as_no_calls(tmp_path, monkeypatch):
+    step, _, _ = await scripted(tmp_path, monkeypatch, reply(calls=[SKILL], finish="tool_calls"), mode="xml")
+    assert (step.calls, step.finish_reason, step.flaw) == ((), "tool_calls", "native-in-xml")
+
+
+def test_a_tool_call_finish_with_nothing_dispatched_is_named_by_mode():
+    response = Action(agent_id="a", session_id="s", action_type="llm_response", content="", finish_reason="tool_calls")
+    assert (flaw_of(response, (), "xml"), flaw_of(response, (), "native")) == ("native-in-xml", "calls not dispatched")
+    assert flaw_of(response, (("skill", {}),), "xml") is None
+
+
+def test_the_xml_leg_teaches_the_syntax_and_restores_the_client():
+    client = MockLLMClient([])
+    with xml_mode(client):
+        assert client.config.tool_call_mode == "xml" and client._fn_converter is not None
+    assert client.config.tool_call_mode == "native" and client._fn_converter is None
 
 
 async def test_the_measured_loop_sends_what_a_real_start_sends(tmp_path, monkeypatch):

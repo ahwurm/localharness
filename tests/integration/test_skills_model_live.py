@@ -39,6 +39,7 @@ from localharness.config.models import AgentConfig
 from localharness.config.skills import SkillSet
 from localharness.core.bus import EventBus
 from localharness.core.events import Action
+from localharness.provider.fn_call import FnCallConverter
 from localharness.tools.builtin import register_builtin_tools
 from localharness.tools.builtin.paths import resolve_user_path
 from localharness.tools.builtin.agent_tool import AgentTool
@@ -148,7 +149,18 @@ def first_request_only(client, seen: list):
         del client.stream_complete
 
 
-def first_step(events) -> tuple[tuple[tuple[str, dict], ...], str | None, str | None]:
+@contextlib.contextmanager
+def xml_mode(client):
+    """The client as detection leaves an xml server: the mode and the converter that teaches the syntax."""
+    mode, converter = client.config.tool_call_mode, getattr(client, "_fn_converter", None)
+    client.config.tool_call_mode, client._fn_converter = "xml", FnCallConverter()
+    try:
+        yield
+    finally:
+        client.config.tool_call_mode, client._fn_converter = mode, converter
+
+
+def first_step(events, mode: str = "native") -> tuple[tuple[tuple[str, dict], ...], str | None, str | None]:
     actions = [e for e in events if isinstance(e, Action)]
     start = next((i for i, e in enumerate(actions) if e.action_type == "llm_response"), None)
     if start is None:
@@ -156,13 +168,15 @@ def first_step(events) -> tuple[tuple[tuple[str, dict], ...], str | None, str | 
     end = next((i for i, e in enumerate(actions) if i > start and e.action_type == "llm_response"), len(actions))
     calls = tuple((e.tool_name, dict(e.tool_params or {})) for e in actions[start + 1:end] if e.action_type == "tool_call")
     first = actions[start]
-    return calls, first.finish_reason, flaw_of(first, calls)
+    return calls, first.finish_reason, flaw_of(first, calls, mode)
 
 
-def flaw_of(response: Action, calls) -> str | None:
-    """Why a first response is no answer: a cut or aborted generation, or nothing said and nothing called."""
+def flaw_of(response: Action, calls, mode: str = "native") -> str | None:
+    """Why a first response is no answer: a cut or aborted generation, a call the loop did not dispatch, or nothing said and nothing called."""
     if response.finish_reason in NON_ANSWERS:
         return response.finish_reason
+    if response.finish_reason == "tool_calls" and not calls:
+        return "native-in-xml" if mode == "xml" else "calls not dispatched"
     if not calls and not (response.content or "").strip():
         return "reasoning only" if response.reasoning_chars else "empty"
     return None
@@ -194,7 +208,7 @@ async def first_step_run(client, skill_set: SkillSet, cfg: AgentConfig, shape: S
     with first_request_only(client, seen):
         with contextlib.suppress(FirstStepDone):
             await loop.run_turn(prompt)
-    calls, finish, flaw = first_step(bus.history(event_types=[Action]))
+    calls, finish, flaw = first_step(bus.history(event_types=[Action]), getattr(client.config, "tool_call_mode", "native"))
     return Step(calls, finish, seen[0]["messages"][0]["content"], flaw)
 
 
@@ -528,10 +542,9 @@ async def test_the_subject_model_picks_a_listed_skill_on_its_own(live_endpoint, 
         for index in range(1, RUNS + 1):
             for request in requests:
                 await one("native", index, *request)
-        client.config.tool_call_mode = "xml"
-        for request in requests:
-            await one("xml", 1, *request)
-        client.config.tool_call_mode = "native"
+        with xml_mode(client):
+            for request in requests:
+                await one("xml", 1, *request)
         creator = []
         for _ in range(CREATOR_BAR[1]):
             with neutral_sitting(fake_home) as (home, creator_work):
