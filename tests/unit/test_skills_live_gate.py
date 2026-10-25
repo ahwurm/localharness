@@ -13,7 +13,7 @@ from tests.integration.test_injection_redteam import MockLLMClient
 import tests.integration.test_skills_model_live as live
 from tests.integration.test_skills_model_live import (
     CREATOR_BAR, FALSE_BAR, FIXTURES, MATCHING_BAR, RUNS, TEMPERATURE, NOT_FINISHED, NOT_SERVING, NOT_SUBJECT, VARIANT_A, VARIANT_B, CreatorRun, Run, Step,
-    first_step, first_step_run, hit, install, not_run_report, out_of_list, passed, prompts, render_report, root_config,
+    creator_run, first_step, first_step_run, hit, install, not_run_report, out_of_list, passed, prompts, render_report, root_config,
     tally, write_report)
 from tests.unit.test_image_hygiene import FORBIDDEN
 from tests.unit.test_skills_misc import lures
@@ -309,3 +309,47 @@ def test_a_report_names_the_shape_of_the_root():
     assert "Window: 131072" in text
     assert "Window: not exposed by the server" in render_report(
         {**META, "window": None}, synthetic(lambda s, k, n: k == "matching"), creator_runs(True, True, True))
+
+
+WEEKLY = (
+    "---\nname: weekly-status\n"
+    "description: Turns pasted notes into a weekly status update under Done, Doing and Blocked. Use when the person pastes notes for a status.\n"
+    "---\n# Weekly status\n\n1. Group each item under Done, Doing or Blocked.\n2. End with one line naming the biggest risk.\n")
+
+
+def call(n, tool, **arguments):
+    return {"name": tool, "arguments": arguments, "id": f"c{n}"}
+
+
+async def creator_turn(tmp_path, monkeypatch, fake_home, *calls):
+    home = fake_home(tmp_path / "home")
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    client = MockLLMClient([{"content": None, "tool_calls": [call(0, "skill", name="skill-creator")]},
+                            *({"content": None, "tool_calls": [c]} for c in calls),
+                            {"content": "Done.", "tool_calls": None}])
+    return home, await creator_run(client, home, prompts()["creator"], work)
+
+
+async def test_a_scripted_creator_turn_leaves_a_skill_the_verb_lists(tmp_path, monkeypatch, fake_home):
+    outside = tmp_path / "outside.txt"
+    home, run = await creator_turn(
+        tmp_path, monkeypatch, fake_home,
+        call(1, "write", path="~/.localharness/skills/weekly-status/SKILL.md", content=WEEKLY, mode="overwrite"),
+        call(2, "write", path=str(outside), content="x", mode="overwrite"))
+    assert run.valid is True
+    assert (home / ".localharness" / "skills" / "weekly-status" / "SKILL.md").read_text(encoding="utf-8") == WEEKLY
+    assert not outside.exists()
+    assert "weekly-status (machine, " in run.listing and "Skipped:" not in run.listing
+    allowed = [ask for ask in run.asks if ask[2]]
+    assert [ask[0] for ask in allowed] == ["write"] and "weekly-status" in allowed[0][1]
+    assert [ask[0] for ask in run.asks if not ask[2]] == ["write"]
+
+
+async def test_a_creator_turn_that_writes_nothing_is_not_valid(tmp_path, monkeypatch, fake_home):
+    home, run = await creator_turn(tmp_path, monkeypatch, fake_home)
+    assert run.valid is False
+    assert "skill-creator (bundled, " in run.listing and " (machine, " not in run.listing
+    assert run.asks == ()
+    assert not (home / ".localharness" / "skills").exists()

@@ -5,20 +5,27 @@ import contextlib
 import functools
 import json
 import shutil
+import subprocess
+import time
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 import pytest
 import yaml
+from typer.testing import CliRunner
 
-from localharness.agent.context import ContentStore, ContextManager
+from localharness.agent.context import ContentStore, ContextManager, probe_served_window
 from localharness.agent.gate import PermissionGate
+from localharness.agent.gate_types import Decision, PermissionRequest
 from localharness.agent.loop import AgentLoop
 from localharness.agent.permissions import PermissionEvaluator
 from localharness.agent.task_record import TaskState
 from localharness.bench.config import MatrixEntry
 from localharness.bench.orchestrator import _build_bench_client
 from localharness.cli.agent_cmd import _build_agent_yaml
+from localharness.cli.app import app
+from localharness.cli.skill_session import SkillSession
 from localharness.config.grants import GrantStore
 from localharness.config.loader import ConfigLoader
 from localharness.config.models import AgentConfig
@@ -26,6 +33,7 @@ from localharness.config.skills import SkillSet
 from localharness.core.bus import EventBus
 from localharness.core.events import Action
 from localharness.tools.builtin import register_builtin_tools
+from localharness.tools.builtin.paths import resolve_user_path
 from localharness.tools.builtin.agent_tool import AgentTool
 from localharness.tools.builtin.skill_tool import SkillTool, render_listing
 from localharness.tools.builtin.task_tool import TaskTool
@@ -118,7 +126,7 @@ async def no_child(agent_id, brief, grant_handles, shape=None) -> str:
     return "no child agent is dispatched in this run"
 
 
-async def first_step_run(client, skill_set: SkillSet, cfg: AgentConfig, prompt: str, work: Path) -> Step:
+async def root_registry(skill_set: SkillSet, cfg: AgentConfig) -> tuple[ToolRegistry, TaskState]:
     registry = ToolRegistry()
     await register_builtin_tools(registry)
     state = TaskState()
@@ -128,6 +136,11 @@ async def first_step_run(client, skill_set: SkillSet, cfg: AgentConfig, prompt: 
         SkillTool(skill_set, ContentStore(), state, result_cap=lambda: registry.result_size_cap_chars), scope="global")
     apply_root_capability_floor(cfg.tools, registry.global_schemas())
     assert "skill" in registry.get_tools_for_agent(cfg.name, cfg.division or "", cfg.tools)
+    return registry, state
+
+
+async def first_step_run(client, skill_set: SkillSet, cfg: AgentConfig, prompt: str, work: Path) -> Step:
+    registry, state = await root_registry(skill_set, cfg)
     bus = EventBus()
     gate = PermissionGate(boundary=None, workspace=work, grants=GrantStore(work.parent / "grants.yaml"), mode="read-only")
     loop = AgentLoop(
@@ -286,17 +299,96 @@ def not_run_report(day: str, model: str | None, endpoint: str | None, reason: st
         "No run finished, so this report holds no result.", ""])
 
 
-async def test_the_subject_model_picks_a_listed_skill_on_its_own(live_endpoint, tmp_path, monkeypatch):
+def inside(params: dict, root: Path) -> bool:
+    path = params.get("path")
+    if not isinstance(path, str):
+        return False
+    try:
+        return root in resolve_user_path(path).parents
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+async def creator_run(client, home: Path, request: str, work: Path) -> CreatorRun:
+    cfg_dir = home / ".localharness"
+    base = root_config(cfg_dir)
+    budget = base.permissions.budget.model_copy(
+        update={"max_actions": CREATOR_MAX_ACTIONS, "max_duration_minutes": CREATOR_MAX_MINUTES})
+    cfg = base.model_copy(update={"permissions": base.permissions.model_copy(update={"budget": budget})})
+    skill_set = SkillSet.discover(cfg_dir, None)
+    invoked = SkillSession(skill_set).invoke(skill_set.find("skill-creator"), request)
+    assert isinstance(invoked, tuple), invoked
+    asks: list[tuple[str, str, bool]] = []
+    skills_dir = (cfg_dir / "skills").resolve()
+
+    async def asker(req: PermissionRequest) -> Decision:
+        allowed = req.tool_name == "write" and inside(req.tool_params, skills_dir)
+        asks.append((req.tool_name, req.display, allowed))
+        return Decision("allow_once" if allowed else "reject_once")
+
+    gate = PermissionGate(
+        boundary=None, workspace=work, grants=GrantStore(work.parent / f"{work.name}-grants.yaml"), mode="guarded", asker=asker)
+    registry, state = await root_registry(skill_set, cfg)
+    loop = AgentLoop(
+        config=cfg, llm=client, bus=EventBus(), context_manager=ContextManager(), tool_registry=registry,
+        permission_evaluator=PermissionEvaluator(), gate=gate, kill_file_path=None,
+        skills=render_listing(skill_set.skills), task_context=state)
+    await loop.run_turn(invoked[0])
+    result = CliRunner().invoke(app, ["skills", "--config-dir", str(cfg_dir)])
+    valid = result.exit_code == 0 and "Skipped:" not in result.output and " (machine, " in result.output
+    return CreatorRun(request, tuple(asks), loop.last_terminated_reason, result.output, valid)
+
+
+async def test_the_subject_model_picks_a_listed_skill_on_its_own(live_endpoint, fake_home, tmp_path, monkeypatch):
+    day = date.today().isoformat()
+    assert not report_path(day).exists(), f"{report_path(day)} exists; one report per day, never overwritten"
+    started = time.monotonic()
     model, base_url = live_target()
     client = _build_bench_client(MatrixEntry(name=model, provider="vllm", model_id=model, base_url=base_url))
     await client.detect_capabilities()
     assert client.config.tool_call_mode == "native"
     client.config.temperature = TEMPERATURE
+    window = probe_served_window(base_url, model)
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True, cwd=Path(__file__).resolve().parents[2]).stdout.strip()
     work = tmp_path / "work"
     work.mkdir()
     monkeypatch.chdir(work)
     skill_set = install(tmp_path / "cfg")
     cfg = root_config(tmp_path / "cfg")
-    request = prompts()["skills"]["release-notes"]["matching"][0]
-    step = await first_step_run(client, skill_set, cfg, request, work)
-    assert render_listing(skill_set.skills) in step.system
+    listing = render_listing(skill_set.skills)
+    names = sorted(s.name for s in skill_set.skills)
+    sets = prompts()["skills"]
+    assert set(sets) == set(names)
+    registry, _ = await root_registry(skill_set, cfg)
+    tools = sorted(registry.get_tools_for_agent(cfg.name, cfg.division or "", cfg.tools))
+    requests = [(skill, kind, text) for skill in names for kind in KINDS for text in sets[skill][kind]]
+    total = (RUNS + 1) * len(requests)
+    runs: list[Run] = []
+
+    async def one(leg: str, index: int, skill: str, kind: str, text: str) -> None:
+        step = await first_step_run(client, skill_set, cfg, text, work)
+        assert listing in step.system
+        runs.append(Run(leg, skill, kind, text, index, step))
+        print(f"{leg} {len(runs)}/{total} {skill} {kind} run {index}: {[name for name, _ in step.calls]}", flush=True)
+
+    for index in range(1, RUNS + 1):
+        for request in requests:
+            await one("native", index, *request)
+    client.config.tool_call_mode = "xml"
+    for request in requests:
+        await one("xml", 1, *request)
+    client.config.tool_call_mode = "native"
+    creator = []
+    for i in range(1, CREATOR_BAR[1] + 1):
+        creator_work = tmp_path / f"creator-{i}"
+        creator_work.mkdir()
+        monkeypatch.chdir(creator_work)
+        creator.append(await creator_run(client, fake_home(tmp_path / f"home-{i}"), prompts()["creator"], creator_work))
+    meta = {
+        "day": day, "commit": commit, "model": model, "base_url": base_url, "window": window, "temperature": TEMPERATURE,
+        "tools": tools, "listing": listing, "minutes": int((time.monotonic() - started) // 60)}
+    path = write_report(day, render_report(meta, runs, creator))
+    print(f"report: {path}", flush=True)
+    valid = [c.valid for c in creator]
+    assert passed(runs, valid), "; ".join(f"{s} {tally(runs, s)}" for s in names) + f"; creator {sum(valid)} of {len(valid)}"
