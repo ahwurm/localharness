@@ -14,6 +14,7 @@ import pytest
 
 from localharness.agent.gate_types import Decision, PermissionRequest
 from localharness.channels.mobile.channel import ALWAYS_KINDS, ASK_FALLBACK_DECISION, MobileChannel
+from localharness.channels.mobile.protocol import AskOption, BlockingAsk
 from localharness.core.bus import EventBus
 from localharness.core.events import (
     Action,
@@ -227,6 +228,31 @@ async def test_always_needs_a_second_server_checked_tap(tmp_path):
     ok = channel.answer_ask(request_id, "allow_always", first["confirm_token"])
     assert ok == {"status": "recorded", "decision": "allow_always"}
     assert (await task).kind == "allow_always"
+
+
+async def test_always_on_a_hand_supplied_option_still_takes_two_requests():
+    channel = await _channel()
+    channel.register_fixture_ask(BlockingAsk(
+        request_id="fx-1", tool_name="bash_exec", tool_params={}, klass="shell-new", grantable=True,
+        options=[AskOption(kind="allow_always", name="always"), AskOption(kind="allow_once", name="once")],
+    ))
+
+    first = channel.answer_ask("fx-1", "allow_always")
+    assert first["status"] == "confirm_required"
+    assert channel.answer_ask("fx-1", "allow_always", first["confirm_token"])["status"] == "recorded"
+
+
+async def test_always_confirm_detail_says_the_answer_is_permanent():
+    channel = await _channel()
+    task = asyncio.ensure_future(
+        channel.ask_permission(_request(grantable=True, key="bash:ls", klass="shell-new"))
+    )
+    await asyncio.sleep(0)
+    first = channel.answer_ask(next(iter(channel._open_asks)), "allow_always")
+    assert first["detail"].startswith("this answer is permanent")
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 async def test_allow_once_takes_one_tap(tmp_path):
