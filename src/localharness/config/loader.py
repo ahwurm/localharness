@@ -9,7 +9,7 @@ import re
 import reprlib as repr_lib
 from dataclasses import fields as dataclass_fields
 from pathlib import Path
-from typing import Any, Callable, Collection, Mapping, Optional, get_args
+from typing import Any, Callable, Collection, Literal, Mapping, NamedTuple, Optional, get_args
 
 import yaml
 from pydantic import BaseModel, SecretStr, ValidationError
@@ -636,6 +636,20 @@ def leaves_layer(path: Path, layer_dir: Path) -> bool:
         return not Path(path).resolve().is_relative_to(Path(layer_dir).resolve())
     except (OSError, RuntimeError):
         return True
+
+
+Origin = Literal["project", "machine"]
+ProblemKind = Literal["parse", "validation", "invalid-name", "mismatch", "load"]
+
+
+class AgentFile(NamedTuple):
+    path: Path
+    origin: Origin
+
+
+def shadow_label(path: Path) -> str:
+    return f"shadows {path}"
+
 
 _UNSET = object()
 
@@ -1455,6 +1469,22 @@ class ConfigLoader:
         self._plugin_names = None
 
     @property
+    def local_dir(self) -> Optional[Path]:
+        """The bound project layer dir, or None when no project layer applies."""
+        return self._local_dir
+
+    def agents_dir(self, layer: Origin) -> Optional[Path]:
+        """The `agents/` folder of one layer; None for the project layer when none is bound."""
+        if layer == "machine":
+            return self._config_dir / "agents"
+        return self._local_dir / "agents" if self._local_dir is not None else None
+
+    def agent_search_paths(self, name: str) -> list[str]:
+        """Where `load_agent(name)` looks, first-wins order; formats the name, opens nothing."""
+        dirs = (self.agents_dir("project"), self.agents_dir("machine"))
+        return [str(d / f"{name}.yaml") for d in dirs if d is not None]
+
+    @property
     def global_config_dir(self) -> Path:
         """The GLOBAL layer (or its --config-dir replacement) — where plugin folders are discovered
         and GUARDRAILS.md lives. Never the workspace."""
@@ -1601,8 +1631,7 @@ class ConfigLoader:
         # 1. Find and load raw YAML
         path = self._find_file("agents", name)
         if path is None:
-            searched = [str(b / "agents" / f"{name}.yaml") for b in self._search_bases()]
-            raise ConfigNotFoundError(name, searched)
+            raise ConfigNotFoundError(name, self.agent_search_paths(name))
         result = self.load_agent_file(path)
         self._agent_cache[name] = result
         return result
@@ -2969,6 +2998,32 @@ class ConfigLoader:
                 for f in (self._project_layer_files("agents") if b == self._local_dir
                           else layer_files(b, "agents"))]
 
+    def _origin(self, path: Path) -> Origin:
+        return "project" if self._local_dir is not None and in_layer(path, self._local_dir) else "machine"
+
+    def discover_agent_files(self) -> list[AgentFile]:
+        """Every agent file in discovery order, each labelled with the layer it sits in."""
+        return [AgentFile(p, self._origin(p)) for p in self.agent_yaml_paths()]
+
+    def agent_winners(self) -> dict[str, AgentFile]:
+        """The file each stem loads from: the project's replaces the machine's."""
+        return {f.path.stem: f for f in self.discover_agent_files()}
+
+    def agent_file(self, stem: str) -> Optional[AgentFile]:
+        path = self._find_file("agents", stem)
+        return AgentFile(path, self._origin(path)) if path is not None else None
+
+    @staticmethod
+    def read_agent_file(path: Path) -> dict:
+        """One agent file as a dict, `name` defaulted to the stem; a parse error carries no snippet."""
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError as exc:
+            raise _parse_error(path, exc) from None
+        if "name" not in data:
+            data["name"] = path.stem
+        return data
+
     def discover_agents(
         self, *, on_error: Optional[Callable[[Path, Exception], None]] = None
     ) -> list[dict]:
@@ -2985,13 +3040,8 @@ class ConfigLoader:
         agents: dict[str, dict] = {}
         for f in self.agent_yaml_paths():
             try:
-                data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
-                if "name" not in data:
-                    data["name"] = f.stem
-                agents[f.stem] = data
+                agents[f.stem] = self.read_agent_file(f)
             except Exception as exc:  # noqa: BLE001
-                if isinstance(exc, yaml.YAMLError):  # its text would quote the broken line (R16)
-                    exc = _parse_error(f, exc)
                 log.warning("skipping unreadable agent file %s: %s", f, exc)
                 if on_error is not None:
                     on_error(f, exc)
