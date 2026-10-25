@@ -9,9 +9,10 @@ from localharness.config.skills import LISTING_BUDGET_CHARS, shown
 from localharness.core.events import Action
 from localharness.tools.builtin.skill_tool import render_listing
 from tests.integration.test_injection_redteam import MockLLMClient
+import tests.integration.test_skills_model_live as live
 from tests.integration.test_skills_model_live import (
-    CREATOR_BAR, FALSE_BAR, FIXTURES, MATCHING_BAR, RUNS, TEMPERATURE, Step, first_step, first_step_run, install,
-    prompts, root_config)
+    CREATOR_BAR, FALSE_BAR, FIXTURES, MATCHING_BAR, RUNS, TEMPERATURE, VARIANT_A, CreatorRun, Run, Step,
+    first_step, first_step_run, hit, install, passed, prompts, render_report, root_config, write_report)
 from tests.unit.test_image_hygiene import FORBIDDEN
 from tests.unit.test_skills_misc import lures
 
@@ -136,3 +137,55 @@ def test_no_fixture_skill_carries_an_install_or_fetch_step():
         text = path.read_text(encoding="utf-8")
         assert lures(text) == [], path
         assert not [needle for needle in FORBIDDEN if needle in text], path
+
+
+DAY = "2026-10-24"
+NAMES = sorted(LISTED)
+META = {
+    "day": DAY, "commit": "abc1234", "model": "qwen-27b-swift-1.5", "base_url": "http://localhost:8080/v1", "window": 131072,
+    "temperature": 0.6, "tools": ["agent", "skill", "task"], "listing": "- release-notes: Draft release notes.", "minutes": 42}
+
+
+def step_of(skill, kind, called) -> Step:
+    calls = (("skill", {"name": skill}),) if called else ()
+    return Step(calls, "tool_calls" if called else "stop", "system")
+
+
+def synthetic(hits, leg="native", repeats=RUNS) -> list[Run]:
+    """Runs for the six listed names; hits(skill, kind, n) says whether the n-th run of that skill and kind called skill."""
+    seen: dict[tuple[str, str], int] = {}
+    runs = []
+    for index in range(1, repeats + 1):
+        for skill in NAMES:
+            for kind in KINDS:
+                for prompt in prompts()["skills"][skill][kind]:
+                    n = seen[skill, kind] = seen.get((skill, kind), -1) + 1
+                    runs.append(Run(leg, skill, kind, prompt, index, step_of(skill, kind, hits(skill, kind, n))))
+    return runs
+
+
+def creator_runs(*valid) -> list[CreatorRun]:
+    return [CreatorRun(prompts()["creator"], (("write", "write: a skill file", ok),), "completed", "listing", ok) for ok in valid]
+
+
+def test_synthetic_outcomes_are_judged_and_written_as_a_dated_report(tmp_path, monkeypatch):
+    monkeypatch.setattr(live, "REPORTS", tmp_path / "reports")
+    runs = synthetic(lambda skill, kind, n: kind == "matching")
+    creator = creator_runs(True, True, True)
+    assert passed(runs, [c.valid for c in creator]) is True
+    text = render_report(META, runs, creator)
+    assert "Outcome: pass" in text and VARIANT_A in text
+    assert text.count("30 of 30") == 6 and text.count("0 of 60") == 6
+    assert META["listing"] in text
+    assert all(text.count(request) >= RUNS for request in prompts()["skills"]["release-notes"]["matching"])
+    path = write_report(DAY, text)
+    assert path == tmp_path / "reports" / f"skills-live-gate-{DAY}.md"
+    assert path.read_text(encoding="utf-8") == text
+
+
+def test_a_matching_run_passes_only_on_the_matching_name():
+    def matching(called):
+        return Run("native", "release-notes", "matching", "p", 1, Step((("skill", {"name": called}),), "tool_calls", ""))
+
+    assert hit(matching("release-notes")) is True
+    assert hit(matching("commit-message")) is False
