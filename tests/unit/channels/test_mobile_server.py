@@ -19,7 +19,7 @@ from localharness.channels.mobile.channel import MobileChannel
 from localharness.channels.mobile.protocol import PROTOCOL_VERSION
 from localharness.channels.mobile.server import MobileServer
 from localharness.core.bus import EventBus
-from localharness.core.events import Action, Observation, TaskComplete, UserMessage
+from localharness.core.events import Action, ModelSwitched, Observation, TaskComplete, UserMessage
 
 pytestmark = pytest.mark.asyncio
 
@@ -337,6 +337,25 @@ async def test_reconnect_backfills_from_the_cursor_then_tails_with_no_gaps_or_du
     assert seqs == [published[1].seq, published[2].seq]
     assert len(seqs) == len(set(seqs))
     assert [f[2]["output"] for f in frames[1:]] == ["out-1", "out-2"]
+
+
+async def test_a_backfilled_model_switch_older_than_the_hello_model_is_not_replayed(tmp_path):
+    bus, channel, server, _ = await _stack(tmp_path)
+    switched = await bus.publish(ModelSwitched(
+        agent_id="a", session_id="s1", model="old", endpoint="primary", kind="hot"))
+    await bus.publish(UserMessage(agent_id="a", session_id="s1", content="hi", channel="mobile"))
+    path = f"/api/stream?from={switched.seq}"
+
+    plain = await _read_frames(server, 3, path=path)
+    assert [f[0] for f in plain[:3]] == ["Hello", "ModelSwitched", "UserMessage"]
+
+    channel.model_source = lambda: "new"
+    named = await _read_frames(server, 2, path=path)
+    assert [f[0] for f in named[:2]] == ["Hello", "UserMessage"] and named[0][2]["model"] == "new"
+    live = asyncio.ensure_future(_read_frames(server, 4, path=path))
+    await asyncio.sleep(0.05)
+    await bus.publish(ModelSwitched(agent_id="a", session_id="s1", model="newer", endpoint="primary", kind="hot"))
+    assert "ModelSwitched" in [f[0] for f in await live]
 
 
 async def test_the_backfill_matches_the_session_log_byte_for_byte(tmp_path):

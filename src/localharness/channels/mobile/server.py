@@ -550,6 +550,8 @@ class MobileServer:
     async def _sse(self, client: Any, cursor: Optional[int]) -> AsyncIterator[bytes]:
         served_upto: Optional[int] = None
         try:
+            sid = self.channel.session_id
+            before_hello = self._log_max_seq(sid) if cursor is not None and sid else None
             hello = await self.channel.hello(client, cursor)
             if self.replay is not None:
                 hello = hello.model_copy(update={"synthetic": True})
@@ -559,6 +561,8 @@ class MobileServer:
             if cursor is not None and self.channel.session_id:
                 async for name, seq, payload in self._backfill(self.channel.session_id, cursor):
                     served_upto = seq if seq is not None else served_upto
+                    if name == "ModelSwitched" and hello.model and before_hello is not None and seq <= before_hello:
+                        continue  # older than the model Hello just named; replaying it would put the pill back
                     yield _frame(name, seq, payload)
                 # The gap check gets the LOG's ceiling, never `served_upto`: a caught-up client
                 # reconnects with a cursor past the log's last row (the NORMAL case — cursors
