@@ -2374,6 +2374,7 @@ class OrchestratorREPL:
                             else f" Could not restore it: {why}" if why
                             else " The box now has NO model serving — manual attention needed."
                             if freed
+                            else RESTART_DOWN_ON_PEER if prior
                             else " The managed server is down — retry /model to relaunch.")
                     await self._channel.send_message(
                         redact_failure(f"Model swap failed: {exc}{tail}"), metadata={"style": "system.error"}

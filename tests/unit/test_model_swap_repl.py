@@ -1048,3 +1048,97 @@ async def test_failed_restart_cancel_before_the_lock_restores_the_peer_binding(t
 
     _stays_bound(agent, before, "qwen-gguf", bus, caps)
     assert launches.stops == [] and launches.cmds == []
+
+
+async def test_failed_restart_from_the_second_of_two_peers_on_one_url_restores_its_own_binding(
+        tmp_path, monkeypatch, launches):
+    from tests.unit.test_launch_paths_repl import PRIMARY_URL as PRIMARY
+    from tests.unit.test_repl_server_recovery import _wait_ready_fails_at
+
+    first = _launchable_peer(name="first", api_key="sk-first")
+    second = _launchable_peer(name="second", served="other", api_key="sk-second")
+    repl, _chan, agent, _sent, bus, caps, _ = _failing_restart_world(tmp_path, monkeypatch, peers=[first, second])
+    agent._llm.config.api_key, agent._llm.config.extra_headers = "sk-second", {"X-Second": "2"}
+    before = _bound(agent._llm)
+    _wait_ready_fails_at(monkeypatch, PRIMARY)
+
+    await repl._handle_slash(f"/model {PRIMARY_SERVED}")
+
+    assert _bound(agent._llm) == (PEER_URL, "sk-second", {"X-Second": "2"}, "llamacpp") == before
+    assert bus.history(event_types=[ModelSwitched]) == []
+
+
+async def test_failed_restart_from_a_binding_that_is_no_configured_peer_restores_exactly_it(
+        tmp_path, monkeypatch, launches):
+    from tests.unit.test_launch_paths_repl import PRIMARY_URL as PRIMARY
+    from tests.unit.test_repl_server_recovery import _wait_ready_fails_at
+
+    bind = ("http://elsewhere.invalid:9/v1", "sk-adhoc", {"X-Adhoc": "a"}, "ollama")
+    repl, _chan, agent, _sent, bus, caps, _ = _failing_restart_world(tmp_path, monkeypatch, bind=bind)
+    _wait_ready_fails_at(monkeypatch, PRIMARY)
+
+    await repl._handle_slash(f"/model {PRIMARY_SERVED}")
+
+    _stays_bound(agent, bind, "qwen-gguf", bus, caps)
+
+
+async def test_restart_from_the_primary_makes_no_rebind_call(tmp_path, monkeypatch, launches):
+    from tests.unit.test_launch_paths_repl import PRIMARY_URL as PRIMARY
+    from tests.unit.test_repl_server_recovery import _wait_ready_fails_at
+
+    repl, _chan, agent, sent, _bus, _caps, _ = _failing_restart_world(tmp_path, monkeypatch, on_peer=False)
+    before = _bound(agent._llm)
+    _wait_ready_fails_at(monkeypatch, PRIMARY)
+
+    await repl._handle_slash(f"/model {PRIMARY_SERVED}")
+
+    assert agent._llm.rebinds == [] and _bound(agent._llm) == before
+    assert any(s[0].startswith("Model swap failed:") for s in sent)
+
+
+async def test_restart_from_the_primary_with_a_peer_on_its_url_makes_no_rebind_call(tmp_path, monkeypatch, launches):
+    from tests.unit.test_launch_paths_repl import PRIMARY_URL as PRIMARY
+    from tests.unit.test_repl_server_recovery import _wait_ready_fails_at
+
+    twin = _launchable_peer(name="twin", served="twin-served").model_copy(update={"base_url": PRIMARY})
+    repl, _chan, agent, _sent, _bus, _caps, _ = _failing_restart_world(
+        tmp_path, monkeypatch, on_peer=False, peers=[twin])
+    _wait_ready_fails_at(monkeypatch, PRIMARY)
+
+    await repl._handle_slash(f"/model {PRIMARY_SERVED}")
+
+    assert agent._llm.rebinds == []
+
+
+async def test_failed_restart_with_the_server_down_from_a_peer_says_the_session_is_on_its_endpoint(
+        tmp_path, monkeypatch, launches):
+    from localharness.cli.model_switch import RESTART_DOWN_ON_PEER
+    from tests.unit.test_launch_paths_repl import PRIMARY_URL as PRIMARY
+    from tests.unit.test_repl_server_recovery import _wait_ready_fails_at
+
+    repl, _chan, agent, sent, _bus, _caps, peer = _failing_restart_world(
+        tmp_path, monkeypatch, bind=(PEER_URL, PEER_KEY, dict(PEER_HEADERS), "llamacpp"), on_peer=False)
+    repl._active_heavy = (repl._harness.server, PRIMARY)
+    _wait_ready_fails_at(monkeypatch, PRIMARY)
+
+    await repl._handle_slash(f"/model {PRIMARY_SERVED}")
+
+    [(line, _)] = [s for s in sent if s[0].startswith("Model swap failed:")]
+    assert line.endswith(RESTART_DOWN_ON_PEER)
+    assert _bound(agent._llm) == (PEER_URL, PEER_KEY, PEER_HEADERS, "llamacpp")
+
+
+async def test_failed_restart_with_the_server_down_from_the_primary_keeps_the_existing_line(
+        tmp_path, monkeypatch, launches):
+    from localharness.cli.model_switch import RESTART_DOWN_ON_PEER
+    from tests.unit.test_launch_paths_repl import PRIMARY_URL as PRIMARY
+    from tests.unit.test_repl_server_recovery import _wait_ready_fails_at
+
+    repl, _chan, _agent, sent, _bus, _caps, _ = _failing_restart_world(tmp_path, monkeypatch, on_peer=False)
+    _wait_ready_fails_at(monkeypatch, PRIMARY)
+
+    await repl._handle_slash(f"/model {PRIMARY_SERVED}")
+
+    [(line, _)] = [s for s in sent if s[0].startswith("Model swap failed:")]
+    assert line.endswith(" The managed server is down — retry /model to relaunch.")
+    assert RESTART_DOWN_ON_PEER not in line
