@@ -2298,7 +2298,7 @@ class OrchestratorREPL:
                                 provider_type=_prim.provider_type)
         landed = False
         try:
-            # a failure line carries a launch's tail: it is masked before any channel shows it (D-22)
+            # a failure line carries a launch's tail: it is masked before any channel shows it
             redact_failure = self._channel_redactor()
             label = RUNTIME_LABELS.get(managed.runtime, managed.runtime)
             _, posture = effective_posture(managed, keyed=bool(launch_kw), decision=decision)
@@ -2317,11 +2317,9 @@ class OrchestratorREPL:
                 if box_note is not None:
                     box_note(f"loading {target} · {int(elapsed)}s")
 
-            # GPU-lock (Phase C2): if a DIFFERENT heavy peer holds the accelerator — we're swapping BACK
-            # to the primary from a cold-launched peer — verified-stop it FIRST, in its OWN try so a
-            # stop-failure is reported honestly and NOTHING is torn down (the peer is still up). A no-op
-            # when the primary is itself the incumbent (the common restart case), whose own stop below
-            # reloads the model.
+            # A different heavy peer holding the accelerator (swapping back to the primary) is stopped
+            # first, in its own try, so a stop failure tears nothing down. A no-op when the primary is
+            # itself the incumbent.
             self._switch.launch(target)
             async with self._launch_lock():
                 try:
@@ -2337,7 +2335,7 @@ class OrchestratorREPL:
                     return
                 if freed is not None:
                     self._active_heavy = None
-                # The shared record's own weights and name, put back if the restart fails (WR-53).
+                # The shared record's own weights and name, put back if the restart fails.
                 before = (managed.model, managed.served_name)
                 spec = managed
                 try:
@@ -2348,14 +2346,13 @@ class OrchestratorREPL:
                     await strategy.stop(managed, self._server_config_dir)
                     # The record already names its weights: the primary's served name never replaces them
                     # (a llama.cpp alias never reaches -m; a vLLM --served-model-name alias never becomes
-                    # the vLLM model, D-70). Only a name other than the primary's (non-llama.cpp), or a typed
+                    # the vLLM model). Only a name other than the primary's (non-llama.cpp), or a typed
                     # regular .gguf (llama.cpp, named in memory only, never persisted), changes the model.
                     if not gguf and target != prim_served:
                         managed.model = target
                     elif typed_swap:
                         # A copy for the launch: the shared record (the primary's served name, the listing,
-                        # the swap-back target) keeps its own weights, so a typed file is never "the primary"
-                        # (WR-53, IN-57).
+                        # the swap-back target) keeps its own weights, so a typed file is never "the primary".
                         spec = planned
                     # the provider's key, only when the managed server is set to require one (default off)
                     ep = await strategy.activate(
