@@ -199,7 +199,8 @@ def test_agent_list_and_loader_report_one_roster(layered, monkeypatch):
 
     result = CliRunner().invoke(agent_app, ["list", "--json", "--config-dir", str(global_dir)])
     assert result.exit_code == 0, result.output
-    cli_agents = json.loads(result.output)
+    cli_agents = json.loads(result.stdout)
+    assert "project agent files in" in result.stderr
 
     loader = ConfigLoader(config_dir=global_dir)
     assert sorted(a["name"] for a in cli_agents) == sorted(

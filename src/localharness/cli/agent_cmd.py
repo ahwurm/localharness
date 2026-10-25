@@ -6,7 +6,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import typer
 import yaml
@@ -37,6 +37,36 @@ def _build_agent_yaml(name: str, role: str, model: str | None) -> dict:
         "role": role,
         "model": model or "inherit",
     }
+
+
+UNREAD_PROJECT_AGENTS = "{n} project agent files in {dir} not read: {why}; drop it to read them"
+_UNREAD_WHY = {
+    "flag": "--config-dir was given",
+    "LOCALHARNESS_DIR": "LOCALHARNESS_DIR is set",
+    "LOCALHARNESS_HOME": "LOCALHARNESS_HOME is set",
+}
+
+
+def config_dir_source(config_dir: str | None) -> Literal["flag", "LOCALHARNESS_DIR", "LOCALHARNESS_HOME"] | None:
+    """What named the config directory: the flag, LOCALHARNESS_DIR, LOCALHARNESS_HOME, or nothing."""
+    if config_dir is not None:
+        # typer fills `config_dir` from LOCALHARNESS_DIR too, so it is the flag only when the value differs
+        return "LOCALHARNESS_DIR" if os.environ.get("LOCALHARNESS_DIR") == config_dir else "flag"
+    if os.environ.get("LOCALHARNESS_DIR"):
+        return "LOCALHARNESS_DIR"
+    return "LOCALHARNESS_HOME" if os.environ.get("LOCALHARNESS_HOME") else None
+
+
+def unread_project_agents(cwd: Path | None, config_dir: str | None) -> list[str]:
+    """The one line saying project agent files sit unread because an explicit config dir skipped the project."""
+    from localharness.config.paths import discover_workspace_dir, resolve_config_dir
+
+    source = config_dir_source(config_dir)
+    found = discover_workspace_dir(cwd) if source else None
+    files = sorted((found / "agents").glob("*.yaml")) if found else []
+    if not files or found.resolve() == resolve_config_dir(config_dir).resolve():
+        return []
+    return [UNREAD_PROJECT_AGENTS.format(n=len(files), dir=found / "agents", why=_UNREAD_WHY[source])]
 
 
 def _warn_unreadable_workspace_files(workspace: Path | None) -> None:
@@ -142,32 +172,15 @@ def agent_create(
         from localharness.cli.workspace import resolve_workspace_layer
         from localharness.config.paths import config_dir_env_override, discover_workspace_dir
 
-        # A-B3. An explicit config dir SKIPS discovery entirely — that is LAYR-02, and it is not
-        # negotiable: an explicit dir is a full replacement, not a base to layer on. So `--project`
-        # here has no project to resolve, and the old fallback wrote `./.localharness/agents/x.yaml`
-        # under a green checkmark — a file this same invocation's readers cannot see, because
-        # `agent list --config-dir X` and `start --config-dir X` skip discovery too. Refuse instead
-        # of writing somewhere nothing reads. Exit 2 (usage error), matching `init --workspace`'s
-        # conflicting-flags guard rather than this command's name/scope validation.
-        chosen = config_dir if config_dir is not None else config_dir_env_override()
-        if chosen is not None:
-            # Naming the right one matters: a message that says "--config-dir" to somebody who
-            # never typed it sends them looking for a flag that is not on their command line.
-            # `config_dir` is not the flag — typer fills it from LOCALHARNESS_DIR too (its
-            # `envvar=`), so the parameter alone cannot tell the two apart; matching the env value
-            # can. Measured on the real binary: the first version of this message got it wrong.
-            if config_dir is not None and os.environ.get("LOCALHARNESS_DIR") == config_dir:
-                source = "$LOCALHARNESS_DIR"
-            elif config_dir is not None:
-                source = "--config-dir"
-            elif os.environ.get("LOCALHARNESS_DIR"):
-                source = "$LOCALHARNESS_DIR"
-            else:
-                source = "$LOCALHARNESS_HOME"
+        # an explicit config dir skips discovery, so `--project` has no project to write
+        source = config_dir_source(config_dir)
+        if source is not None:
+            chosen = config_dir if config_dir is not None else config_dir_env_override()
+            label = {"flag": "--config-dir", "LOCALHARNESS_DIR": "$LOCALHARNESS_DIR", "LOCALHARNESS_HOME": "$LOCALHARNESS_HOME"}[source]
             err_console.print(
                 "[bold red]Error:[/bold red] "
                 + escape(f"--project cannot be used with an explicit config directory "
-                         f"({source}={chosen}).")
+                         f"({label}={chosen}).")
                 + " An explicit config directory replaces the whole configuration — nothing "
                 "layers a project on top of it, so an agent written to this project would be "
                 "invisible to every command run the same way. Drop that setting to use this "
@@ -265,7 +278,7 @@ def agent_list(
     """List all configured agents."""
     from localharness.channels.base import one_line
     from localharness.cli.workspace import resolve_workspace_layer
-    from localharness.config.loader import ConfigLoader, problem_lines
+    from localharness.config.loader import ConfigLoader, problem_lines, shadow_label
     from localharness.orchestrator.cards import AgentCardRegistry
 
     # `config_dir` here is the RAW flag value on purpose: resolving it first would erase the
@@ -274,15 +287,19 @@ def agent_list(
     # gets its prompt from the next interactive command in this directory.
     workspace = resolve_workspace_layer(config_dir, interactive=False if json_output else None)
     _warn_unreadable_workspace_files(workspace)
+    for line in unread_project_agents(None, config_dir):
+        err_console.print(line, style="yellow", markup=False, soft_wrap=True)
     loader = ConfigLoader(config_dir=resolve_config_dir(config_dir), local_config_dir=workspace)
     problems = AgentCardRegistry(loader=loader).refresh()
     for line in problem_lines(problems):
         err_console.print("[yellow]⚠ " + escape(line) + "[/yellow]", soft_wrap=True)
     # dispatch resolves first-wins and never falls back, so a winner that does not load hides its stem
     dropped = {p.path.stem for p in problems if not p.loads}
+    winners = loader.agent_winners()
+    shadowed = {f.path.stem: f.path for f in loader.discover_agent_files() if f != winners[f.path.stem]}
     rows = [
         (stem, f, data)
-        for stem, f in loader.agent_winners().items()
+        for stem, f in winners.items()
         if stem not in dropped and (data := _read_row(loader, f)) is not None
     ]
 
@@ -296,7 +313,10 @@ def agent_list(
 
     if json_output:
         # typer.echo, never console.print: Rich reads `[...]` in the data as markup and hard-wraps mid-JSON.
-        typer.echo(json.dumps([{**data, "origin": f.origin, "path": str(f.path)} for _, f, data in rows]))
+        typer.echo(json.dumps([
+            {**data, "origin": f.origin, "path": str(f.path), **({"shadows": str(shadowed[stem])} if stem in shadowed else {})}
+            for stem, f, data in rows
+        ]))
         return
 
     table = Table(title="Agents")
@@ -314,3 +334,6 @@ def agent_list(
         table.add_row(*cells)
 
     console.print(table)
+    for stem, _, _ in rows:
+        if stem in shadowed:
+            console.print(shadow_label(shadowed[stem]), style="dim", markup=False, soft_wrap=True)
