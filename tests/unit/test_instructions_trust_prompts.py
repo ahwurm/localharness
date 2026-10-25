@@ -43,12 +43,11 @@ SESSION_CLAUSE = (
     "Trust this workspace? LocalHarness will load its .localharness config and its CLAUDE.md, "
     "and run tools here without asking, except for dangerous actions."
 )
-# Copied before the edit: the outside-workspace question is not touched by this plan (D-14).
 OUTSIDE_TRUST_QUESTION = (
     "Trust the workspace at {parent}? It is outside the project you are in. LocalHarness will "
-    "load its .localharness config — agents, models and tool permissions, which you should treat "
-    "like code you are about to run — and run tools there without asking, except for dangerous "
-    "actions."
+    "load its .localharness config — agents, models, tool permissions and skills, which you should "
+    "treat like code you are about to run — and run tools there without asking, except for "
+    "dangerous actions."
 )
 
 
@@ -238,7 +237,7 @@ def test_a_store_failure_while_recording_costs_the_record_never_the_answer(
     assert any("instructions answer" in r.getMessage() for r in caplog.records)
 
 
-def test_the_outside_workspace_question_is_unchanged_byte_for_byte():
+def test_the_outside_workspace_question_is_pinned_byte_for_byte():
     assert ws_mod.TRUST_QUESTION == OUTSIDE_TRUST_QUESTION
     assert session_trust.TRUST_QUESTION != ws_mod.TRUST_QUESTION
 

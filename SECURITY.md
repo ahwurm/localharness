@@ -28,7 +28,7 @@ would review code, because they decide what the agents are allowed to do.
 
 **Workspace config from outside your project is not trusted by default.** From v0.13 the harness
 looks for a `.localharness/` directory at or above your current directory and can load agent and
-division files from it. If that directory is the one you are standing in, or it sits inside the same
+division files and skills from it. If that directory is the one you are standing in, or it sits inside the same
 git repository you are working in, it loads straight away — it is part of the project you already
 opened, and every directory inside a project inherits that project's config. If it sits somewhere
 else — above your repository's root, or in a parent folder while you are not in a repository at all
@@ -88,8 +88,8 @@ your `overrides.yaml` start, load or loosen waits for one Yes instead — see th
 the agent may change about its own setup, under the approval gate.
 
 **What this does NOT cover.** If you clone someone's repository and run the harness inside it, that
-repository's `.localharness/` config and agent files load with no prompt, because you are inside
-that project. They decide an agent's role, prompt, model and tools, so read them in an unfamiliar
+repository's `.localharness/` config, agent files and skills load with no prompt, because you are
+inside that project. They decide an agent's role, prompt, model and tools, so read them in an unfamiliar
 repository before you run the harness there, the same way you would read its build scripts. A trust
 Yes covers what you were shown and no more: the scripts and files an approved server's command runs
 from inside the repository are not fingerprinted (the same gap as a granted `python3 <script>`,
@@ -226,6 +226,19 @@ own, so a prompt-injected agent could edit `pip.conf` or `uv.toml` and the next 
 confirm would use the index it names, the same exposure any `pip install` on this machine has. And
 `uv` is found on your `PATH`, so a `PATH` entry another account can write could put a different
 `uv` first.
+
+### Skills
+
+**A skill is text, and a project's skills are workspace config.** A skill is a folder holding a
+`SKILL.md`, and the harness reads four directories for them, highest precedence first:
+`.localharness/skills/` and `.agents/skills/` in a project (`.agents/skills/` is read only beside a
+`.localharness/`), `~/.localharness/skills/` on your machine (or the folder a session's
+`--config-dir` names), then the bundled set inside the package, whose names no other skill can take.
+A project's skills load with its config under the workspace rule above: in a clone with no prompt,
+and from a workspace outside your project only after the trust question, which names them. Only the
+`name` and `description` of a skill are read and every other key is ignored, so `allowed-tools`
+grants nothing. A skill runs no command of its own and installs nothing: there is no hub and no
+install command.
 
 ### Machine-level-only settings
 

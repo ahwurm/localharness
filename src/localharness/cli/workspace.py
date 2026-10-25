@@ -422,9 +422,9 @@ def _notice(message: str) -> None:
 
 TRUST_QUESTION = (
     "Trust the workspace at {parent}? It is outside the project you are in. LocalHarness will "
-    "load its .localharness config — agents, models and tool permissions, which you should treat "
-    "like code you are about to run — and run tools there without asking, except for dangerous "
-    "actions."
+    "load its .localharness config — agents, models, tool permissions and skills, which you should "
+    "treat like code you are about to run — and run tools there without asking, except for "
+    "dangerous actions."
 )
 """The one-time question. Names what is at stake AND why this workspace is being asked about,
 since the ones inside your own project never are. A module constant, because a channel that is

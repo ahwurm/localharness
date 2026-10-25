@@ -27,6 +27,7 @@ from localharness.config.loader import (
     AGENT_GLOBAL_ONLY_FIELDS, ASK_GLOBAL_ONLY_FIELDS, HARNESS_GLOBAL_ONLY_FIELDS,
 )
 from localharness.config.plugin_sections import CORE_HARNESS_KEYS, global_only_paths
+from localharness.config.skills import ORIGINS
 from localharness.config.trust import LAUNCH_KEYS, LAUNCH_MODEL_KEYS, LAUNCH_MODEL_KIND
 from localharness.plugins.api import Plugin, plugin_summary
 from localharness.plugins.builtin import BUILTIN_PLUGINS
@@ -366,6 +367,63 @@ def test_plugins_doc_bites():
                             + len(RESIDUAL_NEEDLES))
     unnamed = text.replace("Plugins (the screen bare", "(the screen bare")
     assert check_plugins_doc(unnamed) == ["SECURITY.md's list after wherever a command displays it: does not name Plugins"]
+
+
+# ---------------------------------------------------------------- check: the skills section
+
+SKILLS_HEADING = "### Skills"
+SKILLS_NEEDLES = ("`allowed-tools` grants nothing", "installs nothing")
+CLONE_NEEDLES = ("can load agent and division files and skills from it",
+                 "config, agent files and skills load with no prompt")
+
+
+def skills_dirs(origins: Iterable[tuple[str, str]] = ORIGINS) -> list[str]:
+    """The directory each origin is named by in the doc, in precedence order."""
+    return [{"project": f"`{rel}/`", "machine": f"`~/.localharness/{rel}/`", "bundled": "bundled"}[label]
+            for label, rel in origins]
+
+
+def in_order(text: str, needles: Iterable[str]) -> list[str]:
+    """Each needle that is absent from `text` or does not first appear after the previous one."""
+    out, last = [], -1
+    for n in needles:
+        if (at := text.find(n)) <= last:
+            out.append(n)
+        else:
+            last = at
+    return out
+
+
+def check_skills_doc(security_text: str) -> list[str]:
+    """`### Skills` sits between Plugins and Machine-level-only settings as one prose paragraph that
+    names the origins in precedence order and says what skills do and grant; the clone lists name skills."""
+    body = section(security_text, SKILLS_HEADING)
+    if body is None:
+        return ["SECURITY.md has no ### Skills section"]
+    whole, flat = (" ".join(t.split()) for t in (security_text, body))
+    heads = [line.strip() for line in unfenced_lines(security_text) if _heading(line)]
+    at = heads.index(SKILLS_HEADING)
+    out = []
+    if heads[max(at - 1, 0):at + 2] != ["### Plugins", SKILLS_HEADING, MACHINE_ONLY_HEADING]:
+        out.append("### Skills is not between ### Plugins and ### Machine-level-only settings")
+    if len(paragraphs(body)) != 1 or any(re.match(r"([-*+]|\d+\.) ", ln.lstrip()) for ln in body.splitlines()):
+        out.append("the Skills section is not one paragraph of prose")
+    out += [f"the Skills section does not name {d} in precedence order" for d in in_order(flat, skills_dirs())]
+    out += [f"the Skills section does not say {n}" for n in SKILLS_NEEDLES if n not in flat]
+    out += [f"SECURITY.md does not say {n}" for n in CLONE_NEEDLES if n not in whole]
+    if "tools/capabilities.py" in ticks(body):
+        out.append("the Skills section names the capability-floor module in backticks")
+    if "\N{SECTION SIGN}" in body:
+        out.append("the Skills section carries a section sign")
+    return out
+
+
+def test_skills_doc_live():
+    assert check_skills_doc(_read("SECURITY.md")) == []
+
+
+def test_skills_doc_bites():
+    assert check_skills_doc("## Nothing\n") == ["SECURITY.md has no ### Skills section"]
 
 
 # ---------------------------------------------------------------- check 4: three declaration readers
