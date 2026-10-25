@@ -382,6 +382,7 @@ SKILLS_NEEDLES = (
     f"{MAX_REFERENCE_BYTES // 1024} KiB", f"{MAX_ENTRIES} entries", "named gaps", "shows only the path",
     "`permissions.workspace_root`", "`mv staged .agents`", "`[budget: …]`", "off switch",
     "`localharness --config-dir X skills`", "whole line", "about a second", "minutes", "once per subcommand",
+    "except the bundled one is a protected path", "the bundled set is not protected", "`bash_exec`",
 )
 ELSEWHERE_NEEDLES = (
     "`.agents/skills/` is protected the same way", "`permissions.ask.protected_config_dir_entries`",
@@ -464,6 +465,10 @@ def test_skills_doc_bites():
         f"SECURITY.md does not say {ELSEWHERE_NEEDLES[0]} after the thirteen-entry list"]
     assert check_skills_doc(text.replace("A project skill is not that door", "A skill is no door")) == [
         f"SECURITY.md does not say {ELSEWHERE_NEEDLES[2]}"]
+    for gone, pattern, instead in (("except the bundled one is a protected path", r"except\s+the\s+bundled\s+one\s+is", "is"),
+                                   ("the bundled set is not protected", r"the\s+bundled\s+set\s+is\s+not\s+protected", "x"),
+                                   ("`bash_exec`", r"`bash_exec`", "x")):
+        assert check_skills_doc(re.sub(pattern, instead, text)) == [f"the Skills section does not say {gone}"]
     inside = text.replace("`server-floor.json` (the window", "`.agents/skills/`, `server-floor.json` (the window", 1)
     assert check_protected_entries_doc(inside) == ["not a protected entry: .agents/skills/"]
     assert check_protected_entries_doc(text) == []
