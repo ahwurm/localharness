@@ -45,7 +45,7 @@ def test_tool_names_is_preserved_on_both_turn_events():
 
 
 def test_the_protocol_moved_once_per_phase_on_top_of_v3():
-    assert protocol.PROTOCOL_VERSION == 9
+    assert protocol.PROTOCOL_VERSION == 10
     tree = ast.parse(Path(protocol.__file__).read_text(encoding="utf-8"))
     body = tree.body
     i = next(n for n, node in enumerate(body) if isinstance(node, ast.Assign)
@@ -53,7 +53,8 @@ def test_the_protocol_moved_once_per_phase_on_top_of_v3():
     doc = body[i + 1].value.value  # the string literal right after the constant is its docstring
     assert isinstance(doc, str)
     for bit in ("v3:", "tool_names", "v4:", "artifact", "v5:", "screens", "v6:", "ProviderLost",
-                "v7:", "InstructionsChanged", "NarrowingNotice", "v8:", "ConversationCleared", "v9:", "ModelSwitched"):
+                "v7:", "InstructionsChanged", "NarrowingNotice", "v8:", "ConversationCleared", "v9:", "ModelSwitched",
+                "v10:", "AffordanceCued"):
         assert bit in doc, f"the PROTOCOL_VERSION docstring does not mention {bit!r}"
     assert "artifact" in Observation.model_fields
 

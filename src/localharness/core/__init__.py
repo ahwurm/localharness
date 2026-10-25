@@ -2,6 +2,7 @@
 from .bus import EventBus, SubscriptionHandle
 from .events import (
     Action,
+    AffordanceCued,
     AgentCreated,
     AgentDeleted,
     AnyEvent,
@@ -31,6 +32,7 @@ __all__ = [
     "EventBus",
     "SubscriptionHandle",
     "Action",
+    "AffordanceCued",
     "AgentCreated",
     "AgentDeleted",
     "AnyEvent",

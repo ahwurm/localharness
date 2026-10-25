@@ -1,8 +1,9 @@
-"""Tests for localharness.core.events — all 38 event models, BudgetSpec, AnyEvent, EVENT_TYPE_MAP."""
+"""Tests for localharness.core.events — all 39 event models, BudgetSpec, AnyEvent, EVENT_TYPE_MAP."""
 import json
 import pytest
 from localharness.core.events import (
     Action,
+    AffordanceCued,
     AgentCreated,
     AgentDeleted,
     AnyEvent,
@@ -144,8 +145,8 @@ def test_event_serialization_roundtrip():
 
 
 def test_event_type_map_complete():
-    """EVENT_TYPE_MAP has entries for all 38 event types."""
-    assert len(EVENT_TYPE_MAP) == 38
+    """EVENT_TYPE_MAP has entries for all 39 event types."""
+    assert len(EVENT_TYPE_MAP) == 39
     expected_keys = {
         "SystemReady", "AgentCreated", "AgentDeleted", "TurnStarted", "TurnCompleted",
         "TurnFailed", "UserMessage", "TaskRequest", "TaskComplete", "Action",
@@ -156,7 +157,7 @@ def test_event_type_map_complete():
         "ConsolidationStarted", "ConsolidationFinished", "InputRouted",
         "TurnEndMicroPassCompleted", "PermissionAsked", "PermissionStaged",
         "PermissionResolved", "ProviderLost", "InstructionsChanged", "NarrowingNotice",
-        "ConversationCleared", "ModelSwitched",
+        "ConversationCleared", "ModelSwitched", "AffordanceCued",
     }
     assert set(EVENT_TYPE_MAP.keys()) == expected_keys
 
@@ -186,6 +187,24 @@ def test_provider_lost_event():
         parent_id=SessionID("p"),
     )
     assert child.parent_id == "p"
+
+
+def test_affordance_cued_event():
+    """AffordanceCued is frozen, registered in both tables, exported from core, round-trips through
+    deserialize_event and carries no kind."""
+    import typing
+
+    import localharness.core
+
+    ev = AffordanceCued(agent_id=AgentID("a"), session_id=SessionID("s"), name="commit-message", origin="machine")
+    assert ev.event_type == "AffordanceCued"
+    with pytest.raises(Exception):  # frozen
+        ev.name = "notes"  # type: ignore[misc]
+    assert EVENT_TYPE_MAP["AffordanceCued"] is AffordanceCued
+    assert AffordanceCued in typing.get_args(AnyEvent)
+    assert deserialize_event(ev.model_dump_json()) == ev
+    assert "kind" not in AffordanceCued.model_fields
+    assert localharness.core.AffordanceCued is AffordanceCued
 
 
 def test_instructions_changed_event():
@@ -326,15 +345,15 @@ def test_budget_spec_frozen():
 
 
 def test_any_event_union():
-    """AnyEvent type contains all 38 event classes."""
+    """AnyEvent type contains all 39 event classes."""
     # AnyEvent is a Union; check its __args__
     import typing
     from localharness.core.events import (
         ConsolidationFinished, ConsolidationStarted, ConversationCleared, InputRouted,
-        ModelSwitched, TurnEndMicroPassCompleted,
+        AffordanceCued, ModelSwitched, TurnEndMicroPassCompleted,
     )
     args = typing.get_args(AnyEvent)
-    assert len(args) == 38
+    assert len(args) == 39
     expected = {
         SystemReady, AgentCreated, AgentDeleted, TurnStarted, TurnCompleted, TurnFailed,
         UserMessage, TaskRequest, TaskComplete, Action, Observation,
@@ -345,7 +364,7 @@ def test_any_event_union():
         ConsolidationStarted, ConsolidationFinished, InputRouted,
         TurnEndMicroPassCompleted, PermissionAsked, PermissionStaged, PermissionResolved,
         ProviderLost, InstructionsChanged, NarrowingNotice, ConversationCleared,
-        ModelSwitched,
+        ModelSwitched, AffordanceCued,
     }
     assert set(args) == expected
 
