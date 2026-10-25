@@ -445,6 +445,7 @@ const S = {
   reasoning: false, offline: false, modes: [], verbose: false, burst: null, lastRow: null,
   webNoted: false, bring: null, echoes: [], working: null, sent: false, activity: "",
   modelFetch: 0, wakeRefetch: false, checking: null, modelState: null, overlaid: false,
+  launchName: null, sawSwitch: false, notLaunched: null, lastNotice: "",
 };
 const $ = id => document.getElementById(id);
 const log = $("log");
@@ -700,6 +701,8 @@ function onEvent(name, data) {
       break;
     case "ModelSwitched":
       if (data.model) $("model").textContent = data.model;
+      S.sawSwitch = true;
+      if ($("cfg").open) loadModels();
       break;
     default: break;
   }
@@ -967,7 +970,13 @@ function onFrame(name, d) {
         `that question expired after ${d.waited_s.toFixed(0)}s and was recorded as ${d.decision}. ` +
         `Nothing ran.`));
       break;
-    case "Activity": S.checking = null; S.activity = d.text || ""; paint(); break;
+    case "Activity":
+      S.checking = null; S.activity = d.text || "";
+      if ($("cfg").open) {
+        if (!S.activity) loadModels(); else if (S.launchName) $("cfgModelHead").textContent = S.activity;
+      }
+      paint();
+      break;
     case "TurnCancelled":
       S.turn = false; S.sent = false; clearProvisional(null); restDials(); paint();
       add(el("div", "row sys", "turn cancelled — the partial text above stays."));
@@ -1010,7 +1019,7 @@ function onFrame(name, d) {
       break;
     }
     case "Notice": {
-      S.checking = null; paint();
+      S.checking = null; S.lastNotice = d.text || ""; paint();
       if (S.wakeRefetch && $("cfg").open) { S.wakeRefetch = false; loadModels(); }
       const r = add(el("div", "row " + (d.style === "system.error" ? "err" : "sys")));
       if (d.preformatted) r.appendChild(el("pre", null, d.text)); else r.appendChild(el("div", null, d.text));
@@ -1682,14 +1691,15 @@ function paintModes() {
     box.appendChild(b);
   }
 }
-const modelHeader = () => S.turn ? MODEL_TURN : MODEL_HEADER;
+const modelHeader = () => S.launchName ? (S.activity || MODEL_LAUNCHING.replace("{launching}", S.launchName))
+  : S.notLaunched || (S.turn ? MODEL_TURN : MODEL_HEADER);
 function tapModel(r) {
   if (!S.turn && r.kind === "cold") { S.checking = r.label || r.name; paint(); }
   if (S.turn) add(el("div", "row sys", r.kind === "cold" ? MODEL_QUEUED_ASK : MODEL_QUEUED));
   $("cfg").close();
   post(`/api/sessions/${S.session || "current"}/command`, { text: "/model " + r.name });
 }
-function modelRow(r) {
+function modelRow(r, off) {
   const tags = [];
   if (r.active) tags.push(MODEL_TAG_ACTIVE);
   if (r.why) tags.push(r.why);
@@ -1701,13 +1711,20 @@ function modelRow(r) {
   const text = [r.label || r.name, ...tags].join(" · ");
   if (r.active || r.why) return el("div", "meta", text);
   const b = el("button", "small", text);
+  b.disabled = off;
   b.onclick = () => tapModel(r);
   return b;
 }
 function renderModels(p) {
+  if (p.launching) { S.launchName = p.launching; S.sawSwitch = false; }
+  else if (S.launchName) {
+    S.notLaunched = S.sawSwitch ? null : MODEL_NOT_LAUNCHED.replace("{launching}", S.launchName)
+      .replace("{notice}", S.lastNotice.split("\n")[0] || MODEL_NO_NOTICE);
+    S.launchName = null;
+  }
   $("cfgModelHead").textContent = modelHeader();
   $("cfgModel").replaceChildren(
-    ...(p.models || []).map(modelRow), ...(p.footer || []).map(f => el("div", "meta", f)));
+    ...(p.models || []).map(r => modelRow(r, !!p.launching)), ...(p.footer || []).map(f => el("div", "meta", f)));
 }
 async function loadModels() {
   const n = ++S.modelFetch;
@@ -1733,7 +1750,7 @@ async function loadModels() {
   else renderModels(body);
 }
 function openModels() {
-  S.wakeRefetch = false;
+  S.wakeRefetch = false; S.notLaunched = null; S.launchName = null;
   $("cfgModelHead").textContent = modelHeader();
   $("cfgModel").replaceChildren(el("div", "meta", MODEL_LOADING));
   paintModes();
