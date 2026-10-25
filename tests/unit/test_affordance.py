@@ -31,9 +31,11 @@ from localharness.memory.plugin import MemoryPlugin
 from localharness.memory.resonance import EMBED_MAX_TOKENS, ResonanceEngine, ResonanceUnavailable, local_folder
 from localharness.plugins.api import MemorySlotPlugin, QueryEmbedder
 from localharness.plugins.slot import MemorySlot
+from localharness.tools.base import Tool, ToolResult, ToolSchema
 from localharness.tools.builtin.agent_tool import BUILTIN_AGENT_NAMES
 from localharness.tools.builtin.skill_tool import SkillTool, render_listing
 from localharness.tools.builtin.task_tool import TaskTool
+from localharness.tools.registry import ToolRegistry, allowed_by_config
 from tests.unit.test_capabilities import _production_registry
 from tests.unit.test_embedding_model_source import MODEL, PURE, SHIPS_CODE, _cached, _write
 from tests.unit.test_memory_plugin import _ctx
@@ -528,3 +530,48 @@ def test_a_partial_snapshot_is_none_and_never_downloaded(hub, st, monkeypatch):
     monkeypatch.setattr("huggingface_hub.snapshot_download", refuse)
     engine = ResonanceEngine(MODEL)
     assert engine.ensure_local() is None and engine._folder is None and asked == []
+
+
+# --- allowed_by_config ----------------------------------------------------------------------------
+
+class _Named(Tool):
+    def __init__(self, name: str) -> None:
+        super().__init__()
+        self._name = name
+
+    def info(self) -> ToolSchema:
+        return ToolSchema(name=self._name, description="A tool.", parameters={"type": "object", "properties": {}},
+                          ingest="none", host="safe")
+
+    async def _execute(self) -> ToolResult:
+        return self.ok("")
+
+
+@pytest.mark.parametrize("inherit", [None, ["global"], ["division"]])
+@pytest.mark.parametrize("add", [False, True])
+@pytest.mark.parametrize("deny", [False, True])
+@pytest.mark.parametrize("name, scope", [("g", "global"), ("d", "division")])
+async def test_the_registry_admits_a_global_or_division_tool_exactly_when_allowed_by_config_does(
+        inherit, add, deny, name, scope):
+    reg = ToolRegistry()
+    await reg.register(_Named("g"), scope="global")
+    await reg.register(_Named("d"), scope="division", division_id="div")
+    cfg = SimpleNamespace(inherit=inherit, add=[name] if add else [], deny=[name] if deny else [])
+    assert (name in reg.get_tools_for_agent("a", "div", cfg)) == allowed_by_config(cfg, name, scope)
+
+
+@pytest.mark.parametrize("cfg, scope, admitted", [
+    (SimpleNamespace(inherit=None, add=[], deny=[]), "global", True),
+    (SimpleNamespace(inherit=None, add=[], deny=[]), "division", True),
+    (ToolConfig(inherit=["global"]), "global", True),
+    (ToolConfig(inherit=["global"]), "division", False),
+    (ToolConfig(inherit=["division"]), "division", True),
+    (ToolConfig(inherit=["division"]), "global", False),
+    (ToolConfig(inherit=["division"], add=["skill"]), "global", True),
+    (ToolConfig(inherit=["global"], add=["skill"]), "division", True),
+    (ToolConfig(inherit=["global"], deny=["skill"]), "global", False),
+    (ToolConfig(inherit=["division"], add=["skill"], deny=["skill"]), "global", False),
+    (ToolConfig(), "global", True),
+])
+def test_allowed_by_config_truth_table(cfg, scope, admitted):
+    assert allowed_by_config(cfg, "skill", scope) is admitted
