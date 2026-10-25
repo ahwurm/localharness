@@ -28,7 +28,7 @@ Without the extra, `localharness plugins list` shows it as `off — turn on: loc
 
 The bind address and `--allow-unsafe-bind` stay flags of `localharness mobile`, never settings. A token is required on every request; it is generated on first run and stored in your global config folder, and its text is printed only to a terminal: when it is created, after `--rotate-token`, or with `--show-token`. The phone's event stream uses a cookie derived from the token, which only the GET routes accept. An app added to the home screen asks for the token once.
 
-A paired phone can do what you can do at the terminal, including switching the session to `unattended` and answering "always". The machine-level setting `channels.remote_unattended: false` keeps those two to the terminal and Zed; the default, `true`, changes nothing. See [SECURITY.md, a paired phone or Discord account](../../SECURITY.md#a-paired-phone-or-discord-account).
+A paired phone can do what you can do at the terminal, including switching the session to `unattended`, answering "always" and launching a model, which asks first. The machine-level setting `channels.remote_unattended: false` keeps those three to the terminal and Zed; the default, `true`, locks none of them. See [SECURITY.md, a paired phone or Discord account](../../SECURITY.md#a-paired-phone-or-discord-account).
 
 ## Not there yet
 
