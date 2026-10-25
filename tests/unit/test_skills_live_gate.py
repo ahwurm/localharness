@@ -17,10 +17,10 @@ from localharness.tools.builtin.skill_tool import render_listing
 import tests.integration.test_skills_model_live as live
 from tests.conftest import FakeLLMResponse, FakeToolCall, MockLLMClient
 from tests.integration.test_skills_model_live import (
-    CREATOR_BAR, CREATOR_MAX_ACTIONS, CREATOR_MAX_MINUTES, FALSE_BAR, FIXTURES, KINDS, MATCHING_BAR, NOT_FINISHED, NOT_SERVING, NOT_SUBJECT,
-    RUNS, TEMPERATURE, VARIANT_A, VARIANT_B, CreatorRun, Run, Step, count, creator_asker, creator_run, first_step, first_step_run, hit,
+    CREATOR_BAR, CREATOR_MAX_ACTIONS, CREATOR_MAX_MINUTES, FALSE_BAR, FIXTURES, KINDS, MATCHING_BAR, MAX_ERROR_STREAK, NOT_FINISHED, NOT_SERVING,
+    NOT_SUBJECT, RUNS, TEMPERATURE, VARIANT_A, VARIANT_B, CreatorRun, Run, RunStopped, Step, count, creator_asker, creator_run, first_step, first_step_run, hit,
     flaw_of, install, judge, loop_shape, meets, neutral_sitting, not_run_report, out_of_list, passed, prompts, render_report, root_config, run_number, settled,
-    sizes, subject_served, write_report, xml_mode)
+    sizes, stop_on_failing_server, subject_served, write_report, xml_mode)
 from tests.unit.test_image_hygiene import FORBIDDEN
 from tests.unit.test_skills_misc import lures
 
@@ -38,6 +38,7 @@ def test_the_bar_is_the_architects():
     assert CREATOR_BAR == (2, 3)
     assert TEMPERATURE == 0.6
     assert (CREATOR_MAX_ACTIONS, CREATOR_MAX_MINUTES) == (40, 30.0)
+    assert MAX_ERROR_STREAK == 10
 
 
 def reply(content=None, calls=(), finish="stop", reasoning=None) -> FakeLLMResponse:
@@ -443,7 +444,8 @@ async def test_a_request_that_fails_once_is_tried_again(tmp_path, monkeypatch):
 async def test_a_request_that_fails_twice_is_an_error_step_and_the_run_goes_on(tmp_path, monkeypatch):
     client = Flaky(2, reply(calls=[SKILL]))
     step = await settle(tmp_path, monkeypatch, client)
-    assert step.error and step.calls == () and step.flaw is None
+    assert step.calls == () and step.flaw is None
+    assert "the server went away" in step.error and "AssertionError" not in step.error
     assert client.fails == 0 and client._index == 0
 
 
@@ -462,6 +464,36 @@ def test_an_error_can_only_make_the_bar_harder():
     spare = next(i for i, r in enumerate(quiet) if r.skill == "release-notes" and r.kind == "unrelated" and not hit(r))
     assert passed(quiet, [True, True, True]) is True
     assert passed([*quiet[:spare], failed(quiet[spare], error="X"), *quiet[spare + 1:]], [True, True, True]) is False
+
+
+async def test_ten_failed_requests_in_a_row_stop_the_run_and_a_good_one_in_between_does_not(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    skill_set = install(tmp_path / "cfg")
+    cfg = root_config(tmp_path / "cfg")
+    shape = loop_shape(tmp_path / "cfg", cfg, URL, None)
+    runs: list[Run] = []
+    for n in range(MAX_ERROR_STREAK + 1):
+        step = await settled(Flaky(2, reply(calls=[SKILL])), skill_set, cfg, shape, "Draft the release notes.", work)
+        runs.append(Run("native", "release-notes", "matching", "p", n, step))
+        if n < MAX_ERROR_STREAK - 1:
+            stop_on_failing_server(runs)
+        else:
+            with pytest.raises(RunStopped, match="10 requests in a row errored.*the server went away"):
+                stop_on_failing_server(runs)
+            break
+    assert len(runs) == MAX_ERROR_STREAK and all(r.step.error for r in runs)
+    runs[4] = Run("native", "release-notes", "matching", "p", 4, step_of("release-notes", "matching", True))
+    stop_on_failing_server(runs)
+
+
+def test_a_run_the_server_stopped_renders_as_incomplete_with_its_reason_and_no_verdict():
+    runs = synthetic(lambda s, k, n: k == "matching")[:40]
+    text = render_report(META, runs, [], "stopped after 10 requests in a row errored; the last: boom")
+    assert "Outcome: incomplete" in text and "Incomplete because: stopped after 10 requests in a row errored; the last: boom" in text
+    assert "Outcome: pass" not in text and "Outcome: miss" not in text and VARIANT_B in text
+    assert "| yes |" not in text.split("## XML")[0] and "| n/a |" in text
 
 
 def test_the_bar_is_written_once():
@@ -580,7 +612,7 @@ async def test_nothing_the_creator_is_sent_names_the_real_user_and_every_path_it
 
 async def test_a_creator_turn_that_dies_is_an_invalid_run_not_a_lost_report(fake_home):
     run = await creator_turn(fake_home, client=Flaky(99))
-    assert run.valid is False and run.terminated.startswith("error")
+    assert run.valid is False and run.terminated == "internal_error: the server went away"
 
 
 async def test_a_path_in_the_real_home_is_denied_and_reported_as_written_and_as_resolved(fake_home):
