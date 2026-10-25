@@ -3162,6 +3162,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         except Exception:  # noqa: BLE001 — the loop's own resolution degrades the same way: keep every line the root registered
             held = {"agent", "task", "skill"} if skill_set.skills else {"agent", "task"}
         skill_listing = skill_listing if "skill" in held else ""
+        affordances = None
+        if skill_listing:
+            from localharness.agent.affordance import Affordances
+            affordances = Affordances(skill_set, memory_slot, task_state)
+            affordances.warm()
 
         # --- 10. Agent loop ---
         # #35: resolve the kill-file value against THIS config dir (a bare default 'KILL' lands at
@@ -3198,6 +3203,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             project_instructions=instructions_handle,
             skills=skill_listing,
             index=render_index(root, cfg_path, held, config_dir_flag, slash=acp_channel is None),
+            affordances=affordances,
             # PAPI-04: the memory slot — the lifecycle's; its occupant (the memory plugin) feeds the
             # prompt's memory section.
             memory_slot=memory_slot,
@@ -3537,7 +3543,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # The harness's own unit state sensed once above: the session's launches go through it too
             # (D-19) and it never senses again.
             unit_state=_unit,
-            skills=SkillSession(skill_set) if skill_set.skills else None,
+            skills=SkillSession(skill_set, affordances) if skill_set.skills else None,
         )
 
         repl_cell.append(repl)  # late binding: the supplier now answers repl.server_recovery()
