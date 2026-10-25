@@ -703,7 +703,12 @@ class OrchestratorREPL:
 
         # Check for creation intent in natural language
         if self._detect_creation_intent(user_input):
-            self._orchestrator.begin_agent_creation(config_dir=self._config_dir)
+            from localharness.config.loader import ConfigLoader
+
+            registry = self._orchestrator._card_registry
+            # write-only fallback: untrusted, so it never serves a reader the start decision did not bless
+            self._orchestrator.begin_agent_creation(loader=registry.loader or ConfigLoader(
+                config_dir=self._config_dir, local_config_dir=self._workspace, project_trusted=False))
             # #19: do NOT transition with the trigger message. The workflow already starts in
             # DISCUSS; feeding the trigger here consumed it as the agent DESCRIPTION and silently
             # advanced to CONFIGURE, skipping the CONFIGURE branch — the user's NEXT message is
@@ -3044,10 +3049,7 @@ class OrchestratorREPL:
             return
 
         if new_state == WorkflowState.DEPLOY:
-            # User confirmed — deploy the config. #19: no step ever gathers a
-            # name, and the old 'new_agent' fallback failed AgentConfig's
-            # hyphens-only name rule — the default path could never deploy.
-            # Pass None so deploy_config honors the confirmed YAML's own name.
+            # User confirmed — deploy the config.
             name = workflow.gathered.get("name")
             try:
                 config_path = workflow.deploy_config(name)

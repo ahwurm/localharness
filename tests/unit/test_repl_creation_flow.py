@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import yaml
 
 from localharness.cli.repl import OrchestratorREPL
+from localharness.config.loader import ConfigLoader
 from localharness.orchestrator.cards import AgentCardRegistry
 from localharness.orchestrator.router import AgentCreationFlow
 from localharness.orchestrator.workflow import WorkflowState
@@ -60,6 +61,48 @@ def _repl(channel: ScriptedChannel, llm, config_dir=None):
         config_dir=config_dir,
     )
     return repl, orch, agent, bus
+
+
+def _bound_repl(channel: ScriptedChannel, llm, tmp_path):
+    home, ws = tmp_path / "home", tmp_path / "proj" / ".localharness"
+    home.mkdir()
+    ws.mkdir(parents=True)
+    orch = AgentCreationFlow(AgentCardRegistry(loader=ConfigLoader(config_dir=home, local_config_dir=ws)))
+    agent = MagicMock()
+    agent._config.name = "orchestrator"
+    agent.current_session_id = "sess-1"
+    agent._llm = llm
+    agent.run_turn = AsyncMock()
+    repl = OrchestratorREPL(orchestrator=orch, agent_loop=agent, channel=channel, bus=AsyncMock(),
+                            config_dir=home, workspace=ws)
+    return repl, orch, home, ws
+
+
+def test_a_bound_creation_saves_to_the_project_by_default(tmp_path, mock_llm_client):
+    llm = mock_llm_client([mock_llm_client.Response(content=f"name: finance-helper\nrole: {ROLE}")])
+    channel = ScriptedChannel(["create an agent", f"it should {ROLE}", "yes"])
+    repl, orch, home, ws = _bound_repl(channel, llm, tmp_path)
+
+    asyncio.run(repl.run())
+
+    path = ws / "agents" / "finance-helper.yaml"
+    assert path.exists() and path.stat().st_mode & 0o777 == 0o600
+    assert not (home / "agents" / "finance-helper.yaml").exists()
+    assert f"Agent deployed to {path}" in channel.sent
+
+
+def test_a_registry_without_a_loader_hands_the_flow_the_repls_own_dirs(tmp_path, mock_llm_client):
+    home, ws = tmp_path / "home", tmp_path / "proj" / ".localharness"
+    channel = ScriptedChannel(["create an agent"])
+    orch = AgentCreationFlow(AgentCardRegistry())
+    repl = OrchestratorREPL(orchestrator=orch, agent_loop=MagicMock(), channel=channel, bus=AsyncMock(),
+                            config_dir=home, workspace=ws)
+
+    asyncio.run(repl.run())
+
+    loader = orch.active_workflow._loader
+    assert loader.global_config_dir == home and loader.local_dir == ws
+    assert loader._project_trusted is False
 
 
 def test_agent_creation_e2e_writes_real_config(tmp_path, mock_llm_client):

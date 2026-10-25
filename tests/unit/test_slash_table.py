@@ -23,6 +23,7 @@ from prompt_toolkit.document import Document
 from localharness.channels.terminal import SlashCommandCompleter
 from localharness.agent.context import ContentStore
 from localharness.cli.repl import CLEAR_DONE, CLEAR_DROPPED, CLEAR_MID_TURN, OrchestratorREPL
+from localharness.config.loader import ConfigLoader
 from localharness.core.bus import EventBus
 from localharness.core.events import ConversationCleared
 from localharness.cli.slash_commands import (
@@ -272,7 +273,7 @@ async def test_agents_lists_the_cards():
 async def test_quit_mid_wizard_cancels_the_creation_and_a_second_quit_exits(tmp_path):
     channel = RecordingChannel([])
     repl, _, _ = _build_repl(channel)
-    repl._orchestrator.begin_agent_creation(config_dir=tmp_path)
+    repl._orchestrator.begin_agent_creation(loader=ConfigLoader(config_dir=tmp_path))
     assert await repl._handle_slash("/quit") is True
     assert repl._orchestrator.active_workflow is None
     assert channel.sent == [("Agent creation cancelled. /quit again to exit.", INFO)]

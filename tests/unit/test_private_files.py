@@ -323,9 +323,10 @@ def test_agent_create_yaml_is_born_private(tmp_path, no_chmod):
 
 def test_workflow_agent_yaml_is_born_private(tmp_path, no_chmod):
     from localharness.cli.agent_cmd import _build_agent_yaml
+    from localharness.config.loader import ConfigLoader
     from localharness.orchestrator.workflow import AgentCreationWorkflow
 
-    flow = AgentCreationWorkflow(config_dir=tmp_path)
+    flow = AgentCreationWorkflow(loader=ConfigLoader(config_dir=tmp_path))
     flow.set_generated_yaml(yaml.safe_dump(_build_agent_yaml("scout", "Finds things", None)))
     path = flow.deploy_config()
     assert path == tmp_path / "agents" / "scout.yaml" and _mode(path) == 0o600

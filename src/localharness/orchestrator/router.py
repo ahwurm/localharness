@@ -1,12 +1,12 @@
 """Orchestrator layer: the agent-creation flow and the no-config welcome message."""
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from localharness.orchestrator.cards import AgentCardRegistry
 
 if TYPE_CHECKING:
+    from localharness.config.loader import ConfigLoader
     from localharness.orchestrator.workflow import AgentCreationWorkflow
 
 
@@ -34,15 +34,10 @@ class AgentCreationFlow:
             "see: https://localharness.dev"
         )
 
-    def begin_agent_creation(self, config_dir: Path | None = None) -> "AgentCreationWorkflow":
-        """Start a new agent creation workflow.
-
-        Instantiates AgentCreationWorkflow and stores it as the active workflow.
-        ORCH-02 requires the orchestrator layer to drive the creation flow through
-        this delegation.
-        """
+    def begin_agent_creation(self, loader: "ConfigLoader | None" = None) -> "AgentCreationWorkflow":
+        """Start a new agent creation workflow and store it as the active one."""
         from localharness.orchestrator.workflow import AgentCreationWorkflow
-        self._active_workflow = AgentCreationWorkflow(config_dir=config_dir)
+        self._active_workflow = AgentCreationWorkflow(loader=loader)
         return self._active_workflow
 
     @property

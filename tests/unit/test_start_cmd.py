@@ -976,8 +976,9 @@ def test_repl_slash_commands_no_user_message():
 
 def test_deploy_config_writes_to_agents_subdir(tmp_path):
     """ORCH-02: deploy_config writes to config_dir/agents/{name}.yaml."""
+    from localharness.config.loader import ConfigLoader
     from localharness.orchestrator.workflow import AgentCreationWorkflow
-    wf = AgentCreationWorkflow(config_dir=tmp_path)
+    wf = AgentCreationWorkflow(loader=ConfigLoader(config_dir=tmp_path))
     wf.set_generated_yaml("name: test-bot\nrole: Test\n")
     result_path = wf.deploy_config("test-bot")
     assert result_path == tmp_path / "agents" / "test-bot.yaml"
@@ -1006,6 +1007,7 @@ def test_deploy_config_default_path(tmp_path, monkeypatch, fake_home):
     """
     fake_home(tmp_path)
     from localharness.orchestrator.workflow import AgentCreationWorkflow
+    (tmp_path / ".localharness").mkdir()
     wf = AgentCreationWorkflow()  # no config_dir
     wf.set_generated_yaml("name: default-bot\nrole: Default\n")
     result_path = wf.deploy_config("default-bot")

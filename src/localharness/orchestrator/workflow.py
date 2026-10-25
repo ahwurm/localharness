@@ -1,15 +1,13 @@
 """Agent creation workflow state machine."""
 from __future__ import annotations
 
-import os
 import re
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from localharness.config.paths import resolve_config_dir
+from localharness.config.loader import ConfigLoader, Origin
 from localharness.config.redact import yaml_problem, yaml_where
-from localharness.core.private_files import touch_private
 
 
 # #59: deterministic, leading-anchored cancellation. The old escape was 4 undocumented
@@ -137,14 +135,16 @@ class AgentCreationWorkflow:
     Cancel from any state. Back from confirm -> discuss.
     """
 
-    def __init__(self, config_dir: Path | None = None) -> None:
+    def __init__(self, loader: ConfigLoader | None = None) -> None:
         self._state = WorkflowState.DISCUSS
-        # #150 phase 38: chokepoint-routed. Explicit arg (repl.py -> router.py threads one) still
-        # wins; the bare fallback now honors LOCALHARNESS_DIR/HOME instead of the raw user home.
-        self._config_dir = resolve_config_dir(config_dir)
+        self._loader = loader if loader is not None else ConfigLoader()
+        self._layer: Origin = self._default_layer()
         self._gathered: dict[str, Any] = {}
         self._generated_yaml: str = ""
         self._agent_name: str = ""
+
+    def _default_layer(self) -> Origin:
+        return "project" if self._loader.local_dir is not None else "machine"
 
     @property
     def state(self) -> WorkflowState:
@@ -247,17 +247,7 @@ class AgentCreationWorkflow:
         return self._generated_yaml
 
     def deploy_config(self, agent_name: str | None = None) -> Path:
-        """Write the generated YAML to the config directory.
-
-        Validates the YAML parses correctly and satisfies AgentConfig schema
-        before writing. agent_name overrides the YAML's name field; when None
-        (#19), the confirmed YAML's own name is honored — deploying what the
-        user actually confirmed. A config with no name anywhere fails explicitly
-        (#28: never placeholder). Refuses to overwrite an existing agent config
-        (#28: os.replace silently clobbered it). Raises ValueError if the YAML is
-        invalid, unnamed, fails schema validation, or the target already exists.
-        Returns the path to the written config file.
-        """
+        """Validate the generated YAML and write it to the chosen layer; ValueError for anything the person can fix."""
         import yaml as _yaml
         from localharness.config.models import AgentConfig
 
@@ -290,17 +280,9 @@ class AgentCreationWorkflow:
         # Re-serialize with corrected name
         validated_yaml = _yaml.dump(data, default_flow_style=False, sort_keys=False)
 
-        config_path = self._config_dir / "agents" / f"{agent_name}.yaml"
-        # #28: never silently overwrite an existing agent — os.replace clobbers.
-        if config_path.exists():
-            raise ValueError(
-                f"Agent {agent_name!r} already exists at {config_path}; refusing to "
-                "overwrite. Choose a different name or remove the existing config."
-            )
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = config_path.with_suffix(".yaml.tmp")
-        touch_private(tmp_path)  # the agent file keeps this one's mode
-        tmp_path.write_text(validated_yaml)
-        os.replace(str(tmp_path), str(config_path))
+        try:
+            config_path = self._loader.write_agent(agent_name, validated_yaml, layer=self._layer)
+        except FileExistsError as exc:
+            raise ValueError(str(exc)) from None
         self._agent_name = agent_name
         return config_path
