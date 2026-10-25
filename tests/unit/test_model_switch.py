@@ -58,7 +58,7 @@ class _Bus:
         self.events.append(event)
 
 
-def _world(model="qwen3:32b", session="s1", bus=None, chan=None, with_llm=True, gate=lambda: None, config_dir=None):
+def _world(model="qwen3:32b", session="s1", bus=None, chan=None, with_llm=True, gate=lambda: None, config_dir=None, with_harness=True):
     llm = NS(config=NS(base_url=PRIMARY, model=model))
     agent = NS(_llm=llm if with_llm else None, _config=NS(name="root"), current_session_id=session)
     harness = NS(
@@ -68,7 +68,7 @@ def _world(model="qwen3:32b", session="s1", bus=None, chan=None, with_llm=True, 
     )
     bus = bus or _Bus()
     chan = chan or _Chan()
-    return llm, ModelSwitch(agent, bus, chan, harness, gate, config_dir), bus, chan
+    return llm, ModelSwitch(agent, bus, chan, harness if with_harness else None, gate, config_dir), bus, chan
 
 
 async def test_publish_hot_on_a_model_change_at_the_same_endpoint():
@@ -146,6 +146,18 @@ async def test_publish_nothing_and_no_raise_when_the_agent_has_no_llm():
 
     async def handler(arg):
         ran.append(arg)
+
+    await switch.run(handler, "x")
+    assert ran == ["x"] and bus.events == []
+
+
+async def test_run_reaches_the_handler_and_publishes_nothing_when_the_session_has_no_harness():
+    llm, switch, bus, _ = _world(with_harness=False)
+    ran = []
+
+    async def handler(arg):
+        ran.append(arg)
+        llm.config.model = "new"
 
     await switch.run(handler, "x")
     assert ran == ["x"] and bus.events == []

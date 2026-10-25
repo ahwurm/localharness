@@ -128,7 +128,9 @@ class ModelSwitch:
 
     def _bound(self):
         llm = getattr(self._agent, "_llm", None)
-        return None if llm is None else (llm.config.model, _endpoint_name(self._harness, llm.config.base_url))
+        if llm is None or self._harness is None:
+            return None
+        return llm.config.model, _endpoint_name(self._harness, llm.config.base_url)
 
     def refusal(self, target: str) -> str | None:
         if getattr(self._channel, "local_operator", False):
@@ -177,7 +179,7 @@ class ModelSwitch:
             self._generation += 1
             try:
                 after, session_id = self._bound(), self._agent.current_session_id
-                if after != before and not cancelled and session_id:
+                if before and after and after != before and not cancelled and session_id:
                     await self._bus.publish(ModelSwitched(
                         agent_id=self._agent._config.name, session_id=session_id,
                         model=_label(after[0]), endpoint=after[1],
