@@ -32,7 +32,7 @@ If a listed skill covers the workflow, extend it instead of writing a new one.
 The description is a retrieval cue, the only part the model sees before it decides to load the skill.
 
 - Third person: what the skill does, then when to use it.
-- Use the words the person types.
+- Write the description in the words a person uses to ask for this work, not the procedure's own terms: it is the cue the harness and the model match against.
 - One line, at most 250 characters; the listing holds 1,300 characters in all and drops a project description first when it overflows.
 - Distinct from the other listed skills, so a near-miss request does not match.
 
