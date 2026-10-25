@@ -523,6 +523,28 @@ async def test_a_published_provider_lost_reaches_the_phones_stream_with_no_chann
     await channel.stop()
 
 
+async def test_a_published_model_switched_reaches_the_phones_stream_with_no_channel_change(tmp_path):
+    from localharness.core.events import ModelSwitched
+
+    bus = EventBus(persist_path=tmp_path / "e.jsonl")
+    channel = await _channel(bus)
+    client = channel.attach_client()
+
+    await bus.publish(ModelSwitched(
+        agent_id="a", session_id="s", model="qwen3-27b", endpoint="primary", kind="hot",
+    ))
+    await bus.publish(ModelSwitched(
+        agent_id="a", session_id="s", model="qwen3-27b", endpoint="primary", kind="cold",
+        parent_id="child-1",
+    ))
+    rows = _drain(client)
+
+    assert [r[0] for r in rows] == ["ModelSwitched", "ModelSwitched"]
+    assert [(r[2]["model"], r[2]["endpoint"], r[2]["kind"]) for r in rows] == [
+        ("qwen3-27b", "primary", "hot"), ("qwen3-27b", "primary", "cold")]
+    await channel.stop()
+
+
 async def test_a_published_instructions_changed_reaches_the_phones_stream_with_no_channel_change(tmp_path):
     """D-46: the forwarder covers every EVENT_TYPE_MAP type, so the project-instructions status
     line needs no code in the channel. A child-stamped one is forwarded like any other."""
