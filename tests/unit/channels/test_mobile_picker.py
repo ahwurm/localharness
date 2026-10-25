@@ -21,6 +21,7 @@ from localharness.channels.mobile.channel import (
     PICKER_KLASS,
     MobileChannel,
 )
+from localharness.cli.model_switch import ModelSwitch
 from localharness.core.bus import EventBus
 
 pytestmark = pytest.mark.asyncio
@@ -261,3 +262,43 @@ async def test_picker_without_confirm_records_every_option_in_one_request():
     assert [o["confirm_required"] for o in frame["options"]] == [False] * len(LEVELS)
     assert channel.answer_ask(frame["request_id"], "max") == {"status": "recorded", "decision": "max"}
     assert await task == "max"
+
+
+async def _real_phone_confirm(channel, client, answers):
+    stop = ("recheck", "stop")
+    calls = []
+
+    async def recheck():
+        calls.append(1)
+        return stop
+
+    switch = ModelSwitch(
+        SimpleNamespace(_llm=SimpleNamespace(config=SimpleNamespace(model="qwen3-27b"))),
+        None, channel, None, lambda: SimpleNamespace(remote_unattended=True), None)
+    task = asyncio.ensure_future(switch.confirm("mixtral", "qwen3-27b", "", recheck))
+    await asyncio.sleep(0)
+    frames = [r for r in _drain(client) if r[0] == "BlockingAsk"]
+    assert len(frames) == 1
+    frame = frames[0][2]
+    assert [(o["kind"], o["confirm_required"]) for o in frame["options"]] == [
+        ("Launch", True), ("Cancel", False)]
+    assert "mixtral" in frame["reason"] and "cannot be cancelled" in frame["reason"]
+    token = None
+    for kind in answers:
+        reply = channel.answer_ask(frame["request_id"], kind, token)
+        token = reply.get("confirm_token")
+    return await task, stop, calls
+
+
+async def test_real_phone_launch_confirm_takes_two_requests_and_rechecks():
+    channel = await _channel()
+    client = channel.attach_client()
+    result, stop, calls = await _real_phone_confirm(channel, client, ["Launch", "Launch"])
+    assert result == stop and calls == [1]
+
+
+async def test_real_phone_launch_cancel_takes_one_request_and_never_rechecks():
+    channel = await _channel()
+    client = channel.attach_client()
+    result, _, calls = await _real_phone_confirm(channel, client, ["Cancel"])
+    assert result == ("", "") and calls == []
