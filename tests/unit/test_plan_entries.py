@@ -316,7 +316,7 @@ def test_a_plan_the_floor_refuses_is_a_not_offered_line(world, monkeypatch):
     entries = entries_of(world, SERVING)
 
     assert model_ops.entry_lines(entries)[-1] == (
-        "  not offered: flash-next — fits only a 9,216-token window here and the harness needs at least 13,824")
+        "  not offered: flash-next — fits only a 9,216-token window here and the harness needs at least 13,824 — free GPU memory, or pick a smaller model")
     assert entries.pick("flash-next") == refusal
 
 

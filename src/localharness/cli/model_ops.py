@@ -1354,9 +1354,9 @@ def plan_entries(
 
 
 def not_offered_reason(sentence: str, name: str) -> str:
-    """The reason in a refusal sentence: without the leading name and ``cannot run here:``, up to the first `` — ``, no final period."""
+    """The reason in a refusal sentence: without the leading name and ``cannot run here:``, no final period."""
     text = sentence.removeprefix(f"{name} ").removeprefix("cannot run here: ")
-    return text.split(" — ")[0].rstrip(".")
+    return text.rstrip(".")
 
 
 STRATA_AVAILABLE = " · Strata available: /model {name}"

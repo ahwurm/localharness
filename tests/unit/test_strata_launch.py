@@ -80,7 +80,8 @@ async def test_an_install_made_group_writable_since_the_set_up_is_refused(make_w
     (world.engine / path).chmod(0o777)
     with pytest.raises(server.LaunchRefused) as refused:
         await world.activate(autosense=None)
-    assert str(refused.value) == strata.NOT_AN_INSTALL.format(name=SERVED, engine_dir=str(world.engine))
+    assert str(refused.value) == strata.NOT_AN_INSTALL.format(name=SERVED, engine_dir=world.engine.name)
+    assert str(world.engine.parent) not in str(refused.value)
     assert popen == [] and not copy_file(world).exists()
 
 
