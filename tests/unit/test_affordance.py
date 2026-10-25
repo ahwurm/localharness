@@ -6,6 +6,7 @@ import datetime
 import hashlib
 import inspect
 import logging
+import re
 import shlex
 import sys
 from itertools import combinations
@@ -1091,3 +1092,25 @@ async def test_the_pending_cue_is_cancelled_when_the_assembly_raises(tmp_path, m
     await asyncio.sleep(0)
     (task,) = tasks
     assert task.cancelled() and seen.requests == [] and seen.events == []
+
+
+# --- the calibration writer and file hygiene -------------------------------------------------------
+
+ROOT = Path(__file__).resolve().parents[2]
+GEN_CALIBRATION = ROOT / "scripts" / "gen_calibration.py"
+RECORD = Path(affordance.__file__).resolve().parent.parent / "assets" / "affordance" / "calibration.yaml"
+IDS = re.compile(r"\b(?:D|R|T|WR)-\d+|R§|§")
+
+
+def test_the_calibration_script_never_names_the_holdout():
+    assert "prompts_holdout" not in GEN_CALIBRATION.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("path", [Path(affordance.__file__), GEN_CALIBRATION, RECORD],
+                         ids=["affordance", "gen_calibration", "record"])
+def test_the_cue_files_carry_no_review_or_plan_id(path):
+    assert IDS.findall(path.read_text(encoding="utf-8")) == []
+
+
+def test_the_id_pattern_bites():
+    assert IDS.findall("D-14 R-28 T-05 WR-09 R§2 §8 1-D WORD-1 PID-3") == ["D-14", "R-28", "T-05", "WR-09", "R§", "§"]
