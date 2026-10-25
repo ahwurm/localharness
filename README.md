@@ -37,7 +37,7 @@ localharness update                  # the latest release from PyPI
 
 ## What agents can do
 
-Agents are YAML. The built-in tools are read, write, edit, glob, grep, bash, python, web search and fetch, delegation to helper agents, and MCP servers, so a session works as a coding agent or a research agent. Drive it from the terminal, from Zed ([`localharness acp`](docs/zed.md)), from your phone on your own network ([`localharness mobile`](docs/mobile.md)) or from Discord ([`--channel discord`](docs/plugins/dispatch.md)). With a vision model, drop a screenshot on the terminal, paste one into Zed or the phone page, or attach one on Discord.
+Agents are YAML. A project's agents live in its `.localharness/agents/` and yours in `~/.localharness/agents/`, the project's file winning a shared name; the model is told about both and sees a new one as soon as it is used or created, and `localharness agent list` shows where each comes from. The built-in tools are read, write, edit, glob, grep, bash, python, web search and fetch, delegation to helper agents, and MCP servers, so a session works as a coding agent or a research agent. Drive it from the terminal, from Zed ([`localharness acp`](docs/zed.md)), from your phone on your own network ([`localharness mobile`](docs/mobile.md)) or from Discord ([`--channel discord`](docs/plugins/dispatch.md)). With a vision model, drop a screenshot on the terminal, paste one into Zed or the phone page, or attach one on Discord.
 
 ## Supported runtimes
 
@@ -79,7 +79,7 @@ A skill is a folder holding a `SKILL.md` in the open [Agent Skills](https://agen
 
 ## Status
 
-Early stage (v0.22.0, pre-1.0). Interfaces and config schema may change without notice. Each release's known limitations are listed in the [CHANGELOG](CHANGELOG.md).
+Early stage (v0.22.1, pre-1.0). Interfaces and config schema may change without notice. Each release's known limitations are listed in the [CHANGELOG](CHANGELOG.md).
 
 ## Links
 

@@ -566,9 +566,10 @@ def test_skills_claim_live() -> None:
 
 
 def _swapped(text: str) -> str:
-    changed = re.search(r"### Changed\n.*?(?=### Removed)", text, re.S).group(0)
-    removed = re.search(r"### Removed\n.*?\n(?=\n## \[)", text, re.S).group(0)
-    return text.replace(changed + removed, removed + "\n" + changed.rstrip("\n") + "\n")
+    head, entry = text.split(SKILLS_RELEASE, 1)
+    changed = re.search(r"### Changed\n.*?(?=### Removed)", entry, re.S).group(0)
+    removed = re.search(r"### Removed\n.*?\n(?=\n## \[)", entry, re.S).group(0)
+    return head + SKILLS_RELEASE + entry.replace(changed + removed, removed + "\n" + changed.rstrip("\n") + "\n")
 
 
 def test_skills_entry_bites() -> None:
