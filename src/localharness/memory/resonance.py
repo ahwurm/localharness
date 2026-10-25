@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from localharness.config.paths import _repo, local_folder, model_folder
 from localharness.memory.errors import MemoryError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -200,48 +201,6 @@ def _bound(model):
     return model
 
 
-def cached_copy(model: str) -> str | None:
-    """The folder of `model`'s copy in the local Hugging Face cache, or None. Reads the cache only,
-    as doctor and the start notice do; an id the cache cannot read (a malformed one) is None."""
-    try:
-        from huggingface_hub import try_to_load_from_cache
-
-        for name in ("modules.json", "config.json"):
-            found = try_to_load_from_cache(model, name)
-            if isinstance(found, str):
-                return os.path.dirname(found)
-    except Exception:  # noqa: BLE001 — unreadable from the cache is "not cached", never an error here
-        return None
-    return None
-
-
-def model_folder(model: str, config_dir: str | os.PathLike | None = None) -> Path | None:
-    """The folder `model` names, as an absolute path, or None when it is a model id. `~` expands. A
-    relative path is the config folder's (`config_dir`, else the machine's), and a folder only when
-    that folder holds it; never the current folder's, where sentence-transformers would look for a
-    name first, so a cloned project could ship one named like the model (R24)."""
-    path = Path(model).expanduser()
-    if not path.is_absolute():
-        if config_dir is None:
-            from localharness.config.paths import global_config_dir
-
-            config_dir = global_config_dir()
-        path = Path(config_dir).expanduser() / path
-        if not path.is_dir():
-            return None
-    return path.absolute()
-
-
-def local_folder(model: str, config_dir: str | os.PathLike | None, factory=None) -> Path | None:
-    """The folder a load of `model` reads: its configured folder, else its copy in the local Hugging
-    Face cache, else None."""
-    folder = model_folder(model, config_dir)
-    if folder is not None:
-        return folder
-    cached = cached_copy(_repo(factory, model))
-    return Path(cached) if cached is not None else None
-
-
 def _load(factory, model: str, config_dir: str | os.PathLike | None = None, download: bool = True):
     """`model` loaded by `factory` (SentenceTransformer), only from a vetted folder and only by its
     absolute path (R24): the library is never handed a name, which it would resolve against the
@@ -280,19 +239,6 @@ def _load(factory, model: str, config_dir: str | os.PathLike | None = None, down
     log.warning(embedding_download_line(model))
     fetched = Path(snapshot_download(_repo(factory, model)))
     return _vetted(factory, fetched, model), fetched
-
-
-def _repo(factory, model: str) -> str:
-    """The hub repo of the model id `model`, as `factory` itself resolves a name with no owner: its
-    organisation's (`sentence-transformers/<name>`), except the original transformers models."""
-    org = getattr(factory, "default_huggingface_organization", None)
-    if not org or "/" in model:
-        return model
-    try:
-        from sentence_transformers.util.misc import ORIGINAL_TRANSFORMER_MODELS as originals
-    except ImportError:  # a library without the list keeps every name as given
-        return model
-    return model if model.lower() in originals else f"{org}/{model}"
 
 
 def _vetted(factory, folder: str | os.PathLike, model: str):

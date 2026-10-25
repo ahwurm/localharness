@@ -374,8 +374,42 @@ _ROW_GLYPH = {"off": _INFO + "  ", "available": _INFO + "  ", "skipped": _WARN +
               "needs-extra": _WARN + " ", "unconfigured": _WARN + " "}
 
 
+def _affordance_check(model, memory_state, embedding_status, skill_tool_held, unreadable, calibration,
+                      cached_files, checkout: bool):
+    """Whether the skill cue would run at the next start, and when not, the first reason why."""
+    from localharness.plugins.api import Check
+
+    def off(status, detail, hint=""):
+        return Check(name="affordance-cue", status=status, detail=f"cue off: {detail}", hint=hint)
+
+    if memory_state != "on":
+        return off("skip", "the memory plugin is not on (the cue uses memory's embedder)")
+    if embedding_status != "pass":
+        return off("skip", "waits on memory-embedding")
+    if unreadable:
+        reasons = [unreadable[k] for k in ("cache", "record") if k in unreadable]
+        hints = [h for k, h in (("cache", f"`hf download {model}`"), ("record", "`reinstall localharness`"))
+                 if k in unreadable]
+        return off("warn", "calibration record or cached model unreadable: " + "; ".join(reasons), "; ".join(hints))
+    if cached_files is None:
+        return off("skip", "waits on memory-embedding")
+    if not skill_tool_held:
+        return off("skip", "the skill tool is not enabled for the root")
+    if calibration is None:
+        return off("skip", "calibrated for the default embedding model only")
+    if not calibration.snapshot_files.keys() <= cached_files.keys():
+        return off("warn", "the embedding model download is incomplete",
+                   f"`hf download {model}` finishes it; the cue starts at the next start")
+    if cached_files != calibration.snapshot_files:
+        return off("warn", "the cached embedding model is not the one this release was calibrated on (nothing you did)",
+                   f"`hf download {model}` refreshes an old copy; if it still differs, a newer localharness may "
+                   "carry a calibration for these weights"
+                   + ("; `python scripts/gen_calibration.py` writes one" if checkout else ""))
+    return Check(name="affordance-cue", status="pass", detail=f"ready — {model}, calibrated {calibration.date.isoformat()}")
+
+
 def _print_plugins(cfg_path: Path, workspace: Path | None, loader: ConfigLoader,
-                   failures: list[str]) -> None:
+                   failures: list[str], root_agent=None) -> None:
     """PAPI-08: core checks first, then each plugin; off is off, not failed.
 
     `✓ Plugins: <on names>` (or `i  Plugins: none on`), the resolver's warnings, then per plugin:
@@ -420,6 +454,35 @@ def _print_plugins(cfg_path: Path, workspace: Path | None, loader: ConfigLoader,
         console.print(_WARN + " " + escape(warning), soft_wrap=True)
     for row in rows:
         print_plugin_row(row, failures)
+    if root_agent is not None:
+        print_plugin_row(_affordance_row(cfg_path, rows, root_agent), failures)
+
+
+def _affordance_row(cfg_path: Path, rows, root_agent):
+    from localharness.agent.affordance import load_calibration, snapshot_files
+    from localharness.config.paths import local_folder
+    from localharness.config.skills import PACKAGE_DIR
+    from localharness.plugins.lifecycle import DoctorRow
+    from localharness.tools.registry import allowed_by_config
+
+    # Without the memory plugin's settings there is no model; the memory row is then not on and wins.
+    model = getattr(getattr(root_agent, "memory", None), "embedding_model", None)
+    memory = next((r for r in rows if r.name == "memory"), None)
+    embedding = next((c.status for c in memory.checks if c.name == "memory-embedding"), None) if memory else None
+    unreadable, cached_files, calibration = {}, None, None
+    try:
+        folder = local_folder(model, cfg_path)
+        cached_files = snapshot_files(folder) if folder is not None else None
+    except Exception as exc:  # noqa: BLE001 — an unreadable cache is a warn row, never a doctor crash
+        unreadable["cache"] = f"{type(exc).__name__}: {exc}".splitlines()[0]
+    try:
+        calibration = load_calibration(model)
+    except Exception as exc:  # noqa: BLE001 — as above
+        unreadable["record"] = f"{type(exc).__name__}: {exc}".splitlines()[0]
+    check = _affordance_check(model, memory.state if memory else "off", embedding,
+                              allowed_by_config(root_agent.tools, "skill", "global"), unreadable, calibration,
+                              cached_files, (PACKAGE_DIR.parent.parent / "scripts" / "gen_calibration.py").is_file())
+    return DoctorRow("affordance-cue", "on", "", checks=(check,))
 
 
 def print_plugin_row(row, failures: list[str]) -> None:
@@ -1160,7 +1223,7 @@ def doctor(
         console.print(f"       Run 'uv sync' to install it.")
         failures.append("ddgs-missing")
 
-    _print_plugins(cfg_path, workspace, loader, failures)
+    _print_plugins(cfg_path, workspace, loader, failures, root_agent)
     _summarize_and_exit(failures)
 
 

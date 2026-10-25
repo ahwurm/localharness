@@ -300,3 +300,50 @@ def resolve_runtime_path(value: str, config_dir: Optional[PathLike] = None) -> P
     if p.is_absolute():
         return p
     return resolve_config_dir(config_dir) / value
+
+
+def cached_copy(model: str) -> Optional[str]:
+    """The folder of `model`'s copy in the local Hugging Face cache, or None; reads the cache only."""
+    try:
+        from huggingface_hub import try_to_load_from_cache
+
+        for name in ("modules.json", "config.json"):
+            found = try_to_load_from_cache(model, name)
+            if isinstance(found, str):
+                return os.path.dirname(found)
+    except Exception:  # noqa: BLE001 — unreadable from the cache is "not cached", never an error here
+        return None
+    return None
+
+
+def model_folder(model: str, config_dir: Optional[PathLike] = None) -> Optional[Path]:
+    """The absolute folder `model` names, or None when it is a model id."""
+    path = Path(model).expanduser()
+    if not path.is_absolute():
+        # Relative is the config folder's, never the current folder's: sentence-transformers would
+        # look there for a name first, so a cloned project could ship one named like the model.
+        path = global_config_dir(config_dir) / path
+        if not path.is_dir():
+            return None
+    return path.absolute()
+
+
+def local_folder(model: str, config_dir: Optional[PathLike], factory=None) -> Optional[Path]:
+    """The folder a load of `model` reads: its configured folder, else its cached copy, else None."""
+    folder = model_folder(model, config_dir)
+    if folder is not None:
+        return folder
+    cached = cached_copy(_repo(factory, model))
+    return Path(cached) if cached is not None else None
+
+
+def _repo(factory, model: str) -> str:
+    """The hub repo `factory` resolves an owner-less model id to, as sentence-transformers does."""
+    org = getattr(factory, "default_huggingface_organization", None)
+    if not org or "/" in model:
+        return model
+    try:
+        from sentence_transformers.util.misc import ORIGINAL_TRANSFORMER_MODELS as originals
+    except ImportError:  # a library without the list keeps every name as given
+        return model
+    return model if model.lower() in originals else f"{org}/{model}"
