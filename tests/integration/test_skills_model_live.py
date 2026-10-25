@@ -39,7 +39,7 @@ from localharness.config import skills as skill_config
 from localharness.config.models import AgentConfig
 from localharness.config.skills import SkillSet
 from localharness.core.bus import EventBus
-from localharness.core.events import Action
+from localharness.core.events import Action, TurnFailed
 from localharness.provider.fn_call import FnCallConverter
 from localharness.tools.builtin import register_builtin_tools
 from localharness.tools.builtin.paths import resolve_user_path
@@ -60,6 +60,7 @@ CREATOR_BAR = (2, 3)
 TEMPERATURE = 0.6
 CREATOR_MAX_ACTIONS = 40
 CREATOR_MAX_MINUTES = 30.0
+MAX_ERROR_STREAK = 10
 ROOT_DIR = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT_DIR / "tests" / "fixtures" / "skills_live"
 NO_CHILD_AGENTS = ["explore", "web-researcher", "cruncher", "search-verifier"]
@@ -76,6 +77,14 @@ ROOT = ("a fresh install's orchestrator with the built-in tools, agent, task and
 
 class FirstStepDone(BaseException):
     """Raised on the second model request of a turn, so nothing after the first step runs."""
+
+
+class RequestFailed(Exception):
+    """The loop ended the turn on a failure; the message is the cause it published."""
+
+
+class RunStopped(Exception):
+    """The server failed too many requests in a row for the rest of the run to mean anything."""
 
 
 @dataclass(frozen=True)
@@ -161,6 +170,12 @@ def xml_mode(client):
         client.config.tool_call_mode, client._fn_converter = mode, converter
 
 
+def failure(bus: EventBus) -> str | None:
+    """The cause the loop published when it ended a turn on a failure."""
+    failed = bus.history(event_types=[TurnFailed])
+    return f"{failed[-1].reason}: {failed[-1].detail[:120]}" if failed else None
+
+
 def first_step(events, mode: str = "native") -> tuple[tuple[tuple[str, dict], ...], str | None, str | None]:
     actions = [e for e in events if isinstance(e, Action)]
     start = next((i for i, e in enumerate(actions) if e.action_type == "llm_response"), None)
@@ -209,6 +224,8 @@ async def first_step_run(client, skill_set: SkillSet, cfg: AgentConfig, shape: S
     with first_request_only(client, seen):
         with contextlib.suppress(FirstStepDone):
             await loop.run_turn(prompt)
+    if cause := failure(bus):
+        raise RequestFailed(cause)
     calls, finish, flaw = first_step(bus.history(event_types=[Action]), getattr(client.config, "tool_call_mode", "native"))
     return Step(calls, finish, seen[0]["messages"][0]["content"], flaw)
 
@@ -221,8 +238,8 @@ async def settled(client, skill_set: SkillSet, cfg: AgentConfig, shape: Shape, p
             assert render_listing(skill_set.skills) in step.system
             return step
         except Exception as exc:  # noqa: BLE001 - any failure of one request is recorded, not fatal to the run
-            failure = exc
-    return Step((), None, "", error=type(failure).__name__)
+            error = exc
+    return Step((), None, "", error=repr(error)[:200])
 
 
 @dataclass(frozen=True)
@@ -243,6 +260,12 @@ class CreatorRun:
     listing: str
     valid: bool
     files: tuple[tuple[str, str], ...] = ()
+
+
+def stop_on_failing_server(runs) -> None:
+    streak = sum(1 for _ in itertools.takewhile(lambda r: r.step.error, reversed(runs)))
+    if streak >= MAX_ERROR_STREAK:
+        raise RunStopped(f"stopped after {streak} requests in a row errored; the last: {runs[-1].step.error}")
 
 
 def skill_params(run: Run) -> list[dict]:
@@ -350,9 +373,9 @@ def per_leg(found) -> str:
     return ", ".join(f"{leg}: {sum(r.leg == leg for r in found)}" for leg in ("native", "xml"))
 
 
-def render_report(meta: dict, runs, creator) -> str:
+def render_report(meta: dict, runs, creator, stopped: str | None = None) -> str:
     valid = [c.valid for c in creator]
-    short = sizes(runs, valid)
+    short = [stopped] if stopped else sizes(runs, valid)
     ok = not short and judge(runs, valid)
     skills = sorted({r.skill for r in runs})
     window = NO_WINDOW if meta["window"] is None else meta["window"]
@@ -384,7 +407,7 @@ def render_report(meta: dict, runs, creator) -> str:
         "- A response that was no answer (cut, aborted, empty) counts as no pick; its count is beside each figure.", "",
         "## Native, per skill", "",
         *table(["skill", "matching", "near-miss plus unrelated", "meets the bar", "no answer", "errors"],
-               [(s, f"{m} of {mt}", f"{f} of {ft}", "yes" if meets(m, f) else "no", na, er) for s, m, mt, f, ft, na, er in native]), "",
+               [(s, f"{m} of {mt}", f"{f} of {ft}", "n/a" if short else "yes" if meets(m, f) else "no", na, er) for s, m, mt, f, ft, na, er in native]), "",
         "## XML tool-call mode, one run of the whole set (recorded, not judged)", "",
         *table(["skill", "matching", "near-miss plus unrelated", "no answer", "errors"],
                [(s, f"{m} of {mt}", f"{f} of {ft}", na, er) for s, m, mt, f, ft, na, er in xml]), "",
@@ -497,10 +520,14 @@ async def creator_run(client, home: Path, request: str, work: Path, base_url: st
         boundary=derive_session_boundary(cwd=work, local_dir=work / ".localharness"), workspace=work,
         grants=GrantStore(home.parent / "grants.yaml"), mode="guarded", asker=creator_asker(skills_dir, asks))
     registry, state = await root_registry(skill_set, cfg)
-    loop = root_loop(client, cfg, loop_shape(cfg_dir, cfg, base_url, served), skill_set, registry, state, gate, EventBus())
+    bus = EventBus()
+    loop = root_loop(client, cfg, loop_shape(cfg_dir, cfg, base_url, served), skill_set, registry, state, gate, bus)
     try:
         await loop.run_turn(invoked[0])
-        terminated, failed = loop.last_terminated_reason, False
+        terminated = loop.last_terminated_reason
+        failed = terminated == "error"
+        if failed:
+            terminated = failure(bus) or terminated
     except Exception as exc:  # noqa: BLE001 - a creator turn that died is an invalid run, not a lost report
         terminated, failed = f"error: {type(exc).__name__}", True
     result = CliRunner().invoke(app, ["skills", "--config-dir", str(cfg_dir)])
@@ -552,26 +579,32 @@ async def test_the_subject_model_picks_a_listed_skill_on_its_own(live_endpoint, 
             runs.append(Run(leg, skill, kind, text, index, step))
             print(f"{leg} {len(runs)}/{total} {skill} {kind} run {index}: {[name for name, _ in step.calls]}"
                   f"{' ' + step.error if step.error else ''}", flush=True)
+            stop_on_failing_server(runs)
 
-        for index in range(1, RUNS + 1):
-            for request in requests:
-                await one("native", index, *request)
-        with xml_mode(client):
-            for request in requests:
-                await one("xml", 1, *request)
-        creator = []
-        for _ in range(CREATOR_BAR[1]):
-            with neutral_sitting(fake_home) as (home, creator_work):
-                creator.append(await creator_run(client, home, prompts()["creator"], creator_work, base_url, window))
+        creator: list[CreatorRun] = []
+        stopped = None
+        try:
+            for index in range(1, RUNS + 1):
+                for request in requests:
+                    await one("native", index, *request)
+            with xml_mode(client):
+                for request in requests:
+                    await one("xml", 1, *request)
+            for _ in range(CREATOR_BAR[1]):
+                with neutral_sitting(fake_home) as (home, creator_work):
+                    creator.append(await creator_run(client, home, prompts()["creator"], creator_work, base_url, window))
+        except RunStopped as stop:
+            stopped = str(stop)
         meta = {
             "day": day, "run": number, "commit": commit, "tree": tree, "sha": sha, "model": model, "base_url": base_url, "window": window,
             "temperature": TEMPERATURE, "effort": shape.effort, "loop_window": shape.window, "tools": tools, "listing": listing,
             "minutes": int((time.monotonic() - started) // 60)}
-        path = write_report(day, render_report(meta, runs, creator), number)
+        path = write_report(day, render_report(meta, runs, creator, stopped), number)
     except BaseException:
         with contextlib.suppress(FileExistsError):
             write_report(day, not_run_report(day, model, base_url, NOT_FINISHED), number)
         raise
     print(f"report: {path}", flush=True)
+    assert stopped is None, stopped
     valid = [c.valid for c in creator]
     assert passed(runs, valid), "; ".join(f"{s} {count(runs, 'native', s)}" for s in names) + f"; creator {sum(valid)} of {len(valid)}"
