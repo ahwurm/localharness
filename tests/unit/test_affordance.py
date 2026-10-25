@@ -1114,3 +1114,10 @@ def test_the_cue_files_carry_no_review_or_plan_id(path):
 
 def test_the_id_pattern_bites():
     assert IDS.findall("D-14 R-28 T-05 WR-09 R§2 §8 1-D WORD-1 PID-3") == ["D-14", "R-28", "T-05", "WR-09", "R§", "§"]
+
+
+def test_the_holdout_shares_no_prompt_with_the_calibration_set():
+    def texts(name):
+        sets = yaml.safe_load((ROOT / "tests" / "fixtures" / "skills_live" / name).read_text(encoding="utf-8"))["skills"]
+        return {t.strip().casefold() for groups in sets.values() for kind in affordance.LABELS for t in groups[kind]}
+    assert texts("prompts_holdout.yaml") and not texts("prompts_holdout.yaml") & texts("prompts.yaml")
