@@ -320,7 +320,7 @@ def test_agent_list_shows_each_agents_origin(tmp_path, monkeypatch):
     assert "project" in _line(result.stdout, "alpha")
     assert "machine" in _line(result.stdout, "beta")
     assert "project" in _line(result.stdout, "gamma")
-    assert sum("alpha" in ln for ln in result.stdout.splitlines()) == 1
+    assert sum("alpha" in ln and "│" in ln for ln in result.stdout.splitlines()) == 1
 
 
 def test_agent_list_prints_problems_on_stderr_before_the_empty_state(tmp_path):
@@ -423,3 +423,105 @@ def test_agent_list_warns_and_skips_unreadable_agent_file(tmp_path, monkeypatch)
     assert "healthy" in result.stdout
     (line,) = [ln for ln in result.stderr.splitlines() if "broken.yaml" in ln]
     assert line.endswith("; edit the file")
+
+
+# ---------------------------------------------------------------------------
+# agent list — shadows, --json fields, the unread-files line
+# ---------------------------------------------------------------------------
+
+def test_a_project_file_that_shadows_prints_one_dim_line(tmp_path, monkeypatch):
+    from localharness.config.loader import shadow_label
+
+    monkeypatch.setenv("COLUMNS", "400")
+    cfg, proj = _world(tmp_path)
+    _bound(monkeypatch, proj)
+    result = runner.invoke(agent_app, ["list", "--config-dir", str(cfg)])
+    assert result.stdout.count(shadow_label(cfg / "agents" / "alpha.yaml")) == 1
+    assert result.stdout.count("shadows ") == 1
+
+
+def test_agent_list_json_carries_origin_path_and_shadows(tmp_path, monkeypatch):
+    cfg, proj = _world(tmp_path)
+    server = {"name": "evil", "transport": "stdio", "command": "/bin/echo", "args": ["pwned"]}
+    _yaml(proj / "agents", "gamma", {"name": "gamma", "role": "project gamma", "tools": {"mcp_servers": [server]}})
+    _bound(monkeypatch, proj)
+    result = runner.invoke(agent_app, ["list", "--json", "--config-dir", str(cfg)])
+    by_name = {a["name"]: a for a in json.loads(result.stdout)}
+    assert by_name["alpha"]["origin"] == "project"
+    assert by_name["alpha"]["path"] == str(proj / "agents" / "alpha.yaml")
+    assert by_name["alpha"]["shadows"] == str(cfg / "agents" / "alpha.yaml")
+    assert by_name["beta"]["origin"] == "machine" and "shadows" not in by_name["beta"]
+    assert by_name["gamma"]["tools"]["mcp_servers"] == [server]
+
+
+@pytest.mark.parametrize("config_dir, env, expected", [
+    ("/x", {}, "flag"),
+    ("/x", {"LOCALHARNESS_DIR": "/x"}, "LOCALHARNESS_DIR"),
+    ("/x", {"LOCALHARNESS_DIR": "/y"}, "flag"),
+    (None, {"LOCALHARNESS_DIR": "/y"}, "LOCALHARNESS_DIR"),
+    (None, {"LOCALHARNESS_HOME": "/h"}, "LOCALHARNESS_HOME"),
+    (None, {}, None),
+])
+def test_config_dir_source_names_the_setting(monkeypatch, config_dir, env, expected):
+    from localharness.cli.agent_cmd import config_dir_source
+
+    for var in ("LOCALHARNESS_DIR", "LOCALHARNESS_HOME"):
+        monkeypatch.delenv(var, raising=False)
+    for var, value in env.items():
+        monkeypatch.setenv(var, value)
+    assert config_dir_source(config_dir) == expected
+
+
+@pytest.mark.parametrize("cause, why", [
+    ("flag", "--config-dir was given"),
+    ("LOCALHARNESS_DIR", "LOCALHARNESS_DIR is set"),
+    ("LOCALHARNESS_HOME", "LOCALHARNESS_HOME is set"),
+])
+def test_agent_list_prints_the_unread_line_for_each_cause(tmp_path, monkeypatch, cause, why):
+    from localharness.cli.agent_cmd import UNREAD_PROJECT_AGENTS
+    from localharness.config.paths import discover_workspace_dir
+
+    work, cfg = tmp_path / "work", tmp_path / "cfg"
+    for stem in ("a", "b"):
+        _yaml(work / ".localharness" / "agents", stem, {"name": stem, "role": "r"})
+    cfg.mkdir()
+    monkeypatch.chdir(work)
+    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
+    args = ["list", "--json"]
+    if cause == "flag":
+        args += ["--config-dir", str(cfg)]
+    else:
+        monkeypatch.setenv(cause, str(cfg))
+    result = runner.invoke(agent_app, args)
+    line = UNREAD_PROJECT_AGENTS.format(n=2, dir=discover_workspace_dir(work) / "agents", why=why)
+    assert line in result.stderr.replace("\n", "")
+    assert json.loads(result.stdout) == []
+
+
+def test_no_unread_line_when_bound_without_files_or_on_the_active_dir(tmp_path, monkeypatch):
+    from localharness.cli.agent_cmd import unread_project_agents
+
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+    monkeypatch.delenv("LOCALHARNESS_HOME", raising=False)
+    assert unread_project_agents(None, None) == []
+    assert unread_project_agents(None, str(tmp_path / "cfg")) == []
+    (work / ".localharness" / "agents").mkdir(parents=True)
+    assert unread_project_agents(None, str(tmp_path / "cfg")) == []
+    _yaml(work / ".localharness" / "agents", "a", {"name": "a", "role": "r"})
+    assert unread_project_agents(None, "./.localharness") == []
+    active = str(work / ".localharness")
+    monkeypatch.setenv("LOCALHARNESS_DIR", active)
+    assert unread_project_agents(None, active) == []
+
+
+def test_agents_only_and_unread_project_agents_return_lists(tmp_path, monkeypatch):
+    from localharness.cli import skills_cmd
+    from localharness.cli.agent_cmd import unread_project_agents
+
+    monkeypatch.chdir(tmp_path)
+    assert skills_cmd.agents_only(tmp_path) == []
+    assert unread_project_agents(tmp_path, str(tmp_path / "cfg")) == []
