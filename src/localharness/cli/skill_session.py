@@ -7,13 +7,14 @@ import re
 from pathlib import Path
 
 from localharness.cli.slash_commands import SlashCommand
-from localharness.core.events import Action, TurnCompleted, TurnFailed
+from localharness.core.events import Action, AffordanceCued, TurnCompleted, TurnFailed
 from localharness.tools.builtin.paths import resolve_user_path
 
 LINE = "The person invoked /{name}{args}. Call skill('{name}') and follow it."
 NOT_LOADED = 'the model did not load /{name}; try again, or say "use the {name} skill"'
 ADDED = "added since start: {name} ({origin}, {path})"
 CHANGED = "changed since first use: {path}; using it"
+CUED = "hint to the model: skill {name}{origin}"
 FIRST_SENTENCE = re.compile(r".*?[.!?](?=\s+[A-Z]|$)")
 ROW_WIDTH = 80
 
@@ -31,8 +32,9 @@ def skill_row(record) -> SlashCommand:
 
 
 class SkillSession:
-    def __init__(self, skill_set):
+    def __init__(self, skill_set, affordances=None):
         self.skill_set = skill_set
+        self._affordances = affordances
         self._stash: str | None = None
         self._armed: str | None = None
         self._called: set[str] = set()
@@ -67,6 +69,8 @@ class SkillSession:
         self._armed = name if name is not None else self._stash
         self._stash = None
         self._called = set()
+        if self._affordances is not None:
+            self._affordances.named = self._armed
 
     def subscribe(self, bus, agent_id, say):
         self._say = say
@@ -74,6 +78,7 @@ class SkillSession:
             bus.subscribe(Action, self.on_action, agent_id=agent_id),
             bus.subscribe(TurnCompleted, self.on_turn_completed, agent_id=agent_id),
             bus.subscribe(TurnFailed, self.on_turn_failed, agent_id=agent_id),
+            bus.subscribe(AffordanceCued, self.on_affordance_cued, agent_id=agent_id),
         ]
 
     def on_action(self, event):
@@ -95,3 +100,6 @@ class SkillSession:
 
     def on_turn_failed(self, event):
         self._armed = None
+
+    async def on_affordance_cued(self, event):
+        await self._say(CUED.format(name=event.name, origin=" (project)" if event.origin == "project" else ""))

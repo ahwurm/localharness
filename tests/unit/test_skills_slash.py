@@ -5,6 +5,7 @@ import ast
 import inspect
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -21,7 +22,7 @@ from localharness.cli.slash_commands import (
 from localharness.config import skills
 from localharness.config.skills import SkillSet
 from localharness.core.bus import EventBus
-from localharness.core.events import Action, TurnCompleted, TurnFailed
+from localharness.core.events import Action, AffordanceCued, TurnCompleted, TurnFailed
 from tests.unit.test_repl_input_box import _pending_turn, _repl as _box_repl
 from tests.unit.test_repl_unknown_slash import RecordingChannel, _build_repl
 from tests.unit.test_skills_discovery import _skill as write_skill
@@ -163,6 +164,9 @@ class Sitting:
             agent_id=agent, session_id="s1", iterations=1, duration_seconds=0.1, elapsed_tokens=0, summary="",
         ))
 
+    async def cued(self, origin="machine", agent="orchestrator"):
+        await self.bus.publish(AffordanceCued(agent_id=agent, session_id="s1", name="notes", origin=origin))
+
     async def failed(self):
         await self.bus.publish(TurnFailed(
             agent_id="orchestrator", session_id="s1", reason="llm_error", detail="x", iterations=1, duration_seconds=0.1,
@@ -175,7 +179,7 @@ def sitting(tmp_path, pkg):
 
 
 async def test_a_slash_name_the_model_did_not_load_is_said_once(sitting):
-    assert len(sitting.handles) == 3
+    assert len(sitting.handles) == 4
     line, notices = sitting.session.invoke(sitting.record(), "")
     assert (line, notices) == ("The person invoked /notes. Call skill('notes') and follow it.", ())
     assert "Body of notes." not in line
@@ -449,14 +453,53 @@ async def test_hostile_action_params_record_nothing_and_raise_nothing(sitting):
     assert len(sitting.session._written) == 1
 
 
-def test_only_the_turn_end_handler_awaits_and_only_the_say():
+def test_only_the_turn_end_and_cue_handlers_await_and_only_the_say():
     def awaits(fn):
         return [n for n in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(fn)))) if isinstance(n, ast.Await)]
 
     for name in ("invoke", "arm", "find", "on_action", "on_turn_failed"):
         assert awaits(getattr(SkillSession, name)) == []
-    (only,) = awaits(SkillSession.on_turn_completed)
-    assert ast.unparse(only.value.func) == "self._say"
+    for handler in (SkillSession.on_turn_completed, SkillSession.on_affordance_cued):
+        (only,) = awaits(handler)
+        assert ast.unparse(only.value.func) == "self._say"
+
+
+@pytest.mark.parametrize("origin, said", [("project", "hint to the model: skill notes (project)"),
+                                          ("machine", "hint to the model: skill notes"),
+                                          ("bundled", "hint to the model: skill notes")])
+async def test_a_cue_is_said_once_naming_only_a_project_origin(sitting, origin, said):
+    await sitting.cued(origin)
+    assert sitting.said == [said]
+
+
+async def test_a_childs_cue_says_nothing(sitting):
+    await sitting.cued(agent="explore")
+    assert sitting.said == []
+
+
+async def test_an_ignored_cue_says_nothing_at_the_turn_end(sitting):
+    sitting.session.arm()
+    await sitting.cued()
+    await sitting.completed()
+    assert sitting.said == ["hint to the model: skill notes"]
+
+
+def test_arm_hands_the_holder_the_name_armed_this_turn_and_only_this_turn(sitting):
+    holder = SimpleNamespace(named="stale")
+    session = SkillSession(sitting.found, holder)
+    session.invoke(sitting.record(), "")
+    session.arm()
+    assert holder.named == "notes"
+    session.arm()
+    assert holder.named is None
+    session.arm("notes")
+    assert holder.named == "notes"
+
+
+def test_arm_without_a_holder_arms_as_before(sitting):
+    sitting.session.invoke(sitting.record(), "")
+    sitting.session.arm()
+    assert sitting.session._armed == "notes" and sitting.session._affordances is None
 
 
 NOT_LOADED_NOTES = ('the model did not load /notes; try again, or say "use the notes skill"', {"style": "system.info"})
@@ -514,6 +557,12 @@ async def test_slash_name_at_an_idle_session_is_one_line_the_model_must_load(ter
     await terminal.completed()
     assert terminal.channel.sent[-1] == NOT_LOADED_NOTES
     assert terminal.channel.sent.count(NOT_LOADED_NOTES) == 1
+
+
+async def test_a_cue_reaches_the_terminal_as_one_dim_hint_line(terminal):
+    await terminal.bus.publish(AffordanceCued(agent_id="orchestrator", session_id="s1", name="notes", origin="machine"))
+    assert [m for m in terminal.channel.sent if m[0].startswith("hint to the model")] == [
+        ("hint to the model: skill notes", {"style": "system.info"})]
 
 
 async def test_a_skill_call_keeps_the_classic_path_silent(terminal):
