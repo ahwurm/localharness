@@ -216,7 +216,7 @@ def agent_create(
     except (ValueError, OSError) as exc:
         reason = getattr(exc, "strerror", None) or str(exc)
         if isinstance(exc, FileExistsError) and not exc.strerror:
-            reason += " pass --force to overwrite"
+            reason += " Or pass --force to overwrite."
         err_console.print("[bold red]Error:[/bold red] " + escape(f"cannot write {target}: {reason}"), soft_wrap=True)
         raise typer.Exit(code=1)
 
