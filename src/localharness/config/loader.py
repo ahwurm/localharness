@@ -651,6 +651,35 @@ def shadow_label(path: Path) -> str:
     return f"shadows {path}"
 
 
+class AgentProblem(NamedTuple):
+    path: Path
+    origin: Origin
+    kind: ProblemKind
+    reason: str
+    fix: str
+
+    @property
+    def line(self) -> str:
+        # function-local: channels/__init__ imports the terminal, which config/ never loads at import time
+        from localharness.channels.base import one_line
+        return one_line(f"{self.path}: {self.reason}; {self.fix}")
+
+    @property
+    def loads(self) -> bool:
+        return self.kind == "mismatch"
+
+
+PROBLEM_LINE_CAP = 20
+
+
+def problem_lines(problems: list[AgentProblem], cap: int | None = None) -> list[str]:
+    """Each problem's line; past `cap`, the first `cap` and one pointer line for the rest."""
+    lines = [p.line for p in problems]
+    if cap is None or len(lines) <= cap:
+        return lines
+    return [*lines[:cap], f"...and {len(lines) - cap} more; run localharness agent list"]
+
+
 _UNSET = object()
 
 

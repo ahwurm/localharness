@@ -229,8 +229,18 @@ class AgentCreationWorkflow:
         self._gathered[key] = value
 
     def set_generated_yaml(self, yaml_str: str) -> None:
-        """Store the generated YAML for confirmation display."""
+        """Store the generated YAML and the name it carries when that name is valid, else None."""
+        import yaml as _yaml
+
+        from localharness.config.models import AgentConfig
+
         self._generated_yaml = yaml_str
+        try:
+            data = _yaml.safe_load(yaml_str)
+            name = data.get("name") if isinstance(data, dict) else None
+            self._gathered["name"] = AgentConfig.validate_name_format(name) if isinstance(name, str) else None
+        except (_yaml.YAMLError, ValueError):
+            self._gathered["name"] = None
 
     @property
     def generated_yaml(self) -> str:
