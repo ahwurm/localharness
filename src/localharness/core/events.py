@@ -789,6 +789,14 @@ class ModelSwitched(BaseEvent):
     kind: Literal["hot", "cross", "cold"]
 
 
+class AffordanceCued(BaseEvent):
+    """The agent loop cued the model toward a skill."""
+
+    event_type: str = "AffordanceCued"
+    name: str
+    origin: str
+
+
 AnyEvent = Union[
     SystemReady,
     AgentCreated,
@@ -828,6 +836,7 @@ AnyEvent = Union[
     ConsolidationFinished,
     TurnEndMicroPassCompleted,
     ModelSwitched,
+    AffordanceCued,
 ]
 
 EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
@@ -869,6 +878,7 @@ EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
     "ConsolidationFinished": ConsolidationFinished,
     "TurnEndMicroPassCompleted": TurnEndMicroPassCompleted,
     "ModelSwitched": ModelSwitched,
+    "AffordanceCued": AffordanceCued,
 }
 
 
