@@ -3100,7 +3100,10 @@ class ConfigLoader:
         # a repository ships .localharness/agents as a link; the machine's may be a dotfiles link
         if layer == "project" and (agents.is_symlink() or leaves_layer(agents, self._local_dir)):  # type: ignore[arg-type]
             raise ValueError(f"{agents} is a symlink; replace it with a folder")
-        agents.mkdir(exist_ok=True)
+        try:
+            agents.mkdir(exist_ok=True)
+        except FileExistsError:
+            raise ValueError(f"{agents} is not a folder; replace it with a folder") from None
         # exists() hides a dangling link, and os.replace would swap any link for a file
         if dest.is_symlink():
             raise ValueError(f"{dest} is a symlink; replace it with a file")

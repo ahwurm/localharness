@@ -724,3 +724,12 @@ def test_start_warns_only_project_problems_that_do_not_load(tmp_path, monkeypatc
         AgentProblem(tmp_path / "d.yaml", "project", "parse", "r", "f"),
     ])
     assert len(errs) == 1 and "a.yaml" in errs[0]
+
+
+@pytest.mark.parametrize("kind", ["dangling", "file"])
+def test_a_machine_agents_path_that_is_not_a_folder_is_a_value_error(tmp_path, kind):
+    (tmp_path / "machine").mkdir()
+    agents = tmp_path / "machine" / "agents"
+    agents.symlink_to(tmp_path / "gone") if kind == "dangling" else agents.write_text("")
+    with pytest.raises(ValueError, match="is not a folder; replace it with a folder$"):
+        ConfigLoader(config_dir=tmp_path / "machine").write_agent("x", _text(), layer="machine")
