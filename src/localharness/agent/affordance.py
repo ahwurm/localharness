@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import hashlib
 import json
 import logging
@@ -18,8 +19,6 @@ import yaml
 from localharness.core.types import is_harness_message
 
 if TYPE_CHECKING:
-    import datetime
-
     from localharness.agent.task_record import TaskState
     from localharness.config.skills import Skill, SkillSet
     from localharness.plugins.api import QueryEmbedder
@@ -96,6 +95,8 @@ def load_calibration(model_name: str) -> Calibration | None:
     entry = record.get(model_name)
     if entry is None:
         return None
+    if not isinstance(entry["date"], datetime.date):
+        raise ValueError(f"{CALIBRATION}: {model_name}'s date is not a date")
     return Calibration(calibrate([tuple(r) for r in entry["rows"]]), dict(entry["snapshot_files"]), entry["date"])
 
 

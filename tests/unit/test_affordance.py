@@ -9,6 +9,7 @@ import logging
 import re
 import shlex
 import sys
+import threading
 from itertools import combinations
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,6 +40,7 @@ from localharness.core.bus import EventBus
 from localharness.core.events import AffordanceCued
 from localharness.core.types import harness_message, human_message, is_harness_message, provider_messages
 from localharness.memory import resonance
+from localharness.memory.embeddings import _quiet_ml_output
 from localharness.memory.plugin import MemoryPlugin
 from localharness.memory.resonance import EMBED_MAX_TOKENS, ResonanceEngine, ResonanceUnavailable, local_folder
 from localharness.plugins.api import Check, MemorySlotPlugin, QueryEmbedder
@@ -155,13 +157,18 @@ def test_the_config_dir_pointer_is_one_shell_word_or_absent():
     text = _index(machine=Path("/home/u/my dir;rm -rf x"), flag=True)
     assert pointer in text
     assert shlex.split(pointer.split("`")[1]) == ["localharness", "skills", "--config-dir", "/home/u/my dir;rm -rf x"]
-    assert "`localharness skills --config-dir /home/u/xy`" in _index(machine=Path("/home/u/x\x1b[31my"), flag=True)
     for raw in ("/home/u/a\tb", "/home/u/a\nb", "/home/u/a  b"):
         text = _index(machine=Path(raw), flag=True)
         assert "--config-dir" not in text and "localharness skills" not in text
         assert _line(text, "Skills: ").endswith("`/help` lists them as `/<name>` rows.")
         assert _line(_index(machine=Path(raw), flag=True, slash=False), "Skills: ").endswith(
             "'/home/u/a b/skills'.")
+
+
+@pytest.mark.parametrize("raw", ["/srv/lh\x07x", "/home/u/x\x1b[31my"])
+def test_a_path_the_sanitiser_would_alter_gets_no_config_dir_pointer(raw):
+    text = _index(machine=Path(raw), flag=True)
+    assert "--config-dir" not in text and "localharness skills" not in text and "\x1b" not in text
 
 
 def test_the_reference_limit_and_the_directories_are_derived(monkeypatch):
@@ -463,6 +470,21 @@ def test_a_raising_or_wrong_typed_embedder_is_none_with_one_warning(caplog, answ
     assert "embedder()" in record.getMessage() and why in record.getMessage()
 
 
+def test_the_ml_quieting_swaps_the_streams_only_on_the_main_thread():
+    seen, before = [], (sys.stdout, sys.stderr)
+
+    def inside():
+        with _quiet_ml_output():
+            seen.append((sys.stdout, sys.stderr))
+
+    worker = threading.Thread(target=inside)
+    worker.start()
+    worker.join()
+    inside()
+    assert seen[0] == before and seen[1][0] is not before[0] and seen[1][1] is not before[1]
+    assert (sys.stdout, sys.stderr) == before
+
+
 def test_try_embed_query_never_waits_never_loads_and_always_releases_the_lock(hub, st):
     unloaded = ResonanceEngine(MODEL)
     assert unloaded.try_embed_query("x") is None and st.loaded == [] and not unloaded._lock.locked()
@@ -698,7 +720,8 @@ def test_the_record_gives_the_derived_threshold_its_pins_and_its_date(tmp_path, 
     assert load_calibration("lh-test/custom") is None
 
 
-@pytest.mark.parametrize("record", ["- a list\n- not a mapping\n", {DEFAULT: _entry(rows=[*TABLE, ("a", "maybe", "a", 0.1)])}])
+@pytest.mark.parametrize("record", ["- a list\n- not a mapping\n", {DEFAULT: _entry(rows=[*TABLE, ("a", "maybe", "a", 0.1)])},
+                                    {DEFAULT: {**_entry(), "date": "2026-10-25"}}])
 def test_a_malformed_record_raises(tmp_path, monkeypatch, record):
     _patch_record(tmp_path, monkeypatch, record)
     with pytest.raises(ValueError):
