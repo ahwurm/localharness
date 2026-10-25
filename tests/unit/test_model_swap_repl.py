@@ -8,6 +8,7 @@ imports; serve_command stays REAL so the command the swap builds is asserted end
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from types import SimpleNamespace as NS
 
@@ -914,3 +915,136 @@ async def test_phone_cold_peer_failed_launch_publishes_no_event_and_clears_the_c
     assert len(swaps) == 1 and bus.history(event_types=[ModelSwitched]) == []
     assert agent._llm.config.base_url != PEER_URL
     assert phone.activity[0] is not None and phone.activity[-1] is None
+
+
+PEER_KEY = "sk-PEER-0123456789"
+PEER_HEADERS = {"X-Peer": "p1"}
+
+
+def _bound(llm) -> tuple:
+    c = llm.config
+    return c.base_url, c.api_key, dict(c.extra_headers), c.provider_type
+
+
+def _failing_restart_world(tmp_path, monkeypatch, *, bind=None, peers=None, on_peer=True, live=None):
+    from tests.unit.test_launch_paths_repl import ON_PEER, PRIMARY_DOWN, _llama_primary, _on_the_cold_peer
+
+    stub_liveness(monkeypatch, False)
+    peer = _launchable_peer()
+    harness, repl, channel, agent = _session(
+        tmp_path, peer, server=_llama_primary(), live=live or (ON_PEER if on_peer else PRIMARY_DOWN))
+    harness.extra_endpoints = list(peers) if peers is not None else [peer]
+    llm = agent._llm
+    if on_peer:
+        _on_the_cold_peer(repl, agent, peer)
+        llm.config.api_key, llm.config.extra_headers, llm.config.provider_type = PEER_KEY, dict(PEER_HEADERS), "llamacpp"
+    if bind is not None:
+        llm.config.base_url, llm.config.api_key, llm.config.extra_headers, llm.config.provider_type = bind
+    sent: list = []
+    real_send = channel.send_message
+
+    async def send(text, metadata=None):
+        sent.append((text, llm.config.base_url))
+        if "Restarting managed" in text and getattr(channel, "cancel_at_restart", False):
+            raise asyncio.CancelledError
+        await real_send(text, metadata)
+
+    channel.send_message = send
+    caps: list = []
+    real_caps = llm.detect_capabilities
+
+    async def detect():
+        caps.append(1)
+        return await real_caps()
+
+    llm.detect_capabilities = detect
+    agent.current_session_id, agent._config = "s1", NS(name="root")
+    bus = EventBus()
+    repl._switch._bus = bus
+    return repl, channel, agent, sent, bus, caps, peer
+
+
+def _stays_bound(agent, bound, model, bus, caps):
+    assert _bound(agent._llm) == bound
+    assert agent._llm.config.model == model and caps == []
+    assert bus.history(event_types=[ModelSwitched]) == []
+
+
+async def test_failed_restart_could_not_free_the_gpu_keeps_the_peer_binding(tmp_path, monkeypatch, launches):
+    from localharness.provider import lifecycle
+    from tests.unit.test_launch_paths_repl import PRIMARY_URL as PRIMARY
+
+    repl, _chan, agent, sent, bus, caps, peer = _failing_restart_world(tmp_path, monkeypatch)
+    before = _bound(agent._llm)
+    assert before == (peer.base_url, PEER_KEY, PEER_HEADERS, "llamacpp")
+
+    async def held(*a, **kw):
+        raise RuntimeError("held")
+
+    monkeypatch.setattr(lifecycle, "free_accelerator", held)
+
+    await repl._handle_slash(f"/model {PRIMARY_SERVED}")
+
+    [(line, url_at_send)] = [s for s in sent if s[0].startswith("Could not free the GPU")]
+    assert url_at_send == PRIMARY
+    _stays_bound(agent, before, "qwen-gguf", bus, caps)
+    listed = await repl._switch.model_list(repl._plan_model_entries, repl._active_heavy)
+    assert listed["endpoint"] == peer.name
+
+
+async def test_failed_restart_swap_failure_restores_the_peer_binding_after_its_line(tmp_path, monkeypatch, launches):
+    from tests.unit.test_launch_paths_repl import PRIMARY_URL as PRIMARY
+    from tests.unit.test_repl_server_recovery import _wait_ready_fails_at
+
+    repl, _chan, agent, sent, bus, caps, peer = _failing_restart_world(tmp_path, monkeypatch)
+    before = _bound(agent._llm)
+    _wait_ready_fails_at(monkeypatch, PRIMARY)
+
+    await repl._handle_slash(f"/model {PRIMARY_SERVED}")
+
+    [(line, url_at_send)] = [s for s in sent if s[0].startswith("Model swap failed:")]
+    assert "Restored" in line and url_at_send == PRIMARY
+    _stays_bound(agent, before, "qwen-gguf", bus, caps)
+
+
+async def test_failed_restart_base_exception_restores_the_peer_binding(tmp_path, monkeypatch, launches):
+    from localharness.provider import lifecycle
+
+    class Stop(BaseException):
+        pass
+
+    repl, _chan, agent, _sent, bus, caps, _peer = _failing_restart_world(tmp_path, monkeypatch)
+    before = _bound(agent._llm)
+    real = lifecycle.strategy_for
+
+    class Raising:
+        def __init__(self, strategy):
+            self._strategy = strategy
+
+        def __getattr__(self, name):
+            return getattr(self._strategy, name)
+
+        async def activate(self, *a, **k):
+            raise Stop
+
+    def strategy_for(spec, **kw):
+        return Raising(real(spec, **kw))
+
+    monkeypatch.setattr(lifecycle, "strategy_for", strategy_for)
+
+    with pytest.raises(Stop):
+        await repl._handle_slash(f"/model {PRIMARY_SERVED}")
+
+    _stays_bound(agent, before, "qwen-gguf", bus, caps)
+
+
+async def test_failed_restart_cancel_before_the_lock_restores_the_peer_binding(tmp_path, monkeypatch, launches):
+    repl, channel, agent, _sent, bus, caps, _peer = _failing_restart_world(tmp_path, monkeypatch)
+    before = _bound(agent._llm)
+    channel.cancel_at_restart = True
+
+    with pytest.raises(asyncio.CancelledError):
+        await repl._handle_slash(f"/model {PRIMARY_SERVED}")
+
+    _stays_bound(agent, before, "qwen-gguf", bus, caps)
+    assert launches.stops == [] and launches.cmds == []
