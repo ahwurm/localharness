@@ -72,7 +72,7 @@ class AgentTool(Tool):
         project_agents_dir: Path | None = None,
     ) -> None:
         self._agent_runner = agent_runner
-        self._available_agents = available_agents or []
+        self._available_agents = () if available_agents is None else available_agents
         self._machine_agents_dir = machine_agents_dir
         self._project_agents_dir = project_agents_dir
 

@@ -358,3 +358,10 @@ def test_a_live_iterable_roster_is_read_fresh():
 def test_no_roster_renders_none_configured(agents):
     tool = AgentTool(agent_runner=AsyncMock(), available_agents=agents)
     assert "Available agents: none configured." in tool.info().description
+
+
+def test_a_roster_empty_at_construction_shows_names_added_later():
+    roster: list[str] = []
+    tool = AgentTool(agent_runner=AsyncMock(), available_agents=roster)
+    roster.append("late-agent")
+    assert "late-agent" in tool.info().description
