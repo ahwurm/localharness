@@ -415,7 +415,7 @@ def _swap_world(tmp_path, monkeypatch, floor=None):
     monkeypatch.setattr(ConfigLoader, "load_agent", lambda self, name: name)
     seen = []
 
-    async def spy(agent, skills=()):
+    async def spy(agent, skills=(), **kw):
         seen.append(skills)
         return 1_000 if floor is None else floor
 
@@ -473,7 +473,7 @@ def _start_world(base, monkeypatch, skill=True):
         _skill(base / "skills", "notes")
     seen = []
 
-    async def spy(agent_config, skills=()):
+    async def spy(agent_config, skills=(), **kw):
         seen.append(skills)
         return 256
 
@@ -647,7 +647,7 @@ async def test_start_prints_its_skill_lines_once_with_markup_off(tmp_path, pkg, 
     _skill(tmp_path / "skills", "[old]", "no frontmatter")
     monkeypatch.setattr(start_cmd, "console", Console(file=out, width=400))
 
-    async def spy(agent_config, skills=()):
+    async def spy(agent_config, skills=(), **kw):
         at_launch.append(out.getvalue())
         return 256
 

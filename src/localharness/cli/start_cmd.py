@@ -2059,12 +2059,15 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.cli.skills_cmd import agents_only
     from localharness.config.skills import SkillSet
     from localharness.tools.builtin.skill_tool import render_listing
-    skill_set = SkillSet.discover(cfg_path, workspace.parent if workspace is not None else None)
+    root = workspace.parent if workspace is not None else None
+    config_dir_flag = config_dir_source(config_dir) == "flag"
+    skill_set = SkillSet.discover(cfg_path, root)
     skill_listing = render_listing(skill_set.skills)
-    unread = unread_project_agents(None, config_dir) if config_dir_source(config_dir) == "flag" else []
+    unread = unread_project_agents(None, config_dir) if config_dir_flag else []
     for line in _skill_start_lines(skill_set) + agents_only() + unread:
         console.print(line, style="yellow", markup=False, soft_wrap=True)
-    _live_floor = await start_serving.launch_floor(agent_config, skill_set.skills)
+    _live_floor = await start_serving.launch_floor(
+        agent_config, skill_set.skills, root=root, machine_dir=cfg_path, config_dir_flag=config_dir_flag)
     from localharness.provider.lifecycle import cached_floor, raised_floor
     _floor = raised_floor(_live_floor, cached_floor(server_cfg_path))
     if model_override:

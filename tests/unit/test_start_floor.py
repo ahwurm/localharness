@@ -21,7 +21,7 @@ UNIT_LINE = ("test-model on llm.service serves a 4,096-token window and the harn
 
 
 def _stub_floor(monkeypatch, floor, unit="llm.service"):
-    async def fake_floor(agent_config, skills=()):
+    async def fake_floor(agent_config, skills=(), **kw):
         return floor
     monkeypatch.setattr(start_serving, "launch_floor", fake_floor)
     monkeypatch.setattr(start_serving, "served_unit", lambda base_url: unit)
