@@ -5,8 +5,10 @@ import logging
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Literal
 
+import yaml
 from pydantic import BaseModel, ConfigDict
 
 from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
@@ -120,6 +122,17 @@ def score_card(task: str, card: AgentCard) -> float:
     return min(score, 1.0)
 
 
+def _shape_reason(path: Path) -> str | None:
+    """Why a file that is not UTF-8 or whose top level is not a mapping cannot load, else None."""
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError:
+        return "not valid UTF-8"
+    except Exception:  # noqa: BLE001 - unreadable or unparseable files are classified elsewhere
+        return None
+    return None if data is None or isinstance(data, dict) else "top level is not a mapping"
+
+
 def _problem(f: AgentFile, exc: ConfigError) -> AgentProblem:
     """The problem record for a file that did not load, classified from the exception alone."""
     from localharness.channels.base import one_line
@@ -182,8 +195,11 @@ class AgentCardRegistry:
             except ConfigError as exc:
                 problem = _problem(f, exc)
             except Exception:
-                log.debug("agent file %s was skipped", f.path, exc_info=True)
-                continue
+                reason = _shape_reason(f.path)
+                if reason is None:
+                    log.debug("agent file %s was skipped", f.path, exc_info=True)
+                    continue
+                problem = AgentProblem(f.path, f.origin, "parse", one_line(reason)[:200], "edit the file")
             else:
                 if cfg.name == stem:
                     continue
