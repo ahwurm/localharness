@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
+import hashlib
 import inspect
 import logging
 import shlex
@@ -12,20 +14,27 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import yaml
 
-from localharness.agent import subagent
+from localharness.agent import affordance, subagent
+from localharness.agent.affordance import (
+    Calibration, Cue, calibrate, cued_skills, descriptions_digest, held_skills, load_calibration, normalise, pick,
+    scores, snapshot_files, task_skills,
+)
 from localharness.agent.context import ContentStore, ContextManager, TokenCounter, fixed_tokens
 from localharness.agent.loop import AgentLoop, base_system_prompt, render_index
 from localharness.agent.permissions import PermissionEvaluator
-from localharness.agent.task_record import TaskState
+from localharness.agent.task_context import TaskContext
+from localharness.agent.task_record import Reference, TaskRecord, TaskState
 from localharness.cli import model_cmd, start_serving
 from localharness.channels.base import one_line
 from localharness.cli.workspace import MachineTrust
 from localharness.config.paths import resolve_config_dir
 from localharness.config.loader import ConfigLoader
 from localharness.config.models import AgentConfig, ToolConfig
-from localharness.config.skills import SkillSet
+from localharness.config.skills import Skill, SkillSet
 from localharness.core.bus import EventBus
+from localharness.core.types import harness_message, human_message
 from localharness.memory import resonance
 from localharness.memory.plugin import MemoryPlugin
 from localharness.memory.resonance import EMBED_MAX_TOKENS, ResonanceEngine, ResonanceUnavailable, local_folder
@@ -36,8 +45,9 @@ from localharness.tools.builtin.agent_tool import BUILTIN_AGENT_NAMES
 from localharness.tools.builtin.skill_tool import SkillTool, render_listing
 from localharness.tools.builtin.task_tool import TaskTool
 from localharness.tools.registry import ToolRegistry, allowed_by_config
+from tests.conftest import FakeToolCall
 from tests.unit.test_capabilities import _production_registry
-from tests.unit.test_embedding_model_source import MODEL, PURE, SHIPS_CODE, _cached, _write
+from tests.unit.test_embedding_model_source import DEFAULT, MODEL, PURE, SHIPS_CODE, _cached, _write
 from tests.unit.test_memory_plugin import _ctx
 from tests.unit.test_loop_project_instructions import _FakeHandle, _build
 from tests.unit.test_skills_discovery import _skill
@@ -575,3 +585,184 @@ async def test_the_registry_admits_a_global_or_division_tool_exactly_when_allowe
 ])
 def test_allowed_by_config_truth_table(cfg, scope, admitted):
     assert allowed_by_config(cfg, "skill", scope) is admitted
+
+
+# --- the cue: pure functions ----------------------------------------------------------------------
+
+COMMIT = Skill("commit-message", "Write the commit message for staged changes.", "machine",
+               Path("/m/skills/commit-message/SKILL.md"), False)
+NOTES = Skill("notes", "Keep the project's running notes.", "project", Path("/p/.localharness/skills/notes/SKILL.md"), True)
+REVIEW = Skill("review", "Review a change before it lands.", "machine", Path("/m/skills/review/SKILL.md"), False)
+TABLE = [("a", "near_miss", "a", 0.40), ("a", "unrelated", "b", 0.30), ("a", "matching", "a", 0.80),
+         ("b", "matching", "b", 0.60)]
+DATE = datetime.date(2026, 10, 25)
+
+
+def test_a_turn_nearest_one_description_names_that_skill_once_in_one_line():
+    skills = (COMMIT, NOTES)
+    s = skills[pick(scores([[1.0, 0.0], [0.0, 1.0]], [0.9, 0.1]), 0.5)]
+    assert Cue(s.name, s.origin, affordance._line(s)) == Cue("commit-message", "machine", (
+        "A skill may match this request: skill('commit-message'). Call it if it applies; otherwise ignore this."))
+    assert affordance._line(NOTES) == ("A skill may match this request: skill('notes') (a project skill). "
+                                       "Call it if it applies; otherwise ignore this.")
+    assert all(affordance._line(s).count(s.name) == 1 for s in skills)
+
+
+def test_normalise_gives_a_unit_vector_and_unit_rows():
+    assert np.isclose(np.linalg.norm(normalise([3.0, 4.0])), 1.0)
+    assert np.allclose(np.linalg.norm(normalise([[3.0, 4.0], [0.0, 2.0]]), axis=1), 1.0)
+
+
+@pytest.mark.parametrize("bad", [[[1.0, 0.0], [0.0, 0.0]], [np.nan, 1.0], [np.inf, 1.0]])
+def test_normalise_refuses_a_zero_or_non_finite_norm(bad):
+    with pytest.raises(ValueError):
+        normalise(bad)
+
+
+def test_scores_is_the_normalised_matrix_times_the_normalised_vector():
+    matrix, vec = np.array([[3.0, 4.0], [1.0, 1.0]]), np.array([2.0, 0.0])
+    assert np.allclose(scores(matrix, vec), normalise(matrix) @ normalise(vec))
+
+
+@pytest.mark.parametrize("matrix, vec", [(np.ones((2, 3)), np.ones(2)), (np.ones((2, 2)), np.ones((1, 2))),
+                                         (np.ones(2), np.ones(2))])
+def test_scores_refuses_a_shape_mismatch(matrix, vec):
+    with pytest.raises(ValueError):
+        scores(matrix, vec)
+
+
+def test_pick_is_strict_and_an_empty_array_picks_nothing():
+    assert pick(np.array([0.2, 0.5], dtype=np.float32), 0.5) is None
+    assert pick(np.array([0.2, 0.51], dtype=np.float32), 0.5) == 1
+    assert pick(np.array([], dtype=np.float32), 0.5) is None
+
+
+def test_the_threshold_is_the_midpoint_above_every_row_that_must_not_cue():
+    threshold = calibrate(TABLE)
+    assert threshold == pytest.approx(0.50)
+    assert all(s <= threshold for item, label, top, s in TABLE if label != "matching" or top != item)
+
+
+def test_a_matching_prompt_topped_by_another_item_must_not_cue():
+    assert calibrate([*TABLE, ("b", "matching", "a", 0.70)]) == pytest.approx((0.70 + 0.80) / 2)
+
+
+def test_no_admitted_score_above_the_must_not_cue_maximum_is_that_maximum_and_never_picks():
+    rows = [("a", "near_miss", "a", 0.90), ("a", "matching", "a", 0.80)]
+    threshold = calibrate(rows)
+    assert threshold == 0.90 and pick(np.array([s for *_, s in rows]), threshold) is None
+
+
+@pytest.mark.parametrize("rows", [
+    [("a", "matching", "a", 0.80)],
+    [*TABLE, ("a", "maybe", "a", 0.30)],
+    [*TABLE, ("a", "unrelated", "b", float("nan"))],
+    [*TABLE, ("a", "matching", "a", 1.5)],
+    [*TABLE, ("a", "near_miss", "a", -1.01)],
+])
+def test_calibrate_refuses_no_must_not_cue_row_an_unknown_label_or_a_score_off_the_cosine_range(rows):
+    with pytest.raises(ValueError):
+        calibrate(rows)
+
+
+def _snapshot(folder, files):
+    """`files` as the Hugging Face cache holds them: each a link into a sibling blobs folder."""
+    blobs = folder.parent / "blobs"
+    for rel, blob in files.items():
+        (blobs / blob).parent.mkdir(parents=True, exist_ok=True)
+        (blobs / blob).write_text(rel)
+        (folder / rel).parent.mkdir(parents=True, exist_ok=True)
+        (folder / rel).symlink_to(blobs / blob)
+    return folder
+
+
+def _entry(rows=TABLE, files=None):
+    return {"rows": [list(r) for r in rows], "snapshot_files": files or {"config.json": "aa11"},
+            "max_seq": EMBED_MAX_TOKENS, "prompts_sha256": "0" * 64, "descriptions_sha256": "1" * 64,
+            "date": DATE, "commit": "abc1234 clean"}
+
+
+def _patch_record(tmp_path, monkeypatch, record):
+    path = tmp_path / "calibration.yaml"
+    path.write_text(record if isinstance(record, str) else yaml.safe_dump(record), encoding="utf-8")
+    monkeypatch.setattr(affordance, "CALIBRATION", path)
+
+
+def test_the_record_gives_the_derived_threshold_its_pins_and_its_date(tmp_path, monkeypatch):
+    _patch_record(tmp_path, monkeypatch, {DEFAULT: _entry()})
+    assert load_calibration(DEFAULT) == Calibration(0.5, {"config.json": "aa11"}, DATE)
+    assert load_calibration("lh-test/custom") is None
+
+
+@pytest.mark.parametrize("record", ["- a list\n- not a mapping\n", {DEFAULT: _entry(rows=[*TABLE, ("a", "maybe", "a", 0.1)])}])
+def test_a_malformed_record_raises(tmp_path, monkeypatch, record):
+    _patch_record(tmp_path, monkeypatch, record)
+    with pytest.raises(ValueError):
+        load_calibration(DEFAULT)
+
+
+def test_snapshot_files_names_each_files_blob_and_leaves_out_what_no_loader_opens(tmp_path):
+    folder = _snapshot(tmp_path / "snapshots" / "rev", {"config.json": "aa11", "1_Pooling/config.json": "bb22",
+                                                        "README.md": "cc33", ".gitattributes": "dd44"})
+    (folder / "plain.txt").write_text("x")
+    assert snapshot_files(folder) == {"config.json": "aa11", "1_Pooling/config.json": "bb22", "plain.txt": "plain.txt"}
+
+
+def test_the_descriptions_digest_hashes_sorted_name_and_description_lines():
+    text = f"commit-message\0{COMMIT.description}\nnotes\0{NOTES.description}\n"
+    assert descriptions_digest([NOTES, COMMIT]) == descriptions_digest([COMMIT, NOTES])
+    assert descriptions_digest([NOTES, COMMIT]) == hashlib.sha256(text.encode()).hexdigest()
+
+
+def _call(args='{"name": "notes"}', name="skill"):
+    return {"id": "c", "type": "function", "function": {"name": name, "arguments": args}}
+
+
+def _assistant(*calls):
+    return {"role": "assistant", "content": "", "tool_calls": list(calls)}
+
+
+def test_held_skills_reads_skill_calls_as_objects_and_dicts_and_skips_every_malformed_one():
+    messages = [
+        _assistant(FakeToolCall("c1", "skill", {"name": "commit-message"}), _call(),
+                   FakeToolCall("c2", "read_file", {"name": "review"}), _call('{"name": "review"}', "read_file")),
+        {"role": "tool", "tool_call_id": "c1", "content": "error: the skill could not be read"},
+        {"role": "user", "content": "", "tool_calls": [_call('{"name": "review"}')]},
+        _assistant(_call('["review"]'), _call("3"), _call("null"), _call("{bad"), _call('{"name": 7}'),
+                   {"id": "c9", "type": "function"}),
+        {"role": "assistant", "content": "done", "tool_calls": None},
+        {"role": "assistant", "content": "done"},
+    ]
+    assert held_skills(messages) == {"commit-message", "notes"}
+
+
+def test_cued_skills_matches_only_its_own_harness_line():
+    line = affordance._line(COMMIT)
+    assert cued_skills([harness_message(line, "affordance_cue")], (COMMIT, NOTES)) == {"commit-message"}
+    assert cued_skills([human_message(line), harness_message(line, "self_check")], (COMMIT, NOTES)) == set()
+
+
+def _task(tmp_path, *sources, **flags):
+    state = TaskState(tmp_path / "task.json", workspace=str(tmp_path))
+    state.current = TaskRecord(context=TaskContext("goal"), workspace=str(tmp_path),
+                               references=[Reference(s) for s in sources], **flags)
+    return state
+
+
+def test_task_skills_reads_only_the_live_records_skill_references(tmp_path):
+    skills = (COMMIT, NOTES)
+    assert task_skills(_task(tmp_path, "skill notes"), skills) == {"notes"}
+    paused = _task(tmp_path, "skill notes")
+    paused.paused = True
+    for state in (paused, _task(tmp_path, "skill notes", closed=True), _task(tmp_path, "skill notes", retired=True),
+                  _task(tmp_path, "skill other", "notes.md"), None):
+        assert task_skills(state, skills) == set()
+
+
+@pytest.mark.parametrize("turn, named", [
+    ("use the commit-message skill", {"commit-message"}), ("/commit-message", {"commit-message"}),
+    ("commit-message,", {"commit-message"}), ("Commit-Message", {"commit-message"}), ("commit-messages", set()),
+    ("please review this", {"review"}),
+])
+def test_a_name_is_named_by_a_whole_token_up_to_punctuation_and_case(turn, named):
+    assert affordance._named_in(turn, ["commit-message", "review"]) == named
