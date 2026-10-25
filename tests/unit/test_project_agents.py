@@ -389,3 +389,134 @@ def test_load_keys_by_the_stem_and_always_reregisters(tmp_path):
     _write(p, "x", {"name": "x", "role": "p"})
     registry.load("x")
     assert registry.get("x").origin == "project" and registry.get("x").description == "p"
+
+
+def test_refresh_registers_a_file_written_after_start_and_adds_nothing_twice(tmp_path):
+    loader, m, p = _layers(tmp_path)
+    _write(m, "a", _agent("a"))
+    registry = AgentCardRegistry(loader=loader)
+    assert registry.refresh() == [] and "a" in registry
+    _write(p, "b", _agent("b"))
+    assert registry.refresh() == []
+    listed = list(registry)
+    assert listed == [*BUILTIN_AGENT_NAMES, "b", "a"]
+    assert registry.refresh() == [] and list(registry) == listed
+    assert AgentCardRegistry().refresh() == []
+
+
+def test_a_broken_file_returns_the_same_problem_until_fixed(tmp_path):
+    loader, m, p = _layers(tmp_path)
+    path = _write(p, "w", {"name": "w", "role": "r", "capabilities": "lots"})
+    registry = AgentCardRegistry(loader=loader)
+    first, second = registry.refresh(), registry.refresh()
+    assert first == second and len(first) == 1
+    problem = first[0]
+    assert (problem.path, problem.origin, problem.kind, problem.fix) == (path, "project", "validation", "edit the file")
+    assert problem.reason.startswith("capabilities: ")
+    assert "got:" not in problem.reason and "lots" not in problem.reason
+    _write(p, "w", _agent("w"))
+    assert registry.refresh() == [] and "w" in list(registry)
+
+
+def test_a_broken_winner_shadowing_a_machine_file_is_loaded_once(tmp_path, monkeypatch):
+    loader, m, p = _layers(tmp_path)
+    bad = _write(p, "x", {"name": "x", "role": "r", "capabilities": "lots"})
+    _write(m, "x", _agent("x"))
+    registry = AgentCardRegistry(loader=loader)
+    calls: list[str] = []
+    real = registry.load
+    monkeypatch.setattr(registry, "load", lambda name: (calls.append(name), real(name))[1])
+    problems = registry.refresh()
+    assert calls == ["x"]
+    assert [pr.path for pr in problems] == [bad]
+    assert "x" not in list(registry)
+
+
+def test_a_name_mismatch_registers_the_stem_and_returns_the_pinned_problem(tmp_path):
+    loader, m, p = _layers(tmp_path)
+    path = _write(m, "foo", {"name": "bar", "role": "r"})
+    registry = AgentCardRegistry(loader=loader)
+    assert registry.refresh() == [AgentProblem(
+        path, "machine", "mismatch", "name: 'bar' ignored; foo.yaml is agent 'foo'",
+        "rename the file or the name: to match")]
+    assert "foo" in list(registry) and "bar" not in list(registry)
+    assert registry.refresh() == []
+    evil = _write(p, "evil", {"name": "../../x", "role": "r"})
+    problems = registry.refresh()
+    assert [pr.path for pr in problems] == [evil]
+    assert registry.get("../../x") is None and registry.get("x") is None and "evil" not in list(registry)
+    raw = _write(p, "raw", {"name": "[red]x", "role": "r"})
+    (problem,) = [pr for pr in registry.refresh() if pr.path == raw]
+    out = io.StringIO()
+    Console(file=out, force_terminal=False, width=500).print(escape(problem.line))
+    assert "[red]x" in out.getvalue()
+
+
+def test_problem_kinds_come_from_the_exception(tmp_path, monkeypatch):
+    loader, m, p = _layers(tmp_path)
+    _write(p, "p", "name: [unclosed\nrole: SECRETTEXT\n")
+    _write(p, "design_reviewer", _agent("design-reviewer"))
+    _write(p, "refdiv", {"name": "refdiv", "role": "r", "division": "nope"})
+    _write(p, "y", _agent("y"))
+    _write(p, "boom", _agent("boom"))
+    real = loader.load_agent
+
+    def fake(name, **kw):
+        if name == "y":
+            raise ConfigNotFoundError("y", [])
+        if name == "boom":
+            raise RuntimeError("boom")
+        return real(name, **kw)
+
+    monkeypatch.setattr(loader, "load_agent", fake)
+    by_stem = {pr.path.stem: pr for pr in AgentCardRegistry(loader=loader).refresh()}
+    assert set(by_stem) == {"p", "design_reviewer", "refdiv", "y"}
+    parse = by_stem["p"]
+    assert parse.kind == "parse" and "SECRETTEXT" not in parse.reason
+    assert parse.reason.split(": ")[0].count(":") == 1
+    inv = by_stem["design_reviewer"]
+    assert (inv.kind, inv.reason, inv.fix) == ("invalid-name", INVALID_AGENT_NAME, "rename the file")
+    ref = by_stem["refdiv"]
+    assert (ref.kind, ref.reason, ref.fix) == ("load", "does not load", "run localharness validate")
+    assert "nope" not in ref.line
+    assert by_stem["y"].kind == "load"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+def test_an_unreadable_file_is_no_problem(tmp_path):
+    loader, m, p = _layers(tmp_path)
+    locked = _write(p, "locked", _agent("locked"))
+    locked.chmod(0)
+    try:
+        registry = AgentCardRegistry(loader=loader)
+        assert registry.refresh() == [] and "locked" not in list(registry)
+    finally:
+        locked.chmod(0o600)
+
+
+def test_a_multi_line_validation_reason_is_one_line_of_at_most_200(tmp_path):
+    loader, m, p = _layers(tmp_path)
+    bad = {"name": "many", "role": "r", **{f"field{i}": i for i in range(40)}}
+    _write(p, "many", bad)
+    (problem,) = AgentCardRegistry(loader=loader).refresh()
+    assert problem.kind == "validation"
+    assert "\n" not in problem.reason and 0 < len(problem.reason) <= 200
+
+
+def test_a_partial_builtin_overlay_is_not_a_problem(tmp_path):
+    loader, m, p = _layers(tmp_path)
+    _write(p, "explore", {"permissions": {"budget": {"max_actions": 50}}})
+    registry = AgentCardRegistry(loader=loader)
+    assert registry.refresh() == []
+    assert list(registry).count("explore") == 1
+
+
+def test_a_link_leading_outside_is_never_refreshed_in(tmp_path):
+    loader, m, p = _layers(tmp_path)
+    outside = _write(tmp_path, "outside", _agent("x"))
+    (p / "x.yaml").symlink_to(outside)
+    registry = AgentCardRegistry(loader=loader)
+    assert registry.refresh() == [] and "x" not in list(registry)
+    _write(m, "x", _agent("x"))
+    assert registry.refresh() == []
+    assert registry.get("x").origin == "machine"
