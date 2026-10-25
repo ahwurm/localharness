@@ -35,6 +35,7 @@ from localharness.cli.start_cmd import _effective_max_context
 from localharness.config.effort import resolve_effort
 from localharness.config.grants import GrantStore
 from localharness.config.loader import ConfigLoader
+from localharness.config import skills as skill_config
 from localharness.config.models import AgentConfig
 from localharness.config.skills import SkillSet
 from localharness.core.bus import EventBus
@@ -453,8 +454,20 @@ def creator_asker(skills_dir: Path, asks: list):
 
 
 @contextlib.contextmanager
+def bundled_under(root: Path):
+    """The bundled skills laid out under `root`, so the directory the skill tool names carries no user name."""
+    real = skill_config.PACKAGE_DIR
+    shutil.copytree(real / "assets" / "skills", root / "assets" / "skills")
+    skill_config.PACKAGE_DIR = root
+    try:
+        yield
+    finally:
+        skill_config.PACKAGE_DIR = real
+
+
+@contextlib.contextmanager
 def neutral_sitting(fake_home):
-    """A person's sitting: a fake home and a workspace holding `.localharness/` inside it, all under a temp dir whose name carries no user."""
+    """A person's sitting: a fake home, a workspace holding `.localharness/` and the bundled skills, all under a temp dir whose name carries no user."""
     base = Path(tempfile.mkdtemp(prefix="lh-")).resolve()
     here = Path.cwd()
     try:
@@ -462,7 +475,8 @@ def neutral_sitting(fake_home):
         work = home / "work"
         (work / ".localharness").mkdir(parents=True)
         os.chdir(work)
-        yield home, work
+        with bundled_under(home / "pkg"):
+            yield home, work
     finally:
         os.chdir(here)
         shutil.rmtree(base, ignore_errors=True)

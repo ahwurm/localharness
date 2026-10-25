@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import dataclasses
+import getpass
+import json
 import re
 from pathlib import Path
 
@@ -549,6 +551,31 @@ async def test_a_creator_turn_that_writes_nothing_is_not_valid(fake_home):
     assert run.valid is False
     assert "skill-creator (bundled, " in run.listing and " (machine, " not in run.listing
     assert run.asks == () and run.files == ()
+
+
+class Spy(MockLLMClient):
+    def __init__(self, *responses):
+        super().__init__(list(responses))
+        self.sent: list[str] = []
+
+    async def stream_complete(self, messages=None, tools=None, on_token=None, **kwargs):
+        self.sent.append(json.dumps([messages, tools], default=str))
+        return await super().stream_complete(messages, tools, on_token, **kwargs)
+
+
+async def test_nothing_the_creator_is_sent_names_the_real_user_and_every_path_it_sees_is_neutral(fake_home):
+    client = Spy(reply(calls=[call(0, "skill", name="skill-creator")]), reply("Done."))
+    with neutral_sitting(fake_home) as (home, work):
+        reference = home / "pkg" / "assets" / "skills" / "skill-creator" / "references" / "format.md"
+        client._responses.insert(1, reply(calls=[call(1, "read", path=str(reference))]))
+        run = await creator_run(client, home, prompts()["creator"], work, URL, None)
+        sent = "\n".join(client.sent)
+        directory = re.search(r"directory '([^']+)'", sent)
+        assert directory and Path(directory.group(1)).is_relative_to(home)
+        assert reference.is_file() and run.asks == ()
+    assert len(client.sent) == 3 and "The skill format" in client.sent[2]
+    for real in {getpass.getuser(), REAL_HOME.name, str(REAL_HOME)}:
+        assert real not in sent
 
 
 async def test_a_creator_turn_that_dies_is_an_invalid_run_not_a_lost_report(fake_home):
