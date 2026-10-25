@@ -8,8 +8,8 @@ skills:
       - "Something is wrong in the retry logic. Capture the failure in an automated check so it cannot come back."
       - "Can you pin the timeout issue down with a check which fails right now?"
       - "A customer reported the export drops accents. Show me it happens."
-      - "Which check could I run that goes red today over the unicode crash, so we know the cure works afterwards?"
-      - "Is there something I can run to watch this crash report happen?"
+      - "Which automated check could you write for the unicode crash, one failing today so we know the cure works?"
+      - "Is there a check you can write to make the crash in the customer's report happen on demand?"
       - "Before we fix this, I want a unit test that shows the null pointer."
       - "Show the memory leak is real with the smallest runnable check you can write."
     near_miss:
@@ -173,7 +173,7 @@ skills:
   skill-creator:
     matching:
       - "Make a skill that formats my standup notes."
-      - "Is it possible to keep what we just did as a repeatable routine for next time?"
+      - "Is it possible to keep my budget review steps as a routine you can follow in later sessions?"
       - "Save this as a procedure I can call again."
       - "How would I keep my pull request review routine for every session? Set it up for me."
       - "Improve the skill I wrote for planning meals; it is too vague about portions."
