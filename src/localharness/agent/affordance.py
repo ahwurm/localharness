@@ -1,10 +1,13 @@
 """The skill cue: the turn scored against the skill descriptions, and one skill named past a calibrated threshold."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import logging
 import math
 import string
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -18,7 +21,11 @@ if TYPE_CHECKING:
     import datetime
 
     from localharness.agent.task_record import TaskState
-    from localharness.config.skills import Skill
+    from localharness.config.skills import Skill, SkillSet
+    from localharness.plugins.api import QueryEmbedder
+    from localharness.plugins.slot import MemorySlot
+
+log = logging.getLogger(__name__)
 
 CUE_LINE = "A skill may match this request: skill('{name}'){origin}. Call it if it applies; otherwise ignore this."
 CALIBRATION = Path(__file__).resolve().parent.parent / "assets" / "affordance" / "calibration.yaml"
@@ -139,3 +146,70 @@ def task_skills(task_state: TaskState | None, skills) -> set[str]:
 
 def _named_in(turn: str, names) -> set[str]:
     return set(names) & {t.strip(string.punctuation).casefold() for t in turn.split()}
+
+
+class Affordances:
+    """The cue's holder for one sitting: description vectors warmed once from a local snapshot, at most one cue a turn."""
+
+    def __init__(self, skill_set: SkillSet, memory_slot: MemorySlot, task_state: TaskState | None) -> None:
+        self._skill_set, self._slot, self._task_state = skill_set, memory_slot, task_state
+        self._skills: tuple[Skill, ...] = ()
+        self._ready: tuple[QueryEmbedder, np.ndarray, float] | None = None
+        self.named: str | None = None
+
+    def warm(self) -> threading.Thread:
+        self._skills = self._skill_set.skills
+        thread = threading.Thread(target=self._warm, args=(self._skills,), name="affordance-warm", daemon=True)
+        thread.start()
+        return thread
+
+    def _warm(self, skills: tuple[Skill, ...]) -> None:
+        try:
+            why = self._publish(skills)
+        except Exception as exc:
+            why = f"{type(exc).__name__}: {exc}"
+        if why:
+            log.info("skill cue off: %s", why)
+
+    def _publish(self, skills: tuple[Skill, ...]) -> str | None:
+        embedder = self._slot.embedder()
+        if embedder is None:
+            return "the memory slot offers no embedder"
+        calibration = load_calibration(embedder.model_name)
+        if calibration is None:
+            return f"no calibration for {embedder.model_name}"
+        folder = embedder.ensure_local()
+        if folder is None:
+            return "embedding model not on this machine yet"
+        if snapshot_files(folder) != calibration.snapshot_files:
+            return f"{folder} is not the snapshot the calibration was measured on"
+        matrix = normalise(embedder.embed_docs([s.description for s in skills]))
+        if matrix.ndim != 2 or len(matrix) != len(skills):
+            return f"{matrix.shape} vectors for {len(skills)} descriptions"
+        self._ready = (embedder, matrix, calibration.threshold)
+        return None
+
+    async def cue(self, turn: str, messages) -> Cue | None:
+        try:
+            return await self._cue(turn, messages)
+        except Exception as exc:
+            log.warning("skill cue off for this sitting: %s: %s", type(exc).__name__, exc)
+            self._ready = None
+            return None
+
+    async def _cue(self, turn: str, messages) -> Cue | None:
+        ready, skills = self._ready, self._skills
+        if ready is None or not turn.strip():
+            return None
+        embedder, matrix, threshold = ready
+        vec = await asyncio.to_thread(embedder.try_embed_query, turn)
+        if vec is None:
+            return None
+        named = _named_in(turn, [s.name for s in skills]) | ({self.named} if self.named else set())
+        keep = [i for i, s in enumerate(skills) if s.name not in named]
+        i = pick(scores(matrix, vec)[keep], threshold)
+        if i is None:
+            return None
+        skill = skills[keep[i]]
+        in_view = held_skills(messages) | cued_skills(messages, skills) | task_skills(self._task_state, skills)
+        return None if skill.name in in_view else Cue(skill.name, skill.origin, _line(skill))
