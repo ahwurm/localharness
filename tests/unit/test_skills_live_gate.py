@@ -4,6 +4,7 @@ from __future__ import annotations
 import dataclasses
 import getpass
 import json
+import os
 import re
 from pathlib import Path
 
@@ -11,8 +12,10 @@ import pytest
 
 from localharness.agent.gate import derive_session_boundary
 from localharness.agent.gate_types import PermissionRequest
+from localharness.config import skills as skill_config
 from localharness.config.skills import LISTING_BUDGET_CHARS, shown
 from localharness.core.events import Action
+from localharness.provider.client import ProviderAPIError, ProviderConnectionError
 from localharness.tools.builtin.skill_tool import render_listing
 import tests.integration.test_skills_model_live as live
 from tests.conftest import FakeLLMResponse, FakeToolCall, MockLLMClient
@@ -437,6 +440,15 @@ class Flaky(MockLLMClient):
         return await super().stream_complete(messages, tools, on_token, **kwargs)
 
 
+class Raises(MockLLMClient):
+    def __init__(self, exc):
+        super().__init__([])
+        self.exc = exc
+
+    async def stream_complete(self, messages=None, tools=None, on_token=None, **kwargs):
+        raise self.exc
+
+
 async def settle(tmp_path, monkeypatch, client):
     work = tmp_path / "work"
     work.mkdir()
@@ -457,6 +469,17 @@ async def test_a_request_that_fails_twice_is_an_error_step_and_the_run_goes_on(t
     assert step.calls == () and step.flaw is None
     assert "the server went away" in step.error and "AssertionError" not in step.error
     assert client.fails == 0 and client._index == 0
+
+
+@pytest.mark.parametrize("exc", [
+    ProviderConnectionError("All connection attempts failed"),
+    ProviderAPIError("HTTP 400: This model's maximum context length is 32768 tokens.", 400)], ids=["lost connection", "context overflow"])
+async def test_a_request_the_loop_retries_internally_records_the_error_it_raised(tmp_path, monkeypatch, exc):
+    step = await settle(tmp_path, monkeypatch, Raises(exc))
+    assert f"{type(exc).__name__}: {exc}" in step.error and "AssertionError" not in step.error
+    assert step.calls == () and step.flaw is None
+    matching = Run("native", "release-notes", "matching", "p", 1, step)
+    assert (hit(matching), hit(dataclasses.replace(matching, kind="near_miss"))) == (False, True)
 
 
 def test_an_error_can_only_make_the_bar_harder():
@@ -609,6 +632,7 @@ class Spy(MockLLMClient):
 async def test_nothing_the_creator_is_sent_names_the_real_user_and_every_path_it_sees_is_neutral(fake_home):
     client = Spy(reply(calls=[call(0, "skill", name="skill-creator")]), reply("Done."))
     with neutral_sitting(fake_home) as (home, work):
+        assert {os.environ["USER"], os.environ["LOGNAME"]} == {"user"}
         reference = home / "pkg" / "assets" / "skills" / "skill-creator" / "references" / "format.md"
         client._responses.insert(1, reply(calls=[call(1, "read", path=str(reference))]))
         run = await creator_run(client, home, prompts()["creator"], work, URL, None)
@@ -646,6 +670,14 @@ def test_the_sitting_has_a_workspace_in_a_fake_home_and_no_user_name_in_any_path
         assert REAL_HOME.name not in {*home.parts, *work.parts}
         assert REAL_HOME.name not in str(base)
     assert not base.exists() and Path.cwd() == here
+
+
+def test_the_sitting_restores_the_package_directory_the_cwd_and_the_environment_when_its_body_raises(fake_home):
+    before = Path.cwd(), skill_config.PACKAGE_DIR, os.environ.get("USER"), os.environ.get("LOGNAME")
+    with pytest.raises(RuntimeError), neutral_sitting(fake_home) as (home, work):
+        assert skill_config.PACKAGE_DIR == home / "pkg"
+        raise RuntimeError
+    assert (Path.cwd(), skill_config.PACKAGE_DIR, os.environ.get("USER"), os.environ.get("LOGNAME")) == before
 
 
 def ask(tool, **params) -> PermissionRequest:
