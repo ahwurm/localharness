@@ -1,6 +1,7 @@
 """Skills seams outside the skill modules: the removed microagents key, protected paths, the origins they guard and the children that never hold the tool."""
 from __future__ import annotations
 
+import inspect
 import re
 import subprocess
 from importlib import resources
@@ -11,6 +12,7 @@ import pytest
 from typer.testing import CliRunner
 
 from localharness.agent.context import APPROX_CHARS_PER_TOKEN
+from localharness.agent.loop import AgentLoop
 from localharness.agent.gate_types import PROTECTED_CONFIG_DIR_ENTRIES, Verdict
 from localharness.agent.subagent import CONFIG_CHILD_DEFAULT_TOOLS, _config_child_allowed
 from localharness.agent.verdict import AGENTS_SKILLS, GateContext, evaluate
@@ -31,6 +33,7 @@ from tests.unit.test_docs_convergence import (
 )
 from tests.unit.test_capabilities import _production_registry
 from tests.unit.test_leftover_plugin_section import _CONFIG, _agent_file
+from tests.unit.test_release_docs import _REPO
 from tests.unit.test_skills_discovery import _skill
 from tests.unit.test_skills_listing import _start_world
 
@@ -599,3 +602,14 @@ def test_skills_claim_bites() -> None:
     assert check_skills_claim(readme.replace(VARIANT_B, ""), changelog) == [
         "the README Skills section keeps 0 variants, not one"]
     assert check_skills_claim(readme.replace("## Skills", "## Abilities"), changelog) == ["README has no ## Skills section"]
+
+
+def test_spec_00_lists_the_agent_loop_parameters() -> None:
+    spec = _REPO / ".planning" / "specs" / "00-architecture-overview.md"
+    if not spec.is_file():
+        pytest.skip("spec 00 is local only")
+    line = next(l for l in spec.read_text(encoding="utf-8").splitlines() if l.startswith("- `AgentLoop.__init__`:"))
+    listed = re.findall(r"`([^`]+)`", line.split(":", 1)[1])
+
+    assert listed == [p for p in inspect.signature(AgentLoop.__init__).parameters if p != "self"]
+    assert listed[-2:] == ["project_instructions", "skills"]
