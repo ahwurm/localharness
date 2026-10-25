@@ -1021,6 +1021,13 @@ async def test_health_distinguishes_cold_from_unreachable(tmp_path):
     assert body["model_state"] == "ready" and body["session_live"] is True
 
 
+async def test_health_model_is_the_source_label_and_none_without_one(tmp_path):
+    _, channel, _, client = await _stack(tmp_path)
+    assert (await client.get("/api/health", headers=BEARER)).json()["model"] is None
+    channel.model_source = lambda: "qwen3-27b"
+    assert (await client.get("/api/health", headers=BEARER)).json()["model"] == "qwen3-27b"
+
+
 async def test_grants_are_listed_read_only_and_say_they_cannot_be_revoked(tmp_path):
     """WEBCH-41 / §5.3b: a fat-thumbed tap is forever, so the least this owes is visibility."""
     _, _, _, client = await _stack(tmp_path)

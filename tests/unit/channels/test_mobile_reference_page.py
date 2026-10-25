@@ -690,6 +690,39 @@ def test_the_live_stream_listens_for_model_switched_and_knows_activity(page):
     assert '"ModelSwitched"' in bus
 
 
+def test_the_health_model_sets_the_pill_on_boot(page):
+    assert 'if (health.model) $("model").textContent = health.model;' in page
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_a_hello_model_sets_the_pill_and_null_leaves_it(page, tmp_path):
+    out = _drive(page, """
+const hello = (model) => onFrame("Hello", {session_id: "s", mode: "repl", turn_in_progress: false,
+  protocol_version: PROTOCOL_VERSION, synthetic: false, model_state: "ready", model});
+$("model").textContent = "settings";
+hello("qwen3-27b");
+const named = $("model").textContent;
+$("model").textContent = "settings";
+hello(null);
+console.log(JSON.stringify({named, unnamed: $("model").textContent}));
+""", tmp_path)
+    assert out == {"named": "qwen3-27b", "unnamed": "settings"}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_a_health_model_sets_the_pill_on_a_recheck_and_null_leaves_it(page, tmp_path):
+    out = _drive(page, """
+let answer = {model_state: "ready", model: "m2"};
+globalThis.fetch = async () => ({json: async () => answer});
+await $("recheck").onclick();
+const first = $("model").textContent;
+answer = {model_state: "ready", model: null};
+await $("recheck").onclick();
+console.log(JSON.stringify({first, second: $("model").textContent}));
+""", tmp_path)
+    assert out == {"first": "m2", "second": "m2"}
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
 def test_a_model_switched_sets_the_pill_as_text(page, tmp_path):
     out = _drive(page, """
