@@ -2068,21 +2068,46 @@ phone's pairing and the Discord allow list the way you would guard a shell login
 two to this machine, set `channels.remote_unattended: false`
 in your machine-level config (a project cannot set it). `unattended` is then refused from the phone
 and Discord with one line naming the setting, and their permission questions are put without
-"always" — an "always" that comes back anyway counts once. An interactive terminal (a keyboard on
+"always" — an "always" that comes back anyway counts once. The setting also refuses a cold launch or
+managed restart — a `/model` pick that starts a model server, or restarts the managed one with
+another model — from the phone, Discord and every other session it limits (below), with one line
+naming the setting, before anything is stopped. An interactive terminal (a keyboard on
 a tty, without `--no-input`, not launched by the agent) and Zed (not launched by the agent) are
 never limited by it; a `--no-input`, piped or agent-launched session answers to nobody here and is
 locked like the phone. "Launched by the agent" is read from the `LOCALHARNESS_COMMIT` marker the
 agent's commands carry, which every process they start inherits: a Zed (or a terminal emulator)
 that the agent itself cold-started, say from "open this in Zed", passes it on, so a session you
 later start from that Zed is capped and locked like the phone too. That errs on the safe side;
-start the editor yourself to be treated as at the machine. It is `true` by default, so nothing you do from the phone or Discord today stops working,
-and `localharness doctor` shows a row while the phone app or the Discord plugin is on and the lock
-is not set.
+start the editor yourself to be treated as at the machine. It is `true` by default. A cold launch or
+managed restart needs a question the person can answer, so a session that cannot put one — Discord,
+a `--no-input`, piped or agent-launched terminal, and a Zed session the agent launched — is refused
+it whatever the setting, at the default with one line pointing at the terminal (and at the phone app
+when it is set up); a switch to a model already served is not refused there. `localharness doctor`
+shows a row while the phone app or the Discord plugin is on and the lock is not set.
 
-**What this does NOT cover.** The lock refuses `unattended` and "always" only. The phone and
-Discord can still switch the session to `auto` or `trusted`, answer every question once, and answer
-the workspace trust question, whose Yes puts a new workspace in `auto` — so a paired phone or an
-allowlisted account can still run anything `auto` allows.
+**On the phone a launch asks first.** A cold launch or managed restart picked on the phone shows one
+question naming the model it starts and what it stops for every client, with `Launch` and `Cancel`,
+and it is asked only after every refusal that needs no answer. The server takes `Launch` only as a
+second request carrying a single-use token that lasts 120 seconds, and after it re-checks, before
+anything is stopped, the refusals a wait can change; no answer, an expired question or a closed app
+launches nothing. That stops a stray tap and a client that sends one blind request; it is not an
+authorization boundary — whoever holds the app token can read the confirm token and send both
+requests. The boundary is `channels.remote_unattended`.
+
+**What this does NOT cover.** The lock refuses `unattended`, "always" and model launches only. The
+phone and Discord can still switch the session to `auto` or `trusted`, answer every question once,
+and answer the workspace trust question, whose Yes puts a new workspace in `auto` — so a paired
+phone or an allowlisted account can still run anything `auto` allows. A switch to a model already
+served — on the bound endpoint, or on another configured endpoint, also while the bound server's
+reply is not understood — stops nothing, so the phone makes it with one tap and no question, under
+`channels.remote_unattended: false` too; a switch to another endpoint sends the conversation, from
+the next turn on, to that endpoint, which may be another machine. A model's id leaves this machine
+unshortened in a few places the phone shows: the launch progress text and the list's header during a
+launch, the launch question's legend (the model still serving), the line sent when the app was
+closed before the question was put, and the name a list row posts back (a tap is a `/model`
+command, planned and refused again when it runs); a llama.cpp model served without an alias is named
+there by its weights path. A managed restart interrupted after the serving peer was stopped leaves
+the session bound to that stopped peer: the next turn fails visibly and `/model` relaunches.
 
 **The `LOCALHARNESS_COMMIT` marker is cooperative.** It is an environment variable, and a
 command the model runs can drop it: `env -u LOCALHARNESS_COMMIT localharness start …` starts a
