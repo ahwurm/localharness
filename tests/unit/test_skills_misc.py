@@ -429,8 +429,11 @@ def test_the_bundled_files_are_package_data(name) -> None:
 
     assert BUNDLED.joinpath(*name.split("/")).is_file()
     assert not BUNDLED.joinpath("scripts").is_dir()
-    if subprocess.run(["git", "rev-parse", "--git-dir"], cwd=repo, capture_output=True).returncode:
-        pytest.skip("not a git checkout")
+    try:
+        if subprocess.run(["git", "rev-parse", "--git-dir"], cwd=repo, capture_output=True).returncode:
+            pytest.skip("not a git checkout")
+    except FileNotFoundError:
+        pytest.skip("git is not installed")
     assert subprocess.run(
         ["git", "check-ignore", "-q", f"src/localharness/assets/skills/skill-creator/{name}"], cwd=repo
     ).returncode == 1
