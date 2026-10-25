@@ -426,13 +426,14 @@ def ids(text: str) -> list[str]:
 @FILES
 def test_the_bundled_files_are_package_data(name) -> None:
     repo = Path(__file__).resolve().parents[2]
-    ignored = subprocess.run(
-        ["git", "check-ignore", "-q", f"src/localharness/assets/skills/skill-creator/{name}"], cwd=repo
-    ).returncode
 
     assert BUNDLED.joinpath(*name.split("/")).is_file()
     assert not BUNDLED.joinpath("scripts").is_dir()
-    assert ignored == 1
+    if subprocess.run(["git", "rev-parse", "--git-dir"], cwd=repo, capture_output=True).returncode:
+        pytest.skip("not a git checkout")
+    assert subprocess.run(
+        ["git", "check-ignore", "-q", f"src/localharness/assets/skills/skill-creator/{name}"], cwd=repo
+    ).returncode == 1
 
 
 def test_the_creator_is_small() -> None:
@@ -452,6 +453,7 @@ def test_the_creator_carries_the_fixed_strings_in_step_order() -> None:
     assert re.findall(r"^## (\d)\. ", CREATOR, re.M) == [str(n) for n in range(1, 10)]
     assert "localharness skills --config-dir" in flat
     assert "localharness --config-dir" not in flat
+    assert "The full text of every file, one after another, `SKILL.md` last." in flat
     assert flat.replace(STEP_6, "").count("/mode") == 0
 
 
@@ -507,6 +509,10 @@ def kept_variants(text: str) -> list[str]:
     return [v for v in (VARIANT_A, VARIANT_B) if v in flat]
 
 
+def stray_rate(text: str, kept: list[str]) -> bool:
+    return len(re.findall(r"\b\d+\s?%", " ".join(text.split()))) != int(VARIANT_A in kept)
+
+
 def check_skills_entry(text: str) -> list[str]:
     """The CHANGELOG's Unreleased entry keeps one variant, the code's figures and no internal id."""
     entry = unreleased(text)
@@ -523,6 +529,7 @@ def check_skills_entry(text: str) -> list[str]:
           else ["## [Unreleased] is not the first ## [ heading"]),
         *([] if len(kept) == 1 else [f"the skills entry keeps {len(kept)} variants, not one"]),
         *(["the skills entry carries a variant label"] if re.search(r"Variant [AB]", entry) else []),
+        *(["the skills entry carries a rate claim beyond the kept variant"] if stray_rate(entry, kept) else []),
         *[f"the skills entry does not say {n}" for n in said if n not in flat],
         *[f"internal id in the skills entry: {x}" for x in ids(entry)],
         *([] if re.findall(r"^### (.+)$", entry, re.M) == ["Added", "Changed", "Removed"]
@@ -543,6 +550,7 @@ def check_skills_claim(readme: str, changelog: str) -> list[str]:
     mine, theirs = kept_variants(body), kept_variants(unreleased(changelog))
     return [
         *([] if len(mine) == 1 else [f"the README Skills section keeps {len(mine)} variants, not one"]),
+        *(["the README Skills section carries a rate claim beyond the kept variant"] if stray_rate(body, mine) else []),
         *(["the README and the CHANGELOG keep different variants"] if len(mine) == len(theirs) == 1 and mine != theirs else []),
     ]
 
@@ -572,6 +580,8 @@ def test_skills_entry_bites() -> None:
         "the skills entry keeps 2 variants, not one"]
     assert check_skills_entry(good.replace(VARIANT_B, "")) == ["the skills entry keeps 0 variants, not one"]
     assert check_skills_entry(good.replace(VARIANT_B, VARIANT_A)) == []
+    assert check_skills_entry(good.replace(VARIANT_B, VARIANT_B + " Models pick the right skill 90 % of the time.")) == [
+        "the skills entry carries a rate claim beyond the kept variant"]
     assert check_skills_entry(good.replace(VARIANT_B, "Variant B: " + VARIANT_B)) == [
         "the skills entry carries a variant label"]
     assert check_skills_entry(good.replace("while a task is live", "meanwhile")) == [
@@ -597,6 +607,8 @@ def test_skills_claim_bites() -> None:
     assert check_skills_claim(readme.replace(VARIANT_B, VARIANT_A), changelog) == [
         "the README and the CHANGELOG keep different variants"]
     assert check_skills_claim(readme.replace(VARIANT_B, VARIANT_A), changelog.replace(VARIANT_B, VARIANT_A)) == []
+    assert check_skills_claim(readme.replace(VARIANT_B, VARIANT_B + " Models pick the right skill 90 % of the time."), changelog) == [
+        "the README Skills section carries a rate claim beyond the kept variant"]
     assert check_skills_claim(readme.replace(VARIANT_B, VARIANT_A + " " + VARIANT_B), changelog) == [
         "the README Skills section keeps 2 variants, not one"]
     assert check_skills_claim(readme.replace(VARIANT_B, ""), changelog) == [
