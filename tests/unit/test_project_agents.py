@@ -643,3 +643,84 @@ async def test_an_explicit_config_dir_start_renders_that_dir_and_no_project_laye
     assert f"There is no project layer in this session, so write it at {tool._machine_agents_dir}/<name>.yaml" in text
     assert "Available agents: explore, web-researcher, cruncher, search-verifier, helper." in text
     assert "~/.localharness" not in text
+
+
+SKIPPED = "skipping unreadable agent file"
+
+
+async def test_start_warns_project_problems_that_do_not_load_and_parse_errors_once(tmp_path, monkeypatch, fake_home):
+    home, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
+    errs = _capture_err_console(monkeypatch)
+    _write_agent(ws / "agents", "orchestrator")
+    _write(ws / "agents", "broken", "a: [unclosed")
+    _write_agent(ws / "agents", "bad_name")
+    _write(ws / "agents", "foo", {"name": "bar", "role": "r"})
+    _write(ws / "agents", "refdiv", {"name": "refdiv", "role": "r", "division": "nope"})
+    _write_agent(global_dir / "agents", "design_reviewer")
+    _write(global_dir / "agents", "mbroken", "a: [unclosed")
+
+    await _drive()
+
+    def where(text):
+        return [i for i, e in enumerate(errs) if text in e]
+
+    assert len(where("/broken.yaml")) == 1 and SKIPPED in errs[where("/broken.yaml")[0]]
+    assert len(where("/mbroken.yaml")) == 1
+    assert len(where(f"bad_name.yaml: {INVALID_AGENT_NAME}; rename the file")) == 1
+    assert len(where("refdiv.yaml: does not load; run localharness validate")) == 1
+    assert not where("foo.yaml") and not where("design_reviewer")
+    skipped = [i for i, e in enumerate(errs) if SKIPPED in e]
+    refreshed = [*where("bad_name.yaml"), *where("refdiv.yaml")]
+    assert skipped and refreshed and max(skipped) < min(refreshed)
+
+
+async def test_hostile_file_names_print_one_line_with_no_escape(tmp_path, monkeypatch, fake_home):
+    home, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
+    errs = _capture_err_console(monkeypatch)
+    _write_agent(ws / "agents", "orchestrator")
+    _write(ws / "agents", "x\n\x1b[2J", "a: [unclosed")
+    _write(ws / "agents", "y\n\x1b[2J", _agent("y"))
+
+    await _drive()
+
+    hit = [e for e in errs if "x .yaml" in e or "y .yaml" in e]
+    assert len([e for e in hit if SKIPPED in e and "x .yaml" in e]) == 1
+    assert len([e for e in hit if "y .yaml: the file name is the agent name" in e]) == 1
+    assert all("\n" not in e and "\x1b" not in e for e in hit)
+
+
+def test_a_markup_lookalike_file_name_prints_literally_through_both_printers(tmp_path, monkeypatch):
+    import localharness.cli.start_cmd as sc
+
+    out = io.StringIO()
+    monkeypatch.setattr(sc, "err_console", Console(file=out, width=500))
+    x, y = tmp_path / "[\x1b/red]x.yaml", tmp_path / "[\x1b/red]y.yaml"
+    sc._skipped_agent_file(x, ConfigParseError(str(x), 1, 1, "bad"))
+    sc._warn_agent_problems([AgentProblem(y, "project", "invalid-name", INVALID_AGENT_NAME, "rename the file")])
+    text = out.getvalue()
+    assert "[/red]x.yaml" in text and "[/red]y.yaml" in text and "\x1b" not in text
+
+
+def test_start_caps_project_problem_lines_with_the_pointer(tmp_path, monkeypatch):
+    import localharness.cli.start_cmd as sc
+
+    errs = _capture_err_console(monkeypatch)
+    problem = lambda i: AgentProblem(tmp_path / f"a{i}.yaml", "project", "validation", "capabilities: bad", "edit the file")
+    sc._warn_agent_problems([problem(i) for i in range(25)])
+    assert len(errs) == 21 and "...and 5 more; run localharness agent list" in errs[-1]
+    errs.clear()
+    sc._warn_agent_problems([problem(0)])
+    assert len(errs) == 1 and "...and" not in errs[0]
+
+
+def test_start_warns_only_project_problems_that_do_not_load(tmp_path, monkeypatch):
+    import localharness.cli.start_cmd as sc
+
+    errs = _capture_err_console(monkeypatch)
+    sc._warn_agent_problems([
+        AgentProblem(tmp_path / "a.yaml", "project", "future-kind", "r", "f"),
+        AgentProblem(tmp_path / "b.yaml", "machine", "validation", "r", "f"),
+        AgentProblem(tmp_path / "c.yaml", "project", "mismatch", "r", "f"),
+        AgentProblem(tmp_path / "d.yaml", "project", "parse", "r", "f"),
+    ])
+    assert len(errs) == 1 and "a.yaml" in errs[0]
