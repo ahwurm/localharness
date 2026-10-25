@@ -178,7 +178,7 @@ class ModelSwitch:
             self._stored, self.launching = None, None
             self._generation += 1
             try:
-                after, session_id = self._bound(), self._agent.current_session_id
+                after, session_id = self._bound(), getattr(self._agent, "current_session_id", None)
                 if before and after and after != before and not cancelled and session_id:
                     await self._bus.publish(ModelSwitched(
                         agent_id=self._agent._config.name, session_id=session_id,

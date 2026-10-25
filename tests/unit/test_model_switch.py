@@ -917,3 +917,18 @@ async def test_model_list_locked_is_absent_for_the_local_operator(tmp_path):
     _, switch, _, _ = _world(chan=_local(), gate=lambda: LOCK, config_dir=tmp_path)
     payload = await switch.model_list(_Plan(), None)
     assert [r["why"] for r in payload["models"]] == [None] * 3 and payload["footer"] == []
+
+
+async def test_run_without_a_session_id_runs_the_handler_and_publishes_nothing():
+    llm = NS(config=NS(base_url=PRIMARY, model="old"))
+    harness = NS(provider=NS(base_url=PRIMARY), extra_endpoints=[], server=None)
+    bus = _Bus()
+    switch = ModelSwitch(NS(_llm=llm, _config=NS(name="root")), bus, _Chan(), harness, lambda: None, None)
+    ran = []
+
+    async def handler(arg):
+        ran.append(arg)
+        llm.config.model = "new"
+
+    await switch.run(handler, "new")
+    assert ran == ["new"] and bus.events == []
