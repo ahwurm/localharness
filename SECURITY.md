@@ -252,8 +252,17 @@ and from a workspace outside your project only after the trust question, which n
 grants nothing. A skill runs no command of its own and installs nothing. A project skill's listing
 line sits after the guardrails and the body the model loads when cued arrives as a tool result, each
 inside a fence that marks it as the project's own text, the way a project's instructions file does
-([Project instructions files](#project-instructions-files)); the fence is a marker, not a sandbox, because it labels the
-text and does not stop a model from following it. A project skill's body is stored as untrusted
+([Project instructions files](#project-instructions-files)); the fence is a marker, not a
+sandbox, because it labels the text and does not stop a model from following it. The harness
+may also cue a skill by name: with the memory plugin on and its default embedding model on
+this machine, each request is compared on your machine with the skills' descriptions, and
+when one is close enough the model is sent one harness line naming that skill, which it may
+decline; the description never speaks in that line, only the checked name and whether it is
+a project skill. The threshold is a measured record shipped inside the package and read for
+that embedding model alone, never from a project or machine config, so no repository can
+lower it to make every request cue its own skill. The cue never downloads anything, and it
+identifies the cached embedding model by its content-addressed file names in the Hugging
+Face cache, without verifying the files. A project skill's body is stored as untrusted
 content, which keeps it from a child agent that holds a host-dangerous tool. The description alone
 steers which skill a model picks ("Under the Hood of SKILL.md", https://arxiv.org/abs/2605.11418),
 and the malicious skills found in public marketplaces hid their payload in a "Prerequisites" install
@@ -270,8 +279,9 @@ directory it does not read for want of a `.localharness/`; an "always" given to 
 about again, once per subcommand. What this does not stop, as it behaves today: in `auto`, `trusted`
 and `unattended` a script a skill names runs without an ask, and a granted interpreter-plus-file
 signature covers a file the agent just wrote, the same gap as a granted `python3 <script>` under the
-approval gate's named gaps; a cloned repository's skill descriptions enter the root prompt, and the
-bodies the model loads when cued, silently, as its agent files do; in `unattended` the model can
+approval gate's named gaps; a cloned repository's skill descriptions enter the root
+prompt, and the bodies the model loads when cued and may be cued by name, silently, as its
+agent files do; in `unattended` the model can
 write itself a skill without an ask, and it is listed from the next start; the protected-path ask
 shows only the path, so the files you read in the creator's proposal and the files written are tied
 by the model's discipline, not by the gate, and a write the gate denied whose content equals the body
@@ -1125,8 +1135,8 @@ when your config folder holds it (one line in `memory.log` says so), otherwise a
 load it reads the model's files: a model that names code of its own (a module that is not
 sentence-transformers' own, in `modules.json` or a Router's config; a Dense activation outside torch;
 a WordEmbeddings tokenizer outside the library; `auto_map` or `trust_remote_code` in a config) is
-refused with one line; memory search, `remember` and the background embedding report that line for
-the session, and nothing else stops.
+refused with one line; memory search, `remember` and the background embedding report that line
+for the session, the skill cue meets the same refusal and goes silent, and nothing else stops.
 
 ## Files the harness writes
 
@@ -1293,7 +1303,9 @@ A project's `CLAUDE.md`, `AGENTS.md` or `.localharness/INSTRUCTIONS.md` is text 
 controls, so it is treated as attacker-controlled. It enters the agent's role once, after the
 guardrails, inside a fence: a fixed header says the text is the project's and not the harness's
 policy, and the file's text sits between an opening and a closing line carrying a tag chosen at
-random for each process, with any line of the file that would close the fence neutralised first.
+random for each process, with any line of the file that would close the fence neutralised
+first. The short map the root prompt carries above that fence names the project root and
+the skill directories and carries no file's text.
 It is used after the one trust question on a fresh clone, or with one visible line
 ("Using CLAUDE.md (5.1 KB); /instructions off") on a workspace whose settings layer already loads,
 and the record that it was shown is written only once that line has reached a person: the terminal's
