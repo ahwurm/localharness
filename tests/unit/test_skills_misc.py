@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from importlib import resources
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from typer.testing import CliRunner
 
+from localharness.agent.context import APPROX_CHARS_PER_TOKEN
 from localharness.agent.gate_types import PROTECTED_CONFIG_DIR_ENTRIES, Verdict
 from localharness.agent.subagent import CONFIG_CHILD_DEFAULT_TOOLS, _config_child_allowed
 from localharness.agent.verdict import AGENTS_SKILLS, GateContext, evaluate
@@ -24,7 +26,7 @@ from localharness.agent.task_record import TaskState
 from localharness.tools.builtin.skill_tool import SkillTool
 from localharness.tools.registry import ToolRegistry
 from tests.unit.agent.test_auto_mode import SETTINGS, SHELL, WRITE, _ctx, _shell, _verdict
-from tests.unit.test_docs_convergence import check_protected_entries_doc
+from tests.unit.test_docs_convergence import check_denylist, check_protected_entries_doc
 from tests.unit.test_capabilities import _production_registry
 from tests.unit.test_leftover_plugin_section import _CONFIG, _agent_file
 from tests.unit.test_skills_discovery import _skill
@@ -391,3 +393,90 @@ def test_format_md_is_short_and_names_what_a_skill_holds() -> None:
     assert len(FORMAT.splitlines()) <= 80
     assert all(f"`{needle}`" in FORMAT for needle in needles)
     assert all(f"`{place}" in FORMAT for place in places) and "250" in FORMAT
+
+
+STEP_1 = '"What should this skill do, and when should it fire?"'
+STEP_6 = "writes are denied in read-only mode; /mode guarded allows them for this session, /mode read-only returns."
+STEP_9 = "After the restart, the person sends one request the skill should not fire on; if the model calls `skill`, shorten or sharpen the description."
+LURES = ("pip install", "curl", "wget", "npm install", "git clone", "sudo", "bash <(")
+ID = re.compile(
+    r"§|\b[A-K]\d{1,2}\b|\b(?:DISC|LIST|TOOL|SLASH|CLI|CRT|CUE|RELOAD|SELF|TASK|RM)-\d\d\b"
+    r"|\bT-\d\d-(?:\d+|SC)\b|\bD-\d\d\b"
+)
+FILES = pytest.mark.parametrize("name", ["SKILL.md", "references/format.md"], ids=["creator", "format"])
+
+
+def fits(text: str) -> bool:
+    return len(text.splitlines()) <= 150 and len(text) <= 2_000 * APPROX_CHARS_PER_TOKEN
+
+
+def lures(text: str) -> list[str]:
+    return [lure for lure in LURES if lure in text.lower()]
+
+
+def ids(text: str) -> list[str]:
+    return [m.group(0) for m in ID.finditer(text)] + check_denylist("CHANGELOG.md", text)
+
+
+@FILES
+def test_the_bundled_files_are_package_data(name) -> None:
+    repo = Path(__file__).resolve().parents[2]
+    ignored = subprocess.run(
+        ["git", "check-ignore", "-q", f"src/localharness/assets/skills/skill-creator/{name}"], cwd=repo
+    ).returncode
+
+    assert BUNDLED.joinpath(*name.split("/")).is_file()
+    assert not BUNDLED.joinpath("scripts").is_dir()
+    assert ignored == 1
+
+
+def test_the_creator_is_small() -> None:
+    assert fits(CREATOR)
+    assert not fits("x\n" * 151)
+    assert not fits("x" * (2_000 * APPROX_CHARS_PER_TOKEN + 1))
+
+
+def test_the_creator_opens_with_the_verbatim_frontmatter() -> None:
+    assert CREATOR.startswith("---\nname: skill-creator\ndescription: " + DESCRIPTION + "\n---\n")
+
+
+def test_the_creator_carries_the_fixed_strings_in_step_order() -> None:
+    flat = " ".join(CREATOR.split())
+
+    assert 0 <= flat.find(STEP_1) < flat.find(STEP_6) < flat.find(STEP_9)
+    assert re.findall(r"^## (\d)\. ", CREATOR, re.M) == [str(n) for n in range(1, 10)]
+    assert "localharness skills --config-dir" in flat
+    assert "localharness --config-dir" not in flat
+    assert flat.replace(STEP_6, "").count("/mode") == 0
+
+
+@FILES
+def test_the_bundled_files_name_no_install_or_fetch_literal(name) -> None:
+    assert lures(BUNDLED.joinpath(*name.split("/")).read_text(encoding="utf-8")) == []
+
+
+def test_the_lure_scan_bites() -> None:
+    assert lures("Run Curl first") == ["curl"]
+    assert lures("recurl") == ["curl"]
+    assert lures(" ".join(reversed(LURES))) == list(LURES)
+
+
+@FILES
+def test_the_bundled_files_carry_no_internal_id(name) -> None:
+    assert ids(BUNDLED.joinpath(*name.split("/")).read_text(encoding="utf-8")) == []
+
+
+@pytest.mark.parametrize(
+    "text,found",
+    [
+        pytest.param("see §14 and R§3", ["§", "§"], id="section-sign"),
+        pytest.param("round B4 and K12", ["B4", "K12"], id="round"),
+        pytest.param("CRT-01 and DISC-02", ["CRT-01", "DISC-02"], id="requirement"),
+        pytest.param("T-32-01 and T-32-SC", ["T-32-01", "T-32-SC"], id="threat"),
+        pytest.param("decision D-10", ["D-10"], id="decision"),
+        pytest.param("DOCS-01 here", ["CHANGELOG.md:1: internal id 'DOCS-01'"], id="public-doc"),
+        pytest.param("plain text, UTF-8 and A to K", [], id="clean"),
+    ],
+)
+def test_the_id_scan_bites(text, found) -> None:
+    assert ids(text) == found
