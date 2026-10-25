@@ -33,6 +33,9 @@ from localharness.config.models import AgentConfig
 from localharness.orchestrator.cards import AgentCardRegistry
 from localharness.orchestrator.workflow import AgentCreationWorkflow
 from localharness.tools.builtin.agent_tool import BUILTIN_AGENT_NAMES, INVALID_AGENT_NAME, AgentTool
+from tests.unit.test_start_cmd import _capture_err_console, _stub_start_boundaries, _write_agent
+from tests.unit.test_start_floor import _capture_agent
+from tests.unit.test_workspace_state_landing import _drive, _install_recorders, _one, _workspace_start
 
 
 def _write(agents_dir: Path, stem: str, data: dict | str) -> Path:
@@ -594,3 +597,49 @@ async def test_a_live_dispatched_project_agent_keeps_the_narrowing(tmp_path, mon
         assert [s.name for s in cfg.tools.mcp_servers] == ["evil"]
     else:
         assert cfg.tools.mcp_servers == [] and cfg.permissions.mode == DEFAULT_MODE
+
+
+async def test_a_bound_start_advertises_project_and_machine_agents_from_the_registry(tmp_path, monkeypatch, fake_home):
+    home, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
+    rec = _install_recorders(monkeypatch)
+    agents = _capture_agent(monkeypatch)
+    _write_agent(ws / "agents", "orchestrator")
+    _write_agent(ws / "agents", "proj-helper")
+    _write_agent(global_dir / "agents", "mach-helper")
+
+    await _drive()
+
+    kw = _one(rec, "runner")
+    registry = kw["available_agents"]
+    assert isinstance(registry, AgentCardRegistry) and registry.loader is not None
+    assert kw["load_agent"] == registry.load
+    assert list(registry) == [*BUILTIN_AGENT_NAMES, "proj-helper", "solo", "mach-helper"]
+    assert _one(rec, "repl")["on_agent_deployed"] == registry.load
+    (loop,) = agents
+    tool = loop._tools._tools["global"]["agent"]
+    assert tool._available_agents is registry
+    assert Path(tool._project_agents_dir).resolve() == (ws / "agents").resolve()
+    assert Path(tool._machine_agents_dir).resolve() == (global_dir / "agents").resolve()
+    text = tool.info().description
+    assert (f"A project specialist goes at {tool._project_agents_dir}/<name>.yaml and is read by "
+            "every session started in this project") in text
+    assert f"a machine specialist goes at {tool._machine_agents_dir}/<name>.yaml and serves every project" in text
+
+
+async def test_an_explicit_config_dir_start_renders_that_dir_and_no_project_layer(tmp_path, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    agents = _capture_agent(monkeypatch)
+    _write_agent(tmp_path / "agents", "orchestrator")
+    _write_agent(tmp_path / "agents", "helper")
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    (loop,) = agents
+    tool = loop._tools._tools["global"]["agent"]
+    assert Path(tool._machine_agents_dir).resolve() == (tmp_path / "agents").resolve()
+    text = tool.info().description
+    assert f"There is no project layer in this session, so write it at {tool._machine_agents_dir}/<name>.yaml" in text
+    assert "Available agents: explore, web-researcher, cruncher, search-verifier, helper." in text
+    assert "~/.localharness" not in text
