@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from localharness.cli import model_ops
 from localharness.cli.workspace import visible_text
 from localharness.config.paths import global_config_dir
 from localharness.core.events import ModelSwitched
+from localharness.provider.lifecycle import heavy_label
 
 LAUNCH_SLOW = "can take several minutes"
 LAUNCH_QUESTION = "Launch {target}? {stops}. A model server starts and " + LAUNCH_SLOW + "{build}; once started it cannot be cancelled."
@@ -36,6 +38,8 @@ MODEL_MALFORMED = "The bound server's reply wasn't understood — check its base
 MODEL_UNAVAILABLE = "Model switching is unavailable in this session."
 MODEL_LIST_REUSE_S = 15.0
 
+Stop = tuple[str, str] | None
+
 
 def short_label(x: str) -> str:
     return Path(x).name if x.startswith(("/", "~", ".")) or x.endswith(".gguf") else x
@@ -43,6 +47,11 @@ def short_label(x: str) -> str:
 
 def _label(x: str) -> str:
     return short_label(visible_text(x))
+
+
+def launch_holder(active_heavy, harness, fallback=None) -> str | None:
+    active = active_heavy or fallback
+    return None if active is None else short_label(heavy_label(model_ops.incumbent_heavy(active, harness)))
 
 
 def _endpoint_name(harness, base_url: str) -> str:
@@ -81,6 +90,19 @@ class ModelSwitch:
             phone = LAUNCH_ELSEWHERE_PHONE if _phone_enrolled(self._config_dir) else ""
             return LAUNCH_ELSEWHERE.format(target=visible_text(target), phone=phone)
         return None
+
+    async def confirm(self, target: str, holder: str | None, build: str, recheck: Callable[[], Awaitable[Stop]]) -> Stop:
+        if getattr(self._channel, "local_operator", False):
+            return None
+        current = self._agent._llm.config.model
+        can_pick = getattr(self._channel, "can_run_picker", None)
+        if not callable(can_pick) or not can_pick():
+            return LAUNCH_NO_PHONE.format(target=visible_text(target), current=current), "system.info"
+        stops = LAUNCH_STOPS.format(holder=visible_text(holder)) if holder else LAUNCH_STOPS_NONE
+        choice = await self._channel.run_picker(
+            [LAUNCH_YES, LAUNCH_NO], current,
+            prompt=LAUNCH_QUESTION.format(target=_label(target), build=build, stops=stops), confirm=LAUNCH_YES)
+        return await recheck() if choice == LAUNCH_YES else ("", "")
 
     def _box_activity(self, text: str | None) -> None:
         push = getattr(self._channel, "box_activity", None)

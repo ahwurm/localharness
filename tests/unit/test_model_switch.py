@@ -9,7 +9,7 @@ import pytest
 from localharness.cli import model_switch as ms
 from localharness.agent.gate import PermissionGate
 from localharness.channels.mobile.auth import token_path
-from localharness.cli.model_switch import ModelSwitch, short_label
+from localharness.cli.model_switch import ModelSwitch, launch_holder, short_label
 from localharness.cli.workspace import visible_text
 from localharness.config.grants import GrantStore
 from localharness.config.paths import global_config_dir
@@ -18,6 +18,7 @@ from localharness.core.events import ModelSwitched
 
 PRIMARY = "http://primary:8000/v1"
 PEER_B = "http://peer-b:8001/v1"
+PEER_C = "http://peer-c:8002/v1"
 
 
 class _Chan:
@@ -399,3 +400,110 @@ async def test_never_gated_hot_and_cross_switches_run_from_a_locked_remote_chann
     await switch.run(handler, "")
     [event] = bus.events
     assert event.kind == change
+
+
+HELD = NS(served_name=None, model="/home/u/weights/held.gguf")
+HARNESS = NS(provider=NS(base_url=PRIMARY, api_key=None), extra_endpoints=[])
+
+
+def _asker(answer, ready=True, model="qwen3:32b"):
+    chan = _Picker(answer, ready)
+    llm, switch, _, _ = _world(model=model, chan=chan)
+    return chan, switch
+
+
+def _recheck(result=None):
+    calls = []
+
+    async def recheck():
+        calls.append(1)
+        return result
+
+    return calls, recheck
+
+
+async def test_confirm_asks_once_with_the_whole_question_and_returns_the_recheck():
+    chan, switch = _asker(ms.LAUNCH_YES)
+    calls, recheck = _recheck()
+    assert await switch.confirm("mixtral", "qwen3:32b", " (first build x)", recheck) is None
+    assert chan.asked == [([ms.LAUNCH_YES, ms.LAUNCH_NO], "qwen3:32b", {
+        "prompt": "Launch mixtral? This stops qwen3:32b for every client. A model server starts and can take several minutes"
+                  " (first build x); once started it cannot be cancelled.",
+        "confirm": ms.LAUNCH_YES})]
+    assert calls == [1]
+
+
+async def test_confirm_without_a_holder_says_nothing_is_stopped():
+    chan, switch = _asker(ms.LAUNCH_YES)
+    await switch.confirm("mixtral", None, "", _recheck()[1])
+    assert chan.asked[0][2]["prompt"] == ms.LAUNCH_QUESTION.format(target="mixtral", stops=ms.LAUNCH_STOPS_NONE, build="")
+
+
+async def test_confirm_returns_a_refusal_that_appeared_during_the_wait_unchanged():
+    _, switch = _asker(ms.LAUNCH_YES)
+    _, recheck = _recheck(("refused now", "system.error"))
+    assert await switch.confirm("mixtral", None, "", recheck) == ("refused now", "system.error")
+
+
+@pytest.mark.parametrize("answer", [ms.LAUNCH_NO, None])
+async def test_confirm_cancel_or_no_answer_stops_with_nothing_sent_and_no_recheck(answer):
+    _, switch = _asker(answer)
+    calls, recheck = _recheck()
+    assert await switch.confirm("mixtral", None, "", recheck) == ("", "") and calls == []
+
+
+async def test_confirm_a_closed_app_says_so_without_asking_or_rechecking():
+    chan, switch = _asker(ms.LAUNCH_YES, ready=False)
+    calls, recheck = _recheck()
+    assert await switch.confirm("mixtral", None, "", recheck) == (
+        ms.LAUNCH_NO_PHONE.format(target="mixtral", current="qwen3:32b"), "system.info")
+    assert chan.asked == [] and calls == []
+
+
+async def test_confirm_for_a_local_operator_neither_asks_nor_rechecks():
+    chan = _local(picker=True)
+    chan.answer = ms.LAUNCH_YES
+    _, switch, _, _ = _world(chan=chan)
+    calls, recheck = _recheck()
+    assert await switch.confirm("mixtral", None, "", recheck) is None
+    assert chan.asked == [] and calls == []
+
+
+async def test_confirm_question_holds_no_directory_while_current_stays_raw():
+    chan, switch = _asker(ms.LAUNCH_YES, model="/home/u/live/serving.gguf")
+    holder = launch_holder((HELD, PRIMARY), HARNESS)
+    await switch.confirm("/home/u/w/big.gguf", holder, "", _recheck()[1])
+    [(_, current, kw)] = chan.asked
+    assert "/home/u" not in kw["prompt"] and "big.gguf" in kw["prompt"] and "held.gguf" in kw["prompt"]
+    assert current == "/home/u/live/serving.gguf"
+
+
+async def test_confirm_closed_app_line_escapes_the_target_and_keeps_the_raw_current():
+    _, switch = _asker(ms.LAUNCH_YES, ready=False, model="/home/u/live/serving.gguf")
+    line, style = await switch.confirm("evil\x1bx", None, "", _recheck()[1])
+    assert line == ms.LAUNCH_NO_PHONE.format(target=visible_text("evil\x1bx"), current="/home/u/live/serving.gguf")
+    assert style == "system.info" and "\x1b" not in line
+
+
+
+
+@pytest.mark.parametrize("args", [(None, HARNESS), (None, HARNESS, None)])
+def test_holder_none_when_nothing_is_tracked(args):
+    assert launch_holder(*args) is None
+
+
+@pytest.mark.parametrize("model, name", [("/home/u/weights/held.gguf", "held.gguf"), ("models/x.gguf", "x.gguf")])
+def test_holder_reduces_a_weights_path_to_its_file_name(model, name):
+    assert launch_holder((NS(served_name=None, model=model), PRIMARY), HARNESS) == name
+
+
+def test_holder_names_a_peer_by_its_peer_name():
+    spec = NS(served_name=None, model="/m/p.gguf")
+    harness = NS(provider=NS(base_url=PRIMARY, api_key=None), extra_endpoints=[NS(name="peer-c", base_url=PEER_C, lifecycle=spec)])
+    assert launch_holder((spec, PEER_C), harness) == "peer-c"
+
+
+def test_holder_prefers_the_active_heavy_over_the_fallback():
+    fallback = (NS(served_name="srv", model="/m/x.gguf"), PRIMARY)
+    assert launch_holder(None, HARNESS, fallback) == "srv"
+    assert launch_holder((HELD, PRIMARY), HARNESS, fallback) == "held.gguf"
