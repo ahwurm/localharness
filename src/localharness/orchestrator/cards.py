@@ -1,16 +1,29 @@
 """Agent Cards: capability declarations for orchestrator routing."""
 from __future__ import annotations
 
+import logging
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Literal
+from typing import Callable, Literal
 
 from pydantic import BaseModel, ConfigDict
 
 from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
+from localharness.config.loader import (
+    AgentFile,
+    AgentProblem,
+    ConfigError,
+    ConfigLoader,
+    ConfigNotFoundError,
+    ConfigParseError,
+    ConfigValidationError,
+    Origin,
+)
+from localharness.config.models import AgentConfig
+from localharness.tools.builtin.agent_tool import BUILTIN_AGENT_NAMES, INVALID_AGENT_NAME
 
-if TYPE_CHECKING:
-    from localharness.config.models import AgentConfig
+log = logging.getLogger(__name__)
 
 
 class AgentCard(BaseModel):
@@ -54,6 +67,7 @@ class AgentCard(BaseModel):
 
     # Status
     status: Literal["active", "paused", "error"] = "active"
+    origin: Origin | None = None
 
 
 @dataclass(frozen=True)
@@ -109,8 +123,33 @@ def score_card(task: str, card: AgentCard) -> float:
 class AgentCardRegistry:
     """Manages Agent Cards for all configured agents."""
 
-    def __init__(self) -> None:
+    def __init__(self, loader: ConfigLoader | None = None) -> None:
         self._cards: dict[str, AgentCard] = {}
+        self.loader = loader
+
+    def __iter__(self) -> Iterator[str]:
+        rest = sorted(
+            (c for c in self._cards.values() if c.agent_id not in (*BUILTIN_AGENT_NAMES, "orchestrator")),
+            key=lambda c: (c.origin != "project", c.agent_id),
+        )
+        return iter([*BUILTIN_AGENT_NAMES, *(c.agent_id for c in rest)])
+
+    def __len__(self) -> int:
+        return sum(1 for _ in self)
+
+    def load(self, name: str) -> AgentConfig:
+        """Load one agent through the loader's narrowing, register its card under the requested stem."""
+        if self.loader is None:
+            raise ConfigNotFoundError(name, [])
+        try:
+            AgentConfig.validate_name_format(name)
+        except ValueError:
+            raise ConfigNotFoundError(name, self.loader.agent_search_paths(name)) from ValueError(INVALID_AGENT_NAME)
+        cfg = self.loader.load_agent(name, bypass_cache=True)
+        found = self.loader.agent_file(name)
+        card = self.generate_card(cfg.model_copy(update={"name": name}))
+        self.register(card.model_copy(update={"origin": found.origin if found else None}))
+        return cfg
 
     def generate_card(self, config: "AgentConfig") -> AgentCard:
         """Generate an AgentCard from an AgentConfig."""

@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 from localharness.config.models import (
     AgentConfig, BudgetConfig, ChildBudget, ChildrenBudgetConfig, PermissionConfig, ToolConfig,
 )
+from localharness.tools.builtin.agent_tool import BUILTIN_AGENT_NAMES, INVALID_AGENT_NAME
 
 if TYPE_CHECKING:
     from localharness.plugins.api import MemoryWriteHandle
@@ -161,8 +162,6 @@ def _sanitize_agent_name(name: str) -> str:
     return name.replace("_", "-")
 
 
-# The built-in names the runner dispatches itself; always part of the "closest available" roster.
-_BUILTIN_AGENT_NAMES = ("explore", "web-researcher", "search-verifier", "cruncher")
 # How many roster names the not-wired line leads with when nothing is close (the lean error stays lean).
 _NOT_WIRED_FALLBACK_NAMES = 8
 
@@ -188,7 +187,7 @@ def _not_wired_text(
         d = str(Path(sp).parent)
         if d not in dirs:
             dirs.append(d)
-    roster = ({*_BUILTIN_AGENT_NAMES, *(available_agents or ())}) - {"orchestrator", name}
+    roster = ({*BUILTIN_AGENT_NAMES, *(available_agents or ())}) - {"orchestrator", name}
     ordered = sorted(roster)
     closest = (
         difflib.get_close_matches(agent_id, ordered, n=3, cutoff=0.6)
@@ -1856,7 +1855,7 @@ def make_explore_agent_runner(
     window: Callable[[], int | None] | None = None,
     depth: int = 0,
     max_subagent_depth: int = MAX_DEPTH,
-    available_agents: list[str] | None = None,
+    available_agents: Iterable[str] | None = None,
     parent_store: Any = None,
     cruncher_config: Any = None,
     memory_handle: Callable[[], MemoryWriteHandle | None] | None = None,
