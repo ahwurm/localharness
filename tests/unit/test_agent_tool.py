@@ -1,10 +1,13 @@
 """Tests for the agent delegation tool."""
+import asyncio
 import re
 
 import pytest
 from unittest.mock import AsyncMock
 
-from localharness.tools.builtin.agent_tool import AgentTool
+from localharness.tools.builtin.agent_tool import (
+    BUILTIN_AGENT_NAMES, INVALID_AGENT_NAME, ROSTER_NAME_CAP, AgentTool,
+)
 
 BOUND = (
     "You can also BUILD a new specialist as a YAML file (fields: name, role, tools: {add: [tool names]}, permissions: {budget: {max_actions, max_duration_minutes}}), then delegate to that name immediately. A project specialist goes at <P>/<name>.yaml and is read by every session started in this project; a machine specialist goes at <M>/agents/<name>.yaml and serves every project. The file name is the agent name: lowercase letters, digits, hyphens. Compose specialists from the existing tools; never write your own tool for something the harness already provides (web search, fetch, files, delegation). A specialist gets no MCP servers of its own: compose it from the harness tools (`tools.add`). A project specialist's permissions can only tighten the machine's. A script you add under <M>/tools/ runs only as an unconfirmed shell command (asked about in guarded mode) until they confirm it at their next `localharness start`."
@@ -310,3 +313,48 @@ def test_neither_text_claims_git_or_a_confirmation_wait(tmp_path, project):
             "(`tools.add`).") in description
     assert ("A project specialist's permissions can only tighten the machine's." in description) == bool(project)
 
+
+def test_builtin_names_exist_once_in_start_order():
+    assert BUILTIN_AGENT_NAMES == ("explore", "web-researcher", "cruncher", "search-verifier")
+    assert INVALID_AGENT_NAME == "the file name is the agent name: lowercase letters, digits, hyphens"
+    assert ROSTER_NAME_CAP == 24
+
+
+def _names(n):
+    return [f"a{i:02d}" for i in range(n)]
+
+
+@pytest.mark.parametrize("n,tail", [(24, ""), (25, " and 1 more"), (30, " and 6 more")])
+def test_the_description_caps_the_roster_at_24_names(n, tail):
+    description = _text(agents=_names(n))
+
+    assert f"Available agents: {', '.join(_names(24))}{tail}." in description
+    assert ("a24" in description) is False
+    assert (" more" in description) == bool(tail)
+
+
+def test_the_not_found_texts_use_the_same_cap():
+    expected = f"Available: {', '.join(_names(24))} and 6 more"
+    for exc in (KeyError("x"), ValueError("")):
+        tool = _make_agent_tool(runner=AsyncMock(side_effect=exc), agents=_names(30))
+        result = asyncio.run(tool._execute(agent_id="nope", task="t"))
+        assert expected in result.error
+
+
+def test_a_live_iterable_roster_is_read_fresh():
+    class Live:
+        def __init__(self): self.names = ["explore"]
+        def __iter__(self): return iter(self.names)
+        def __len__(self): return len(self.names)
+
+    live = Live()
+    tool = _make_agent_tool(agents=live)
+    assert "explore." in tool.info().description
+    live.names.append("late-arrival")
+    assert "explore, late-arrival." in tool.info().description
+
+
+@pytest.mark.parametrize("agents", [None, []])
+def test_no_roster_renders_none_configured(agents):
+    tool = AgentTool(agent_runner=AsyncMock(), available_agents=agents)
+    assert "Available agents: none configured." in tool.info().description

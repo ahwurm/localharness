@@ -22,6 +22,13 @@ INVALID_AGENT_NAME = "the file name is the agent name: lowercase letters, digits
 ROSTER_NAME_CAP = 24
 
 
+def _roster(names: Iterable[str]) -> str:
+    """The first ROSTER_NAME_CAP names in order, then ' and N more'; '' for none."""
+    names = list(names)
+    tail = f" and {len(names) - ROSTER_NAME_CAP} more" if len(names) > ROSTER_NAME_CAP else ""
+    return ", ".join(names[:ROSTER_NAME_CAP]) + tail
+
+
 def compose_brief(
     task: str, purpose: str | None = None, inputs: list[str] | None = None,
     constraints: str | None = None, expected_output: str | None = None,
@@ -102,7 +109,7 @@ class AgentTool(Tool):
         )
 
     def info(self) -> ToolSchema:
-        agent_list = ", ".join(self._available_agents) if self._available_agents else "none configured"
+        agent_list = _roster(self._available_agents) or "none configured"
         return ToolSchema(
             name="agent",
             group="delegate",
@@ -218,13 +225,13 @@ class AgentTool(Tool):
             return self.err(
                 str(exc)
                 or f"Agent '{agent_id}' not found. "
-                   f"Available: {', '.join(self._available_agents) or 'none'}",
+                   f"Available: {_roster(self._available_agents) or 'none'}",
                 error_type="not_found",
             )
         except KeyError:
             return self.err(
                 f"Agent '{agent_id}' not found. "
-                f"Available: {', '.join(self._available_agents) or 'none'}",
+                f"Available: {_roster(self._available_agents) or 'none'}",
                 error_type="not_found",
             )
         except Exception as exc:
