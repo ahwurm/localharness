@@ -16,6 +16,7 @@ from `BUILTIN_PLUGINS` only, never discovery (a dev venv may have other plugins 
 """
 from __future__ import annotations
 
+import ast
 import re
 from collections.abc import Callable, Iterable
 
@@ -319,6 +320,52 @@ def test_key_file_doc_bites():
     assert check_key_file_doc(text.replace("doctor never opens a key file", "doctor opens")) == [
         "SECURITY.md does not say doctor never opens it"]
     assert len(check_key_file_doc("## Nothing\n")) == 7
+
+
+# ---------------------------------------------------------------- check: the launch boundary and the model route
+
+LOCK_NEEDLES = ("cold launch or managed restart", "whatever the setting", "not an authorization boundary",
+                "one tap and no question", "may be another machine")
+STALE_DEFAULT = "today stops working"
+
+
+def _source_constant(rel: str, name: str):
+    """The module-level literal `name` in the repo file `rel`, read with `ast` so no optional dependency imports."""
+    return next(ast.literal_eval(n.value) for n in ast.parse(_read(rel)).body
+                if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in n.targets))
+
+
+def _swap(text: str, phrase: str, new: str) -> str:
+    return re.sub(r"\s+".join(map(re.escape, phrase.split())), lambda _: new, text)
+
+
+def check_model_switch_doc(
+    security_text: str, ttl: float = _source_constant("src/localharness/channels/mobile/channel.py", "CONFIRM_TOKEN_TTL_S"),
+) -> list[str]:
+    """SECURITY.md's paired-phone section says the machine lock covers launches, who is refused whatever the setting, and how long the confirm lives."""
+    paired = " ".join((section(security_text, "### A paired phone or Discord account") or "").split())
+    found = [f"SECURITY.md's paired-phone section does not say {n}" for n in (*LOCK_NEEDLES, f"{int(ttl)} seconds")
+             if n not in paired]
+    return found + ([f"SECURITY.md's paired-phone section still says {STALE_DEFAULT}"] if STALE_DEFAULT in paired else [])
+
+
+def test_model_switch_doc_live():
+    assert check_model_switch_doc(_read("SECURITY.md")) == []
+
+
+def test_model_switch_doc_bites():
+    text = _read("SECURITY.md")
+    for needle in LOCK_NEEDLES:
+        assert check_model_switch_doc(_swap(text, needle, "x")) == [
+            f"SECURITY.md's paired-phone section does not say {needle}"]
+    assert check_model_switch_doc(text, ttl=60.0) == ["SECURITY.md's paired-phone section does not say 60 seconds"]
+    lock = "**What this does NOT cover.** The lock refuses"
+    assert lock in text
+    stale = text.replace(lock, f"It is `true` by default, so nothing you do from the phone or Discord {STALE_DEFAULT},\n\n{lock}", 1)
+    assert check_model_switch_doc(stale) == [f"SECURITY.md's paired-phone section still says {STALE_DEFAULT}"]
+    empty = check_model_switch_doc("## Nothing\n")
+    assert len(empty) == len(LOCK_NEEDLES) + 1
+    assert check_model_switch_doc("## Nothing\n") == empty
 
 
 # ---------------------------------------------------------------- check: what the Plugins sentences say
