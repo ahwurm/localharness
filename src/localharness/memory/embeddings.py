@@ -13,6 +13,7 @@ import hashlib
 import math
 import os
 import re
+import threading
 from typing import Protocol, runtime_checkable
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -29,6 +30,9 @@ def _quiet_ml_output():
     propagate unchanged, only stream writes are swallowed."""
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+    if threading.current_thread() is not threading.main_thread():
+        yield  # the streams are process-wide: a worker swapping them races the console and patch_stdout
+        return
     with open(os.devnull, "w") as devnull, \
             contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
         yield

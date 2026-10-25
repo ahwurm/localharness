@@ -1202,7 +1202,7 @@ def base_system_prompt(cfg, *, tool_call_mode: str, guardrails: str, skills: str
 def render_index(root: Path | None, machine_dir: Path, held: set[str], config_dir_flag: bool, slash: bool) -> str:
     """The root's map of the project and where its skills and agents live and enter a task."""
     from shlex import quote
-    from localharness.channels.base import one_line, sanitize_for_display
+    from localharness.channels.base import one_line
     from localharness.config.skills import ORIGINS
 
     def shown(x) -> str:
@@ -1213,8 +1213,8 @@ def render_index(root: Path | None, machine_dir: Path, held: set[str], config_di
     mine = shown(f"{machine}/{next(d for label, d in ORIGINS if label == 'machine')}")
     write = (f"{shown(project[0])} under the project root; also read: {shown(project[1])} under it, and {mine}"
              if root is not None else mine)
-    flag = f" --config-dir {quote(sanitize_for_display(machine))}" if config_dir_flag else ""
-    unquotable = config_dir_flag and sanitize_for_display(machine) != one_line(machine)
+    flag = f" --config-dir {quote(machine)}" if config_dir_flag else ""
+    unquotable = config_dir_flag and machine != one_line(machine)
     pointer = "" if unquotable else f"`localharness skills{flag}` also shows any skipped"
     tail = "; ".join(c for c in ("`/help` lists them as `/<name>` rows" if slash else "", pointer) if c)
     work = " ".join(c for c in (
