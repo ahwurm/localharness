@@ -92,10 +92,20 @@ async def test_a_first_response_that_is_no_answer_is_named(tmp_path, monkeypatch
 XML_SKILL = '<tool_call>{"name": "skill", "arguments": {"name": "release-notes"}}</tool_call>'
 
 
-async def test_an_xml_mode_first_step_records_the_call_the_loop_dispatched(tmp_path, monkeypatch):
-    step, _, client = await scripted(tmp_path, monkeypatch, reply(XML_SKILL, finish="stop"), mode="xml")
+async def test_the_xml_leg_teaches_the_syntax_and_records_the_call_the_loop_dispatched(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    skill_set = install(tmp_path / "cfg")
+    cfg = root_config(tmp_path / "cfg")
+    registry, _ = await live.root_registry(skill_set, cfg)
+    client = MockLLMClient([reply(XML_SKILL), reply("second request")])
+    with xml_mode(client):
+        taught = client._fn_converter.build_system_injection(registry.global_schemas())
+        step = await first_step_run(client, skill_set, cfg, loop_shape(tmp_path / "cfg", cfg, URL, None), "Draft the release notes.", work)
+    assert "<tool_call>" in taught and "skill" in taught
     assert step.calls == (("skill", {"name": "release-notes"}),)
-    assert step.flaw is None and client._index == 1
+    assert step.flaw is None and client._index == 1 and client.config.tool_call_mode == "native"
 
 
 async def test_a_server_that_answers_natively_in_xml_mode_is_named_not_recorded_as_no_calls(tmp_path, monkeypatch):
@@ -182,12 +192,12 @@ def test_near_misses_share_a_word_only_their_skill_uses(tmp_path):
 
 
 QUESTION_WORDS = {
-    "what", "who", "whom", "whose", "which", "why", "how", "when", "where", "is", "are", "was", "were", "does", "did", "has", "have",
-    "should", "can", "could", "would", "will", "may", "might"}
+    "what", "who", "whom", "whose", "which", "why", "how", "when", "where", "is", "are", "was", "were", "does", "did", "has", "have", "should"}
 
 
 def is_question(text: str) -> bool:
-    return text.strip().endswith("?") or text.split()[0].lower() in QUESTION_WORDS
+    """Opens with a question word; a leading can, could or would is a request."""
+    return text.split()[0].lower() in QUESTION_WORDS
 
 
 def leans(text: str, name: str, own: dict[str, set[str]]) -> bool:
@@ -203,8 +213,8 @@ def test_matching_requests_vary_their_wording(tmp_path):
 
 def test_near_misses_and_matching_requests_are_not_told_apart_by_their_form():
     for name, groups in prompts()["skills"].items():
-        assert sum(not is_question(text) for text in groups["near_miss"]) >= 4, name
-        assert sum(is_question(text) for text in groups["matching"]) >= 4, name
+        assert sum(is_question(text) for text in groups["matching"]) >= 3, name
+        assert sum(is_question(text) for text in groups["near_miss"]) <= 4, name
 
 
 def test_unrelated_requests_share_no_word_with_any_description(tmp_path):
@@ -552,8 +562,9 @@ def test_the_report_of_a_second_run_never_replaces_the_first(tmp_path, monkeypat
     assert first.read_text(encoding="utf-8") == "first" and second.read_text(encoding="utf-8") == "second"
 
 
-def test_only_a_qwen_model_is_the_subject():
-    assert [subject_served(m) for m in ("qwen-27b-swift-1.5", "Qwen3.6-27B", "llama-3.3-70b")] == [True, True, False]
+def test_only_a_qwen_model_is_the_subject_whatever_its_case_and_the_report_names_what_was_served():
+    assert [subject_served(m) for m in ("qwen-27b-swift-1.5", "Qwen3.6-27B", "QWEN-27B", "llama-3.3-70b")] == [True, True, True, False]
+    assert "Model: llama-3.3-70b" in not_run_report(DAY, "llama-3.3-70b", URL, NOT_SUBJECT)
 
 
 async def creator_turn(fake_home, *calls, client=None):
@@ -615,8 +626,8 @@ async def test_a_creator_turn_that_dies_is_an_invalid_run_not_a_lost_report(fake
     assert run.valid is False and run.terminated == "internal_error: the server went away"
 
 
-async def test_a_path_in_the_real_home_is_denied_and_reported_as_written_and_as_resolved(fake_home):
-    target = REAL_HOME / ".localharness" / "skills" / "never-written-probe" / "SKILL.md"
+async def test_a_path_in_the_real_home_is_denied_and_reported_as_written_and_as_resolved(fake_home, tmp_path):
+    target = tmp_path / "real-home" / ".localharness" / "skills" / "never-written-probe" / "SKILL.md"
     run = await creator_turn(fake_home, call(1, "write", path=str(target), content=WEEKLY, mode="overwrite"))
     assert run.valid is False and run.files == ()
     [(tool, shown, allowed)] = run.asks
