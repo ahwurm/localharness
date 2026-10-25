@@ -452,6 +452,14 @@ async def test_confirm_without_a_holder_says_nothing_is_stopped():
     assert chan.asked[0][2]["prompt"] == ms.LAUNCH_QUESTION.format(target="mixtral", stops=ms.LAUNCH_STOPS_NONE, build="")
 
 
+async def test_confirm_shows_control_characters_in_the_holder_escaped():
+    chan, switch = _asker(ms.LAUNCH_YES)
+    await switch.confirm("mixtral", "q\x1b[2J\nfake\u202e", "", _recheck()[1])
+    prompt = chan.asked[0][2]["prompt"]
+    assert "q\\x1b[2J\\x0afake\\u202e" in prompt
+    assert not any(ord(c) < 0x20 or c == "\u202e" for c in prompt)
+
+
 async def test_confirm_returns_a_refusal_that_appeared_during_the_wait_unchanged():
     _, switch = _asker(ms.LAUNCH_YES)
     _, recheck = _recheck(("refused now", "system.error"))
@@ -640,6 +648,16 @@ def test_payload_stops_names_the_holder_on_offered_cold_rows_only(tmp_path):
     assert stops["qwen-27b"] == launch_holder(heavy, harness, (harness.server, PRIMARY)) == "held.gguf"
     for name in (LIVE_PATH, "llama3.1:8b", "Qwen/Qwen3-4B", "held-model", "ckpt", "strata-a", "strata-b"):
         assert stops[name] is None
+
+
+def test_payload_stops_shows_control_and_bidi_characters_in_the_holder_escaped(tmp_path):
+    entries, llm, harness, _ = _payload_world(tmp_path)
+    held = NS(served_name=None, model="/w/a\x1b[2J\r\nb\u202e.gguf")
+    payload = ms.list_payload(entries, llm=llm, harness=harness, active_heavy=(held, PRIMARY), locked=False, launching=None)
+    stops = {r["name"]: r["stops"] for r in payload["models"]}
+    for name in ("mixtral", "qwen-27b"):
+        assert stops[name] == "a\\x1b[2J\\x0d\\x0ab\\u202e.gguf"
+        assert not any(ord(c) < 0x20 or c == "\u202e" for c in stops[name])
 
 
 def test_payload_why_follows_setup_digits_foreign_not_offered(tmp_path):
