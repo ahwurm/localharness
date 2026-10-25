@@ -2400,13 +2400,12 @@ class OrchestratorREPL:
                 url, key, headers, ptype = prior
                 llm.rebind_endpoint(url, api_key=key, extra_headers=headers, provider_type=ptype)
         served = models[0] if models else target
-        # the restart's window line, after the try/except above (D-22, D-36)
         await self._announce_window(ep, prim_ptype or managed.runtime, served)
         llm.config.model = served
         cap = await llm.detect_capabilities()
         note = await self._refresh_token_counter(served)
         # Swapping back to a non-llama.cpp primary by a served-model-name alias relaunched the record
-        # as written; persisting the alias would write it over server.model (D-70), so nothing is.
+        # as written; persisting the alias would write it over server.model, so nothing is.
         alias_swap_back = (not gguf and target == prim_served
                            and managed.model != target)
         saved = (False if alias_swap_back or typed_swap
