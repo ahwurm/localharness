@@ -1147,22 +1147,24 @@ function showAsk(d) {
   const dlg = $("ask");
   dlg.dataset.rid = d.request_id;
   dlg.replaceChildren();
-  dlg.appendChild(el("h3", null, d.klass === "workspace-trust" ? "Trust this workspace?" : "Permission"));
+  const picker = d.klass === "picker";
+  dlg.appendChild(el("h3", null, d.klass === "workspace-trust" ? "Trust this workspace?"
+    : picker ? (d.options.some((o) => o.confirm_required) ? CONFIRM_TITLE : PICKER_TITLE) : "Permission"));
   dlg.appendChild(el("div", null, d.display || d.reason));
   if (d.untrusted_ingest) dlg.appendChild(el("div", "untrusted",
     "this tool ingests attacker-controllable content"));
-  dlg.appendChild(el("pre", null, JSON.stringify(d.tool_params, null, 1)));
+  if (d.tool_name) dlg.appendChild(el("pre", null, JSON.stringify(d.tool_params, null, 1)));
   if (d.deadline_s) dlg.appendChild(el("div", "meta",
     `the gate stops waiting after about ${d.deadline_s}s and records a denial`));
   for (const o of d.options) {
-    const b = el("button", null, o.name + (o.confirm_required ? " (2 taps)" : ""));
+    const b = el("button", null, o.name + (o.confirm_required && !picker ? " (2 taps)" : ""));
     b.onclick = async () => {
       let r = await post(`/api/permissions/${d.request_id}/answer`, { kind: o.kind });
       if (r.status === "confirm_required") {
         // The second tap is enforced by the SERVER, not here. This page is the owner's disposable
         // half — anything else holding the token (curl, a Shortcut, a future UI) hits the same
         // wall, which is the whole point of putting it there rather than in a page.
-        if (!confirm(r.detail)) return;
+        if (!picker && !confirm(r.detail)) { dlg.close(); return; }
         r = await post(`/api/permissions/${d.request_id}/answer`,
                        { kind: o.kind, confirm_token: r.confirm_token });
       }
