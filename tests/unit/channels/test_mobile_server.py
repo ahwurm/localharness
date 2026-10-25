@@ -13,6 +13,7 @@ import re
 import httpx
 import pytest
 from starlette.routing import Route
+from structlog.testing import capture_logs
 
 from localharness.channels.mobile import auth
 from localharness.channels.mobile.channel import MobileChannel
@@ -1086,10 +1087,14 @@ async def test_model_list_hides_a_raising_resolvers_detail(tmp_path):
 
     _, channel, _, client = await _stack(tmp_path)
     channel._model_list_resolver = boom
-    got = await client.get("/api/model", headers=BEARER)
+    with capture_logs() as logs:
+        got = await client.get("/api/model", headers=BEARER)
     assert got.status_code == 503
     assert got.json() == {"error": MODEL_UNAVAILABLE, "asleep": False}
     assert "secret detail" not in got.text and "10.0.0.5" not in got.text
+    [line] = [e for e in logs if e["event"] == "mobile_model_list_failed"]
+    assert line["log_level"] == "warning" and line["error_type"] == "RuntimeError"
+    assert "secret detail" not in repr(logs) and "10.0.0.5" not in repr(logs)
 
 
 async def test_model_list_never_starts_a_session_or_probes_the_endpoint(tmp_path):
