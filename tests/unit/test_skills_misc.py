@@ -19,14 +19,14 @@ from localharness.config.models import AgentConfig, ContextConfig, ToolConfig
 from localharness.config.paths import WORKSPACE_DIR_NAME
 from localharness.config import skills
 from localharness.cli.app import app
-from localharness.config.skills import BUNDLED_NAME, ORIGINS, SkillSet, Skipped, skip_line
+from localharness.config.skills import BUNDLED_NAME, LISTING_BUDGET_CHARS, ORIGINS, SkillSet, Skipped, skip_line
 from localharness.agent import subagent
 from localharness.agent.context import ContentStore
-from localharness.agent.task_record import TaskState
+from localharness.agent.task_record import MAX_REFERENCES, TaskState
 from localharness.tools.builtin.skill_tool import SkillTool
 from localharness.tools.registry import ToolRegistry
 from tests.unit.agent.test_auto_mode import SETTINGS, SHELL, WRITE, _ctx, _shell, _verdict
-from tests.unit.test_docs_convergence import check_denylist, check_protected_entries_doc
+from tests.unit.test_docs_convergence import _NUMBER_WORDS, _read, check_denylist, check_protected_entries_doc
 from tests.unit.test_capabilities import _production_registry
 from tests.unit.test_leftover_plugin_section import _CONFIG, _agent_file
 from tests.unit.test_skills_discovery import _skill
@@ -480,3 +480,41 @@ def test_the_bundled_files_carry_no_internal_id(name) -> None:
 )
 def test_the_id_scan_bites(text, found) -> None:
     assert ids(text) == found
+
+
+VARIANT_A = "On the subject model, the model picked a matching skill from the listing on its own in at least 80 % of test runs."
+VARIANT_B = "The model may not pick a skill up on its own; `/<name>` asks it to."
+UNRELEASED = "## [Unreleased]"
+
+
+def unreleased(text: str) -> str:
+    lines = text.splitlines()
+    start = next((i for i, line in enumerate(lines) if line.startswith(UNRELEASED)), None)
+    if start is None:
+        return ""
+    end = next((j for j in range(start + 1, len(lines)) if lines[j].startswith("## [")), len(lines))
+    return "\n".join(lines[start:end])
+
+
+def check_skills_entry(text: str) -> list[str]:
+    """The CHANGELOG's Unreleased entry keeps one variant, the code's figures and no internal id."""
+    entry = unreleased(text)
+    if not entry:
+        return ["CHANGELOG has no ## [Unreleased] entry"]
+    flat = " ".join(entry.split())
+    headings = [line for line in text.splitlines() if line.startswith("## [")]
+    word = next(w for w, n in _NUMBER_WORDS.items() if n == MAX_REFERENCES)
+    said = ("while a task is live", f"{LISTING_BUDGET_CHARS:,}-character", f"{word}-reference limit")
+    kept = [v for v in (VARIANT_A, VARIANT_B) if v in flat]
+    return [
+        *([] if sum(h.startswith(UNRELEASED) for h in headings) == 1 and headings[0].startswith(UNRELEASED)
+          else ["## [Unreleased] is not the first ## [ heading"]),
+        *([] if len(kept) == 1 else [f"the skills entry keeps {len(kept)} variants, not one"]),
+        *(["the skills entry carries a variant label"] if re.search(r"Variant [AB]", entry) else []),
+        *[f"the skills entry does not say {n}" for n in said if n not in flat],
+        *[f"internal id in the skills entry: {x}" for x in ids(entry)],
+    ]
+
+
+def test_skills_entry_live() -> None:
+    assert check_skills_entry(_read("CHANGELOG.md")) == []
