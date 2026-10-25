@@ -57,6 +57,7 @@ from localharness.core.events import (
 from . import push as push_mod
 from .protocol import (
     ASLEEP_STAGE,
+    Activity,
     AskExpired,
     AskOption,
     BlockingAsk,
@@ -280,6 +281,7 @@ class MobileChannel(ChannelAdapter):
     _pending_resolver: Optional[Callable[[str, int], Awaitable[None]]] = None
     _nudge_resolver: Optional[Callable[[str, str], Awaitable[bool]]] = None
     _cancel_resolver: Optional[Callable[[], Awaitable[bool]]] = None
+    _model_list_resolver: Optional[Callable[[], Awaitable[dict]]] = None
 
     def __init__(self, bus: EventBus, config: dict[str, Any]) -> None:
         super().__init__(bus, config)
@@ -327,6 +329,7 @@ class MobileChannel(ChannelAdapter):
         self._stream_id: Optional[str] = None
         self._status_task: Optional[asyncio.Task] = None
         self._turn_running = False
+        self._activity = ""
         self._context_pct: Optional[float] = None
 
         # Bring-up progress, so a client connecting mid-build sees the stage rather than a number.
@@ -461,9 +464,11 @@ class MobileChannel(ChannelAdapter):
         # registry, the memory tools and the embedding model alive with it (found by measuring
         # the sleeping server, 2026-10-04).
         self._pending_resolver = self._nudge_resolver = self._cancel_resolver = None
+        self._model_list_resolver = None
         self._memory_slot = MemorySlot()  # closes with the session — a dead store must not answer
         self._artifact_roots = {}  # the next session's plugins decide what is served
         self._turn_running = False
+        self._activity = ""
         self._open_asks.clear()
         self._sleep_event.clear()
         self._sleep_now = self._sleeping = False
@@ -1020,7 +1025,12 @@ class MobileChannel(ChannelAdapter):
         `/plugins` restart refuses while something is parked."""
         return (self.session_id is not None and not self._turn_running and not self._clients
                 and self._inbound.empty() and not self._open_asks
-                and not getattr(self._gate, "pending", None))
+                and not getattr(self._gate, "pending", None) and not self._activity)
+
+    def box_activity(self, text: str | None) -> None:
+        """A launch's progress line for the state chip; None or empty clears it."""
+        self._activity = text or ""
+        self.push(Activity(session_id=self.session_id, text=self._activity))
 
     async def nudge(self, text: str) -> bool:
         """Steer the RUNNING turn at its next step boundary (`intent=nudge`).
@@ -1494,6 +1504,8 @@ class MobileChannel(ChannelAdapter):
 
     async def hello(self, client: _Client, resume_seq: Optional[int]) -> Hello:
         """The first frame on a connection."""
+        if self._activity:
+            self.push(Activity(session_id=self.session_id, text=self._activity))
         return Hello(
             session_id=self.session_id,
             agent_id=self.agent_id,
