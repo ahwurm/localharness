@@ -18,6 +18,7 @@ import pytest
 import yaml
 
 from localharness.cli import start_serving
+from localharness.cli.model_switch import ModelSwitch
 from localharness.cli.repl import OrchestratorREPL
 from localharness.config import trust
 from localharness.config.loader import ConfigLoader
@@ -35,6 +36,7 @@ OUTSIDE = lifecycle.RUNS_OUTSIDE_AUTOSTART
 
 class StyledChannel(FakeChannel):
     """A channel that keeps the style each line was sent with."""
+    local_operator = True
 
     def __init__(self) -> None:
         super().__init__()
@@ -94,6 +96,7 @@ class ReplWorld:
         repl, _, agent, _ = _xrepl(w.g, harness, urls, unit_state=unit, **repl_kw)
         channel = StyledChannel()
         repl._channel = channel
+        repl._switch = ModelSwitch(agent, repl._bus, channel, harness, repl._session_gate, w.g)
         agent._llm.config.base_url = PRIMARY_URL
         agent._llm.config.model = PRIMARY
 

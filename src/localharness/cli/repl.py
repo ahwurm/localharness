@@ -2049,6 +2049,9 @@ class OrchestratorREPL:
             return
 
         if entry is not None and entry.kind == "cold" and entry.record.peer is not None:
+            if line := self._switch.refusal(target):
+                await self._send_info(line)
+                return
             # A process the harness did not launch holds the primary's port: say so in one sentence
             # and touch nothing — before any key read, launch decision, stop or announcement (D-33).
             # Off the loop: it reads /proc and may ask systemd or an LM Studio endpoint.
@@ -2155,6 +2158,9 @@ class OrchestratorREPL:
             await self._strata_offer(entries, arg)
             return
 
+        if line := self._switch.refusal(target):
+            await self._send_info(line)
+            return
         gguf = RUNTIMES[managed.runtime].gguf
         typed_gguf = Path(target).expanduser().is_file() and target.lower().endswith(".gguf")
         # A process the harness did not launch holding the primary's port ends the restart in the same

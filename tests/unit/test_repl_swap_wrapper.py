@@ -15,6 +15,7 @@ import pytest
 from pydantic import SecretStr
 
 from localharness.cli import model_ops
+from localharness.cli.model_switch import ModelSwitch
 from localharness.cli.repl import GPU_HOLDER_CLAUSE, PERSIST_SELECTION_FAILED
 from localharness.cli.workspace import MachineTrust
 from localharness.config.loader import load_overlay
@@ -46,6 +47,7 @@ PLANTED = ("sk-planted-91ab", "abcd", "u:p", PROVIDER_KEY)
 
 class StyledChannel(FakeChannel):
     """A channel that keeps the style each line was sent with."""
+    local_operator = True
 
     def __init__(self) -> None:
         super().__init__()
@@ -113,6 +115,7 @@ def _build(tmp_path, *, provider_key=None, primary=None, live=None, **repl_kw):
         tmp_path, harness, live or {PRIMARY_URL: ["model-a"], PEER_URL: "unreachable"}, **repl_kw)
     channel = StyledChannel()
     repl._channel = channel
+    repl._switch = ModelSwitch(agent, repl._bus, channel, harness, repl._session_gate, tmp_path)
 
     async def _refresh(model, *, base_url=None, provider_type=None):
         return ""

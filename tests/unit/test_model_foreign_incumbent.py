@@ -74,6 +74,7 @@ def _harness(server, *, base_url=PRIMARY_URL, peers=None) -> HarnessConfig:
 
 def _build(tmp_path, harness, *, base_url=PRIMARY_URL):
     channel = FakeChannel()
+    channel.local_operator = True
     agent = SimpleNamespace(_llm=FakeLLM(model="qwen-27b", base_url=base_url, provider_type="llamacpp"))
     repl = OrchestratorREPL(
         orchestrator=SimpleNamespace(), agent_loop=agent, channel=channel, bus=SimpleNamespace(),
