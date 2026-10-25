@@ -12,11 +12,14 @@ from types import SimpleNamespace as NS
 
 import pytest
 
+from localharness.cli import model_ops
 from localharness.cli.repl import OrchestratorREPL
 from localharness.config.models import EndpointRef, HarnessConfig, ManagedServerConfig, OrgConfig, ProviderConfig
 from localharness.core.bus import EventBus
 from localharness.core.events import ModelSwitched
 from tests.unit.launch_support import offer_primary_as, stub_liveness
+from tests.unit.test_plan_entries import harness_of, twin_files
+from tests.unit.test_serve_cmd import PRIMARY, PRIMARY_URL, serve_world
 
 
 class _Chan:
@@ -35,6 +38,11 @@ class _Chan:
         self.menu_opened += 1
 
 
+class _ListChan(_Chan):
+    _model_list_resolver = None
+    local_operator = True
+
+
 def _managed() -> ManagedServerConfig:
     return ManagedServerConfig(
         launch="docker", docker_image="img:tag", model="qwen3.6-35b-a3b", port=8000,
@@ -49,7 +57,7 @@ def _managed() -> ManagedServerConfig:
     )
 
 
-def _mk(tmp_path, managed, monkeypatch, *, bus=None, session_id=None, peers=(), live=None):
+def _mk(tmp_path, managed, monkeypatch, *, bus=None, session_id=None, peers=(), live=None, chan=None):
     stub_liveness(monkeypatch, False)
     harness = HarnessConfig(
         provider=ProviderConfig(provider_type="vllm", base_url="http://x/v1",
@@ -65,7 +73,7 @@ def _mk(tmp_path, managed, monkeypatch, *, bus=None, session_id=None, peers=(), 
 
     llm.detect_capabilities = caps
     llm.rebind_endpoint = rebind
-    chan = _Chan()
+    chan = chan or _Chan()
     agent = NS(_llm=llm, _config=NS(name="root"), current_session_id=session_id) if session_id else NS(_llm=llm)
     r = OrchestratorREPL(
         orchestrator=None, agent_loop=agent, channel=chan, bus=bus,
@@ -200,3 +208,37 @@ async def test_a_cross_model_through_the_switch_publishes_one_cross_event(tmp_pa
 
     assert (event.kind, event.endpoint, event.model) == ("cross", "side", "gpt-oss:20b")
     assert llm.config.base_url == "http://side/v1"
+
+
+async def test_the_resolver_reports_the_model_a_hot_switch_landed_on(tmp_path, monkeypatch):
+    chan = _ListChan()
+    r, _chan, _llm, _p = _mk(tmp_path, _managed(), monkeypatch, bus=EventBus(), session_id="s1", chan=chan,
+                             live={"http://x/v1": ["qwen3.6-35b-a3b", "qwen3.6-27b"]})
+    r._subscribe_pending()
+
+    await r._handle_slash("/model qwen3.6-27b")
+
+    assert (await chan._model_list_resolver())["active"] == "qwen3.6-27b"
+
+
+async def test_twins_every_listed_name_picks_its_own_entry(tmp_path, monkeypatch):
+    world = serve_world(tmp_path, monkeypatch, peers=twin_files(tmp_path))
+    chan = _ListChan()
+    llm = NS(config=NS(base_url=PRIMARY_URL, model=PRIMARY))
+    r = OrchestratorREPL(
+        orchestrator=None, agent_loop=NS(_llm=llm), channel=chan, bus=EventBus(), config_dir=world.g,
+        harness_config=harness_of(world), machine_trust=model_ops.trust_as_recorded(world.g))
+
+    async def live_models(url):
+        return ([PRIMARY], True) if url == PRIMARY_URL else ([], False)
+
+    r._live_models = live_models
+    r._subscribe_pending()
+    entries, _live, _bad = await r._plan_model_entries(llm)
+    [cold] = [e for e in entries.numbered() if e.kind == "cold"]
+    assert cold.others
+
+    rows = [row for row in (await chan._model_list_resolver())["models"] if row["why"] is None]
+
+    assert {row["name"] for row in rows} >= {cold.name}
+    assert all(entries.pick(row["name"]).name == row["name"] for row in rows)
