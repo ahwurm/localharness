@@ -444,7 +444,7 @@ const S = {
   tools: {}, calls: new Map(), prov: null, lastSent: "", parked: new Map(), asks: new Map(),
   reasoning: false, offline: false, modes: [], verbose: false, burst: null, lastRow: null,
   webNoted: false, bring: null, echoes: [], working: null, sent: false, activity: "",
-  modelFetch: 0, wakeRefetch: false,
+  modelFetch: 0, wakeRefetch: false, checking: null, modelState: null, overlaid: false,
 };
 const $ = id => document.getElementById(id);
 const log = $("log");
@@ -920,7 +920,7 @@ function onFrame(name, d) {
       // the new line. Reboot onto the fresh session's spine rather than half-adopt it.
       if (!d.synthetic && S.session && d.session_id && d.session_id !== S.session
           && location.reload) { location.reload(); return; }
-      S.session = d.session_id; S.mode = d.mode; S.turn = d.turn_in_progress;
+      S.session = d.session_id; S.mode = d.mode; S.turn = d.turn_in_progress; S.activity = "";
       if (d.model) $("model").textContent = d.model;
       $("state").textContent = d.synthetic ? "REPLAY" : "connected";
       if (d.synthetic) add(el("div", "row sys",
@@ -959,7 +959,7 @@ function onFrame(name, d) {
         ensureWorking();
       }
       break;
-    case "BlockingAsk": S.asks.set(d.request_id, d); paint(); showAsk(d); break;
+    case "BlockingAsk": S.asks.set(d.request_id, d); S.checking = null; paint(); showAsk(d); break;
     case "AskExpired":
       S.asks.delete(d.request_id); paint();
       if ($("ask").open && $("ask").dataset.rid === d.request_id) $("ask").close();
@@ -967,7 +967,7 @@ function onFrame(name, d) {
         `that question expired after ${d.waited_s.toFixed(0)}s and was recorded as ${d.decision}. ` +
         `Nothing ran.`));
       break;
-    case "Activity": S.activity = d.text || ""; break;
+    case "Activity": S.checking = null; S.activity = d.text || ""; paint(); break;
     case "TurnCancelled":
       S.turn = false; S.sent = false; clearProvisional(null); restDials(); paint();
       add(el("div", "row sys", "turn cancelled — the partial text above stays."));
@@ -1010,6 +1010,7 @@ function onFrame(name, d) {
       break;
     }
     case "Notice": {
+      S.checking = null; paint();
       if (S.wakeRefetch && $("cfg").open) { S.wakeRefetch = false; loadModels(); }
       const r = add(el("div", "row " + (d.style === "system.error" ? "err" : "sys")));
       if (d.preformatted) r.appendChild(el("pre", null, d.text)); else r.appendChild(el("div", null, d.text));
@@ -1101,16 +1102,21 @@ const ASLEEP_RIBBON = "asleep — wakes on your next message";
 function paint(modelState) {
   closeBurst();   // any state moment — turn boundary, a permission — freezes an open counter
   const s = $("state");
+  if (modelState) S.modelState = modelState;
+  const overlay = S.activity || (S.checking ? MODEL_CHECKING.replace("{name}", S.checking) : "");
   // The ribbon is QUIET when everything is fine (owner, 2026-09-14: "just type"): a healthy
   // state renders as the wordmark, and the center only speaks when something needs you.
   if (S.offline) { s.textContent = "offline — retrying"; s.className = "offline"; }
-  else if (modelState) {
+  else if (overlay) { s.className = ""; s.textContent = overlay; S.overlaid = true; }
+  else if (modelState || S.overlaid) {
+    const m = modelState || S.modelState || "unknown";
     s.className = "";
-    s.textContent = ["ready", "connected", "unknown"].includes(modelState) ? "harness" : modelState;
+    s.textContent = ["ready", "connected", "unknown"].includes(m) ? "harness"
+      : m === "unreachable" ? "model server unreachable — start it, then retry"
+      : m === "cold" ? "cold — send to start the session"
+      : m === "asleep" ? ASLEEP_RIBBON : m;
+    S.overlaid = false;
   } else s.className = "";
-  if (modelState === "unreachable") s.textContent = "model server unreachable — start it, then retry";
-  else if (modelState === "cold") s.textContent = "cold — send to start the session";
-  else if (modelState === "asleep") s.textContent = ASLEEP_RIBBON;
   if (s.dataset.dream) s.textContent += " · dreaming";
   $("pcount").textContent = String(S.parked.size + S.asks.size);
   // the amber pill is an ACTION MOMENT: on the ribbon only while something actually waits
@@ -1678,6 +1684,7 @@ function paintModes() {
 }
 const modelHeader = () => S.turn ? MODEL_TURN : MODEL_HEADER;
 function tapModel(r) {
+  if (!S.turn && r.kind === "cold") { S.checking = r.label || r.name; paint(); }
   if (S.turn) add(el("div", "row sys", r.kind === "cold" ? MODEL_QUEUED_ASK : MODEL_QUEUED));
   $("cfg").close();
   post(`/api/sessions/${S.session || "current"}/command`, { text: "/model " + r.name });

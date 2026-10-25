@@ -1170,3 +1170,101 @@ console.log(JSON.stringify({head, cold, turn, idle: sys().length, posts: posts.m
                            "queued — runs when this turn ends"]
     assert got["idle"] == 2
     assert got["posts"] == ["/model mixtral:8x7b", "/model llama3.1:8b", "/model llama3.1:8b"]
+
+
+PICKER = """
+const picker = (confirmable) => ({request_id: "r1", klass: "picker", tool_name: "", tool_params: {},
+  reason: "Launch mixtral? This stops qwen3:32b for every client.",
+  display: "Launch mixtral? This stops qwen3:32b for every client.",
+  options: [{kind: "Launch", name: "Launch", confirm_required: confirmable},
+            {kind: "Cancel", name: "Cancel", confirm_required: false}]});
+"""
+
+
+def _chip(page, tmp_path, script):
+    return _models(page, tmp_path, PICKER + 'const chip = () => $("state").textContent;\nhello(false);\n' + script)
+
+
+@NODE_ONLY
+def test_chip_shows_the_launch_progress_over_a_poll(page, tmp_path):
+    got = _chip(page, tmp_path, """
+onFrame("Activity", {text: "launching qwen-gguf"});
+paint("ready");
+console.log(JSON.stringify(chip()));
+""")
+    assert got == "launching qwen-gguf"
+
+
+@NODE_ONLY
+def test_chip_returns_to_the_wordmark_when_the_activity_clears(page, tmp_path):
+    got = _chip(page, tmp_path, """
+onFrame("Activity", {text: "x"}); const during = chip();
+onFrame("Activity", {text: ""});
+console.log(JSON.stringify([during, chip()]));
+""")
+    assert got == ["x", "harness"]
+
+
+@NODE_ONLY
+def test_chip_a_hello_clears_the_activity_and_shows_its_own_model_state(page, tmp_path):
+    got = _chip(page, tmp_path, """
+onFrame("Activity", {text: "x"});
+onFrame("Hello", {session_id: "s", mode: "repl", turn_in_progress: false,
+  protocol_version: PROTOCOL_VERSION, synthetic: false, model_state: "cold"});
+console.log(JSON.stringify([chip(), S.activity]));
+""")
+    assert got == ["cold — send to start the session", ""]
+
+
+@NODE_ONLY
+@pytest.mark.parametrize("frame, after", [
+    ('onFrame("BlockingAsk", picker(true))', "harness"),
+    ('onFrame("Notice", {text: "n"})', "harness"),
+    ('onFrame("Activity", {text: "y"})', "y"),
+])
+def test_chip_a_pending_check_ends_on_the_next_word_from_the_box(page, tmp_path, frame, after):
+    got = _chip(page, tmp_path, f"""
+$("modelBtn").onclick(); await tick();
+waiting[0].res(ok(LIST)); await tick();
+$("cfgModel").children[2].onclick(); await tick();
+const checking = chip();
+{frame};
+console.log(JSON.stringify([checking, chip()]));
+""")
+    assert got == ["checking mixtral:8x7b…", after]
+
+
+@NODE_ONLY
+def test_chip_a_tap_during_a_turn_shows_no_check(page, tmp_path):
+    got = _chip(page, tmp_path, """
+hello(true);
+$("modelBtn").onclick(); await tick();
+waiting[0].res(ok(LIST)); await tick();
+$("cfgModel").children[2].onclick(); await tick();
+console.log(JSON.stringify([chip(), S.checking]));
+""")
+    assert got == ["harness", None]
+
+
+@NODE_ONLY
+def test_chip_an_expired_picker_ask_closes_its_dialog_and_leaves_the_wordmark(page, tmp_path):
+    got = _chip(page, tmp_path, """
+onFrame("BlockingAsk", picker(true)); const open = $("ask").open;
+onFrame("AskExpired", {request_id: "r1", decision: "unchanged", waited_s: 120});
+console.log(JSON.stringify([open, $("ask").open, chip()]));
+""")
+    assert got == [True, False, "harness"]
+
+
+@NODE_ONLY
+@pytest.mark.parametrize("poll", ["", "unreachable"])
+def test_chip_offline_wins_over_every_other_source(page, tmp_path, poll):
+    got = _chip(page, tmp_path, f"""
+onFrame("Activity", {{text: "x"}});
+$("modelBtn").onclick(); await tick();
+waiting[0].res(ok(LIST)); await tick();
+$("cfgModel").children[2].onclick(); await tick();
+S.offline = true; paint({poll!r} || undefined);
+console.log(JSON.stringify(chip()));
+""")
+    assert got == "offline — retrying"
