@@ -3042,8 +3042,7 @@ class OrchestratorREPL:
             workflow.set_generated_yaml(yaml_str)
             workflow.transition("configure_done")  # advance to CONFIRM
             await self._channel.send_message(
-                f"Here's the generated config:\n\n```yaml\n{yaml_str}\n```\n\n"
-                "Does this look good? (yes/no/change, or 'cancel')",  # #59: advertise the escape
+                f"Here's the generated config:\n\n```yaml\n{yaml_str}\n```\n\n{workflow.confirm_prompt()}",
                 metadata={"style": "system.info"},
             )
             return
@@ -3051,6 +3050,8 @@ class OrchestratorREPL:
         if new_state == WorkflowState.DEPLOY:
             # User confirmed — deploy the config.
             name = workflow.gathered.get("name")
+            if (note := workflow.machine_note()) is not None:
+                await self._channel.send_message(note, metadata={"style": "system.info"})
             try:
                 config_path = workflow.deploy_config(name)
             except Exception as exc:
@@ -3089,6 +3090,10 @@ class OrchestratorREPL:
 
         if new_state == WorkflowState.COMPLETE:
             self._orchestrator._active_workflow = None
+            return
+
+        if new_state == WorkflowState.CONFIRM:
+            await self._channel.send_message(workflow.reply_line(), metadata={"style": "system.info"})
             return
 
         # Still in DISCUSS state — ask for more info

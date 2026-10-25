@@ -105,6 +105,53 @@ def test_a_registry_without_a_loader_hands_the_flow_the_repls_own_dirs(tmp_path,
     assert loader._project_trusted is False
 
 
+def _seed(path, role):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"name: finance-helper\nrole: {role}\n")
+
+
+def _llm(mock_llm_client, n=1):
+    return mock_llm_client([mock_llm_client.Response(content=f"name: finance-helper\nrole: {ROLE}")] * n)
+
+
+def test_an_unknown_answer_prints_the_reply_line_once(tmp_path, mock_llm_client):
+    channel = ScriptedChannel(["create an agent", f"it should {ROLE}", "maybe", "lgtm"])
+    repl, orch, home, ws = _bound_repl(channel, _llm(mock_llm_client), tmp_path)
+    asyncio.run(repl.run())
+    assert channel.sent.count("Reply: yes / machine / change / cancel") == 1
+    assert (ws / "agents" / "finance-helper.yaml").exists()
+
+    channel = ScriptedChannel(["create an agent", f"it should {ROLE}", "project", "yes"])
+    repl, orch, agent, bus = _repl(channel, _llm(mock_llm_client), config_dir=tmp_path / "unbound")
+    (tmp_path / "unbound").mkdir()
+    asyncio.run(repl.run())
+    assert channel.sent.count("Reply: yes / no / change / cancel") == 1
+    assert (tmp_path / "unbound" / "agents" / "finance-helper.yaml").exists()
+
+
+def test_the_bound_confirm_prompt_names_the_project_path_and_the_shadow(tmp_path, mock_llm_client):
+    channel = ScriptedChannel(["create an agent", f"it should {ROLE}"])
+    repl, orch, home, ws = _bound_repl(channel, _llm(mock_llm_client), tmp_path)
+    _seed(home / "agents" / "finance-helper.yaml", "machine one")
+    asyncio.run(repl.run())
+    confirm = next(m for m in channel.sent if "```yaml" in m)
+    assert f"role: {ROLE}" in confirm
+    assert confirm.endswith(f"Save to {ws / 'agents' / 'finance-helper.yaml'} "
+                            f"(shadows {home / 'agents' / 'finance-helper.yaml'})? yes / machine / change / cancel")
+
+
+def test_machine_saves_to_the_machine_and_notes_a_project_file(tmp_path, mock_llm_client):
+    channel = ScriptedChannel(["create an agent", f"it should {ROLE}", "machine"])
+    repl, orch, home, ws = _bound_repl(channel, _llm(mock_llm_client), tmp_path)
+    _seed(ws / "agents" / "finance-helper.yaml", "proj")
+    asyncio.run(repl.run())
+    mine = home / "agents" / "finance-helper.yaml"
+    note = (f"note: {ws / 'agents' / 'finance-helper.yaml'} shadows {mine}; it will not load here")
+    assert channel.sent.index(note) < channel.sent.index(f"Agent deployed to {mine}")
+    assert yaml.safe_load(mine.read_text())["role"] == ROLE
+    assert yaml.safe_load((ws / "agents" / "finance-helper.yaml").read_text())["role"] == "proj"
+
+
 def test_agent_creation_e2e_writes_real_config(tmp_path, mock_llm_client):
     """Trigger -> description -> yes must end with a validated YAML on disk.
 
