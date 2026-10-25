@@ -61,6 +61,13 @@ def _bare_name(entry: str) -> str:
         return entry
 
 
+def allowed_by_config(agent_tools: Any, name: str, scope: str) -> bool:
+    """Whether an agent's tool config admits the global- or division-scope tool `name`: inherited or
+    added, and not denied."""
+    inherit = agent_tools.inherit if agent_tools.inherit is not None else ["global", "division"]
+    return (scope in inherit or name in (agent_tools.add or [])) and name not in (agent_tools.deny or [])
+
+
 async def _maybe_await(result: Any) -> Any:
     import asyncio
     if asyncio.iscoroutine(result):
@@ -254,19 +261,16 @@ class ToolRegistry:
         division_id: str,
         tool_config: Any,  # ToolConfig from config/models.py
     ) -> dict[str, ToolSchema]:
-        resolved: dict[str, ToolProtocol] = {}
-        inherit = tool_config.inherit if tool_config.inherit is not None else ["global", "division"]
-
-        if "global" in inherit:
-            resolved.update(self._tools["global"])
+        resolved: dict[str, ToolProtocol] = {
+            n: t for n, t in self._tools["global"].items() if allowed_by_config(tool_config, n, "global")}
 
         # MCP always visible unless denied
         for name, tool in self._tools["mcp"].items():
             if name not in resolved:
                 resolved[name] = tool
 
-        if "division" in inherit:
-            resolved.update(self._division_tools.get(division_id, {}))
+        resolved.update({n: t for n, t in self._division_tools.get(division_id, {}).items()
+                         if allowed_by_config(tool_config, n, "division")})
 
         # Agent-specific tools always applied
         resolved.update(self._agent_tools.get(agent_id, {}))
