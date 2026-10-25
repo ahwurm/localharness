@@ -1341,7 +1341,7 @@ class MobileServer:
         })
 
     async def answer(self, request: Request) -> Response:
-        """Answer a blocking ask. Idempotent; the `_always` kinds take a second, server-checked tap."""
+        """Answer a blocking ask. Idempotent; the `_always` kinds and a picker's confirm option take a second, server-checked tap."""
         refusal = self._authed(request, post=True)
         if refusal is not None:
             return refusal
@@ -1541,7 +1541,7 @@ _VERBS: tuple[tuple[str, str, str], ...] = (
     ("POST", "/api/incognito",
      "incognito for this process; body {on}; true also sends Clear-Site-Data: \"cache\""),
     ("POST", "/api/permissions/{request_id}/answer",
-     "answer a blocking ask; idempotent; the _always kinds need a second POST with confirm_token"),
+     "answer a blocking ask; idempotent; the kinds that need a second POST: the _always kinds and a picker's confirm option, with confirm_token"),
     ("POST", "/api/pending/{pending_id}/{approve|deny}", "answer a parked call"),
     ("POST", "/api/bringup/abort", "abandon a wedged session bring-up"),
     ("POST", "/api/auth/enroll", "trade the bearer token for the stream cookie"),

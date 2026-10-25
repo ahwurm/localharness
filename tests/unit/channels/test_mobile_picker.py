@@ -1,9 +1,9 @@
 """`MobileChannel.run_picker`: the phone's picker over the existing BlockingAsk option frame (D-33).
 
-No new wire frame and no page change: four tappable levels answered through the same
-`answer_ask` / `GET /api/permissions` path a permission question uses. The properties that matter
-are that nothing but an offered level can answer it, and that an unanswered picker never holds
-the REPL for longer than its deadline.
+The options are BlockingAsk buttons answered through the same `answer_ask` and
+`GET /api/permissions` path a permission question uses, and a `confirm` option takes a second,
+server-checked request. The properties that matter are that nothing but an offered level can
+answer it, and that an unanswered picker never holds the REPL for longer than its deadline.
 """
 from __future__ import annotations
 
@@ -203,3 +203,61 @@ async def test_a_second_answer_after_the_first_is_not_recorded_twice():
     channel.answer_ask(rid, "low")
     assert channel.answer_ask(rid, "max")["status"] in {"unknown", "already_answered"}
     assert await task == "low"
+
+
+LAUNCH = ("Launch", "Cancel")
+LAUNCH_PROMPT = "Launch mixtral? This stops qwen3-27b for every client."
+
+
+async def _launch(channel, client):
+    return await _open(channel, client, LAUNCH, "qwen3-27b", prompt=LAUNCH_PROMPT, confirm="Launch")
+
+
+async def test_picker_confirm_option_takes_a_second_server_checked_request():
+    channel = await _channel()
+    client = channel.attach_client()
+    task, frame = await _launch(channel, client)
+    rid = frame["request_id"]
+    assert [o["confirm_required"] for o in frame["options"]] == [True, False]
+    assert frame["klass"] == PICKER_KLASS
+
+    first = channel.answer_ask(rid, "Launch")
+    assert first["status"] == "confirm_required" and first["confirm_token"]
+    assert first["detail"] == frame["reason"] and "permanent" not in first["detail"]
+    assert not task.done()
+
+    assert channel.answer_ask(rid, "Launch", "nope")["confirm_token"] == first["confirm_token"]
+    assert channel.answer_ask(rid, "Launch", first["confirm_token"]) == {
+        "status": "recorded", "decision": "Launch"}
+    assert channel.answer_ask(rid, "Launch", first["confirm_token"])["status"] == "already_answered"
+    assert await task == "Launch"
+
+
+async def test_picker_confirm_cancel_records_in_one_request():
+    channel = await _channel()
+    client = channel.attach_client()
+    task, frame = await _launch(channel, client)
+
+    assert channel.answer_ask(frame["request_id"], "Cancel") == {
+        "status": "recorded", "decision": "Cancel"}
+    assert await task == "Cancel"
+
+
+async def test_picker_confirm_unanswered_expires_unchanged(monkeypatch):
+    monkeypatch.setattr(channel_mod, "PICKER_ASK_TIMEOUT_S", 0.05)
+    channel = await _channel()
+    client = channel.attach_client()
+    task, frame = await _launch(channel, client)
+
+    assert await asyncio.wait_for(task, 5.0) is None
+    expired = [r for r in _drain(client) if r[0] == "AskExpired"]
+    assert len(expired) == 1 and expired[0][2]["decision"] == "unchanged"
+
+
+async def test_picker_without_confirm_records_every_option_in_one_request():
+    channel = await _channel()
+    client = channel.attach_client()
+    task, frame = await _open(channel, client, LEVELS, "high")
+    assert [o["confirm_required"] for o in frame["options"]] == [False] * len(LEVELS)
+    assert channel.answer_ask(frame["request_id"], "max") == {"status": "recorded", "decision": "max"}
+    assert await task == "max"
