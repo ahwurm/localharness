@@ -4,6 +4,32 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.22.1] — 2026-10-25
+
+**Project agents.** An agent file in a project's `.localharness/agents/` is now listed to the model and in `/agents` as soon as it is used or created, the agent tool tells the model about both the project and machine directories (the machine one as the session actually reads it) (and says when a session has no project layer), `agent create` and the in-session creation flow share one writer that never writes through a link and refuses a symlinked file, the in-session flow saves to the project when one is bound (say `machine` to change it), and `localharness agent list` shows each agent's origin and what a project file shadows. Project agents keep their narrowing: permissions can only tighten, and a specialist gets no MCP servers of its own.
+
+### Added
+- **`localharness agent list`** shows an Origin column (`project` or `machine`) and, under the
+  table, a dim `shadows <path>` line for each project agent file that hides a machine one. Every
+  agent file that does not load is one line on stderr naming the file, why and what to do;
+  `--json` adds `origin` and `path` to each entry, and `shadows` when it hides one, and stays one
+  array on stdout.
+- **A line when project agent files sit unread** because `--config-dir`, `LOCALHARNESS_DIR` or
+  `LOCALHARNESS_HOME` replaced the configuration: `localharness agent list` prints it for all
+  three, `localharness start` only for `--config-dir`.
+- **`/agents`** marks each agent `(project)` or `(machine)`, lists the agent files that do not
+  load under the roster (twenty at most, then a pointer to `localharness agent list`), and with
+  no agents names the directories it searched.
+
+### Changed
+- **The in-session creation flow names the file before it saves.** With a project bound it asks
+  `Save to <project>/.localharness/agents/<name>.yaml? yes / machine / change / cancel` and says
+  when that file will shadow a machine agent of the same name; an answer it does not take prints
+  the ones it does, and a save the writer refuses (the file exists, or is a link) says why and
+  goes back to the description instead of ending the flow.
+- **`localharness agent create`** writes through the same writer: an existing agent or a
+  symlinked agent file prints `cannot write <path>: <reason>`.
+
 ## [0.22.0] — 2026-10-24
 
 Skills: procedures the model loads when a request matches, and a bundled `skill-creator` that writes the next one with you. A skill is procedural memory, knowing how kept apart from knowing that ([Cohen and Squire 1980](https://doi.org/10.1126/science.7414331)); its description is the cue a situation is recognised by (Klein's recognition-primed decision, 1993), its body a script of steps (Schank and Abelson 1977), and writing one from a worked session is knowledge compilation ([Anderson 1982](https://doi.org/10.1037/0033-295X.89.4.369); Soar's chunking, [Laird, Rosenbloom and Newell 1986](https://doi.org/10.1023/A:1022639103969)). The format is the open [Agent Skills](https://agentskills.io/specification) one. In one study open-weight models triggered the right skill on only about a third of tasks ([Skill-Use](https://arxiv.org/abs/2608.04828)), so `/<name>` is the sure way in.
