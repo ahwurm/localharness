@@ -258,6 +258,7 @@ async def test_model_managed_restart_path(tmp_path, monkeypatch):
     srv = ManagedServerConfig(binary="/x/vllm", model="model-a")
     harness = _harness(srv)
     repl, channel, agent = _repl(tmp_path, harness, live=["model-a"])
+    channel.local_operator = True
 
     await repl._handle_slash("/model cached-b")
     assert calls == ["stop", "start", "wait"]
@@ -403,6 +404,7 @@ async def test_model_managed_restart_rebinds_token_counter(tmp_path, monkeypatch
     tc = TokenCounter(base_url="http://localhost:8081/v1", model="model-a", provider_type="vllm")
     srv = ManagedServerConfig(binary="/x/vllm", model="model-a")
     channel = FakeChannel()
+    channel.local_operator = True
     agent = SimpleNamespace(_llm=FakeLLM(), _ctx=SimpleNamespace(_token_counter=tc))
     repl = OrchestratorREPL(
         orchestrator=SimpleNamespace(),
@@ -775,6 +777,7 @@ def _xrepl(tmp_path, harness, models_by_url, **repl_kw):
     from localharness.cli import model_ops
 
     channel = FakeChannel()
+    channel.local_operator = True
     agent = SimpleNamespace(_llm=FakeLLM())
     repl = OrchestratorREPL(
         orchestrator=SimpleNamespace(), agent_loop=agent, channel=channel,

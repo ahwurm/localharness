@@ -13,6 +13,7 @@ from types import SimpleNamespace as NS
 import pytest
 
 from localharness.cli import model_ops
+from localharness.cli.model_switch import LAUNCH_ELSEWHERE, LAUNCH_LOCKED
 from localharness.cli.repl import OrchestratorREPL
 from localharness.config.models import EndpointRef, HarnessConfig, ManagedServerConfig, OrgConfig, ProviderConfig
 from localharness.core.bus import EventBus
@@ -23,6 +24,8 @@ from tests.unit.test_serve_cmd import PRIMARY, PRIMARY_URL, serve_world
 
 
 class _Chan:
+    local_operator = True
+
     def __init__(self):
         self.msgs: list[str] = []
         self.activity: list[str | None] = []
@@ -242,3 +245,138 @@ async def test_twins_every_listed_name_picks_its_own_entry(tmp_path, monkeypatch
 
     assert {row["name"] for row in rows} >= {cold.name}
     assert all(entries.pick(row["name"]).name == row["name"] for row in rows)
+
+
+COLD_URL = "http://cold/v1"
+COLD_SERVED = "qwen-gguf"
+
+
+def _cold_peer() -> EndpointRef:
+    return EndpointRef(
+        name="cold", base_url=COLD_URL, provider_type="llamacpp", gpu=True, api_key="none",
+        lifecycle=ManagedServerConfig(runtime="llamacpp", binary="/x/llama-server", model="/x/m.gguf", port=8080,
+                                      gpu=True, extra_args=["-a", COLD_SERVED]))
+
+
+class _Remote(_Chan):
+    local_operator = False
+
+    def __init__(self, *, picker=True):
+        super().__init__()
+        self.picked: list = []
+        if picker:
+            self.can_run_picker = lambda: True
+
+    async def run_picker(self, options, current):
+        self.picked.append(options)
+        return None
+
+
+class _Anonymous:
+    def __init__(self):
+        self.msgs: list[str] = []
+        self.styles: list[str] = []
+
+    async def send_message(self, content, metadata=None):
+        self.msgs.append(content)
+
+    def box_activity(self, text):
+        pass
+
+
+def _remote_world(tmp_path, monkeypatch, chan, gate, *, bus=None, peers=(), served=("qwen3.6-35b-a3b",)):
+    r, chan, llm, _p = _mk(tmp_path, _managed(), monkeypatch, bus=bus, session_id="s1" if bus else None,
+                           peers=[_cold_peer(), *peers], chan=chan)
+
+    async def live(base_url):
+        return ([], False) if base_url == COLD_URL else (list(served), True)
+
+    r._live_models = live
+    r._gate = gate
+    offer_primary_as(monkeypatch, "qwen3.6-27b")
+    return r, chan, llm
+
+
+def _watch_every_probe(r, monkeypatch):
+    from localharness.provider import lifecycle
+
+    touched: list[str] = []
+
+    def spy(name):
+        def inner(*a, **k):
+            touched.append(name)
+        return inner
+
+    r._foreign_incumbent = spy("foreign")
+    monkeypatch.setattr("localharness.cli.repl._peer_session_key", spy("key"))
+    monkeypatch.setattr(lifecycle, "swap", spy("swap"))
+    monkeypatch.setattr(lifecycle, "swap_refusal", spy("swap_refusal"))
+    return touched
+
+
+@pytest.mark.parametrize("target", [COLD_SERVED, "qwen3.6-27b"])
+async def test_a_launch_from_a_locked_channel_is_refused_before_any_probe(tmp_path, monkeypatch, target):
+    bus = EventBus()
+    chan = _Remote()
+    sent: list = []
+
+    async def send(content, metadata=None):
+        sent.append((content, metadata))
+
+    chan.send_message = send
+    r, chan, llm = _remote_world(tmp_path, monkeypatch, chan, NS(remote_unattended=False), bus=bus)
+    touched = _watch_every_probe(r, monkeypatch)
+    before = (r._active_heavy, dict(vars(llm.config)))
+
+    await r._handle_slash(f"/model {target}")
+
+    assert sent == [(LAUNCH_LOCKED, {"style": "system.info"})]
+    assert touched == [] and chan.picked == []
+    assert (r._active_heavy, dict(vars(llm.config))) == before
+    assert bus.history(event_types=[ModelSwitched]) == []
+
+
+async def test_a_launch_from_a_channel_with_no_operator_attribute_and_no_gate_is_locked(tmp_path, monkeypatch):
+    chan = _Anonymous()
+    r, chan, _llm = _remote_world(tmp_path, monkeypatch, chan, None)
+    touched = _watch_every_probe(r, monkeypatch)
+
+    await r._handle_slash(f"/model {COLD_SERVED}")
+
+    assert chan.msgs == [LAUNCH_LOCKED] and touched == []
+
+
+async def test_a_launch_from_a_channel_with_no_picker_is_sent_elsewhere(tmp_path, monkeypatch):
+    chan = _Remote(picker=False)
+    r, chan, _llm = _remote_world(tmp_path, monkeypatch, chan, NS(remote_unattended=True))
+    touched = _watch_every_probe(r, monkeypatch)
+
+    await r._handle_slash(f"/model {COLD_SERVED}")
+
+    assert chan.msgs == [LAUNCH_ELSEWHERE.format(target=COLD_SERVED, phone="")] and touched == []
+
+
+async def test_hot_and_cross_from_a_locked_channel_land_unasked(tmp_path, monkeypatch):
+    bus = EventBus()
+    side = EndpointRef(name="side", base_url="http://side/v1", provider_type="ollama", api_key="none")
+    chan = _Remote()
+    r, chan, llm = _remote_world(tmp_path, monkeypatch, chan, NS(remote_unattended=False), bus=bus, peers=[side],
+                                served=("qwen3.6-35b-a3b", "qwen3.6-27b"))
+    live = r._live_models
+
+    async def live_with_side(base_url):
+        return (["gpt-oss:20b"], True) if base_url == "http://side/v1" else await live(base_url)
+
+    r._live_models = live_with_side
+
+    async def persist_active(endpoint, model):
+        return None
+
+    r._persist_active_endpoint = persist_active
+
+    await r._handle_slash("/model qwen3.6-27b")
+    await r._handle_slash("/model gpt-oss:20b")
+
+    assert [e.kind for e in bus.history(event_types=[ModelSwitched])] == ["hot", "cross"]
+    assert chan.picked == [] and LAUNCH_LOCKED not in chan.msgs
+    assert llm.config.base_url == "http://side/v1"
