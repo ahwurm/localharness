@@ -1177,7 +1177,8 @@ class MobileServer:
 
         try:
             return _json(await resolver())
-        except Exception:
+        except Exception as exc:
+            log.warning("mobile_model_list_failed", error_type=type(exc).__name__)
             return _json({"error": MODEL_UNAVAILABLE, "asleep": False}, status=503)
 
     async def memory_list(self, request: Request) -> Response:
