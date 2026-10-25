@@ -689,3 +689,163 @@ def test_payload_bidi_override_is_escaped_in_the_label_and_raw_in_the_name(tmp_p
     _, llm, harness, heavy = _payload_world(tmp_path)
     [row] = ms.list_payload(entries, llm=llm, harness=harness, active_heavy=heavy, locked=False, launching=None)["models"]
     assert "‮" not in row["label"] and row["name"] == "evil‮name"
+
+
+def _list_entries():
+    from localharness.cli.model_ops import Entries, EntryGroup, PlanEntry, ServingRecord
+
+    peer_b = NS(name="peer-b", base_url=PEER_B)
+    peer_c = NS(name="peer-c", base_url=PEER_C, lifecycle=NS())
+    mixtral = ServingRecord("mixtral", "mixtral", PEER_C, "llamacpp", peer_c, None, "p")
+    return Entries((EntryGroup("g", (
+        PlanEntry("qwen3:32b", "live", "llamacpp", active=True),
+        PlanEntry("llama3.1:8b", "live", "llamacpp", endpoint=peer_b),
+        PlanEntry("mixtral", "cold", "llamacpp", record=mixtral)), True),))
+
+
+class _Plan:
+    def __init__(self, gates=(), error=None, malformed=()):
+        self.calls, self.gates, self.error, self.malformed = 0, list(gates), error, set(malformed)
+
+    async def __call__(self, llm):
+        n = self.calls
+        self.calls += 1
+        if n < len(self.gates):
+            await self.gates[n].wait()
+        if self.error:
+            raise self.error
+        return _list_entries(), {}, self.malformed
+
+
+async def _settle():
+    for _ in range(8):
+        await asyncio.sleep(0)
+
+
+def _listing(chan=None, gate=lambda: None, tmp=None):
+    return _world(chan=chan or _local(), gate=gate, config_dir=tmp)[1]
+
+
+async def _noop(arg):
+    return None
+
+
+def _clock(monkeypatch, start=100.0):
+    now = [start]
+    monkeypatch.setattr(ms, "time", NS(monotonic=lambda: now[0]))
+    return now
+
+
+def _names(payload):
+    return [r["name"] for r in payload["models"]]
+
+
+@pytest.mark.parametrize("missing", ["llm", "harness", "config_dir"])
+async def test_model_list_unavailable_answers_without_planning(tmp_path, missing):
+    _, switch, _, _ = _world(chan=_local(), config_dir=None if missing == "config_dir" else tmp_path, with_llm=missing != "llm")
+    if missing == "harness":
+        switch._harness = None
+    plan = _Plan()
+    assert await switch.model_list(plan, None) == {"active": None, "models": [], "footer": [ms.MODEL_UNAVAILABLE]}
+    assert plan.calls == 0
+
+
+async def test_model_list_concurrent_calls_plan_once_and_agree(tmp_path):
+    switch, plan = _listing(tmp=tmp_path), _Plan([asyncio.Event()])
+    a, b = (asyncio.ensure_future(switch.model_list(plan, None)) for _ in range(2))
+    await _settle()
+    plan.gates[0].set()
+    first, second = await asyncio.gather(a, b)
+    assert plan.calls == 1 and first == second and _names(first) == ["qwen3:32b", "llama3.1:8b", "mixtral"]
+
+
+async def test_model_list_reuses_inside_the_window_and_plans_again_at_its_edge(tmp_path, monkeypatch):
+    now, switch, plan = _clock(monkeypatch), _listing(tmp=tmp_path), _Plan()
+    first = await switch.model_list(plan, None)
+    now[0] = 114.9
+    assert await switch.model_list(plan, None) == first and plan.calls == 1
+    now[0] = 115.0
+    await switch.model_list(plan, None)
+    assert plan.calls == 2
+
+
+async def test_model_list_plans_again_after_a_run(tmp_path):
+    switch, plan = _listing(tmp=tmp_path), _Plan()
+    await switch.model_list(plan, None)
+    await switch.run(_noop, "")
+    await switch.model_list(plan, None)
+    assert plan.calls == 2
+
+
+async def test_model_list_during_a_launch_plans_nothing_and_serves_the_stored_rows(tmp_path):
+    switch, plan, seen = _listing(tmp=tmp_path), _Plan(), []
+    before = await switch.model_list(plan, None)
+
+    async def handler(arg):
+        switch.launch("/home/u/w/big.gguf")
+        seen.append(await switch.model_list(plan, None))
+
+    await switch.run(handler, "")
+    [during] = seen
+    assert plan.calls == 1 and during["launching"] == "/home/u/w/big.gguf"
+    assert during["models"] == before["models"] and before["launching"] is None
+
+
+async def test_model_list_during_a_launch_with_nothing_stored_has_the_label_and_no_rows(tmp_path):
+    _, switch, _, _ = _world(model="/home/u/w/held.gguf", chan=_local(), config_dir=tmp_path)
+    plan, seen = _Plan(), []
+
+    async def handler(arg):
+        switch.launch("/home/u/w/big.gguf")
+        seen.append(await switch.model_list(plan, None))
+
+    await switch.run(handler, "")
+    assert plan.calls == 0
+    assert seen == [{"active": "held.gguf", "endpoint": "primary", "launching": "/home/u/w/big.gguf", "models": [], "footer": []}]
+
+
+async def test_model_list_straddling_a_run_is_returned_but_never_stored(tmp_path):
+    switch, plan = _listing(tmp=tmp_path), _Plan([asyncio.Event(), asyncio.Event()])
+    a = asyncio.ensure_future(switch.model_list(plan, None))
+    await _settle()
+    await switch.run(_noop, "")
+    b = asyncio.ensure_future(switch.model_list(plan, None))
+    await _settle()
+    assert plan.calls == 2
+    plan.gates[0].set()
+    assert _names(await a) and switch._stored is None
+    plan.gates[1].set()
+    fresh = await b
+    assert switch._stored is not None and switch._stored[1]["models"] == fresh["models"]
+
+
+async def test_model_list_a_raising_plan_reaches_every_joiner_and_the_next_call_plans_again(tmp_path):
+    switch, plan = _listing(tmp=tmp_path), _Plan([asyncio.Event()], error=RuntimeError("down"))
+    calls = [asyncio.ensure_future(switch.model_list(plan, None)) for _ in range(2)]
+    await _settle()
+    plan.gates[0].set()
+    results = await asyncio.gather(*calls, return_exceptions=True)
+    assert all(isinstance(r, RuntimeError) for r in results)
+    assert switch._inflight is None and switch._stored is None
+    plan.error = None
+    assert _names(await switch.model_list(plan, None)) and plan.calls == 2
+
+
+async def test_model_list_a_cancelled_joiner_leaves_the_shared_plan_running(tmp_path):
+    switch, plan = _listing(tmp=tmp_path), _Plan([asyncio.Event()])
+    a, b = (asyncio.ensure_future(switch.model_list(plan, None)) for _ in range(2))
+    await _settle()
+    a.cancel()
+    await _settle()
+    plan.gates[0].set()
+    assert _names(await b) and plan.calls == 1
+    with pytest.raises(asyncio.CancelledError):
+        await a
+
+
+async def test_model_list_reply_carries_the_launching_of_the_moment_without_touching_the_store(tmp_path):
+    switch, plan = _listing(tmp=tmp_path), _Plan()
+    await switch.model_list(plan, None)
+    switch.launching = "x"
+    assert (await switch.model_list(plan, None))["launching"] == "x"
+    assert switch._stored[1]["launching"] is None

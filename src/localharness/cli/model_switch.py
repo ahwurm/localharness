@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from collections.abc import Awaitable, Callable
 from functools import partial
 from pathlib import Path
@@ -185,3 +186,33 @@ class ModelSwitch:
             finally:
                 if self._launched and not cancelled:
                     self._box_activity(None)
+
+    async def model_list(self, plan, active_heavy) -> dict:
+        llm = getattr(self._agent, "_llm", None)
+        if llm is None or self._harness is None or self._config_dir is None:
+            return {"active": None, "models": [], "footer": [MODEL_UNAVAILABLE]}
+        fresh = {"launching": self.launching}
+        if self.launching is not None:
+            if self._stored:
+                return {**self._stored[1], **fresh}
+            return {"active": _label(llm.config.model), "endpoint": _endpoint_name(self._harness, llm.config.base_url),
+                    "models": [], "footer": [], **fresh}
+        if self._stored and time.monotonic() - self._stored[0] < MODEL_LIST_REUSE_S:
+            return {**self._stored[1], **fresh}
+        if self._inflight is None or self._inflight[0] != self._generation:
+            gen = self._generation
+            self._inflight = (gen, asyncio.ensure_future(self._planned(plan, llm, active_heavy, gen)))
+        task = self._inflight[1]
+        return {**await asyncio.shield(task), **fresh}
+
+    async def _planned(self, plan, llm, active_heavy, gen: int) -> dict:
+        try:
+            entries, _live, _malformed = await plan(llm)
+            payload = list_payload(entries, llm=llm, harness=self._harness, active_heavy=active_heavy,
+                                   locked=self.refusal("") is not None, launching=self.launching)
+            if gen == self._generation:
+                self._stored = (time.monotonic(), payload)
+            return payload
+        finally:
+            if self._inflight and self._inflight[1] is asyncio.current_task():
+                self._inflight = None
