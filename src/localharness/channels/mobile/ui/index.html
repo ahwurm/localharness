@@ -1010,6 +1010,7 @@ function onFrame(name, d) {
       break;
     }
     case "Notice": {
+      if (S.wakeRefetch && $("cfg").open) { S.wakeRefetch = false; loadModels(); }
       const r = add(el("div", "row " + (d.style === "system.error" ? "err" : "sys")));
       if (d.preformatted) r.appendChild(el("pre", null, d.text)); else r.appendChild(el("div", null, d.text));
       if (d.detail) r.appendChild(el("div", "meta", d.detail));
@@ -1244,6 +1245,7 @@ $("filePick").onchange = () => { stage($("filePick").files); $("filePick").value
 async function send(intent) {
   const text = $("text").value.trim();
   if (!text && !staged.length) return;
+  if (text === "/model") { $("text").value = ""; openModels(); return; }
   const sending = staged.slice();
   let images;
   try {
@@ -1676,6 +1678,7 @@ function paintModes() {
 }
 const modelHeader = () => S.turn ? MODEL_TURN : MODEL_HEADER;
 function tapModel(r) {
+  if (S.turn) add(el("div", "row sys", r.kind === "cold" ? MODEL_QUEUED_ASK : MODEL_QUEUED));
   $("cfg").close();
   post(`/api/sessions/${S.session || "current"}/command`, { text: "/model " + r.name });
 }
