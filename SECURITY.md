@@ -261,7 +261,7 @@ signature covers a file the agent just wrote, the same gap as a granted `python3
 approval gate's named gaps; a cloned repository's skill descriptions enter the root prompt, and the
 bodies the model loads when cued, silently, as its agent files do; in `unattended` the model can
 write itself a skill without an ask, and it is listed from the next start; the protected-path ask
-shows only the path, so the body you read in the creator's proposal and the body written are tied
+shows only the path, so the files you read in the creator's proposal and the files written are tied
 by the model's discipline, not by the gate, and a write the gate denied whose content equals the body
 on disk still suppresses the "changed since first use" notice, because the record is of the attempt;
 the bundled set is not protected, so a write into the package directory runs without an ask in
