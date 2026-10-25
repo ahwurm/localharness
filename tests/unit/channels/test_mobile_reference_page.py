@@ -1387,3 +1387,96 @@ onFrame("Activity", {text: ""}); out.push(n());
 console.log(JSON.stringify(out));
 """)
     assert got == [0, 1, 1, 2, 3, 3, 3]
+
+
+ASK_PRELUDE = """
+const answers = [{status: "confirm_required", confirm_token: "tok-1", detail: "sure?"},
+                 {status: "recorded", decision: "Launch"}];
+const bodies = [];
+globalThis.fetch = (path, opts) => {
+  bodies.push(JSON.parse(opts.body));
+  return Promise.resolve({status: 200, json: async () => answers[Math.min(bodies.length - 1, 1)]});
+};
+const perm = {request_id: "r2", klass: "shell-new", tool_name: "bash_exec", tool_params: {command: "ls"},
+  display: "run ls", options: [{kind: "allow_always", name: "Always", confirm_required: true},
+                               {kind: "deny", name: "Deny", confirm_required: false}]};
+const dlg = () => $("ask").children.map((c) => [c.tagName, c.textContent]);
+const labels = () => $("ask").children.filter((c) => c.tagName === "button").map((c) => c.textContent);
+const tap = (label) => $("ask").children.find((c) => c.textContent === label).onclick();
+"""
+
+
+def _ask(page, tmp_path, script):
+    return _models(page, tmp_path, PICKER + ASK_PRELUDE + "hello(false);\n" + script)
+
+
+@NODE_ONLY
+def test_showask_a_picker_launch_is_one_tap_and_two_posts_with_no_native_confirm(page, tmp_path):
+    got = _ask(page, tmp_path, """
+bodies.length = 0;
+onFrame("BlockingAsk", picker(true));
+const shown = labels();
+await tap("Launch");
+console.log(JSON.stringify({bodies, shown, open: $("ask").open, confirm: typeof globalThis.confirm}));
+""")
+    assert got["bodies"] == [{"kind": "Launch"}, {"kind": "Launch", "confirm_token": "tok-1"}]
+    assert got["shown"] == ["Launch", "Cancel"] and got["open"] is False
+    assert got["confirm"] == "undefined"
+
+
+@NODE_ONLY
+def test_showask_a_picker_cancel_posts_once_with_no_token(page, tmp_path):
+    got = _ask(page, tmp_path, """
+answers[0] = {status: "recorded", decision: "Cancel"};
+onFrame("BlockingAsk", picker(true));
+await tap("Cancel");
+console.log(JSON.stringify(bodies));
+""")
+    assert got == [{"kind": "Cancel"}]
+
+
+@NODE_ONLY
+def test_showask_titles_by_class_and_the_pre_only_with_a_tool(page, tmp_path):
+    got = _ask(page, tmp_path, """
+const title = (d) => { onFrame("BlockingAsk", d); return [$("ask").children[0].textContent,
+  $("ask").children.filter((c) => c.tagName === "pre").length]; };
+const plain = picker(false);
+console.log(JSON.stringify([title(picker(true)), title(plain), title(perm),
+  title({...perm, klass: "workspace-trust"})]));
+""")
+    assert got == [["Confirm", 0], ["Choose", 0], ["Permission", 1], ["Trust this workspace?", 1]]
+
+
+@NODE_ONLY
+def test_showask_an_expired_picker_ask_closes_and_leaves_the_expiry_row(page, tmp_path):
+    got = _ask(page, tmp_path, """
+onFrame("BlockingAsk", picker(true));
+onFrame("AskExpired", {request_id: "r1", decision: "unchanged", waited_s: 120});
+console.log(JSON.stringify([$("ask").open, rows().map((r) => [r.cls, r.text])]));
+""")
+    assert got == [False, [["row err", "that question expired after 120s and was recorded as unchanged. Nothing ran."]]]
+
+
+@NODE_ONLY
+def test_showask_a_permission_keeps_two_taps_and_a_native_cancel_closes_the_dialog(page, tmp_path):
+    got = _ask(page, tmp_path, """
+globalThis.confirm = () => false;
+onFrame("BlockingAsk", perm);
+const shown = labels();
+await tap("Always (2 taps)");
+const cancelled = [bodies.length, $("ask").open];
+bodies.length = 0;
+globalThis.confirm = () => true;
+onFrame("BlockingAsk", perm);
+await tap("Always (2 taps)");
+console.log(JSON.stringify({shown, cancelled, bodies, open: $("ask").open}));
+""")
+    assert got["shown"] == ["Always (2 taps)", "Deny"]
+    assert got["cancelled"] == [1, False]
+    assert got["bodies"] == [{"kind": "allow_always"}, {"kind": "allow_always", "confirm_token": "tok-1"}]
+    assert got["open"] is False
+
+
+def test_showask_guards_the_params_block_and_keeps_the_server_confirm(page):
+    assert 'if (d.tool_name) dlg.appendChild(el("pre", null, JSON.stringify(d.tool_params, null, 1)));' in page
+    assert "confirm_required" in page and "confirm_token: r.confirm_token" in page
