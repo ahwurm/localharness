@@ -61,7 +61,7 @@ class FakeLLM:
         # swap refit clamps a CONFIGURED cap to the new window's reserve (#145) and leaves an
         # unconfigured one alone; a double without the field would hide both behaviours.
         self.config = SimpleNamespace(base_url=base_url, model=model, provider_type=provider_type,
-                                      max_tokens=None)
+                                      max_tokens=None, api_key="none", extra_headers={})
         self._mode = mode
         # (base_url, api_key, extra_headers, provider_type) per cross-endpoint rebind — the
         # provider_type is recorded, not swallowed: it is the speed ledger's key.
@@ -80,6 +80,10 @@ class FakeLLM:
         # wrong ledger key.
         self.rebinds.append((base_url, api_key, extra_headers, provider_type))
         self.config.base_url = base_url
+        if api_key is not None:
+            self.config.api_key = api_key
+        if extra_headers is not None:
+            self.config.extra_headers = dict(extra_headers)
         if provider_type is not _REBIND_UNSET:
             self.config.provider_type = provider_type  # ledger key follows the target endpoint
 

@@ -19,7 +19,7 @@ from rich.protocol import is_renderable
 from localharness.agent.gate_types import MODE_STRICTNESS
 from localharness.channels import input_router
 from localharness.cli.model_ops import _hold_peer_session_key, _launch_key, _peer_session_key
-from localharness.cli.model_switch import LAUNCH_SLOW, ModelSwitch, launch_holder
+from localharness.cli.model_switch import LAUNCH_SLOW, RESTART_DOWN_ON_PEER, ModelSwitch, launch_holder
 from localharness.cli.session_resume import RELOAD_ACTION
 from localharness.cli.skill_session import SkillSession, skill_row
 from localharness.cli.slash_commands import SlashCommand, add_plugin_row, find_row, help_text
@@ -2278,110 +2278,120 @@ class OrchestratorREPL:
         # Tradeoff BEFORE the rebind-back below — cur_ptype must key where the current model
         # actually ran (possibly a peer), not the primary we are about to re-point at.
         tradeoff = self._swap_tradeoff_note(cur_ptype, current, prim_ptype, target)
+        prior = None
         if _prim is not None and llm.config.base_url != _prim.base_url:
+            c = llm.config
+            prior = (c.base_url, c.api_key, dict(c.extra_headers), c.provider_type)
             # #3: restore the primary identity FULLY — clear any peer extra_headers with {} (not
             # None, which would leave the peer's headers on the client). ProviderConfig has no
             # headers field, so the primary's identity carries none.
             llm.rebind_endpoint(_prim.base_url, api_key=_prim.api_key, extra_headers={},
                                 provider_type=_prim.provider_type)
-        # a failure line carries a launch's tail: it is masked before any channel shows it (D-22)
-        redact_failure = self._channel_redactor()
-        label = RUNTIME_LABELS.get(managed.runtime, managed.runtime)
-        _, posture = effective_posture(managed, keyed=bool(launch_kw), decision=decision)
-        await self._flush_launch_lines()
-        await self._send_info(
-            f"Restarting managed {label} with {target}{f' ({posture})' if posture else ''}"
-            f" — model load {LAUNCH_SLOW}...{build}{tradeoff}",
-            colorize=True,
-        )
-        if decision.note:
-            await self._send_info(decision.note)
-        box_note = getattr(self._channel, "box_activity", None)
+        landed = False
+        try:
+            # a failure line carries a launch's tail: it is masked before any channel shows it (D-22)
+            redact_failure = self._channel_redactor()
+            label = RUNTIME_LABELS.get(managed.runtime, managed.runtime)
+            _, posture = effective_posture(managed, keyed=bool(launch_kw), decision=decision)
+            await self._flush_launch_lines()
+            await self._send_info(
+                f"Restarting managed {label} with {target}{f' ({posture})' if posture else ''}"
+                f" — model load {LAUNCH_SLOW}...{build}{tradeoff}",
+                colorize=True,
+            )
+            if decision.note:
+                await self._send_info(decision.note)
+            box_note = getattr(self._channel, "box_activity", None)
 
-        def _swap_progress(elapsed: float) -> None:
-            # Rendered in the box status row; a minutes-long load must never look frozen.
-            if box_note is not None:
-                box_note(f"loading {target} · {int(elapsed)}s")
+            def _swap_progress(elapsed: float) -> None:
+                # Rendered in the box status row; a minutes-long load must never look frozen.
+                if box_note is not None:
+                    box_note(f"loading {target} · {int(elapsed)}s")
 
-        # GPU-lock (Phase C2): if a DIFFERENT heavy peer holds the accelerator — we're swapping BACK
-        # to the primary from a cold-launched peer — verified-stop it FIRST, in its OWN try so a
-        # stop-failure is reported honestly and NOTHING is torn down (the peer is still up). A no-op
-        # when the primary is itself the incumbent (the common restart case), whose own stop below
-        # reloads the model.
-        self._switch.launch(target)
-        async with self._launch_lock():
-            try:
-                freed = await free_accelerator(
-                    self._active_heavy, managed, self._server_config_dir, unit=self._unit_state)
-            except (RuntimeError, TimeoutError) as exc:
-                if box_note is not None:
-                    box_note(None)
-                await self._channel.send_message(
-                    redact_failure(f"Could not free the GPU: {exc}. No change made — the previous "
-                                   "model should still be serving."), metadata={"style": "system.error"}
-                )
-                return
-            if freed is not None:
-                self._active_heavy = None
-            # The shared record's own weights and name, put back if the restart fails (WR-53).
-            before = (managed.model, managed.served_name)
-            spec = managed
-            try:
-                # The verified stop can block ~90s worst-case (#100); the strategy runs it OFF the event
-                # loop (asyncio.to_thread inside strategy.stop) so heartbeats/the channel stay live while
-                # the old server drains. The model mutation MUST land strictly BETWEEN stop and activate:
-                # activate's serve_command reads spec.model to build the launch command.
-                await strategy.stop(managed, self._server_config_dir)
-                # The record already names its weights: the primary's served name never replaces them
-                # (a llama.cpp alias never reaches -m; a vLLM --served-model-name alias never becomes
-                # the vLLM model, D-70). Only a name other than the primary's (non-llama.cpp), or a typed
-                # regular .gguf (llama.cpp, named in memory only, never persisted), changes the model.
-                if not gguf and target != prim_served:
-                    managed.model = target
-                elif typed_swap:
-                    # A copy for the launch: the shared record (the primary's served name, the listing,
-                    # the swap-back target) keeps its own weights, so a typed file is never "the primary"
-                    # (WR-53, IN-57).
-                    spec = planned
-                # the provider's key, only when the managed server is set to require one (default off)
-                ep = await strategy.activate(
-                    spec, self._server_config_dir, llm.config.base_url, on_poll=_swap_progress,
-                    autosense=getattr(self._harness, "autosense", None), floor=floor, **launch_kw,
-                )
-                served_window = ep.window.served if ep.window is not None else None
-                if floor is not None and served_window is not None and served_window < floor:
-                    from localharness.provider.autosense import window_phrase
-                    raise RuntimeError(_lifecycle.SWAP_BELOW_FLOOR.format(
-                        name=_lifecycle.heavy_label(target_heavy),
-                        window=window_phrase(served_window), floor=f"{floor:,}"))
-                models = ep.served_models
-            except (RuntimeError, TimeoutError) as exc:
-                # The primary half-started (still alive on a TimeoutError) — tear it down before restoring
-                # a peer incumbent (shared pidfile → else it orphans). It is stopped as LAUNCHED: `spec`
-                # (the copy for a typed .gguf, else `managed` still carrying the new model), because the
-                # stop proves the record's own launch from its model / served name, and the reset below
-                # would hand it the old ones. If we freed a peer (b2 swap-back), restore it; otherwise
-                # the primary is simply down (the pre-existing restart-failure mode).
-                await self._safe_stop(spec)
-                managed.model, managed.served_name = before
-                restored, why = await self._restore_incumbent(freed)
-                tail = (f" Restored {restored}." + (f" {why}" if why else "") if restored
-                        else f" Could not restore it: {why}" if why
-                        else " The box now has NO model serving — manual attention needed."
-                        if freed
-                        else " The managed server is down — retry /model to relaunch.")
-                await self._channel.send_message(
-                    redact_failure(f"Model swap failed: {exc}{tail}"), metadata={"style": "system.error"}
-                )
-                return
-            except BaseException:
-                managed.model, managed.served_name = before
-                raise
-            finally:
-                if box_note is not None:
-                    box_note(None)
-            self._active_heavy = (managed, llm.config.base_url)
-            self._active_launch = (self._active_heavy, spec)  # the copy for a typed .gguf, else managed
+            # GPU-lock (Phase C2): if a DIFFERENT heavy peer holds the accelerator — we're swapping BACK
+            # to the primary from a cold-launched peer — verified-stop it FIRST, in its OWN try so a
+            # stop-failure is reported honestly and NOTHING is torn down (the peer is still up). A no-op
+            # when the primary is itself the incumbent (the common restart case), whose own stop below
+            # reloads the model.
+            self._switch.launch(target)
+            async with self._launch_lock():
+                try:
+                    freed = await free_accelerator(
+                        self._active_heavy, managed, self._server_config_dir, unit=self._unit_state)
+                except (RuntimeError, TimeoutError) as exc:
+                    if box_note is not None:
+                        box_note(None)
+                    await self._channel.send_message(
+                        redact_failure(f"Could not free the GPU: {exc}. No change made — the previous "
+                                       "model should still be serving."), metadata={"style": "system.error"}
+                    )
+                    return
+                if freed is not None:
+                    self._active_heavy = None
+                # The shared record's own weights and name, put back if the restart fails (WR-53).
+                before = (managed.model, managed.served_name)
+                spec = managed
+                try:
+                    # The verified stop can block ~90s worst-case (#100); the strategy runs it OFF the event
+                    # loop (asyncio.to_thread inside strategy.stop) so heartbeats/the channel stay live while
+                    # the old server drains. The model mutation MUST land strictly BETWEEN stop and activate:
+                    # activate's serve_command reads spec.model to build the launch command.
+                    await strategy.stop(managed, self._server_config_dir)
+                    # The record already names its weights: the primary's served name never replaces them
+                    # (a llama.cpp alias never reaches -m; a vLLM --served-model-name alias never becomes
+                    # the vLLM model, D-70). Only a name other than the primary's (non-llama.cpp), or a typed
+                    # regular .gguf (llama.cpp, named in memory only, never persisted), changes the model.
+                    if not gguf and target != prim_served:
+                        managed.model = target
+                    elif typed_swap:
+                        # A copy for the launch: the shared record (the primary's served name, the listing,
+                        # the swap-back target) keeps its own weights, so a typed file is never "the primary"
+                        # (WR-53, IN-57).
+                        spec = planned
+                    # the provider's key, only when the managed server is set to require one (default off)
+                    ep = await strategy.activate(
+                        spec, self._server_config_dir, llm.config.base_url, on_poll=_swap_progress,
+                        autosense=getattr(self._harness, "autosense", None), floor=floor, **launch_kw,
+                    )
+                    served_window = ep.window.served if ep.window is not None else None
+                    if floor is not None and served_window is not None and served_window < floor:
+                        from localharness.provider.autosense import window_phrase
+                        raise RuntimeError(_lifecycle.SWAP_BELOW_FLOOR.format(
+                            name=_lifecycle.heavy_label(target_heavy),
+                            window=window_phrase(served_window), floor=f"{floor:,}"))
+                    models = ep.served_models
+                except (RuntimeError, TimeoutError) as exc:
+                    # The primary half-started (still alive on a TimeoutError) — tear it down before restoring
+                    # a peer incumbent (shared pidfile → else it orphans). It is stopped as LAUNCHED: `spec`
+                    # (the copy for a typed .gguf, else `managed` still carrying the new model), because the
+                    # stop proves the record's own launch from its model / served name, and the reset below
+                    # would hand it the old ones. If we freed a peer (b2 swap-back), restore it; otherwise
+                    # the primary is simply down (the pre-existing restart-failure mode).
+                    await self._safe_stop(spec)
+                    managed.model, managed.served_name = before
+                    restored, why = await self._restore_incumbent(freed)
+                    tail = (f" Restored {restored}." + (f" {why}" if why else "") if restored
+                            else f" Could not restore it: {why}" if why
+                            else " The box now has NO model serving — manual attention needed."
+                            if freed
+                            else " The managed server is down — retry /model to relaunch.")
+                    await self._channel.send_message(
+                        redact_failure(f"Model swap failed: {exc}{tail}"), metadata={"style": "system.error"}
+                    )
+                    return
+                except BaseException:
+                    managed.model, managed.served_name = before
+                    raise
+                finally:
+                    if box_note is not None:
+                        box_note(None)
+                self._active_heavy = (managed, llm.config.base_url)
+                landed = True
+                self._active_launch = (self._active_heavy, spec)  # the copy for a typed .gguf, else managed
+        finally:
+            if not landed and prior:
+                url, key, headers, ptype = prior
+                llm.rebind_endpoint(url, api_key=key, extra_headers=headers, provider_type=ptype)
         served = models[0] if models else target
         # the restart's window line, after the try/except above (D-22, D-36)
         await self._announce_window(ep, prim_ptype or managed.runtime, served)
