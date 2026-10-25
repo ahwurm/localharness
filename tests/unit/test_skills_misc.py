@@ -494,13 +494,13 @@ def test_the_id_scan_bites(text, found) -> None:
 
 VARIANT_A = "On the subject model, the model picked a matching skill from the listing on its own in at least 80 % of test runs."
 VARIANT_B = "The model may not pick a skill up on its own; `/<name>` asks it to."
-UNRELEASED = "## [Unreleased]"
+SKILLS_RELEASE = "## [0.22.0]"
 REMOVED_FIX = "a config that still sets it now fails validation naming the key path: delete it."
 
 
-def unreleased(text: str) -> str:
+def skills_entry(text: str) -> str:
     lines = text.splitlines()
-    start = next((i for i, line in enumerate(lines) if line.startswith(UNRELEASED)), None)
+    start = next((i for i, line in enumerate(lines) if line.startswith(SKILLS_RELEASE)), None)
     if start is None:
         return ""
     end = next((j for j in range(start + 1, len(lines)) if lines[j].startswith("## [")), len(lines))
@@ -517,10 +517,10 @@ def stray_rate(text: str, kept: list[str]) -> bool:
 
 
 def check_skills_entry(text: str) -> list[str]:
-    """The CHANGELOG's Unreleased entry keeps one variant, the code's figures and no internal id."""
-    entry = unreleased(text)
+    """The CHANGELOG's 0.22.0 entry keeps one variant, the code's figures and no internal id."""
+    entry = skills_entry(text)
     if not entry:
-        return ["CHANGELOG has no ## [Unreleased] entry"]
+        return [f"CHANGELOG has no {SKILLS_RELEASE} entry"]
     flat = " ".join(entry.split())
     headings = [line for line in text.splitlines() if line.startswith("## [")]
     items = [(h, " ".join(b.split())) for h, b in bullets(entry)]
@@ -528,8 +528,7 @@ def check_skills_entry(text: str) -> list[str]:
     said = ("while a task is live", f"{LISTING_BUDGET_CHARS:,}-character", f"{word}-reference limit")
     kept = kept_variants(entry)
     return [
-        *([] if sum(h.startswith(UNRELEASED) for h in headings) == 1 and headings[0].startswith(UNRELEASED)
-          else ["## [Unreleased] is not the first ## [ heading"]),
+        *([] if sum(h.startswith(SKILLS_RELEASE) for h in headings) == 1 else [f"{SKILLS_RELEASE} appears {sum(h.startswith(SKILLS_RELEASE) for h in headings)} times, not once"]),
         *([] if len(kept) == 1 else [f"the skills entry keeps {len(kept)} variants, not one"]),
         *(["the skills entry carries a variant label"] if re.search(r"Variant [AB]", entry) else []),
         *(["the skills entry carries a rate claim beyond the kept variant"] if stray_rate(entry, kept) else []),
@@ -550,7 +549,7 @@ def check_skills_claim(readme: str, changelog: str) -> list[str]:
     body = section(readme, "## Skills")
     if body is None:
         return ["README has no ## Skills section"]
-    mine, theirs = kept_variants(body), kept_variants(unreleased(changelog))
+    mine, theirs = kept_variants(body), kept_variants(skills_entry(changelog))
     return [
         *([] if len(mine) == 1 else [f"the README Skills section keeps {len(mine)} variants, not one"]),
         *(["the README Skills section carries a rate claim beyond the kept variant"] if stray_rate(body, mine) else []),
@@ -574,11 +573,10 @@ def _swapped(text: str) -> str:
 
 def test_skills_entry_bites() -> None:
     good = _read("CHANGELOG.md")
-    release = good[good.index("## [0.21.1]"):]
     dropped = re.sub(r"(### Removed\n)- \*\*`context\.microagents`.*?(?=\n\n## \[)", r"\1", good, flags=re.S)
 
     assert check_skills_entry(good) == []
-    assert check_skills_entry(good.replace(UNRELEASED, "## [0.99.0]")) == ["CHANGELOG has no ## [Unreleased] entry"]
+    assert check_skills_entry(good.replace(SKILLS_RELEASE, "## [0.99.0]")) == ["CHANGELOG has no ## [0.22.0] entry"]
     assert check_skills_entry(good.replace(VARIANT_B, VARIANT_A + " " + VARIANT_B)) == [
         "the skills entry keeps 2 variants, not one"]
     assert check_skills_entry(good.replace(VARIANT_B, "")) == ["the skills entry keeps 0 variants, not one"]
@@ -593,9 +591,7 @@ def test_skills_entry_bites() -> None:
     assert check_skills_entry(good.replace("four-reference", "three-reference")) == [
         "the skills entry does not say four-reference limit"]
     assert check_skills_entry(good.replace(VARIANT_B, VARIANT_B + " §")) == ["internal id in the skills entry: §"]
-    assert check_skills_entry(good + "\n" + UNRELEASED + "\n") == ["## [Unreleased] is not the first ## [ heading"]
-    assert check_skills_entry("# Changelog\n\n" + release + "\n" + good[good.index(UNRELEASED):good.index("## [0.21.1]")]) == [
-        "## [Unreleased] is not the first ## [ heading"]
+    assert check_skills_entry(good + "\n" + SKILLS_RELEASE + "\n") == ["## [0.22.0] appears 2 times, not once"]
     assert check_skills_entry(dropped) == ["no Removed bullet names `context.microagents` with the delete-it fix"]
     assert check_skills_entry(good.replace("delete it.", "see the docs.")) == [
         "no Removed bullet names `context.microagents` with the delete-it fix"]

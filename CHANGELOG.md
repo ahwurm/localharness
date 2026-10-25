@@ -4,7 +4,7 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
-## [Unreleased]
+## [0.22.0] — 2026-10-24
 
 Skills: procedures the model loads when a request matches, and a bundled `skill-creator` that writes the next one with you. A skill is procedural memory, knowing how kept apart from knowing that ([Cohen and Squire 1980](https://doi.org/10.1126/science.7414331)); its description is the cue a situation is recognised by (Klein's recognition-primed decision, 1993), its body a script of steps (Schank and Abelson 1977), and writing one from a worked session is knowledge compilation ([Anderson 1982](https://doi.org/10.1037/0033-295X.89.4.369); Soar's chunking, [Laird, Rosenbloom and Newell 1986](https://doi.org/10.1023/A:1022639103969)). The format is the open [Agent Skills](https://agentskills.io/specification) one. In one study open-weight models triggered the right skill on only about a third of tasks ([Skill-Use](https://arxiv.org/abs/2608.04828)), so `/<name>` is the sure way in.
 
