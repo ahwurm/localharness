@@ -445,33 +445,62 @@ class RaisingLLM:
         raise RuntimeError("provider timed out")
 
 
-def test_deploy_failure_never_claims_success(tmp_path, mock_llm_client):
-    """#27: on deploy failure the REPL sent 'Deploy failed' AND THEN, on the same
-    (both) path, 'Agent created.' plus reset the workflow as if it succeeded. The
-    failure path must never claim success; it must be truthful and abandon cleanly
-    with the session still alive.
-
-    (#57 moved schema-invalid configs to a pre-confirm generation abort, so the deploy
-    STAGE is now exercised with a genuine deploy-time failure: a VALID config whose
-    target already exists — deploy_config refuses to overwrite it (#28).)"""
-    (tmp_path / "agents").mkdir(parents=True)
+def test_a_refused_save_returns_to_the_description(tmp_path, mock_llm_client):
     existing = tmp_path / "agents" / "finance-helper.yaml"
-    existing.write_text("name: finance-helper\nrole: the original agent\n")
+    _seed(existing, "the original agent")
     original = existing.read_bytes()
+    channel = ScriptedChannel(["create an agent", f"it should {ROLE}", "yes"])
+    repl, orch, agent, bus = _repl(channel, _llm(mock_llm_client), config_dir=tmp_path)
 
-    llm = mock_llm_client([mock_llm_client.Response(content=f"name: finance-helper\nrole: {ROLE}")])
-    channel = ScriptedChannel(
-        ["create an agent", f"it should {ROLE[0].lower()}{ROLE[1:]}", "yes"]
-    )
-    repl, orch, agent, bus = _repl(channel, llm, config_dir=tmp_path)
+    asyncio.run(repl.run())
 
-    asyncio.run(repl.run())  # returns normally: session survives a failed deploy
+    refusals = [m for m in channel.sent if "already exists at" in m]
+    assert len(refusals) == 1 and refusals[0].endswith("remove the existing config.")
+    for lie in ("Deploy failed", "Agent created", "Tell me more. What"):
+        assert not any(lie in m for m in channel.sent)
+    wf = orch.active_workflow
+    assert wf is not None and wf.state == WorkflowState.DISCUSS
+    assert wf.gathered["description"] == f"it should {ROLE}"
+    assert existing.read_bytes() == original
 
-    assert not any("Agent created" in m for m in channel.sent)  # #27: the lie
-    assert any("Deploy failed" in m for m in channel.sent)  # truthful failure kept
-    assert any("NOT created" in m for m in channel.sent)  # explicit non-success
-    assert orch.active_workflow is None  # abandoned cleanly, back to normal convo
-    assert existing.read_bytes() == original  # refuse-overwrite left it byte-identical
+
+def test_a_non_value_error_at_deploy_still_abandons(tmp_path, mock_llm_client, monkeypatch):
+    def refuse(self, *a, **k):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(ConfigLoader, "write_agent", refuse)
+    channel = ScriptedChannel(["create an agent", f"it should {ROLE}", "yes"])
+    repl, orch, agent, bus = _repl(channel, _llm(mock_llm_client), config_dir=tmp_path)
+
+    asyncio.run(repl.run())
+
+    assert any("Deploy failed" in m for m in channel.sent) and any("NOT created" in m for m in channel.sent)
+    assert not any("Agent created" in m for m in channel.sent)
+    assert orch.active_workflow is None
+
+
+def test_after_a_refused_machine_save_the_next_prompt_names_the_project(tmp_path, mock_llm_client):
+    channel = ScriptedChannel(["create an agent", f"it should {ROLE}", "machine", "it should also track bond prices"])
+    repl, orch, home, ws = _bound_repl(channel, _llm(mock_llm_client, 2), tmp_path)
+    _seed(home / "agents" / "finance-helper.yaml", "machine one")
+
+    asyncio.run(repl.run())
+
+    assert any("already exists at" in m for m in channel.sent)
+    confirms = [m for m in channel.sent if "```yaml" in m]
+    assert len(confirms) == 2
+    assert confirms[1].splitlines()[-1].startswith(f"Save to {ws / 'agents' / 'finance-helper.yaml'}")
+
+
+def test_an_invalid_name_never_reaches_the_prompt(tmp_path, mock_llm_client):
+    bad = mock_llm_client.Response(content=f"name: Bad_Name\nrole: {ROLE}")
+    channel = ScriptedChannel(["create an agent", f"it should {ROLE}"])
+    repl, orch, agent, bus = _repl(channel, mock_llm_client([bad, bad]), config_dir=tmp_path)
+
+    asyncio.run(repl.run())
+
+    assert not any("Save to" in m or "look good" in m for m in channel.sent)
+    assert any("NOT created" in m for m in channel.sent)
 
 
 def test_generation_error_keeps_session_alive(tmp_path):

@@ -3054,6 +3054,9 @@ class OrchestratorREPL:
                 await self._channel.send_message(note, metadata={"style": "system.info"})
             try:
                 config_path = workflow.deploy_config(name)
+            except ValueError as exc:
+                await self._channel.send_message(workflow.back_to_discuss(exc), metadata={"style": "system.info"})
+                return
             except Exception as exc:
                 # #27: never claim success on failure. Abandon creation with a
                 # truthful message; the session stays alive in normal conversation.
