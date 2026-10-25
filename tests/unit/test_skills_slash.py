@@ -362,8 +362,8 @@ def test_a_skill_row_does_not_cut_at_an_abbreviation():
 
 def test_a_skill_row_is_cut_to_eighty_characters_and_the_label_is_not_counted():
     assert _row("é" * 100).description == "é" * 80
-    assert _row("a" * 79 + ". tail").description == "a" * 79 + "."
-    assert _row("a" * 79 + "!" + " tail").description == "a" * 79 + "!"
+    assert _row("a" * 79 + ". Tail").description == "a" * 79 + "."
+    assert _row("a" * 79 + "! Tail").description == "a" * 79 + "!"
     assert _row("a" * 80 + ". tail").description == "a" * 80
     assert _row("b" * 90, "project").description == "b" * 80 + " (project)"
 
