@@ -268,8 +268,9 @@ the bundled set is not protected, so a write into the package directory runs wit
 `trusted`, `auto` and `unattended`, and in `guarded` is the ordinary outside-the-project ask that
 can be saved as "always"; a boundary narrowed by `permissions.workspace_root` leaves
 `.localharness/skills/` and `.agents/skills/` alike outside it when you work below the project root,
-where `auto` allows the write without an ask, and `WriteTool` refuses such a target, so the route
-left open is `bash_exec` (`cp`, `mv`, `mkdir`); `mv staged .agents` with
+where `trusted`, `auto` and `unattended` allow the write without an ask and `guarded` asks with an
+ask that can be saved, and `WriteTool` refuses such a target, so the route left open is `bash_exec`
+(`cp`, `mv`, `mkdir`); `mv staged .agents` with
 `.agents` absent makes a staged tree live, as a created `.localharness` is left alone; the untrusted
 mark does not survive the `[budget: …]` note; the 200 KiB size check is the only bound on a
 `SKILL.md`'s frontmatter, so a hostile file costs about a second to parse and two origins full at
