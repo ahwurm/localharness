@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import os
 import stat
 from pathlib import Path
 from typing import get_args
@@ -12,6 +13,8 @@ from pydantic import ValidationError
 from rich.console import Console
 from rich.markup import escape
 
+import localharness.agent.subagent as subagent
+from localharness.agent.subagent import make_explore_agent_runner
 from localharness.channels.base import one_line
 from localharness.config.loader import (
     PROBLEM_LINE_CAP,
@@ -26,7 +29,9 @@ from localharness.config.loader import (
     shadow_label,
 )
 from localharness.config.models import AgentConfig
+from localharness.orchestrator.cards import AgentCardRegistry
 from localharness.orchestrator.workflow import AgentCreationWorkflow
+from localharness.tools.builtin.agent_tool import BUILTIN_AGENT_NAMES, INVALID_AGENT_NAME, AgentTool
 
 
 def _write(agents_dir: Path, stem: str, data: dict | str) -> Path:
@@ -300,3 +305,87 @@ def test_a_project_link_leading_outside_is_never_written_over(tmp_path):
     with pytest.raises(ValueError):
         loader.write_agent("x", _text(), layer="project", overwrite=True)
     assert outside.read_text() == "keep"
+
+
+def _runner(registry, monkeypatch, seen: list | None = None):
+    async def stub(task, *, agent_config, **kw):
+        if seen is not None:
+            seen.append(agent_config)
+        return "done"
+
+    monkeypatch.setattr(subagent, "dispatch_config_subagent", stub)
+    return make_explore_agent_runner(
+        llm=object(), bus=object(), base_registry=object(), permission_evaluator=object(),
+        get_parent_session_id=lambda: "sid", load_agent=registry.load, available_agents=registry)
+
+
+async def test_a_project_only_agent_dispatched_through_load_joins_the_description(tmp_path, monkeypatch):
+    loader, m, p = _layers(tmp_path)
+    _write(p, "proj-only", _agent("proj-only"))
+    registry = AgentCardRegistry(loader=loader)
+    assert "proj-only" not in list(registry)
+    seen: list = []
+    runner = _runner(registry, monkeypatch, seen)
+    await runner("proj-only", "do it")
+    assert [c.name for c in seen] == ["proj-only"]
+    assert list(registry) == [*BUILTIN_AGENT_NAMES, "proj-only"]
+    assert registry.get("proj-only").origin == "project"
+    tool = AgentTool(agent_runner=runner, available_agents=registry,
+                     machine_agents_dir=loader.agents_dir("machine"), project_agents_dir=loader.agents_dir("project"))
+    assert "proj-only" in tool.info().description
+
+
+def test_iteration_is_builtins_then_project_then_machine(tmp_path):
+    loader, m, p = _layers(tmp_path)
+    for stem in ("zeta", "alpha"):
+        _write(m, stem, _agent(stem))
+    for stem in ("mid", "beta", "explore", "orchestrator"):
+        _write(p, stem, _agent(stem))
+    registry = AgentCardRegistry(loader=loader)
+    for stem in ("zeta", "alpha", "mid", "beta", "explore", "orchestrator"):
+        registry.load(stem)
+    expected = [*BUILTIN_AGENT_NAMES, "beta", "mid", "alpha", "zeta"]
+    assert list(registry) == expected and len(registry) == 8
+    assert ", ".join(registry) == ", ".join(expected) and {*registry} == set(expected)
+    assert registry.get("explore") and registry.get("orchestrator")
+    registry.register_from_config(AgentConfig(name="aaa", role="r"))
+    assert list(registry) == [*BUILTIN_AGENT_NAMES, "beta", "mid", "aaa", "alpha", "zeta"]
+
+
+def test_a_bare_registry_lists_the_builtins_and_loads_nothing():
+    registry = AgentCardRegistry()
+    assert list(registry) == list(BUILTIN_AGENT_NAMES) and len(registry) == 4
+    with pytest.raises(ConfigNotFoundError) as e:
+        registry.load("x")
+    assert e.value.searched_paths == []
+
+
+def test_load_checks_the_name_before_any_path(tmp_path, monkeypatch):
+    loader, m, p = _layers(tmp_path)
+    calls: list = []
+    monkeypatch.setattr(loader, "load_agent", lambda *a, **k: calls.append(a))
+    registry = AgentCardRegistry(loader=loader)
+    for name in ("../x", "ab\n", "", "My_Agent"):
+        with pytest.raises(ConfigNotFoundError) as e:
+            registry.load(name)
+        assert e.value.searched_paths == loader.agent_search_paths(name)
+        assert str(e.value.__cause__) == INVALID_AGENT_NAME
+    assert calls == []
+    monkeypatch.undo()
+    with pytest.raises(ConfigNotFoundError) as e:
+        registry.load("nope")
+    assert e.value.searched_paths == loader.agent_search_paths("nope")
+
+
+def test_load_keys_by_the_stem_and_always_reregisters(tmp_path):
+    loader, m, p = _layers(tmp_path)
+    _write(m, "foo", {"name": "bar", "role": "r"})
+    registry = AgentCardRegistry(loader=loader)
+    assert registry.load("foo").name == "bar"
+    assert registry.get("foo").agent_id == "foo" and registry.get("bar") is None
+    _write(m, "x", {"name": "x", "role": "m"})
+    registry.load("x")
+    assert registry.get("x").origin == "machine"
+    _write(p, "x", {"name": "x", "role": "p"})
+    registry.load("x")
+    assert registry.get("x").origin == "project" and registry.get("x").description == "p"
