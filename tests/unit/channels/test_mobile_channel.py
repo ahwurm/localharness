@@ -508,8 +508,53 @@ async def test_the_flags_are_the_locked_ones(tmp_path):
 async def test_the_repl_installable_resolvers_are_declared(tmp_path):
     """The REPL installs each handle ONLY if the channel already declares it as None. A channel
     that does not declare one is skipped with NO error — which fails silently, at a tap, later."""
-    for name in ("_pending_resolver", "_nudge_resolver", "_cancel_resolver"):
+    for name in ("_pending_resolver", "_nudge_resolver", "_cancel_resolver", "_model_list_resolver"):
         assert getattr(MobileChannel, name, "absent") is None, name
+
+
+async def test_box_activity_pushes_an_activity_frame_and_none_clears_it():
+    channel = await _channel()
+    client = channel.attach_client()
+    channel.box_activity("launching qwen-gguf")
+    channel.box_activity(None)
+    rows = [(n, p["text"]) for n, _, p in _drain(client) if n == "Activity"]
+    assert rows == [("Activity", "launching qwen-gguf"), ("Activity", "")]
+
+
+async def test_activity_keeps_the_session_awake_until_it_clears(tmp_path):
+    channel = await _channel()
+    channel.bind_runtime(session_id="s1", agent_id="orchestrator", session_dir=tmp_path)
+    assert channel.idle()
+    channel.box_activity("x")
+    assert not channel.idle()
+    channel.box_activity(None)
+    assert channel.idle()
+
+
+async def test_activity_comes_back_after_hello_on_a_reconnect_and_only_then():
+    channel = await _channel()
+    channel.box_activity("x")
+    client = channel.attach_client()
+    _drain(client)
+    assert (await channel.hello(client, None)).frame_type == "Hello"
+    assert [(n, p["text"]) for n, _, p in _drain(client)] == [("Activity", "x")]
+    channel.box_activity(None)
+    _drain(client)
+    await channel.hello(client, None)
+    assert not [n for n, _, _ in _drain(client) if n == "Activity"]
+
+
+async def test_activity_and_resolver_are_forgotten_when_the_session_resets(tmp_path):
+    async def resolver():
+        return {}
+
+    channel = await _channel()
+    channel.bind_runtime(session_id="s1", agent_id="orchestrator", session_dir=tmp_path)
+    channel.box_activity("x")
+    channel._model_list_resolver = resolver
+    channel.reset_session()
+    assert channel._activity == ""
+    assert channel._model_list_resolver is None
 
 
 async def test_parked_calls_travel_typed_not_as_prose(tmp_path):
