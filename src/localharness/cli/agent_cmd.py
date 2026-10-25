@@ -234,11 +234,9 @@ def agent_create(
 
 
 def _read_row(loader, f) -> dict | None:
-    from localharness.config.loader import ConfigParseError
-
     try:
         return loader.read_agent_file(f.path)
-    except (OSError, ConfigParseError) as exc:
+    except Exception as exc:  # noqa: BLE001 - one unreadable file never takes the roster down
         log.debug("agent file %s was skipped: %s", f.path, exc)
         return None
 

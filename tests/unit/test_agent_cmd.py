@@ -442,6 +442,27 @@ def test_agent_list_reports_a_file_of_the_wrong_shape_and_lists_the_rest(tmp_pat
     assert "odd.yaml" in as_json.stderr
 
 
+@pytest.mark.parametrize("exc", [UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad"), TypeError("not a mapping"), PermissionError("no")])
+def test_agent_list_skips_a_row_whose_file_fails_to_read(tmp_path, monkeypatch, exc):
+    from localharness.config.loader import ConfigLoader
+
+    monkeypatch.chdir(tmp_path)
+    cfg = tmp_path / "cfg"
+    for stem in ("healthy", "odd"):
+        _yaml(cfg / "agents", stem, {"name": stem, "role": "r"})
+    real = ConfigLoader.read_agent_file
+
+    def flaky(path):
+        if path.stem == "odd":
+            raise exc
+        return real(path)
+
+    monkeypatch.setattr(ConfigLoader, "read_agent_file", staticmethod(flaky))
+    result = runner.invoke(agent_app, ["list", "--json", "--config-dir", str(cfg)])
+    assert result.exit_code == 0 and result.exception is None
+    assert [a["name"] for a in json.loads(result.stdout)] == ["healthy"]
+
+
 # ---------------------------------------------------------------------------
 # agent list — shadows, --json fields, the unread-files line
 # ---------------------------------------------------------------------------
