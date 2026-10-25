@@ -10,22 +10,19 @@ from pathlib import Path
 
 import yaml
 
-from localharness.agent.affordance import calibrate, descriptions_digest, scores, snapshot_files
-from localharness.config.skills import Skill, _parse
+from localharness.agent.affordance import LABELS, calibrate, descriptions_digest, scores, snapshot_files
+from localharness.config.skills import Skill, _check
 from localharness.memory.resonance import DEFAULT_EMBEDDING_MODEL, ResonanceEngine
 
 ROOT = Path(__file__).resolve().parent.parent
-KINDS = ("matching", "near_miss", "unrelated")
 
 
-def read_skills(directory: Path, label: str) -> list[Skill]:
-    skills = []
-    for path in sorted(directory.glob("*/SKILL.md")):
-        data = _parse(path.read_text(encoding="utf-8"))
-        if isinstance(data, tuple):
-            raise SystemExit(f"{path}: {data[0]}")
-        skills.append(Skill(data["name"], data["description"], label, path, False))
-    return skills
+def read_skills(directory: Path, label: str, bundled: frozenset[str]) -> list[Skill]:
+    found = [_check(label, directory, directory.resolve(), path.parent.name, bundled)
+             for path in sorted(directory.glob("*/SKILL.md"))]
+    if skipped := [s for s in found if not isinstance(s, Skill)]:
+        raise SystemExit("\n".join(f"{s.path}: {s.reason}" for s in skipped))
+    return found
 
 
 def git(*args: str) -> str:
@@ -40,7 +37,8 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=ROOT / "src" / "localharness" / "assets" / "affordance" / "calibration.yaml")
     args = parser.parse_args()
     prompts = yaml.safe_load(args.prompts.read_text(encoding="utf-8"))["skills"]
-    skills = read_skills(args.fixtures, "machine") + read_skills(args.bundled, "bundled")
+    bundled = read_skills(args.bundled, "bundled", frozenset())
+    skills = read_skills(args.fixtures, "machine", frozenset(s.name for s in bundled)) + bundled
     if {s.name for s in skills} != set(prompts):
         raise SystemExit(f"skills {sorted(s.name for s in skills)} differ from the prompts' {sorted(prompts)}")
     engine = ResonanceEngine(DEFAULT_EMBEDDING_MODEL)
@@ -51,7 +49,7 @@ def main() -> None:
     docs = engine.embed_docs([s.description for s in skills])
     rows = []
     for skill, group in prompts.items():
-        for kind in KINDS:
+        for kind in LABELS:
             for text in group[kind]:
                 s = scores(docs, engine.embed_query(text))
                 i = int(s.argmax())
