@@ -1,18 +1,31 @@
 """Project agents: one loader, one roster, one writer, and what the model and the person are told."""
 from __future__ import annotations
 
+import io
 from pathlib import Path
+from typing import get_args
 
 import pytest
 import yaml
+from pydantic import ValidationError
+from rich.console import Console
+from rich.markup import escape
 
+from localharness.channels.base import one_line
 from localharness.config.loader import (
+    PROBLEM_LINE_CAP,
     AgentFile,
+    AgentProblem,
     ConfigLoader,
     ConfigNotFoundError,
     ConfigParseError,
+    Origin,
+    ProblemKind,
+    problem_lines,
     shadow_label,
 )
+from localharness.config.models import AgentConfig
+from localharness.orchestrator.workflow import AgentCreationWorkflow
 
 
 def _write(agents_dir: Path, stem: str, data: dict | str) -> Path:
@@ -112,3 +125,63 @@ def test_an_empty_world_enumerates_nothing(tmp_path):
     loader = ConfigLoader(config_dir=tmp_path / "machine", local_config_dir=tmp_path / "proj" / ".localharness")
     assert loader.discover_agent_files() == [] and loader.agent_winners() == {}
     assert loader.agent_file("x") is None
+
+
+def test_one_line_flattens_controls_and_whitespace():
+    assert one_line("a\n\tb\r\x1b[2Jc") == "a b c"
+    assert one_line("x\x9by") == "xy"
+
+
+def test_a_problem_is_one_flattened_line():
+    p = AgentProblem(Path("/p/x\n\x1b[2J.yaml"), "project", "invalid-name", "bad", "fix it")
+    assert p.line == "/p/x .yaml: bad; fix it"
+    assert "\n" not in AgentProblem(Path("/x.yaml"), "machine", "parse", "a\nb", "f").line
+
+
+def test_loads_is_true_only_for_a_mismatch():
+    assert get_args(ProblemKind) == ("parse", "validation", "invalid-name", "mismatch", "load")
+    assert get_args(Origin) == ("project", "machine")
+    for kind in get_args(ProblemKind):
+        assert AgentProblem(Path("/x.yaml"), "machine", kind, "r", "f").loads == (kind == "mismatch")
+
+
+def test_problem_lines_caps_with_the_pointer_on_the_overflow_line_only():
+    def many(n):
+        return [AgentProblem(Path(f"/{i}.yaml"), "project", "load", "r", "f") for i in range(n)]
+
+    assert PROBLEM_LINE_CAP == 20
+    exact = problem_lines(many(20), 20)
+    assert len(exact) == 20 and not any(line.startswith("...and") for line in exact)
+    over = problem_lines(many(21), 20)
+    assert len(over) == 21 and over[-1] == "...and 1 more; run localharness agent list"
+    assert len(problem_lines(many(25))) == 25
+    assert len(problem_lines(many(1), 20)) == 1
+    assert problem_lines([]) == [] and problem_lines([], PROBLEM_LINE_CAP) == []
+
+
+def test_a_markup_lookalike_in_a_problem_prints_literally():
+    out = io.StringIO()
+    line = AgentProblem(Path("/p/[\x1b/red]x.yaml"), "project", "parse", "1:1: bad", "edit the file").line
+    Console(file=out, width=300).print(escape(line))
+    assert "[/red]x.yaml" in out.getvalue()
+
+
+def test_the_name_check_is_a_full_match():
+    for ok in ("ab", "a", "a" * 64):
+        assert AgentConfig.validate_name_format(ok) == ok
+    for bad in ("ab\n", "a" * 65, "", "Ab", "a_b", "é"):
+        with pytest.raises(ValueError):
+            AgentConfig.validate_name_format(bad)
+    with pytest.raises(ValidationError):
+        AgentConfig(name="ab\n", role="r")
+
+
+def test_set_generated_yaml_stores_a_valid_name_or_none(tmp_path):
+    flow = AgentCreationWorkflow(config_dir=tmp_path)
+    flow.set_generated_yaml("name: ok-name\nrole: r")
+    assert flow.gathered["name"] == "ok-name"
+    for text in ('name: "ab\\n"\nrole: r', "this is: [[[not: valid", "- a\n- b", "role: r",
+                 "name: 123\nrole: r", ""):
+        flow.set_generated_yaml("name: ok-name\nrole: r")
+        flow.set_generated_yaml(text)
+        assert flow.gathered["name"] is None and flow.generated_yaml == text

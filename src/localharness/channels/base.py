@@ -105,6 +105,11 @@ def sanitize_for_display(text: str) -> str:
     return CONTROL_CHARS_RE.sub("", ESCAPE_SEQUENCE_RE.sub("", text))
 
 
+def one_line(text: str) -> str:
+    """`sanitize_for_display` with every run of whitespace, newlines included, collapsed to one space."""
+    return " ".join(sanitize_for_display(text.replace("\r", " ")).split())
+
+
 def permission_denied_reason(error: str | None) -> str | None:
     """The reason out of a denied observation's error text, or None if it is an ordinary error.
 

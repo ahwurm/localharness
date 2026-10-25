@@ -1505,7 +1505,7 @@ class AgentConfig(BaseModel):
     @field_validator("name")
     @classmethod
     def validate_name_format(cls, v: str) -> str:
-        if not re.match(r"^[a-z][a-z0-9-]{0,62}[a-z0-9]$|^[a-z]$", v):
+        if not re.fullmatch(r"^[a-z][a-z0-9-]{0,62}[a-z0-9]$|^[a-z]$", v):
             raise ValueError(
                 f"Agent name {v!r} is invalid. "
                 f"Must be lowercase alphanumeric with hyphens, 1-64 chars, "
