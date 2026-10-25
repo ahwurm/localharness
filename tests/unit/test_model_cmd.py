@@ -565,3 +565,20 @@ def test_model_switch_under_a_runner_without_a_tty_is_not_a_local_operator(compo
 
     assert runner.invoke(app, ["model", "model-b"]).exit_code == 0
     assert seen[0]["local_operator"] is False  # CliRunner's stdin is not a tty
+
+
+def _entry(kind, url=None):
+    from types import SimpleNamespace as NS
+
+    return model_ops.PlanEntry(name="m", kind=kind, runtime=None, endpoint=NS(base_url=url) if url else None)
+
+
+@pytest.mark.parametrize("entry, current, want", [
+    (_entry("live"), "http://p:8000/v1/", "hot"),
+    (_entry("live", "http://q:8001/v1"), "http://q:8001/v1", "hot"),
+    (_entry("live", "http://q:8001/v1"), "http://p:8000/v1", "cross"),
+    (_entry("cold"), "http://p:8000/v1", "cold"),
+    (_entry("setup"), "http://p:8000/v1", "setup"),
+])
+def test_switch_kind_follows_the_endpoint_the_session_is_bound_to(entry, current, want):
+    assert model_ops.switch_kind(entry, "http://p:8000/v1", current) == want
