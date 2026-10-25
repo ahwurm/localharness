@@ -507,3 +507,47 @@ def test_holder_prefers_the_active_heavy_over_the_fallback():
     fallback = (NS(served_name="srv", model="/m/x.gguf"), PRIMARY)
     assert launch_holder(None, HARNESS, fallback) == "srv"
     assert launch_holder((HELD, PRIMARY), HARNESS, fallback) == "held.gguf"
+
+
+PATH_SHAPES = [
+    "at /opt/x — fix", "(/opt/x) — fix", "'/opt/x' — fix", "dir=/opt/x — fix", "[/opt/x] — fix",
+    "<path>/opt/x</path> — fix", "`/opt/x` — fix", "~/m — fix", "./rel/x — fix", "../up — fix",
+    "at /home/u/My Engines/x no longer passes — fix", "at /home/o'brien/x — fix", "dir=/opt/x\nnext line — fix",
+]
+
+
+@pytest.mark.parametrize("text", PATH_SHAPES)
+def test_path_token_withholds_the_path_and_keeps_the_fix(text):
+    out = ms.PATH_TOKEN.sub(ms.ROW_WITHHELD, text)
+    assert ms.ROW_WITHHELD in out and out.endswith(" — fix")
+    for fragment in ("opt", "rel", "up", "My Engines", "brien", "home", "next line"):
+        assert fragment not in out
+
+
+def test_path_token_withholds_an_address():
+    assert ms.PATH_TOKEN.sub(ms.ROW_WITHHELD, "see http://h:8000/v1 now") == "see [path withheld] now"
+
+
+@pytest.mark.parametrize("text", ["(/proc/meminfo)", "read /sys/class/x — fix", "Qwen/Qwen3-4B"])
+def test_path_token_leaves_proc_sys_and_hub_ids(text):
+    assert ms.PATH_TOKEN.sub(ms.ROW_WITHHELD, text) == text
+
+
+def test_cut_keeps_a_short_reason_and_a_long_one_with_no_dash():
+    short, long_ = "x" * 30 + " — " + "y" * 30, "z" * 120
+    assert (ms._why_text(short), ms._why_text(long_)) == (short, long_)
+
+
+def test_cut_keeps_a_first_clause_over_the_limit_and_points_at_the_list():
+    from localharness.cli.model_ops import not_offered_reason
+    from localharness.provider.autosense import NGL_REFUSAL, RAM_UNKNOWN_REFUSAL
+
+    ngl = not_offered_reason(NGL_REFUSAL.format(name="m"), "m")
+    assert ms._why_text(ngl) == ngl.split(" — ")[0] + ms.ROW_CUT and len(ngl.split(" — ")[0]) > ms.ROW_WHY_MAX
+    ram = not_offered_reason(RAM_UNKNOWN_REFUSAL.format(name="m", need=30), "m")
+    assert ms._why_text(ram) == ram.split(" — ")[0] + ms.ROW_CUT and "(/proc/meminfo)" in ms._why_text(ram)
+
+
+def test_cut_screens_a_raw_newline_before_escaping_and_escapes_control_characters():
+    assert ms._why_text("dir=/opt/x\nnext line — fix") == "dir=[path withheld] — fix"
+    assert "\x1b" not in ms._why_text("bad\x1bthing")

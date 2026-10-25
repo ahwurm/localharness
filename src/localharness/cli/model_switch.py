@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
@@ -37,6 +38,8 @@ MODEL_NOT_HERE_FOOTER = "Type /model list for the path."
 MODEL_MALFORMED = "The bound server's reply wasn't understood — check its base_url at this machine, then reopen."
 MODEL_UNAVAILABLE = "Model switching is unavailable in this session."
 MODEL_LIST_REUSE_S = 15.0
+PATH_TOKEN = re.compile(r"""[A-Za-z][\w+.-]*://[^\s)"',;]*"""
+                        r"""|(?<![^\s("'=:,<>\[{`])(?!/proc/|/sys/)(?:\.{1,2}/|[/~]).*?(?= — |[.;,)"']+(?:\s|$)|$)""", re.S)
 
 Stop = tuple[str, str] | None
 
@@ -60,6 +63,13 @@ def _endpoint_name(harness, base_url: str) -> str:
         return "primary"
     peers = getattr(harness, "extra_endpoints", None) or []
     return next((ep.name for ep in peers if model_ops._norm_url(ep.base_url) == url), "primary")
+
+
+def _why_text(reason: str) -> str:
+    text = PATH_TOKEN.sub(ROW_WITHHELD, reason)
+    if len(text) > ROW_WHY_MAX and " — " in text:
+        text = text.split(" — ")[0] + ROW_CUT
+    return visible_text(text)
 
 
 def _phone_enrolled(config_dir) -> bool:
