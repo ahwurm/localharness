@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +42,15 @@ CREATOR_BAR = (2, 3)
 TEMPERATURE = 0.6
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "skills_live"
 NO_CHILD_AGENTS = ["explore", "web-researcher", "cruncher", "search-verifier"]
+KINDS = ("matching", "near_miss", "unrelated")
+REPORTS = Path(__file__).resolve().parents[2] / "reports"
+NO_WINDOW = "not exposed by the server"
+CREATOR_MAX_ACTIONS = 40
+CREATOR_MAX_MINUTES = 30.0
+VARIANT_A = "On the subject model, the model picked a matching skill from the listing on its own in at least 80 % of test runs."
+VARIANT_B = "The model may not pick a skill up on its own; `/<name>` asks it to."
+ROOT = ("a fresh install's orchestrator with the built-in tools, agent, task and skill; no plugins, no memory, "
+        "no guardrails file, no project instructions; the web verbs are denied to it, as in a real start")
 
 
 class FirstStepDone(BaseException):
@@ -129,6 +139,136 @@ async def first_step_run(client, skill_set: SkillSet, cfg: AgentConfig, prompt: 
     args, kwargs = seen[0]
     messages = kwargs["messages"] if "messages" in kwargs else args[0]
     return Step(calls, finish, messages[0]["content"])
+
+
+@dataclass(frozen=True)
+class Run:
+    leg: str
+    skill: str
+    kind: str
+    prompt: str
+    index: int
+    step: Step
+
+
+@dataclass(frozen=True)
+class CreatorRun:
+    request: str
+    asks: tuple[tuple[str, str, bool], ...]
+    terminated: str | None
+    listing: str
+    valid: bool
+
+
+def skill_params(run: Run) -> list[dict]:
+    return [params for name, params in run.step.calls if name == "skill"]
+
+
+def hit(run: Run) -> bool:
+    params = skill_params(run)
+    return any(p.get("name") == run.skill for p in params) if run.kind == "matching" else bool(params)
+
+
+def count(runs, leg: str, skill: str) -> tuple[int, int, int, int]:
+    own = [r for r in runs if r.leg == leg and r.skill == skill]
+    matching = [r for r in own if r.kind == "matching"]
+    others = [r for r in own if r.kind != "matching"]
+    return sum(map(hit, matching)), len(matching), sum(map(hit, others)), len(others)
+
+
+def tally(runs, skill: str) -> tuple[int, int, int, int]:
+    return count(runs, "native", skill)
+
+
+def passed(runs, creator_valid) -> bool:
+    skills = sorted({r.skill for r in runs})
+    assert skills, "no runs to judge"
+    assert len(creator_valid) == CREATOR_BAR[1], f"{len(creator_valid)} creator runs, the bar counts {CREATOR_BAR[1]}"
+    rows = [tally(runs, s) for s in skills]
+    for skill, (_, matching, _, others) in zip(skills, rows):
+        assert (matching, others) == (MATCHING_BAR[1], FALSE_BAR[1]), f"{skill}: {matching} matching and {others} other native runs"
+    return (all(m >= MATCHING_BAR[0] and f <= FALSE_BAR[0] for m, _, f, _ in rows)
+            and sum(creator_valid) >= CREATOR_BAR[0])
+
+
+def out_of_list(runs, names) -> dict[str, list[tuple[str, str]]]:
+    found: dict[str, list[tuple[str, str]]] = {"native": [], "xml": []}
+    for run in runs:
+        for params in skill_params(run):
+            name = params.get("name")
+            if not (isinstance(name, str) and name in names):
+                found[run.leg].append((run.prompt, repr(name)))
+    return found
+
+
+def report_path(day: str) -> Path:
+    return REPORTS / f"skills-live-gate-{day}.md"
+
+
+def write_report(day: str, text: str) -> Path:
+    path = report_path(day)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "x", encoding="utf-8") as f:
+        f.write(text)
+    return path
+
+
+def cell(text) -> str:
+    return str(text).replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+
+def table(header: list[str], rows) -> list[str]:
+    return [f"| {' | '.join(header)} |", "|" + " --- |" * len(header),
+            *(f"| {' | '.join(cell(c) for c in row)} |" for row in rows)]
+
+
+def render_report(meta: dict, runs, creator) -> str:
+    ok = passed(runs, [c.valid for c in creator])
+    skills = sorted({r.skill for r in runs})
+    window = NO_WINDOW if meta["window"] is None else meta["window"]
+    outside = out_of_list(runs, skills)
+    names = {leg: "; ".join(f"{name} on {json.dumps(prompt)}" for prompt, name in found) or "none"
+             for leg, found in outside.items()}
+    native = [(s, *count(runs, "native", s)) for s in skills]
+    xml = [(s, *count(runs, "xml", s)) for s in skills]
+    lines = [
+        "# Skills live-model gate", "",
+        f"Date: {meta['day']} · Repo: {meta['commit']}",
+        f"Outcome: {'pass' if ok else 'miss'}",
+        f"The claim: {VARIANT_A if ok else VARIANT_B}",
+        f"Model: {meta['model']} · Base URL: {meta['base_url']} · Window: {window} · Temperature: {meta['temperature']}",
+        f"Wall time: {meta['minutes']} minutes",
+        f"Root: {ROOT}",
+        f"Tools: {', '.join(meta['tools'])}", "",
+        "## The bar, fixed before the run", "",
+        f"- Matching requests: at least {MATCHING_BAR[0]} of {MATCHING_BAR[1]} per skill, no averaging across skills.",
+        f"- Near-miss and unrelated requests: at most {FALSE_BAR[0]} of {FALSE_BAR[1]} per skill.",
+        f"- Creator runs: at least {CREATOR_BAR[0]} of {CREATOR_BAR[1]} valid.",
+        f"- Every request runs {RUNS} times in native tool-call mode; the XML pass runs the set once and is not judged.", "",
+        "## Native, per skill", "",
+        *table(["skill", "matching", "near-miss plus unrelated", "meets the bar"],
+               [(s, f"{m} of {mt}", f"{f} of {ft}", "yes" if m >= MATCHING_BAR[0] and f <= FALSE_BAR[0] else "no")
+                for s, m, mt, f, ft in native]), "",
+        "## XML tool-call mode, one run of the whole set (recorded, not judged)", "",
+        *table(["skill", "matching", "near-miss plus unrelated"],
+               [(s, f"{m} of {mt}", f"{f} of {ft}") for s, m, mt, f, ft in xml]), "",
+        "## Names outside the listing", "",
+        f"native: {names['native']}", f"xml: {names['xml']}", "",
+        "## Creator runs", "",
+        f"Limits per run: {CREATOR_MAX_ACTIONS} actions, {int(CREATOR_MAX_MINUTES)} minutes.", "",
+        *table(["run", "request", "valid", "asks", "terminated"],
+               [(i, c.request, "yes" if c.valid else "no",
+                 "; ".join(f"{tool} {'allowed' if allowed else 'denied'}: {display}" for tool, display, allowed in c.asks),
+                 c.terminated) for i, c in enumerate(creator, 1)]), "",
+        "## The listing as rendered", "", "```text", meta["listing"], "```", "",
+        "## Every run", "",
+        *table(["leg", "skill", "kind", "run", "request", "first-step calls", "finish reason", "hit", "counted"],
+               [(r.leg, r.skill, r.kind, r.index, r.prompt,
+                 json.dumps(r.step.calls, sort_keys=True, default=repr), r.step.finish_reason,
+                 "yes" if hit(r) else "no", "yes" if r.leg == "native" else "no")
+                for r in runs]),
+    ]
+    return "\n".join(lines) + "\n"
 
 
 async def test_the_subject_model_picks_a_listed_skill_on_its_own(live_endpoint, tmp_path, monkeypatch):
