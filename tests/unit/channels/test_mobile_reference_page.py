@@ -235,7 +235,7 @@ const mk = (tag) => ({
     this.parent = null;
   },
   classList: { add() {}, remove() {}, contains: () => false },
-  close() {}, showModal() {},
+  close() { this.open = false; }, showModal() { this.open = true; },
 });
 const byId = new Map();
 globalThis.document = {
@@ -954,3 +954,111 @@ def test_the_stuck_branches_are_present_without_a_js_engine(page):
     spine = module.split("\nfunction ", 1)[0].split("\nasync function ", 1)[0]
     assert '"stuck_detected"' in spine
     assert '"Escalation"' in spine
+
+
+MODEL_STRINGS = {
+    "MODEL_HEADER": "Model", "MODEL_TAG_ACTIVE": "active", "MODEL_TAG_ON": "on {endpoint}",
+    "MODEL_TAG_LAUNCHES": "launches", "MODEL_TAG_STOPS": "stops {stops}", "MODEL_LOADING": "loading…",
+    "MODEL_TURN": "a turn is running — a tap waits for it",
+    "MODEL_QUEUED": "queued — runs when this turn ends",
+    "MODEL_QUEUED_ASK": "queued — asks to launch when this turn ends; keep the app open to answer",
+    "MODEL_CHECKING": "checking {name}…", "MODEL_LAUNCHING": "launching {launching}…",
+    "MODEL_NOT_LAUNCHED": "{launching} not switched — {notice}",
+    "MODEL_NO_NOTICE": "the model is unchanged", "MODEL_WAKE": "wake chat and list",
+    "MODEL_UNAVAILABLE_PAGE": "model list unavailable", "PICKER_TITLE": "Choose",
+    "CONFIRM_TITLE": "Confirm",
+}
+
+MODEL_PRELUDE = """
+const hello = (turn) => onFrame("Hello", {session_id: "s", mode: "repl", turn_in_progress: turn,
+  protocol_version: PROTOCOL_VERSION, synthetic: false, model_state: "ready"});
+const LIST = {models: [
+  {name: "qwen3:32b", label: null, kind: "hot", active: true},
+  {name: "llama3.1:8b", label: null, kind: "cross", endpoint: "peer-b"},
+  {name: "mixtral:8x7b", label: null, kind: "cold", stops: "qwen3:32b"},
+  {name: "Qwen/Qwen3-4B", label: "Qwen3-4B", kind: "setup", why: "set up at the terminal"}],
+  footer: ["Terminal: localharness model --setup"]};
+const waiting = [], posts = [];
+globalThis.fetch = (path, opts) => {
+  if (opts && opts.method === "POST") {
+    posts.push([path, JSON.parse(opts.body)]); return Promise.resolve({status: 200, json: async () => ({})});
+  }
+  if (path !== "/api/model") return Promise.resolve({json: async () => ({})});
+  return new Promise((res, rej) => waiting.push({opts, res, rej}));
+};
+const ok = (body) => ({status: 200, ok: true, json: async () => body});
+const tick = () => new Promise((r) => setTimeout(r, 0));
+const kids = () => $("cfgModel").children.map((c) => [c.tagName, c.textContent]);
+token = "tok";
+"""
+
+
+def _models(page, tmp_path, script):
+    return _drive(page, MODEL_PRELUDE + script, tmp_path)
+
+
+def test_model_list_strings_are_one_block_verbatim(page):
+    lines = page.splitlines()
+    at = [lines.index(f'const {k} = "{v}";') for k, v in MODEL_STRINGS.items()]
+    assert at == list(range(at[0], at[0] + len(MODEL_STRINGS)))
+
+
+def test_model_list_is_fetched_from_one_site_that_reads_the_status(page):
+    assert page.count('"/api/model"') == 1 and 'get("/api/model"' not in page
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_model_list_renders_rows_in_payload_order_once_the_reply_lands(page, tmp_path):
+    got = _models(page, tmp_path, """
+hello(false);
+$("modelBtn").onclick(); await tick();
+const loading = [$("cfg").open, kids()];
+waiting[0].res(ok(LIST)); await tick();
+console.log(JSON.stringify({loading, head: $("cfgModelHead").textContent, rows: kids(),
+  asked: waiting.length, auth: waiting[0].opts.headers["Authorization"]}));
+""")
+    assert got["loading"] == [True, [["div", "loading…"]]]
+    assert got["head"] == "Model" and got["asked"] == 1 and got["auth"] == "Bearer tok"
+    assert got["rows"] == [["div", "qwen3:32b · active"], ["button", "llama3.1:8b · on peer-b"],
+                           ["button", "mixtral:8x7b · launches · stops qwen3:32b"],
+                           ["div", "Qwen3-4B · set up at the terminal"],
+                           ["div", "Terminal: localharness model --setup"]]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_model_list_only_the_newest_reply_renders(page, tmp_path):
+    got = _models(page, tmp_path, """
+hello(false);
+$("modelBtn").onclick(); await tick();
+$("modelBtn").onclick(); await tick();
+waiting[1].res(ok({models: [{name: "only", kind: "hot", active: true}], footer: []})); await tick();
+waiting[0].res(ok(LIST)); await tick();
+console.log(JSON.stringify(kids()));
+""")
+    assert got == [["div", "only · active"]]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_model_list_a_tap_posts_the_model_command_and_closes_the_dialog(page, tmp_path):
+    got = _models(page, tmp_path, """
+hello(false);
+$("modelBtn").onclick(); await tick();
+waiting[0].res(ok(LIST)); await tick();
+$("cfgModel").children[1].onclick(); await tick();
+console.log(JSON.stringify({posts, open: $("cfg").open, rows: rows()}));
+""")
+    assert got["posts"] == [["/api/sessions/s/command", {"text": "/model llama3.1:8b"}]]
+    assert got["open"] is False and got["rows"] == []
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_model_list_a_markup_label_is_text_with_no_child_element(page, tmp_path):
+    got = _models(page, tmp_path, """
+hello(false);
+$("modelBtn").onclick(); await tick();
+waiting[0].res(ok({models: [{name: "m", label: "<img src=x onerror=alert(1)>", kind: "cross", endpoint: "e"}],
+  footer: []})); await tick();
+const row = $("cfgModel").children[0];
+console.log(JSON.stringify([row.textContent, row.children.length]));
+""")
+    assert got == ["<img src=x onerror=alert(1)> · on e", 0]
