@@ -24,7 +24,7 @@ from rich.prompt import IntPrompt
 from rich.table import Table
 from rich.text import Text
 
-from localharness.channels.base import sanitize_for_display
+from localharness.channels.base import one_line
 from localharness.cli.theme import SITE_DIM, SITE_INK, SITE_TOOL, entity, entity_text
 from localharness.cli.workspace import (
     NO_INPUT_HELP,
@@ -259,10 +259,6 @@ def _plugins_text(loaded: list[str], unconfigured: dict[str, str], available: Se
 from localharness.cli.session_resume import (  # noqa: E402 — the handle lives beside its file form
     SLEEP_ACTION, Restart, Resume, asleep_path, is_reload, take_asleep, write_asleep,
 )
-
-
-def _one_line(text: str) -> str:
-    return " ".join(sanitize_for_display(text.replace("\r", " ")).split())
 
 
 def _resume_status(resume: Resume, result: Any) -> str:
@@ -1401,18 +1397,9 @@ def _ensure_packaged_tools(config_dir: Path) -> None:
 
 
 def _skipped_agent_file(f: Path, exc: Exception) -> None:
-    """The user-visible half of discover_agents' warn-and-skip.
-
-    ConfigLoader logs, but config/ must never import a rich console from cli/ — so the caller
-    supplies the printer. This warning is load-bearing: the mint-refusal below points at it
-    ("see the warnings above") before it refuses to overwrite an unparseable root agent.
-
-    escape() around the path and the reason, markup outside — agent_cmd's twin of this function
-    carries the same fix and the same reason: a project folder legally named `[/red]proj` made
-    the one message whose job is naming the broken file raise MarkupError and kill the session.
-    """
+    """Warn about an agent file discover_agents skipped; the root-agent mint refusal says "see the warnings above" about this line."""
     err_console.print(
-        "[yellow]⚠ " + escape(f"skipping unreadable agent file {f}: {exc}") + "[/yellow]",
+        "[yellow]⚠ " + escape(one_line(f"skipping unreadable agent file {f}: {exc}")) + "[/yellow]",
         soft_wrap=True,
     )
 
@@ -3296,7 +3283,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             console.print(Text(RESTARTED_RELOAD), soft_wrap=True)
         else:  # R3: no wordmark mid-conversation — one line, then the plugin lines and the status
             console.print(Text(RESTARTED_LINE.format(
-                name=_one_line(resume.action[1]), state="on" if resume.action[0] == "enable" else "off")),
+                name=one_line(resume.action[1]), state="on" if resume.action[0] == "enable" else "off")),
                 soft_wrap=True)
         if instructions_handle is not None and hasattr(channel, "instructions_on_delivered"):
             # D-47: delivery is the receipt. The channel calls this once its own checked send / hint
@@ -3376,14 +3363,14 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             available = ([e.name for e in plugin_resolution.plan.entries if e.state == "available"]
                          if plugin_resolution is not None else [])
             _plugins_line = _plugins_text(
-                [_one_line(n) for n in plugin_result.loaded_names] if plugin_result is not None else [],
-                {_one_line(n): _one_line(d) for n, d in _unconfigured.items()},
-                [_one_line(n) for n in available],
+                [one_line(n) for n in plugin_result.loaded_names] if plugin_result is not None else [],
+                {one_line(n): one_line(d) for n, d in _unconfigured.items()},
+                [one_line(n) for n in available],
             )
             if _plugins_line is not None:
                 console.print(_plugins_line, soft_wrap=True)
         if resume is not None and not resume.slept and not is_reload(resume.action):
-            console.print(Text(_one_line(_resume_status(resume, plugin_result))), soft_wrap=True)
+            console.print(Text(one_line(_resume_status(resume, plugin_result))), soft_wrap=True)
 
         # --- Verbose output ---
         if verbose:
