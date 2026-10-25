@@ -26,7 +26,9 @@ from localharness.agent.task_record import MAX_REFERENCES, TaskState
 from localharness.tools.builtin.skill_tool import SkillTool
 from localharness.tools.registry import ToolRegistry
 from tests.unit.agent.test_auto_mode import SETTINGS, SHELL, WRITE, _ctx, _shell, _verdict
-from tests.unit.test_docs_convergence import _NUMBER_WORDS, _read, check_denylist, check_protected_entries_doc
+from tests.unit.test_docs_convergence import (
+    _NUMBER_WORDS, _read, bullets, check_denylist, check_protected_entries_doc, section,
+)
 from tests.unit.test_capabilities import _production_registry
 from tests.unit.test_leftover_plugin_section import _CONFIG, _agent_file
 from tests.unit.test_skills_discovery import _skill
@@ -485,6 +487,7 @@ def test_the_id_scan_bites(text, found) -> None:
 VARIANT_A = "On the subject model, the model picked a matching skill from the listing on its own in at least 80 % of test runs."
 VARIANT_B = "The model may not pick a skill up on its own; `/<name>` asks it to."
 UNRELEASED = "## [Unreleased]"
+REMOVED_FIX = "a config that still sets it now fails validation naming the key path: delete it."
 
 
 def unreleased(text: str) -> str:
@@ -496,6 +499,11 @@ def unreleased(text: str) -> str:
     return "\n".join(lines[start:end])
 
 
+def kept_variants(text: str) -> list[str]:
+    flat = " ".join(text.split())
+    return [v for v in (VARIANT_A, VARIANT_B) if v in flat]
+
+
 def check_skills_entry(text: str) -> list[str]:
     """The CHANGELOG's Unreleased entry keeps one variant, the code's figures and no internal id."""
     entry = unreleased(text)
@@ -503,9 +511,10 @@ def check_skills_entry(text: str) -> list[str]:
         return ["CHANGELOG has no ## [Unreleased] entry"]
     flat = " ".join(entry.split())
     headings = [line for line in text.splitlines() if line.startswith("## [")]
+    items = [(h, " ".join(b.split())) for h, b in bullets(entry)]
     word = next(w for w, n in _NUMBER_WORDS.items() if n == MAX_REFERENCES)
     said = ("while a task is live", f"{LISTING_BUDGET_CHARS:,}-character", f"{word}-reference limit")
-    kept = [v for v in (VARIANT_A, VARIANT_B) if v in flat]
+    kept = kept_variants(entry)
     return [
         *([] if sum(h.startswith(UNRELEASED) for h in headings) == 1 and headings[0].startswith(UNRELEASED)
           else ["## [Unreleased] is not the first ## [ heading"]),
@@ -513,8 +522,80 @@ def check_skills_entry(text: str) -> list[str]:
         *(["the skills entry carries a variant label"] if re.search(r"Variant [AB]", entry) else []),
         *[f"the skills entry does not say {n}" for n in said if n not in flat],
         *[f"internal id in the skills entry: {x}" for x in ids(entry)],
+        *([] if re.findall(r"^### (.+)$", entry, re.M) == ["Added", "Changed", "Removed"]
+          else ["the skills entry's subsections are not Added, Changed, Removed"]),
+        *([] if any(h == "Removed" and "`context.microagents`" in b and REMOVED_FIX in b for h, b in items)
+          else ["no Removed bullet names `context.microagents` with the delete-it fix"]),
+        *([] if any(h == "Changed" and "`localharness`" in b and "asked again, once per subcommand" in b
+                    for h, b in items)
+          else ["no Changed bullet says a bare `localharness` grant is asked again, once per subcommand"]),
+    ]
+
+
+def check_skills_claim(readme: str, changelog: str) -> list[str]:
+    """The README's Skills section keeps the one variant the CHANGELOG keeps."""
+    body = section(readme, "## Skills")
+    if body is None:
+        return ["README has no ## Skills section"]
+    mine, theirs = kept_variants(body), kept_variants(unreleased(changelog))
+    return [
+        *([] if len(mine) == 1 else [f"the README Skills section keeps {len(mine)} variants, not one"]),
+        *(["the README and the CHANGELOG keep different variants"] if len(mine) == len(theirs) == 1 and mine != theirs else []),
     ]
 
 
 def test_skills_entry_live() -> None:
     assert check_skills_entry(_read("CHANGELOG.md")) == []
+
+
+def test_skills_claim_live() -> None:
+    assert check_skills_claim(_read("README.md"), _read("CHANGELOG.md")) == []
+
+
+def _swapped(text: str) -> str:
+    changed = re.search(r"### Changed\n.*?(?=### Removed)", text, re.S).group(0)
+    removed = re.search(r"### Removed\n.*?\n(?=\n## \[)", text, re.S).group(0)
+    return text.replace(changed + removed, removed + "\n" + changed.rstrip("\n") + "\n")
+
+
+def test_skills_entry_bites() -> None:
+    good = _read("CHANGELOG.md")
+    release = good[good.index("## [0.21.1]"):]
+    dropped = re.sub(r"(### Removed\n)- \*\*`context\.microagents`.*?(?=\n\n## \[)", r"\1", good, flags=re.S)
+
+    assert check_skills_entry(good) == []
+    assert check_skills_entry(good.replace(UNRELEASED, "## [0.99.0]")) == ["CHANGELOG has no ## [Unreleased] entry"]
+    assert check_skills_entry(good.replace(VARIANT_B, VARIANT_A + " " + VARIANT_B)) == [
+        "the skills entry keeps 2 variants, not one"]
+    assert check_skills_entry(good.replace(VARIANT_B, "")) == ["the skills entry keeps 0 variants, not one"]
+    assert check_skills_entry(good.replace(VARIANT_B, VARIANT_A)) == []
+    assert check_skills_entry(good.replace(VARIANT_B, "Variant B: " + VARIANT_B)) == [
+        "the skills entry carries a variant label"]
+    assert check_skills_entry(good.replace("while a task is live", "meanwhile")) == [
+        "the skills entry does not say while a task is live"]
+    assert check_skills_entry(good.replace("1,300", "1,200")) == ["the skills entry does not say 1,300-character"]
+    assert check_skills_entry(good.replace("four-reference", "three-reference")) == [
+        "the skills entry does not say four-reference limit"]
+    assert check_skills_entry(good.replace(VARIANT_B, VARIANT_B + " §")) == ["internal id in the skills entry: §"]
+    assert check_skills_entry(good + "\n" + UNRELEASED + "\n") == ["## [Unreleased] is not the first ## [ heading"]
+    assert check_skills_entry("# Changelog\n\n" + release + "\n" + good[good.index(UNRELEASED):good.index("## [0.21.1]")]) == [
+        "## [Unreleased] is not the first ## [ heading"]
+    assert check_skills_entry(dropped) == ["no Removed bullet names `context.microagents` with the delete-it fix"]
+    assert check_skills_entry(good.replace("delete it.", "see the docs.")) == [
+        "no Removed bullet names `context.microagents` with the delete-it fix"]
+    assert check_skills_entry(good.replace("once per subcommand", "once")) == [
+        "no Changed bullet says a bare `localharness` grant is asked again, once per subcommand"]
+    assert check_skills_entry(_swapped(good)) == ["the skills entry's subsections are not Added, Changed, Removed"]
+
+
+def test_skills_claim_bites() -> None:
+    readme, changelog = _read("README.md"), _read("CHANGELOG.md")
+
+    assert check_skills_claim(readme.replace(VARIANT_B, VARIANT_A), changelog) == [
+        "the README and the CHANGELOG keep different variants"]
+    assert check_skills_claim(readme.replace(VARIANT_B, VARIANT_A), changelog.replace(VARIANT_B, VARIANT_A)) == []
+    assert check_skills_claim(readme.replace(VARIANT_B, VARIANT_A + " " + VARIANT_B), changelog) == [
+        "the README Skills section keeps 2 variants, not one"]
+    assert check_skills_claim(readme.replace(VARIANT_B, ""), changelog) == [
+        "the README Skills section keeps 0 variants, not one"]
+    assert check_skills_claim(readme.replace("## Skills", "## Abilities"), changelog) == ["README has no ## Skills section"]

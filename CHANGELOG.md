@@ -23,6 +23,16 @@ Skills: procedures the model loads when a request matches, and a bundled `skill-
   window floor.
   The model may not pick a skill up on its own; `/<name>` asks it to.
 
+### Changed
+- **An "always" given to a bare `localharness` command no longer covers its subcommands.** Each
+  subcommand is now its own signature (`localharness <subcommand>`), so an old bare `localharness`
+  "always" grant is asked again, once per subcommand; the bare command alone keeps its grant.
+  `localharness skills` is read-only and never asks.
+
+### Removed
+- **`context.microagents`** — declared since v2 planning, never read by anything; a config that
+  still sets it now fails validation naming the key path: delete it.
+
 ## [0.21.1] — 2026-10-24
 
 The installed phone app shows a "can't reach your box" page instead of a white screen when the box is unreachable.
