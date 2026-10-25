@@ -1564,3 +1564,10 @@ console.log(JSON.stringify({shown, cancelled, bodies, open: $("ask").open}));
 def test_showask_guards_the_params_block_and_keeps_the_server_confirm(page):
     assert 'if (d.tool_name) dlg.appendChild(el("pre", null, JSON.stringify(d.tool_params, null, 1)));' in page
     assert "confirm_required" in page and "confirm_token: r.confirm_token" in page
+
+
+def test_a_second_tap_is_skipped_for_the_picker_class_alone_and_kept_for_every_other_ask(page):
+    body = page.split("function showAsk(d)")[1].split("\n}\n")[0]
+    assert 'const picker = d.klass === "picker";' in body
+    assert '(o.confirm_required && !picker ? " (2 taps)" : "")' in body
+    assert "if (!picker && !confirm(r.detail)) { dlg.close(); return; }" in body

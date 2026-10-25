@@ -359,6 +359,32 @@ async def test_a_backfilled_model_switch_older_than_the_hello_model_is_not_repla
     assert "ModelSwitched" in [f[0] for f in await live]
 
 
+async def test_a_backfilled_model_switch_newer_than_the_hello_ceiling_is_still_replayed(tmp_path):
+    bus, channel, server, _ = await _stack(tmp_path)
+    first = await bus.publish(ModelSwitched(
+        agent_id="a", session_id="s1", model="old", endpoint="primary", kind="hot"))
+    channel.model_source = lambda: "new"
+    real_hello = channel.hello
+
+    async def hello_then_switch(client, cursor):
+        await bus.publish(ModelSwitched(
+            agent_id="a", session_id="s1", model="landed-during-hello", endpoint="primary", kind="hot"))
+        return await real_hello(client, cursor)
+
+    channel.hello = hello_then_switch
+    frames = await _read_frames(server, 2, path=f"/api/stream?from={first.seq}")
+    assert [f[0] for f in frames[:2]] == ["Hello", "ModelSwitched"]
+    assert frames[1][2]["model"] == "landed-during-hello"
+
+
+async def test_model_list_handler_reaches_for_no_session_or_probe_machinery():
+    import inspect
+
+    src = inspect.getsource(MobileServer.model_list)
+    for name in ("on_first_message", "_ensure_session", "probe_model", "_maybe_prewarm", "_bringup"):
+        assert name not in src
+
+
 async def test_the_backfill_matches_the_session_log_byte_for_byte(tmp_path):
     """The diff-against-the-JSONL check WEBCH-06 asks for, at the wire."""
     bus, _, _, client = await _stack(tmp_path)
