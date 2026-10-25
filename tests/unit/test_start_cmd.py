@@ -330,7 +330,6 @@ def test_repl_slash_agents_with_cards():
     mock_card = MagicMock()
     mock_card.name = "finance-agent"
     mock_card.description = "Handles financial tasks"
-    mock_card.status = "active"
 
     responses = ["/agents"]
     response_iter = iter(responses)

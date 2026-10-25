@@ -1308,7 +1308,7 @@ class AgentConfig(BaseModel):
         description=(
             "Human-readable description of what this agent does. "
             "Used as the basis for the default system prompt if system_prompt_file is not set. "
-            "Also used to generate the Agent Card for orchestrator routing."
+            "Also the Agent Card description `/agents` shows."
         ),
     )
 
@@ -1486,14 +1486,12 @@ class AgentConfig(BaseModel):
         ),
     )
 
-    # --- Agent Card (for orchestrator routing) ---
+    # --- Agent Card (listed by /agents) ---
     capabilities: list[str] = Field(
         default_factory=list,
         description=(
-            "List of capability keywords for Agent Card routing. "
-            "The orchestrator uses these to match tasks to agents. "
-            "Examples: ['web-search', 'hacker-news', 'summarization']. "
-            "If empty, capabilities are inferred from the role description."
+            "List of capability keywords carried on the Agent Card. "
+            "Examples: ['web-search', 'hacker-news', 'summarization']."
         ),
     )
 

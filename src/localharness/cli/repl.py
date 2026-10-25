@@ -649,10 +649,9 @@ class OrchestratorREPL:
                         # dispatched: one AgentLoop, one turn at a time (critic, 2026-09-12).
                         await self._await_turn_with_sigint(self._turn_task)
                     task = await self._dispatch_input(user_input)
-                    # v1: the single agent loop handles every turn directly. Multi-agent
-                    # routing (AgentCardRegistry.route) will be wired in for dispatch in
-                    # MULTI-02 (v2). Run it as a cancellable task so a mid-turn Ctrl+C
-                    # cancels the TURN, not the session (#47).
+                    # v1: the single agent loop handles every turn directly. Run it as a
+                    # cancellable task so a mid-turn Ctrl+C cancels the TURN, not the
+                    # session (#47).
                     if task is not None:
                         self._turn_task = task  # so `_turn_running()` is true here too
                         await self._await_turn_with_sigint(task)
