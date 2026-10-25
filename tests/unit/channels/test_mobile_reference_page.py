@@ -1268,3 +1268,122 @@ S.offline = true; paint({poll!r} || undefined);
 console.log(JSON.stringify(chip()));
 """)
     assert got == "offline — retrying"
+
+
+LAUNCH_PRELUDE = """
+const withLaunch = (launching, activeName) => ({...LIST, launching, models: LIST.models.map((m) => ({
+  ...m, active: m.name === activeName, why: m.kind === "setup" ? m.why : undefined}))});
+const head = () => $("cfgModelHead").textContent;
+const rowKinds = () => $("cfgModel").children.map((c) => [c.tagName, c.disabled, c.textContent]);
+const answer = async (body) => { waiting.shift().res(ok(body)); await tick(); };
+const openList = async (body) => { $("modelBtn").onclick(); await tick(); await answer(body); };
+"""
+
+
+def _launch(page, tmp_path, script):
+    return _models(page, tmp_path, PICKER + LAUNCH_PRELUDE + "hello(false);\n" + script)
+
+
+@NODE_ONLY
+def test_launch_list_holds_the_rows_and_heads_with_the_progress_until_it_lands(page, tmp_path):
+    got = _launch(page, tmp_path, """
+const out = {};
+await openList(withLaunch("mixtral:8x7b", "qwen3:32b"));
+out.opened = [head(), rowKinds().filter((r) => r[0] === "button").map((r) => r[1])];
+onFrame("Activity", {text: "launching peer-c · 12s"});
+out.progress = [head(), waiting.length];
+onFrame("Activity", {text: ""}); await tick();
+out.still = [waiting.length]; await answer(withLaunch("mixtral:8x7b", "qwen3:32b"));
+out.still.push(head(), rowKinds().filter((r) => r[0] === "button").every((r) => r[1]));
+onEvent("ModelSwitched", {seq: 1, model: "mixtral:8x7b"}); await tick();
+out.switched = [waiting.length]; await answer(withLaunch(null, "mixtral:8x7b"));
+out.landed = [head(), rowKinds()];
+console.log(JSON.stringify(out));
+""")
+    assert got["opened"] == ["launching mixtral:8x7b…", [True, True]]
+    assert got["progress"] == ["launching peer-c · 12s", 0]
+    assert got["still"] == [1, "launching mixtral:8x7b…", True]
+    assert got["switched"] == [1]
+    head, rows = got["landed"]
+    assert head == "Model"
+    assert rows[:3] == [["button", False, "qwen3:32b"], ["button", False, "llama3.1:8b · on peer-b"],
+                        ["div", False, "mixtral:8x7b · active · launches · stops qwen3:32b"]]
+
+
+@NODE_ONLY
+@pytest.mark.parametrize("notice, said", [
+    ('onFrame("Notice", {text: "the launch failed — see the log\\nsecond line"});',
+     "the launch failed — see the log"),
+    ("", "the model is unchanged"),
+])
+def test_launch_list_a_launch_that_ends_without_a_switch_says_why(page, tmp_path, notice, said):
+    got = _launch(page, tmp_path, f"""
+await openList(withLaunch("mixtral:8x7b", "qwen3:32b"));
+{notice}
+onFrame("Activity", {{text: ""}}); await tick();
+await answer(withLaunch(null, "qwen3:32b"));
+console.log(JSON.stringify([head(), rowKinds().filter((r) => r[0] === "div")[0], rowKinds()[1][1]]));
+""")
+    assert got == [f"mixtral:8x7b not switched — {said}", ["div", False, "qwen3:32b · active"], False]
+
+
+@NODE_ONLY
+def test_launch_list_the_header_returns_to_model_when_the_dialog_next_opens(page, tmp_path):
+    got = _launch(page, tmp_path, """
+await openList(withLaunch("mixtral:8x7b", "qwen3:32b"));
+onFrame("Activity", {text: ""}); await tick();
+await answer(withLaunch(null, "qwen3:32b"));
+const notSwitched = head();
+$("cfg").close();
+await openList(LIST);
+console.log(JSON.stringify([notSwitched, head()]));
+""")
+    assert got == ["mixtral:8x7b not switched — the model is unchanged", "Model"]
+
+
+@NODE_ONLY
+def test_launch_list_reopen_resets_the_header_and_the_wake(page, tmp_path):
+    got = _launch(page, tmp_path, """
+$("modelBtn").onclick(); await tick();
+waiting.shift().res({status: 503, ok: false, json: async () => ({error: "chat asleep — /model list wakes it", asleep: true})});
+await tick();
+$("cfgModel").children[1].onclick(); await tick();
+$("cfg").close();
+await openList(withLaunch("mixtral:8x7b", "qwen3:32b"));
+const launching = head();
+$("cfg").close();
+await openList(LIST);
+const reopened = head();
+const before = waiting.length;
+onFrame("Notice", {text: "listing"}); await tick();
+const afterNotice = waiting.length;
+onFrame("Activity", {text: ""}); await tick();
+onEvent("ModelSwitched", {seq: 1, model: "m"}); await tick();
+console.log(JSON.stringify({launching, reopened, notice: afterNotice - before, events: waiting.length - before,
+  fetched: S.modelFetch}));
+""")
+    assert got["launching"] == "launching mixtral:8x7b…" and got["reopened"] == "Model"
+    assert got["notice"] == 0 and got["events"] == 2 and got["fetched"] == 5
+
+
+@NODE_ONLY
+def test_launch_list_fetches_only_on_the_opener_and_the_two_events_while_open(page, tmp_path):
+    got = _launch(page, tmp_path, """
+const n = () => S.modelFetch, out = [];
+onFrame("Hello", {session_id: "s", mode: "repl", turn_in_progress: false, model: "m",
+  protocol_version: PROTOCOL_VERSION, synthetic: false, model_state: "ready"});
+onEvent("ModelSwitched", {seq: 1, model: "m"});
+onEvent("StatusTick", {phase: "idle", silent: 0, thinking_tokens: 0, answer_tokens: 0,
+  tool_call_tokens: 0, elapsed: 0, tps: null, model: "m"});
+onFrame("Activity", {text: ""}); onFrame("Activity", {text: "x"}); onFrame("Notice", {text: "n"});
+out.push(n());
+$("modelBtn").onclick(); await tick(); out.push(n());
+onFrame("Activity", {text: "x"}); out.push(n());
+onFrame("Activity", {text: ""}); out.push(n());
+onEvent("ModelSwitched", {seq: 2, model: "m"}); out.push(n());
+onFrame("Notice", {text: "n"}); onFrame("BlockingAsk", picker(true)); out.push(n());
+$("cfg").close();
+onFrame("Activity", {text: ""}); out.push(n());
+console.log(JSON.stringify(out));
+""")
+    assert got == [0, 1, 1, 2, 3, 3, 3]
