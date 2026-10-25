@@ -1222,3 +1222,9 @@ def test_affordance_cue_row_reads_the_memory_row_doctor_collected(monkeypatch, t
 def test_affordance_cue_row_without_memory_settings_says_memory_is_not_on(monkeypatch, tmp_path):
     lines, _ = _affordance_cue_doctor(monkeypatch, tmp_path, SimpleNamespace(tools=ToolConfig()), memory_state="off")
     assert "affordance-cue: cue off: the memory plugin is not on (the cue uses memory's embedder)" in lines[-1]
+
+
+def test_the_security_sentences_about_the_cue_carry_no_section_sign():
+    text = " ".join((ROOT / "SECURITY.md").read_text(encoding="utf-8").split())
+    cue = [s for s in re.split(r"(?<=[.;])\s+", text) if re.search(r"\bcue\b", s)]
+    assert cue and not [s for s in cue if "§" in s]
