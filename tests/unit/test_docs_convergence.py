@@ -245,11 +245,14 @@ _NUMBER_WORDS = dict(zip(("zero", "one", "two", "three", "four", "five", "six", 
                           "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen"), range(16)))
 
 
+PROTECTED_LIST = re.compile(r"one (\w+)-entry list protects (.*?)\. ")
+
+
 def check_protected_entries_doc(text: str, entries: Iterable[str] | None = None) -> list[str]:
     """SECURITY.md's `one <count>-entry list protects` sentence carries the count of
     `PROTECTED_CONFIG_DIR_ENTRIES` and names each entry once; the order is free."""
     entries = tuple(PROTECTED_CONFIG_DIR_ENTRIES if entries is None else entries)
-    m = re.search(r"one (\w+)-entry list protects (.*?)\. ", " ".join(text.split()))
+    m = PROTECTED_LIST.search(" ".join(text.split()))
     if m is None:
         return ["the protected config-directory list is not found"]
     named = [t.removesuffix("/**") for t in re.findall(r"`([^`]+)`", m.group(2))]
@@ -380,6 +383,11 @@ SKILLS_NEEDLES = (
     "`permissions.workspace_root`", "`mv staged .agents`", "`[budget: …]`", "off switch",
     "`localharness --config-dir X skills`", "whole line", "about a second", "minutes", "once per subcommand",
 )
+ELSEWHERE_NEEDLES = (
+    "`.agents/skills/` is protected the same way", "`permissions.ask.protected_config_dir_entries`",
+    "A project skill is not that door", "the bundled `skill-creator` writes",
+    "A script a skill names is the same case",
+)
 CLONE_NEEDLES = ("can load agent and division files and skills from it",
                  "config, agent files and skills load with no prompt")
 
@@ -418,6 +426,10 @@ def check_skills_doc(security_text: str) -> list[str]:
     out += [f"the Skills section does not name {d} in precedence order" for d in in_order(flat, skills_dirs())]
     out += [f"the Skills section does not say {n}" for n in SKILLS_NEEDLES if n not in flat]
     out += [f"SECURITY.md does not say {n}" for n in CLONE_NEEDLES if n not in whole]
+    listed = PROTECTED_LIST.search(whole)
+    after = whole[listed.end():] if listed else ""
+    out += [f"SECURITY.md does not say {n} after the thirteen-entry list" for n in ELSEWHERE_NEEDLES[:2] if n not in after]
+    out += [f"SECURITY.md does not say {n}" for n in ELSEWHERE_NEEDLES[2:] if n not in whole]
     if "tools/capabilities.py" in ticks(body):
         out.append("the Skills section names the capability-floor module in backticks")
     if "\N{SECTION SIGN}" in body:
@@ -448,6 +460,13 @@ def test_skills_doc_bites():
         "the Skills section carries a section sign"]
     assert check_skills_doc(text.replace("agent files and skills load", "agent files load")) == [
         "SECURITY.md does not say config, agent files and skills load with no prompt"]
+    assert check_skills_doc(re.sub(r"is\s+protected the same way", "is protected", text)) == [
+        f"SECURITY.md does not say {ELSEWHERE_NEEDLES[0]} after the thirteen-entry list"]
+    assert check_skills_doc(text.replace("A project skill is not that door", "A skill is no door")) == [
+        f"SECURITY.md does not say {ELSEWHERE_NEEDLES[2]}"]
+    inside = text.replace("`server-floor.json` (the window", "`.agents/skills/`, `server-floor.json` (the window", 1)
+    assert check_protected_entries_doc(inside) == ["not a protected entry: .agents/skills/"]
+    assert check_protected_entries_doc(text) == []
     assert skills_dirs() == ["`.localharness/skills/`", "`.agents/skills/`", "`~/.localharness/skills/`", "bundled"]
     assert in_order("`b` then `a`", ["`a`", "`b`"]) == ["`b`"]
     assert in_order("`a` then `b`", ["`a`", "`b`", "`c`"]) == ["`c`"]

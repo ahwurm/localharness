@@ -509,7 +509,11 @@ read and argue with. Each step below says what it does in `auto`.
      file `overrides.yaml.lock`, `server-floor.json` (the window floor cached for start's first launch; it can only raise the floor), `strata/**` (the config copies and logs the harness writes for a Strata launch) and `skills/**` (the skills every later start lists for the model to load), the files that change what the harness does next. Those directories are the
      one the session was started with (`--config-dir`, else `LOCALHARNESS_DIR`, else
      `~/.localharness`), the default `~/.localharness` and any `.localharness/` in the project; a
-     config directory the session does not use is not covered. Everything else under one (agents,
+     config directory the session does not use is not covered. A project's `.agents/skills/` is
+     protected the same way, though it is no config directory: a write below it asks, and so does a
+     move or delete of it or of `.agents`. Setting `permissions.ask.protected_config_dir_entries`
+     replaces that list; for `.agents/skills/` it takes away only the removal ask, and a write there
+     still asks. Everything else under one (agents,
      divisions, tools, session state, memory, history, the audit log, the kill file) is the harness
      being *used* and is not protected; naming what is protected rather than what is exempt also
      means a new kind of runtime state added there is allowed by default rather than becoming a
@@ -812,6 +816,7 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   The same holds for `bash run.sh` and every other interpreter-plus-file signature. Reading the diff
   is what stands between the grant and the code it runs, which is why the review surface matters and
   why a channel that cannot show you one asks about in-project edits instead.
+  A script a skill names is the same case (see [Skills](#skills)).
 - **`source FILE` and `. FILE` are keyed like a script too** (`source <script>`), so the same
   caveat applies. Three shapes that looked like this gap are caught instead: a `git config` write
   to a key that repoints execution (`core.hooksPath`, `core.sshCommand`, `alias.*`, filters
@@ -1144,7 +1149,10 @@ files `init --workspace` writes inside a project (`.localharness/config.yaml`, i
 `plugins/README.md` and `.gitignore`) are meant for the repository and are not made private, and
 neither is a project's `.localharness/` folder itself. Files written outside the config folder — a
 report or a picture saved where you choose, the research reports written in the folder you work
-in — keep your umask. Folders inside the config folder are made at your umask too; the 0700 folder
+in — keep your umask. The files the bundled `skill-creator` writes — a skill's `SKILL.md` and any
+`references/` files, under `~/.localharness/skills/`, `.localharness/skills/` or `.agents/skills/` —
+are written by the agent's `write` tool, one approval per file, and keep your umask, in the config
+folder too. Folders inside the config folder are made at your umask too; the 0700 folder
 above them is what keeps other accounts out. Files an older release created keep their modes: the
 folder's 0700 closes them, `localharness doctor` counts the ones other accounts could read, and
 `chmod -R go-rwx` on the folder makes each private. A temporary file a crash left behind keeps
@@ -1325,7 +1333,9 @@ the same visible "changed, using it" line, fenced, bounded by the approval gate 
 floor, and in front of you at the next turn. It is no more than the model could already put in
 front of itself by reading any file. And the fence is smaller than one other door: a project agent
 file (`.localharness/agents/<name>.yaml`) replaces that agent's whole role, unfenced and ahead of
-the guardrails, with no prompt beyond the workspace's own.
+the guardrails, with no prompt beyond the workspace's own. A project skill is not that door: its
+listing line and the body the model loads sit after the guardrails inside the same fence as this
+file (see [Skills](#skills)).
 
 ### What a web fetch may reach
 
