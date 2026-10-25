@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -282,30 +283,143 @@ def test_agent_list_json_output(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# agent list — malformed agent YAML (phase 38: the silent swallow is retired)
+# agent list — what does not load, origin, rows
 # ---------------------------------------------------------------------------
 
+def _bound(monkeypatch, layer: Path) -> None:
+    monkeypatch.setattr("localharness.cli.workspace.resolve_workspace_layer", lambda *a, **k: layer)
+
+
+def _yaml(agents_dir: Path, stem: str, data: dict | str) -> Path:
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    path = agents_dir / f"{stem}.yaml"
+    path.write_text(data if isinstance(data, str) else yaml.safe_dump(data), encoding="utf-8")
+    return path
+
+
+def _world(tmp_path: Path) -> tuple[Path, Path]:
+    cfg, proj = tmp_path / "cfg", tmp_path / "proj" / ".localharness"
+    for stem in ("alpha", "beta"):
+        _yaml(cfg / "agents", stem, {"name": stem, "role": f"machine {stem}"})
+    for stem in ("alpha", "gamma"):
+        _yaml(proj / "agents", stem, {"name": stem, "role": f"project {stem}"})
+    return cfg, proj
+
+
+def _line(output: str, word: str) -> str:
+    return next(ln for ln in output.splitlines() if word in ln and ("│" in ln or "┃" in ln))
+
+
+def test_agent_list_shows_each_agents_origin(tmp_path, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "400")
+    cfg, proj = _world(tmp_path)
+    _bound(monkeypatch, proj)
+    result = runner.invoke(agent_app, ["list", "--config-dir", str(cfg)])
+    assert result.exit_code == 0, result.output
+    assert "Origin" in _line(result.stdout, "Name")
+    assert "project" in _line(result.stdout, "alpha")
+    assert "machine" in _line(result.stdout, "beta")
+    assert "project" in _line(result.stdout, "gamma")
+    assert sum("alpha" in ln for ln in result.stdout.splitlines()) == 1
+
+
+def test_agent_list_prints_problems_on_stderr_before_the_empty_state(tmp_path):
+    _yaml(tmp_path / "agents", "broken", "a: [unclosed")
+    result = runner.invoke(agent_app, ["list", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 0
+    (line,) = [ln for ln in result.stderr.splitlines() if "broken.yaml" in ln]
+    assert line.endswith("; edit the file")
+    assert "No agents configured" in result.stdout
+    as_json = runner.invoke(agent_app, ["list", "--json", "--config-dir", str(tmp_path)])
+    assert as_json.stdout == "[]\n"
+    assert "broken.yaml" in as_json.stderr
+
+
+@pytest.mark.parametrize("kind, body", [("validation", {"capabilities": "lots"}), ("load", {"division": "nope"})])
+def test_a_stem_whose_winner_does_not_load_drops_both_rows(tmp_path, monkeypatch, kind, body):
+    cfg, proj = tmp_path / "cfg", tmp_path / "proj" / ".localharness"
+    _yaml(cfg / "agents", "x", {"name": "x", "role": "machine x"})
+    _yaml(proj / "agents", "x", {"name": "x", "role": "r", **body})
+    _bound(monkeypatch, proj)
+    result = runner.invoke(agent_app, ["list", "--json", "--config-dir", str(cfg)])
+    assert result.exit_code == 0
+    assert not [a for a in json.loads(result.stdout) if a["path"].endswith("x.yaml")]
+    assert len([ln for ln in result.stderr.splitlines() if str(proj / "agents" / "x.yaml") in ln]) == 1
+
+
+def test_a_mismatch_keeps_its_row_under_the_stem(tmp_path, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "400")
+    _yaml(tmp_path / "agents", "foo", {"name": "bar", "role": "foo role", "model": "m1"})
+    _yaml(tmp_path / "agents", "baz", {"name": "[red]q", "role": "baz role"})
+    result = runner.invoke(agent_app, ["list", "-v", "--config-dir", str(tmp_path)])
+    row = _line(result.stdout, "foo role")
+    assert row.split("│")[1].strip() == "foo" and "m1" in row
+    assert "name: 'bar' ignored; foo.yaml is agent 'foo'; rename the file or the name: to match" in result.stderr
+    assert "[red]q" in result.stderr
+
+
+def test_an_unparseable_shadowed_machine_file_is_never_parsed(tmp_path, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "400")
+    cfg, proj = tmp_path / "cfg", tmp_path / "proj" / ".localharness"
+    _yaml(cfg / "agents", "x", "a: [unclosed")
+    _yaml(proj / "agents", "x", {"name": "x", "role": "project x"})
+    _bound(monkeypatch, proj)
+    result = runner.invoke(agent_app, ["list", "--config-dir", str(cfg)])
+    assert "project" in _line(result.stdout, "x")
+    assert "x.yaml" not in result.stderr
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any mode")
+def test_an_unreadable_winner_is_skipped(tmp_path, monkeypatch):
+    cfg, proj = tmp_path / "cfg", tmp_path / "proj" / ".localharness"
+    locked = _yaml(proj / "agents", "x", {"name": "x", "role": "r"})
+    _bound(monkeypatch, proj)
+    locked.chmod(0)
+    try:
+        result = runner.invoke(agent_app, ["list", "--json", "--config-dir", str(cfg)])
+    finally:
+        locked.chmod(0o600)
+    assert result.exit_code == 0 and result.exception is None
+    assert not [a for a in json.loads(result.stdout) if a["name"] == "x"]
+    assert "x.yaml" not in result.stderr
+
+
+def test_hostile_cells_print_in_one_row_literally(tmp_path, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "400")
+    _yaml(tmp_path / "agents", "h", {"name": "h", "role": "first\nsecond [red]r[/red] [\x1b/red]", "model": "[bold]m[/bold]"})
+    _yaml(tmp_path / "agents", "[red]\x1bz", {"name": "z", "role": "r"})
+    result = runner.invoke(agent_app, ["list", "-v", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 0
+    row = _line(result.stdout, "first second")
+    assert "first second [red]r[/red] [/red]" in row and "[bold]m[/bold]" in row
+    assert "\x1b" not in result.stdout and "\x1b" not in result.stderr
+    assert "[red]z.yaml" in result.stderr
+
+
+def test_rows_are_read_through_read_agent_file_once_each(tmp_path, monkeypatch):
+    from localharness.config.loader import ConfigLoader
+
+    cfg, proj = _world(tmp_path)
+    _bound(monkeypatch, proj)
+    seen: list[Path] = []
+    real = ConfigLoader.read_agent_file
+
+    def spy(path):
+        seen.append(Path(path))
+        return real(path)
+
+    monkeypatch.setattr(ConfigLoader, "read_agent_file", staticmethod(spy))
+    runner.invoke(agent_app, ["list", "--json", "--config-dir", str(cfg)])
+    assert len(seen) == 3 and cfg / "agents" / "alpha.yaml" not in seen
+
+
 def test_agent_list_warns_and_skips_unreadable_agent_file(tmp_path, monkeypatch):
-    """Deliberate BEHAVIOR CHANGE (#150 phase 38): `agent list` used to hide a malformed agent
-    yaml behind a bare `except Exception: pass`, so a typo'd file was indistinguishable from an
-    absent one — the exact confusion that let `start`'s mint branch overwrite a tuned root agent.
-    Both commands now share `ConfigLoader.discover_agents`, so `agent list` warns once, names the
-    file, and still lists everything that parsed.
-    """
-    # The broken file lives in the dir `--config-dir` NAMES. It used to sit in a CWD-relative
-    # `./.localharness` instead, which phase 39 stopped reading (LAYR-02: --config-dir is a full
-    # replacement). Warn-and-skip is what this test is about; which layer the file sits in is not.
     monkeypatch.chdir(tmp_path)
     global_dir = tmp_path / "global"
-    (global_dir / "agents").mkdir(parents=True)
-    (global_dir / "agents" / "healthy.yaml").write_text(
-        "name: healthy\nrole: Parses fine\n", encoding="utf-8"
-    )
-    (global_dir / "agents" / "broken.yaml").write_text("a: [unclosed\n", encoding="utf-8")
-
+    _yaml(global_dir / "agents", "healthy", "name: healthy\nrole: Parses fine\n")
+    _yaml(global_dir / "agents", "broken", "a: [unclosed\n")
     result = runner.invoke(agent_app, ["list", "--config-dir", str(global_dir)])
-
     assert result.exit_code == 0
-    assert "healthy" in result.output               # the good agent still lists
-    assert "skipping unreadable agent file" in result.output
-    assert "broken.yaml" in result.output.replace("\n", "")  # names it (Rich wraps long paths)
+    assert "healthy" in result.stdout
+    (line,) = [ln for ln in result.stderr.splitlines() if "broken.yaml" in ln]
+    assert line.endswith("; edit the file")

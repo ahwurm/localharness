@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -19,6 +20,7 @@ from localharness.config.paths import WORKSPACE_DIR_NAME, resolve_config_dir
 
 console = Console()
 err_console = Console(stderr=True)
+log = logging.getLogger(__name__)
 
 _NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}[a-z0-9]$|^[a-z]$")
 
@@ -35,26 +37,6 @@ def _build_agent_yaml(name: str, role: str, model: str | None) -> dict:
         "role": role,
         "model": model or "inherit",
     }
-
-
-# Phase 38 (#150): `agent list` reads ConfigLoader.discover_agents() — the same roster `start`
-# reads. Its own copy of discovery lived here and was the only one that dropped a malformed yaml
-# silently (a bare except that discarded the error), so a typo'd file looked exactly like an
-# absent one. It now reports what it skipped.
-
-
-def _skipped_agent_file(f: Path, exc: Exception) -> None:
-    """discover_agents' user-visible warning. config/ logs; the CLI owns the console.
-
-    escape() around the path and the reason, markup outside: a folder legally named `[old] proj`
-    is data, and rich would silently delete `[old]` from it — this line would then name a file
-    that does not exist, in the message whose entire job is naming the file that went wrong
-    (39-05's measured lesson). soft_wrap so a deep path is handed to the terminal whole.
-    """
-    err_console.print(
-        "[yellow]⚠ " + escape(f"skipping unreadable agent file {f}: {exc}") + "[/yellow]",
-        soft_wrap=True,
-    )
 
 
 def _warn_unreadable_workspace_files(workspace: Path | None) -> None:
@@ -256,6 +238,16 @@ def agent_create(
     console.print("  Edit the YAML to customize role, tools, and permissions.")
 
 
+def _read_row(loader, f) -> dict | None:
+    from localharness.config.loader import ConfigParseError
+
+    try:
+        return loader.read_agent_file(f.path)
+    except (OSError, ConfigParseError) as exc:
+        log.debug("agent file %s was skipped: %s", f.path, exc)
+        return None
+
+
 @agent_app.command("list")
 def agent_list(
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON array")] = False,
@@ -271,8 +263,10 @@ def agent_list(
     ] = None,
 ) -> None:
     """List all configured agents."""
+    from localharness.channels.base import one_line
     from localharness.cli.workspace import resolve_workspace_layer
-    from localharness.config.loader import ConfigLoader
+    from localharness.config.loader import ConfigLoader, problem_lines
+    from localharness.orchestrator.cards import AgentCardRegistry
 
     # `config_dir` here is the RAW flag value on purpose: resolving it first would erase the
     # "was this explicit" signal the workspace gate is built on.
@@ -280,15 +274,20 @@ def agent_list(
     # gets its prompt from the next interactive command in this directory.
     workspace = resolve_workspace_layer(config_dir, interactive=False if json_output else None)
     _warn_unreadable_workspace_files(workspace)
-    agents = ConfigLoader(
-        config_dir=resolve_config_dir(config_dir),
-        local_config_dir=workspace,
-    ).discover_agents(on_error=_skipped_agent_file)
+    loader = ConfigLoader(config_dir=resolve_config_dir(config_dir), local_config_dir=workspace)
+    problems = AgentCardRegistry(loader=loader).refresh()
+    for line in problem_lines(problems):
+        err_console.print("[yellow]⚠ " + escape(line) + "[/yellow]", soft_wrap=True)
+    # dispatch resolves first-wins and never falls back, so a winner that does not load hides its stem
+    dropped = {p.path.stem for p in problems if not p.loads}
+    rows = [
+        (stem, f, data)
+        for stem, f in loader.agent_winners().items()
+        if stem not in dropped and (data := _read_row(loader, f)) is not None
+    ]
 
-    if not agents:
-        # `--json` is a machine contract, and an empty roster is `[]` — the one answer a caller's
-        # `json.loads` can read. Prose on stdout is a parse error in whatever is piping this
-        # (39-06's deferred item; the D1 repro hit it on a fresh workspace-only project).
+    if not rows:
+        # An empty roster under --json is `[]`: prose on stdout is a parse error in whatever pipes this.
         if json_output:
             typer.echo(json.dumps([]))
             return
@@ -296,23 +295,22 @@ def agent_list(
         return
 
     if json_output:
-        # typer.echo, never console.print: Rich interprets `[...]` in the DATA as markup and
-        # silently drops it, and hard-wraps at the terminal width, injecting newlines mid-JSON.
-        # Both were reproduced on the shipped 0.12.x wheel (v0.13 dogfood F1) at every width
-        # tested. Every other machine-output emitter in cli/ already does it this way.
-        typer.echo(json.dumps(agents))
+        # typer.echo, never console.print: Rich reads `[...]` in the data as markup and hard-wraps mid-JSON.
+        typer.echo(json.dumps([{**data, "origin": f.origin, "path": str(f.path)} for _, f, data in rows]))
         return
 
     table = Table(title="Agents")
     table.add_column("Name", style="bold cyan")
     table.add_column("Role")
+    table.add_column("Origin")
     if verbose:
         table.add_column("Model")
 
-    for a in agents:
-        row = [a.get("name", ""), a.get("role", "")]
+    for stem, f, data in rows:
+        # flatten first, escape second: escape() before one_line would let one_line strip the ESC of `[\x1b/red]`
+        cells = [escape(stem), escape(one_line(str(data.get("role", "")))), f.origin]
         if verbose:
-            row.append(a.get("model", "inherit"))
-        table.add_row(*row)
+            cells.append(escape(one_line(str(data.get("model", "inherit")))))
+        table.add_row(*cells)
 
     console.print(table)

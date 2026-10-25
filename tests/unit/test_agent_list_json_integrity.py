@@ -53,14 +53,13 @@ _LONG_BRACKETED = (
 def _write_agent_yaml(agents_dir: Path, name: str) -> None:
     """Written by hand rather than through `agent create`, which has no --description flag.
 
-    `ConfigLoader.discover_agents` yaml-loads each file into a RAW dict with no validation, so any
-    extra key flows straight through into the --json payload — which is exactly the surface a
-    scripting user relies on and exactly what Rich was mangling.
+    The role is the free-text field that flows through the --json payload untouched — exactly the
+    surface a scripting user relies on and exactly what Rich was mangling.
     """
     agents_dir.mkdir(parents=True, exist_ok=True)
     (agents_dir / f"{name}.yaml").write_text(
         yaml.dump(
-            {"name": name, "role": "reviewer", "description": _LONG_BRACKETED},
+            {"name": name, "role": _LONG_BRACKETED},
             default_flow_style=False,
             sort_keys=False,
         ),
@@ -78,5 +77,5 @@ def test_agent_list_json_survives_a_long_bracketed_description(tmp_path, monkeyp
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.stdout)
-    assert data[0]["description"] == _LONG_BRACKETED, "the payload's text did not survive the emitter"
+    assert data[0]["role"] == _LONG_BRACKETED, "the payload's text did not survive the emitter"
     assert result.stdout.strip().count("\n") == 0, "a newline was injected inside the JSON payload"
