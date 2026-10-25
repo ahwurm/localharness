@@ -6,6 +6,7 @@ from pathlib import Path
 
 from localharness.cli import model_ops
 from localharness.cli.workspace import visible_text
+from localharness.config.paths import global_config_dir
 from localharness.core.events import ModelSwitched
 
 LAUNCH_SLOW = "can take several minutes"
@@ -52,6 +53,10 @@ def _endpoint_name(harness, base_url: str) -> str:
     return next((ep.name for ep in peers if model_ops._norm_url(ep.base_url) == url), "primary")
 
 
+def _phone_enrolled(config_dir) -> bool:
+    return config_dir is not None and (global_config_dir(config_dir) / "mobile" / "token").is_file()
+
+
 class ModelSwitch:
     def __init__(self, agent, bus, channel, harness, gate, config_dir):
         self._agent, self._bus, self._channel = agent, bus, channel
@@ -65,6 +70,17 @@ class ModelSwitch:
     def _bound(self):
         llm = getattr(self._agent, "_llm", None)
         return None if llm is None else (llm.config.model, _endpoint_name(self._harness, llm.config.base_url))
+
+    def refusal(self, target: str) -> str | None:
+        if getattr(self._channel, "local_operator", False):
+            return None
+        gate = self._gate()
+        if gate is None or not getattr(gate, "remote_unattended", False):
+            return LAUNCH_LOCKED
+        if not callable(getattr(self._channel, "can_run_picker", None)):
+            phone = LAUNCH_ELSEWHERE_PHONE if _phone_enrolled(self._config_dir) else ""
+            return LAUNCH_ELSEWHERE.format(target=visible_text(target), phone=phone)
+        return None
 
     def _box_activity(self, text: str | None) -> None:
         push = getattr(self._channel, "box_activity", None)
