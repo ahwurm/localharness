@@ -217,6 +217,12 @@ class AgentCreationWorkflow:
             self._state = WorkflowState.DEPLOY
         return self._state
 
+    def back_to_discuss(self, exc: ValueError) -> str:
+        """Return to the description after a refused save, restore the default destination, and give the refusal line."""
+        self._state = WorkflowState.DISCUSS
+        self._layer = self._default_layer()
+        return _short_validation_error(exc)
+
     def _offered(self) -> tuple[str, ...]:
         return _BOUND_REPLIES if self._loader.local_dir is not None else _UNBOUND_REPLIES
 

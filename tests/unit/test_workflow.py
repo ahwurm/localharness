@@ -374,3 +374,28 @@ def test_machine_note_names_the_project_file_it_will_not_override(tmp_path: Path
                                  "it will not load here")
     wf._layer = "project"
     assert wf.machine_note() is None
+
+
+def test_back_to_discuss_resets_state_and_layer_and_returns_the_text(tmp_path: Path):
+    wf, m, p = _at_confirm(tmp_path)
+    (m / "agents").mkdir()
+    (m / "agents" / "x.yaml").write_text("name: x\nrole: r\n")
+    wf.transition("machine")
+    with pytest.raises(ValueError) as err:
+        wf.deploy_config()
+    line = wf.back_to_discuss(err.value)
+    assert line == str(err.value) and line.endswith("remove the existing config.")
+    assert line.count("remove the existing config.") == 1
+    assert wf.state == WorkflowState.DISCUSS and wf._layer == "project"
+    assert wf.gathered["description"] == "Build a research agent that searches the web for me"
+    assert wf.confirm_prompt().startswith(f"Save to {p / 'agents'}")
+
+
+def test_back_to_discuss_shortens_a_validation_error():
+    from pydantic import ValidationError
+    from localharness.config.models import AgentConfig
+
+    with pytest.raises(ValidationError) as err:
+        AgentConfig(name="x", role="r", temperature=999)
+    line = AgentCreationWorkflow().back_to_discuss(err.value)
+    assert "temperature" in line and "pydantic.dev" not in line and "validation error for" not in line

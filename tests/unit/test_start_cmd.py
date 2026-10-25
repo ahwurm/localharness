@@ -650,6 +650,9 @@ def test_repl_agent_creation_uses_streaming_path():
         def set_generated_yaml(self, _y):
             pass
 
+        def confirm_prompt(self):
+            return "Does this look good?"
+
     class _Channel:
         def __init__(self):
             self.messages = []
