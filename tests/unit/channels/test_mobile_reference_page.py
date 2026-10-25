@@ -1359,6 +1359,19 @@ console.log(JSON.stringify([head(), rowKinds().filter((r) => r[0] === "div")[0],
 
 
 @NODE_ONLY
+def test_launch_list_server_text_fills_its_slot_verbatim(page, tmp_path):
+    got = _launch(page, tmp_path, """
+const name = "m-{notice}-$&";
+await openList(withLaunch(name, "qwen3:32b"));
+onFrame("Notice", {text: "failed $& $$ {launching}"});
+onFrame("Activity", {text: ""}); await tick();
+await answer(withLaunch(null, "qwen3:32b"));
+console.log(JSON.stringify(head()));
+""")
+    assert got == "m-{notice}-$& not switched — failed $& $$ {launching}"
+
+
+@NODE_ONLY
 def test_launch_list_the_header_returns_to_model_when_the_dialog_next_opens(page, tmp_path):
     got = _launch(page, tmp_path, """
 await openList(withLaunch("mixtral:8x7b", "qwen3:32b"));

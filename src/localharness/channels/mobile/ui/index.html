@@ -1115,7 +1115,7 @@ function paint(modelState) {
   closeBurst();   // any state moment — turn boundary, a permission — freezes an open counter
   const s = $("state");
   if (modelState) S.modelState = modelState;
-  const overlay = S.activity || (S.checking ? MODEL_CHECKING.replace("{name}", S.checking) : "");
+  const overlay = S.activity || (S.checking ? MODEL_CHECKING.replace("{name}", () => S.checking) : "");
   // The ribbon is QUIET when everything is fine (owner, 2026-09-14: "just type"): a healthy
   // state renders as the wordmark, and the center only speaks when something needs you.
   if (S.offline) { s.textContent = "offline — retrying"; s.className = "offline"; }
@@ -1696,7 +1696,7 @@ function paintModes() {
     box.appendChild(b);
   }
 }
-const modelHeader = () => S.launchName ? (S.activity || MODEL_LAUNCHING.replace("{launching}", S.launchName))
+const modelHeader = () => S.launchName ? (S.activity || MODEL_LAUNCHING.replace("{launching}", () => S.launchName))
   : S.notLaunched || (S.turn ? MODEL_TURN : MODEL_HEADER);
 function tapModel(r) {
   if (!S.turn && r.kind === "cold") { S.checking = r.label || r.name; paint(); }
@@ -1710,10 +1710,10 @@ function modelRow(r, off) {
   const tags = [];
   if (r.active) tags.push(MODEL_TAG_ACTIVE);
   if (r.why) tags.push(r.why);
-  if (r.kind === "cross") tags.push(MODEL_TAG_ON.replace("{endpoint}", r.endpoint));
+  if (r.kind === "cross") tags.push(MODEL_TAG_ON.replace("{endpoint}", () => r.endpoint));
   if (r.kind === "cold") {
     tags.push(MODEL_TAG_LAUNCHES);
-    if (r.stops) tags.push(MODEL_TAG_STOPS.replace("{stops}", r.stops));
+    if (r.stops) tags.push(MODEL_TAG_STOPS.replace("{stops}", () => r.stops));
   }
   const text = [r.label || r.name, ...tags].join(" · ");
   if (r.active || r.why) return el("div", "meta", text);
@@ -1725,8 +1725,8 @@ function modelRow(r, off) {
 function renderModels(p) {
   if (p.launching) { S.launchName = p.launching; S.sawSwitch = false; }
   else if (S.launchName) {
-    S.notLaunched = S.sawSwitch ? null : MODEL_NOT_LAUNCHED.replace("{launching}", S.launchName)
-      .replace("{notice}", S.lastNotice.split("\n")[0] || MODEL_NO_NOTICE);
+    S.notLaunched = S.sawSwitch ? null : MODEL_NOT_LAUNCHED.replace(/\{(launching|notice)\}/g,
+      (_, k) => k === "launching" ? S.launchName : S.lastNotice.split("\n")[0] || MODEL_NO_NOTICE);
     S.launchName = null;
   }
   $("cfgModelHead").textContent = modelHeader();
