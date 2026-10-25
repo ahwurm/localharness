@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import stat
 from pathlib import Path
 from typing import get_args
 
@@ -185,3 +186,117 @@ def test_set_generated_yaml_stores_a_valid_name_or_none(tmp_path):
         flow.set_generated_yaml("name: ok-name\nrole: r")
         flow.set_generated_yaml(text)
         assert flow.gathered["name"] is None and flow.generated_yaml == text
+
+
+def _text(name: str = "x", **extra) -> str:
+    return yaml.safe_dump({"name": name, "role": "r", **extra})
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+def test_write_agent_lands_in_the_bound_project_layer(tmp_path):
+    loader, m, p = _layers(tmp_path)
+    dest = loader.write_agent("x", _text(), layer="project")
+    assert dest == p / "x.yaml" and dest.read_text() == _text() and _mode(dest) == 0o600
+    assert not list(p.glob("*.bak")) and list(m.iterdir()) == []
+
+
+def test_write_agent_lands_in_the_machine_layer_through_a_linked_agents_folder(tmp_path):
+    loader = ConfigLoader(config_dir=tmp_path / "machine")
+    (tmp_path / "machine").mkdir()
+    (tmp_path / "dotfiles").mkdir()
+    (tmp_path / "machine" / "agents").symlink_to(tmp_path / "dotfiles")
+    dest = loader.write_agent("x", _text(), layer="machine")
+    landed = tmp_path / "dotfiles" / "x.yaml"
+    assert landed.read_text() == _text() and _mode(landed) == 0o600 and not dest.is_symlink()
+
+
+def test_write_agent_without_a_layer_creates_nothing(tmp_path):
+    loader = ConfigLoader(config_dir=tmp_path / "machine")
+    with pytest.raises(ValueError, match="^no project layer in this session"):
+        loader.write_agent("x", _text(), layer="project")
+    assert list(tmp_path.iterdir()) == []
+
+    layer = tmp_path / "proj" / ".localharness"
+    loader = ConfigLoader(config_dir=tmp_path / "machine", local_config_dir=layer)
+    with pytest.raises(FileNotFoundError):
+        loader.write_agent("x", _text(), layer="project")
+    assert not layer.exists()
+
+    layer.mkdir(parents=True)
+    loader.write_agent("x", _text(), layer="project")
+    assert (layer / "agents" / "x.yaml").is_file()
+
+
+def test_write_agent_refuses_a_bad_name_or_a_mismatched_name(tmp_path):
+    loader, m, p = _layers(tmp_path)
+    for bad in ("ab\n", "Ab", "", "a" * 65, "é"):
+        with pytest.raises(ValueError):
+            loader.write_agent(bad, _text(bad), layer="project")
+    for ok in ("a", "a" * 64):
+        assert loader.write_agent(ok, _text(ok), layer="project").is_file()
+    with pytest.raises(ValueError, match="is not 'x'"):
+        loader.write_agent("x", _text("other"), layer="project")
+    with pytest.raises(ValueError):
+        loader.write_agent("x", "role: r", layer="project")
+    assert sorted(f.stem for f in p.iterdir()) == ["a", "a" * 64]
+
+
+def test_write_agent_refuses_to_overwrite_without_overwrite(tmp_path):
+    loader, m, p = _layers(tmp_path)
+    loader.write_agent("x", _text(), layer="project")
+    with pytest.raises(FileExistsError, match=r"already exists at .*Choose a different name or remove the existing config\.$"):
+        loader.write_agent("x", _text(role="new"), layer="project")
+    loader.write_agent("x", _text(role="new"), layer="project", overwrite=True)
+    assert yaml.safe_load((p / "x.yaml").read_text())["role"] == "new"
+    assert not list(p.glob("*.bak"))
+
+
+@pytest.mark.parametrize("layer", ["project", "machine"])
+@pytest.mark.parametrize("dangling", [True, False])
+def test_a_planted_tmp_link_is_never_followed(tmp_path, layer, dangling):
+    loader, m, p = _layers(tmp_path)
+    victim = tmp_path / "victim"
+    if not dangling:
+        victim.write_text("keep")
+    link = (p if layer == "project" else m) / "x.yaml.tmp"
+    link.symlink_to(victim)
+    loader.write_agent("x", _text(), layer=layer)
+    assert link.is_symlink() and (victim.read_text() == "keep" if not dangling else not victim.exists())
+
+
+@pytest.mark.parametrize("layer", ["project", "machine"])
+@pytest.mark.parametrize("dangling", [True, False])
+def test_a_symlinked_agent_file_is_refused_in_both_layers(tmp_path, layer, dangling):
+    loader, m, p = _layers(tmp_path)
+    target = tmp_path / "target.yaml"
+    if not dangling:
+        target.write_text("keep")
+    link = (p if layer == "project" else m) / "x.yaml"
+    link.symlink_to(target)
+    with pytest.raises(ValueError, match="x.yaml is a symlink; replace it with a file"):
+        loader.write_agent("x", _text(), layer=layer, overwrite=True)
+    assert link.is_symlink() and (target.read_text() == "keep" if not dangling else not target.exists())
+
+
+def test_a_symlinked_project_agents_folder_is_refused(tmp_path):
+    loader, m, p = _layers(tmp_path)
+    p.rmdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    p.symlink_to(elsewhere)
+    with pytest.raises(ValueError, match="is a symlink; replace it with a folder"):
+        loader.write_agent("x", _text(), layer="project")
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_a_project_link_leading_outside_is_never_written_over(tmp_path):
+    loader, m, p = _layers(tmp_path)
+    outside = tmp_path / "outside.yaml"
+    outside.write_text("keep")
+    (p / "x.yaml").symlink_to(outside)
+    with pytest.raises(ValueError):
+        loader.write_agent("x", _text(), layer="project", overwrite=True)
+    assert outside.read_text() == "keep"

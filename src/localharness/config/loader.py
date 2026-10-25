@@ -13,7 +13,6 @@ from typing import Any, Callable, Collection, Literal, Mapping, NamedTuple, Opti
 
 import yaml
 from pydantic import BaseModel, SecretStr, ValidationError
-from pydantic_yaml import to_yaml_str
 
 from localharness.agent.gate_types import DEFAULT_MODE, MODE_STRICTNESS, GateSettings
 
@@ -33,7 +32,6 @@ from .models import (
 from localharness.config.overlay import (
     deep_merge,
     load_overlay,
-    restrict_config_file,
     _resolve_user_overlay_path,
 )
 from localharness.config.paths import resolve_config_dir
@@ -3084,21 +3082,33 @@ class ConfigLoader:
                        for f in (self._project_layer_files("divisions") if base == self._local_dir
                                  else layer_files(base, "divisions"))})
 
-    def write_agent(self, config: AgentConfig, *, overwrite: bool = False) -> Path:
-        dest = self._config_dir / "agents" / f"{config.name}.yaml"
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if dest.exists():
-            if not overwrite:
-                raise FileExistsError(f"Agent config already exists: {dest}")
-            bak = dest.with_suffix(".yaml.bak")
-            dest.rename(bak)
-        yaml_text = to_yaml_str(config)
-        from localharness.core.private_files import touch_private
-        touch_private(dest)
-        dest.write_text(yaml_text, encoding="utf-8")
-        # Owner-only, like every other config file this package writes: an agent yaml carries the
-        # deny list, the ask rule sets and the kill file — the policy the session is gated by.
-        restrict_config_file(dest)
+    def write_agent(self, name: str, yaml_text: str, *, layer: Origin, overwrite: bool = False) -> Path:
+        """Write `<layer agents dir>/<name>.yaml` atomically at 0600; never creates the layer or follows a link."""
+        AgentConfig.validate_name_format(name)
+        agents = self.agents_dir(layer)
+        if agents is None:
+            raise ValueError("no project layer in this session; save it to the machine layer, or run "
+                             "localharness init --workspace in the project folder and start again")
+        dest = agents / f"{name}.yaml"
+        try:
+            data = yaml.safe_load(yaml_text)
+        except yaml.YAMLError:
+            data = None
+        got = data.get("name") if isinstance(data, dict) else None
+        if got != name:
+            raise ValueError(f"{dest}: name: {got!r} is not {name!r}; set name: to {name!r}")
+        # a repository ships .localharness/agents as a link; the machine's may be a dotfiles link
+        if layer == "project" and (agents.is_symlink() or leaves_layer(agents, self._local_dir)):  # type: ignore[arg-type]
+            raise ValueError(f"{agents} is a symlink; replace it with a folder")
+        agents.mkdir(exist_ok=True)
+        # exists() hides a dangling link, and os.replace would swap any link for a file
+        if dest.is_symlink():
+            raise ValueError(f"{dest} is a symlink; replace it with a file")
+        if dest.exists() and not overwrite:
+            raise FileExistsError(f"Agent {name!r} already exists at {dest}; refusing to overwrite. "
+                                  "Choose a different name or remove the existing config.")
+        from localharness.core.private_files import atomic_write_text
+        atomic_write_text(dest, yaml_text)
         return dest
 
     def reload(self) -> None:
