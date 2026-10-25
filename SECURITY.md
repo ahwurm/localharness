@@ -84,8 +84,8 @@ not check it), and the machine's file of that name is used instead: a project's 
 files inside its `.localharness/`, judged by where they sit, never by where they point. That rule is
 for a project's files only: a symlink among your machine's own agent files loads as the file it
 points to, as a dotfiles setup expects. So does a machine `agents/` folder that is itself a symlink.
-The harness's agent writer never writes through a link in either layer: it refuses to write over an
-agent file that is a symlink, in a project it also refuses an `agents/` folder that is a symlink or
+The harness's agent writer never writes through a linked agent file in either layer: it refuses to
+write over an agent file that is a symlink, in a project it also refuses an `agents/` folder that is a symlink or
 leads outside `.localharness/`, and it never creates a project's `.localharness/`. What your
 machine's agent files and the `agent:` section of your `overrides.yaml` start, load or loosen waits
 for one Yes instead — see the paragraph on what
@@ -100,7 +100,8 @@ tools, and if the project commits that folder every teammate's session loads it 
 approval gate already allows that write and it shows in a diff; the harness cannot tell whether a
 project commits its `.localharness/`. With a project layer, the in-session creation flow saves a new
 agent to the project by default: the confirmation names the full path, and answering `machine` saves
-it to your machine's agents folder instead. They decide an agent's role, prompt, model and tools, so read them in an unfamiliar
+it to your machine's agents folder instead. A repository's config and agent files decide an agent's
+role, prompt, model and tools, so read them in an unfamiliar
 repository before you run the harness there, the same way you would read its build scripts. A trust
 Yes covers what you were shown and no more: the scripts and files an approved server's command runs
 from inside the repository are not fingerprinted (the same gap as a granted `python3 <script>`,
