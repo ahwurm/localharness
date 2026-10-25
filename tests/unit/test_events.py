@@ -1,4 +1,4 @@
-"""Tests for localharness.core.events — all 37 event models, BudgetSpec, AnyEvent, EVENT_TYPE_MAP."""
+"""Tests for localharness.core.events — all 38 event models, BudgetSpec, AnyEvent, EVENT_TYPE_MAP."""
 import json
 import pytest
 from localharness.core.events import (
@@ -144,8 +144,8 @@ def test_event_serialization_roundtrip():
 
 
 def test_event_type_map_complete():
-    """EVENT_TYPE_MAP has entries for all 37 event types."""
-    assert len(EVENT_TYPE_MAP) == 37
+    """EVENT_TYPE_MAP has entries for all 38 event types."""
+    assert len(EVENT_TYPE_MAP) == 38
     expected_keys = {
         "SystemReady", "AgentCreated", "AgentDeleted", "TurnStarted", "TurnCompleted",
         "TurnFailed", "UserMessage", "TaskRequest", "TaskComplete", "Action",
@@ -156,7 +156,7 @@ def test_event_type_map_complete():
         "ConsolidationStarted", "ConsolidationFinished", "InputRouted",
         "TurnEndMicroPassCompleted", "PermissionAsked", "PermissionStaged",
         "PermissionResolved", "ProviderLost", "InstructionsChanged", "NarrowingNotice",
-        "ConversationCleared",
+        "ConversationCleared", "ModelSwitched",
     }
     assert set(EVENT_TYPE_MAP.keys()) == expected_keys
 
@@ -326,15 +326,15 @@ def test_budget_spec_frozen():
 
 
 def test_any_event_union():
-    """AnyEvent type contains all 37 event classes."""
+    """AnyEvent type contains all 38 event classes."""
     # AnyEvent is a Union; check its __args__
     import typing
     from localharness.core.events import (
         ConsolidationFinished, ConsolidationStarted, ConversationCleared, InputRouted,
-        TurnEndMicroPassCompleted,
+        ModelSwitched, TurnEndMicroPassCompleted,
     )
     args = typing.get_args(AnyEvent)
-    assert len(args) == 37
+    assert len(args) == 38
     expected = {
         SystemReady, AgentCreated, AgentDeleted, TurnStarted, TurnCompleted, TurnFailed,
         UserMessage, TaskRequest, TaskComplete, Action, Observation,
@@ -345,6 +345,7 @@ def test_any_event_union():
         ConsolidationStarted, ConsolidationFinished, InputRouted,
         TurnEndMicroPassCompleted, PermissionAsked, PermissionStaged, PermissionResolved,
         ProviderLost, InstructionsChanged, NarrowingNotice, ConversationCleared,
+        ModelSwitched,
     }
     assert set(args) == expected
 
@@ -698,6 +699,29 @@ async def test_predictive_events_replayable(tmp_path):
     assert isinstance(replayed[0], SurpriseScored)
     assert replayed[0].score == 0.5
     assert replayed[0].quadrant == "routine"
+
+
+async def test_a_logged_model_switched_replays_and_is_registered(tmp_path):
+    import typing
+
+    from localharness.channels.mobile.protocol import NEVER_FIRED_EVENTS
+    from localharness.core.bus import EventBus
+    from localharness.core.events import ModelSwitched
+
+    ev = ModelSwitched(
+        agent_id=AgentID("a"), session_id=SessionID("s"),
+        model="qwen3-27b", endpoint="primary", kind="cold",
+    )
+    jsonl = tmp_path / "events.jsonl"
+    jsonl.write_text(ev.model_dump_json() + "\n", encoding="utf-8")
+
+    replayed = [e async for e in EventBus(persist_path=jsonl).replay()]
+    assert len(replayed) == 1 and isinstance(replayed[0], ModelSwitched)
+    assert (replayed[0].model, replayed[0].endpoint, replayed[0].kind) == ("qwen3-27b", "primary", "cold")
+    assert isinstance(deserialize_event(ev.model_dump_json()), ModelSwitched)
+    assert EVENT_TYPE_MAP["ModelSwitched"] is ModelSwitched
+    assert ModelSwitched in typing.get_args(AnyEvent)
+    assert "ModelSwitched" not in NEVER_FIRED_EVENTS
 
 
 # ---------------------------------------------------------------------------

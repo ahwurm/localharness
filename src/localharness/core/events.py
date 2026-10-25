@@ -1,4 +1,4 @@
-"""All 36 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
+"""All 38 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
 
 event_type field values are PascalCase matching the Python class name: the bus keys subscriptions
 and delivery by the class name, and deserialize_event resolves a logged line through EVENT_TYPE_MAP
@@ -827,6 +827,7 @@ AnyEvent = Union[
     ConsolidationStarted,
     ConsolidationFinished,
     TurnEndMicroPassCompleted,
+    ModelSwitched,
 ]
 
 EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
@@ -867,6 +868,7 @@ EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
     "ConsolidationStarted": ConsolidationStarted,
     "ConsolidationFinished": ConsolidationFinished,
     "TurnEndMicroPassCompleted": TurnEndMicroPassCompleted,
+    "ModelSwitched": ModelSwitched,
 }
 
 

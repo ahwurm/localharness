@@ -47,6 +47,7 @@ def test_every_sse_only_frame_is_handled(page):
     "TaskComplete", "Heartbeat", "ParseFailed", "CompactionTriggered", "Escalation",
     "InputRouted", "PermissionStaged", "PermissionResolved", "PermissionAsked",
     "ConsolidationStarted", "ConsolidationFinished", "ProviderLost", "InstructionsChanged", "NarrowingNotice",
+    "ModelSwitched",
 ])
 def test_every_live_bus_event_in_the_vocabulary_is_handled(page, event):
     """§4.2's table, walked. These are the events a client must handle."""
@@ -679,6 +680,25 @@ console.log(JSON.stringify(out));
     assert got["waking"][0] == "starting: starting the session"
     ((cls, text),) = got["waking"][1]
     assert cls == "row sys" and "waking the chat you left" in text
+
+
+def test_the_live_stream_listens_for_model_switched_and_knows_activity(page):
+    connect = page[page.index("function connect"):]
+    known = re.search(r"const known = new Set\(\[(.*?)\]\)", connect, re.S).group(1)
+    bus = re.search(r"for \(const n of \[(.*?)\]\) es\.addEventListener", connect, re.S).group(1)
+    assert '"Activity"' in known
+    assert '"ModelSwitched"' in bus
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_a_model_switched_sets_the_pill_as_text(page, tmp_path):
+    out = _drive(page, """
+onEvent("ModelSwitched", {event_type: "ModelSwitched", session_id: "s", seq: 3,
+                          model: "<b>qwen3-27b</b>", endpoint: "primary", kind: "hot"});
+const pill = $("model");
+console.log(JSON.stringify({text: pill.textContent, kids: pill.children.length}));
+""", tmp_path)
+    assert out == {"text": "<b>qwen3-27b</b>", "kids": 0}
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")

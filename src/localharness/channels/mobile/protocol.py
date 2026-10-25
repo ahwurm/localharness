@@ -30,7 +30,7 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-PROTOCOL_VERSION = 8
+PROTOCOL_VERSION = 9
 """Bumped on any breaking change to the wire.
 
 v2: Observation gained an optional generated-image id field (never released; replaced by v4's artifact).
@@ -48,6 +48,7 @@ or frame schema moved.
 v6: ProviderLost: a new event; additive, older pages ignore it at `default: break`.
 v7: InstructionsChanged, NarrowingNotice: new events; additive, older pages ignore them at `default: break`.
 v8: ConversationCleared: a new event; additive, older pages ignore it at `default: break`.
+v9: ModelSwitched (event), Activity (frame), Hello.model, /api/health model, GET /api/model; additive, older pages ignore them at `default: break`.
 
 One recorded exception to "a moved schema bumps the version": additive OPTIONAL fields on an
 existing event that the page does not read re-record the snapshot without a bump (the page renders
@@ -187,6 +188,11 @@ class Hello(WireFrame):
                     "is reachable but the session is still coming up (or has not started): "
                     "reading history works, sending starts bring-up.",
     )
+    model: Optional[str] = Field(
+        default=None,
+        description="The short label of the model the session is bound to, the same reading as "
+                    "`StatusTick.model`; None without a source.",
+    )
     synthetic: bool = Field(
         default=False,
         description="True in --replay. Says that TokenDelta and StatusTick frames on this "
@@ -295,7 +301,7 @@ class AskOption(BaseModel):
                                   "own wording (workspace-trust) cannot be mislabelled by a page.")
     confirm_required: bool = Field(
         default=False,
-        description="True for the two `_always` kinds: the FIRST POST of this kind writes no "
+        description="True for the `_always` kinds and a picker's confirm option: the FIRST POST of this kind writes no "
                     "grant and returns a short-lived token; only a second POST carrying it "
                     "produces the durable decision. Enforced on the server (§5.3a) — this flag "
                     "only lets a UI warn in advance.",
@@ -424,6 +430,13 @@ class Notice(WireFrame):
     )
 
 
+class Activity(WireFrame):
+    """Launch progress for the state chip; an empty text clears it."""
+
+    frame_type: Literal["Activity"] = "Activity"
+    text: str = Field(description="Render as TEXT, never markup; empty clears the chip's progress.")
+
+
 class GapDetected(WireFrame):
     """Events a live client saw are missing from the log a reconnecting client replays from.
 
@@ -475,6 +488,7 @@ FRAME_TYPES: tuple[type[WireFrame], ...] = (
     Notice,
     GapDetected,
     Lagged,
+    Activity,
 )
 """Every SSE-only frame, in the order `/api/protocol` lists them.
 
