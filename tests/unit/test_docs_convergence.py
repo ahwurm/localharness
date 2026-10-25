@@ -395,8 +395,9 @@ CLONE_NEEDLES = ("can load agent and division files and skills from it",
 
 def skills_dirs(origins: Iterable[tuple[str, str]] = ORIGINS) -> list[str]:
     """The directory each origin is named by in the doc, in precedence order."""
-    return [{"project": f"`{rel}/`", "machine": f"`~/.localharness/{rel}/`", "bundled": "bundled"}[label]
-            for label, rel in origins]
+    return [("and " if at and label == "project" else "")
+            + {"project": f"`{rel}/`", "machine": f"`~/.localharness/{rel}/`", "bundled": "the bundled set"}[label]
+            for at, (label, rel) in enumerate(origins)]
 
 
 def in_order(text: str, needles: Iterable[str]) -> list[str]:
@@ -424,7 +425,8 @@ def check_skills_doc(security_text: str) -> list[str]:
         out.append("### Skills is not between ### Plugins and ### Machine-level-only settings")
     if len(paragraphs(body)) != 1 or any(re.match(r"([-*+]|\d+\.) ", ln.lstrip()) for ln in body.splitlines()):
         out.append("the Skills section is not one paragraph of prose")
-    out += [f"the Skills section does not name {d} in precedence order" for d in in_order(flat, skills_dirs())]
+    listing = flat.split(" A project's skills load ")[0]
+    out += [f"the Skills section does not name {d} in precedence order" for d in in_order(listing, skills_dirs())]
     out += [f"the Skills section does not say {n}" for n in SKILLS_NEEDLES if n not in flat]
     out += [f"SECURITY.md does not say {n}" for n in CLONE_NEEDLES if n not in whole]
     listed = PROTECTED_LIST.search(whole)
@@ -472,7 +474,13 @@ def test_skills_doc_bites():
     inside = text.replace("`server-floor.json` (the window", "`.agents/skills/`, `server-floor.json` (the window", 1)
     assert check_protected_entries_doc(inside) == ["not a protected entry: .agents/skills/"]
     assert check_protected_entries_doc(text) == []
-    assert skills_dirs() == ["`.localharness/skills/`", "`.agents/skills/`", "`~/.localharness/skills/`", "bundled"]
+    assert skills_dirs() == [
+        "`.localharness/skills/`", "and `.agents/skills/`", "`~/.localharness/skills/`", "the bundled set"]
+    assert check_skills_doc(re.sub(r",\s+then\s+the\s+bundled\s+set\s+inside\s+the\s+package,\s+whose\s+names\s+no\s+other"
+                                   r"\s+skill\s+can\s+take", "", text)) == [
+        "the Skills section does not name the bundled set in precedence order"]
+    assert check_skills_doc(re.sub(r"\s+and\s+`\.agents/skills/`\s+in\s+a\s+project", "", text)) == [
+        "the Skills section does not name and `.agents/skills/` in precedence order"]
     assert in_order("`b` then `a`", ["`a`", "`b`"]) == ["`b`"]
     assert in_order("`a` then `b`", ["`a`", "`b`", "`c`"]) == ["`c`"]
     assert in_order("`a` `a`", ["`a`", "`a`"]) == ["`a`"]
