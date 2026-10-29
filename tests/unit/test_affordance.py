@@ -336,14 +336,21 @@ async def test_a_layer_start_passes_the_project_root_to_the_floor_and_the_index(
     assert loop._index.split("\n")[1] == "Project: " + repr(one_line(str(root))) + "."
 
 
-@pytest.mark.parametrize("occupant, kept", [("memory", True), ("other-memory", False)])
+@pytest.mark.parametrize("occupant, unplanned, kept", [("memory", None, True), ("other-memory", None, False),
+                                                       ("memory", "resolution", False), ("memory", "entry", False)])
 async def test_only_the_bundled_memory_occupant_keeps_a_record_and_only_in_the_machine_directory(
-        tmp_path, monkeypatch, fake_home, occupant, kept):
+        tmp_path, monkeypatch, fake_home, occupant, unplanned, kept):
+    from localharness.plugins.plan import LoadPlan
+
     _, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     _skill(global_dir / "skills", "notes")
     (ws / "affordance").mkdir()
-    if occupant != "memory":
-        monkeypatch.setattr(MemorySlot, "occupant_name", property(lambda self: occupant))
+    monkeypatch.setattr(MemorySlot, "occupant_name", property(lambda self: occupant))
+    if unplanned == "resolution":
+        monkeypatch.setattr("localharness.plugins.resolve.resolve", _raise(RuntimeError("unresolvable")))
+    if unplanned == "entry":
+        entry = LoadPlan.entry
+        monkeypatch.setattr(LoadPlan, "entry", lambda self, name: None if name == "memory" else entry(self, name))
     built = []
     monkeypatch.setattr(Affordances, "warm", lambda self: built.append(self))
     await _drive()
@@ -1431,44 +1438,49 @@ def test_the_labelled_skills_are_in_no_discovery_root(tmp_path):
 # --- doctor's affordance-cue row ------------------------------------------------------------------
 
 CUE_MODEL = "Qwen/Qwen3-Embedding-0.6B"
-_MEASURES = ("cue off until it measures itself in the background at the next start (a few minutes of CPU, yielding to "
-             "your turns)")
-_READY = dict(memory_state="on", embedding_status="pass", cached=True, skill_tool_held=True, bundled=True,
-              state=("ready", 0.5), date=DATE)
+_MEASURES = ("cue off until it has measured itself in the background (a few minutes of CPU, yielding to your turns); "
+             "this shows ready when it is done")
+_READY = dict(model=CUE_MODEL, memory_state="on", embedding_status="pass", cached=True, skill_tool_held=True, other=None,
+              unusable=None, state=("ready", 0.5), date=DATE)
 _DOCTOR_ROWS = [
+    ("third-party-occupant", dict(other="mem0", memory_state="off", embedding_status=None), "skip",
+     "cue off until it measures itself each sitting (mem0 is the memory plugin in use, not the bundled one)"),
     ("memory-not-on", dict(memory_state="off", embedding_status=None),
      "skip", "cue off: the memory plugin is not on (the cue uses memory's embedder)"),
     ("embedding-failed", dict(embedding_status="fail"), "skip", "cue off: waits on memory-embedding"),
     ("embedding-missing", dict(embedding_status=None), "skip", "cue off: waits on memory-embedding"),
     ("not-cached", dict(cached=False), "skip", "cue off: waits on memory-embedding"),
     ("skill-tool-not-held", dict(skill_tool_held=False), "skip", "cue off: the skill tool is not enabled for the root"),
-    ("not-bundled", dict(bundled=False), "skip",
-     "cue off until it measures itself each sitting (a memory plugin other than the bundled one is in use)"),
+    ("unusable-dir", dict(unusable=Path("/c/affordance")), "skip",
+     "the cue is measured anew each sitting because /c/affordance is not a usable directory"),
     ("partial", dict(state=("partial", "40 of 180")), "skip",
-     "cue off until it finishes measuring itself (40 of 180 done; it continues in the background at the next start)"),
+     "cue off until it has measured itself in the background (40 of 180 done; a few minutes of CPU, yielding to your "
+     "turns); this shows ready when it is done"),
     ("failed", dict(state=("failed", NO_SEPARATION)), "skip", f"cue off: {NO_SEPARATION}"),
     ("stale", dict(state=("stale", "")), "skip", _MEASURES),
     ("ready", {}, "pass", f"ready — {CUE_MODEL}, calibrated 2026-10-25"),
+    ("ready-other-model", dict(model="lh-test/other"), "pass",
+     "ready — lh-test/other, calibrated 2026-10-25 (not release-tested)"),
 ]
 
 
 @pytest.mark.parametrize("given, status, detail", [r[1:] for r in _DOCTOR_ROWS], ids=[r[0] for r in _DOCTOR_ROWS])
 def test_affordance_check_rows_in_order(given, status, detail):
-    check = doctor_cmd._affordance_check(CUE_MODEL, **{**_READY, **given})
+    check = doctor_cmd._affordance_check(**{**_READY, **given})
     assert (check.name, check.status, check.detail, check.hint) == ("affordance-cue", status, detail, "")
 
 
 def test_affordance_check_never_warns_or_fails_and_every_off_row_says_so():
-    checks = [doctor_cmd._affordance_check(CUE_MODEL, **{**_READY, **r[1]}) for r in _DOCTOR_ROWS]
+    checks = [doctor_cmd._affordance_check(**{**_READY, **r[1]}) for r in _DOCTOR_ROWS]
     assert {c.status for c in checks} == {"pass", "skip"}
-    assert all(c.detail.startswith("cue off") for c in checks if c.status != "pass")
+    assert all(c.detail.startswith(("cue off", "the cue is measured anew")) for c in checks if c.status != "pass")
 
 
 def test_doctor_and_the_engine_read_the_folder_through_one_function():
     assert resonance.local_folder is config_paths.local_folder
 
 
-def _affordance_cue_doctor(monkeypatch, tmp_path, root_agent, memory_state="on", bundled=True, measured=True):
+def _affordance_cue_doctor(monkeypatch, tmp_path, root_agent, memory_state="on", occupant="memory", measured=True):
     import io
 
     from rich.console import Console
@@ -1476,8 +1488,12 @@ def _affordance_cue_doctor(monkeypatch, tmp_path, root_agent, memory_state="on",
     async def rows(*_args, **_kwargs):
         return [DoctorRow("memory", memory_state, "", checks=(Check(name="memory-db", status="pass"),
                                                              Check(name="memory-embedding", status="pass")),
-                          bundled=bundled),
+                          bundled=True),
+                *([DoctorRow(occupant, "on", "", checks=(Check(name=f"{occupant}-db", status="pass"),))]
+                  if occupant != "memory" else []),
                 DoctorRow("p", "off", "p is off")]
+    plan = SimpleNamespace(memory_occupant=occupant if occupant != "memory" or memory_state == "on" else None,
+                           entry=lambda name: SimpleNamespace(bundled=True) if name == "memory" else None)
     folder = _record(tmp_path, monkeypatch)
     if measured:
         idle = threading.Event()
@@ -1485,7 +1501,7 @@ def _affordance_cue_doctor(monkeypatch, tmp_path, root_agent, memory_state="on",
         (tmp_path / "affordance").mkdir()
         calibration.measure(FakeEmbedder(folder, model_name=CUE_MODEL), shipped_pins(CUE_MODEL, folder), None, idle,
                             tmp_path / "affordance")
-    monkeypatch.setattr("localharness.plugins.resolve.resolve", lambda _loader: SimpleNamespace(warnings=[]))
+    monkeypatch.setattr("localharness.plugins.resolve.resolve", lambda _loader: SimpleNamespace(warnings=[], plan=plan))
     monkeypatch.setattr("localharness.plugins.lifecycle.doctor_rows", rows)
     monkeypatch.setattr(doctor_cmd, "_print_remote_lock", lambda *_a: None)
     monkeypatch.setattr(config_paths, "local_folder", lambda model, cfg: folder)
@@ -1511,15 +1527,43 @@ def test_affordance_cue_row_without_a_record_says_it_measures_at_the_next_start(
     assert f"affordance-cue: {_MEASURES}" in lines[-1] and failures == []
 
 
-def test_affordance_cue_row_beside_another_memory_plugin_never_reads_the_record(monkeypatch, tmp_path):
-    lines, _ = _affordance_cue_doctor(monkeypatch, tmp_path, _ROOT_AGENT, bundled=False)
-    assert "measures itself each sitting (a memory plugin other than the bundled one is in use)" in lines[-1]
+def test_affordance_cue_row_beside_a_third_party_memory_occupant_names_it_and_reads_no_record(monkeypatch, tmp_path):
+    read = []
+    monkeypatch.setattr(calibration, "read_entry", lambda *a: read.append(a))
+    lines, _ = _affordance_cue_doctor(monkeypatch, tmp_path, _ROOT_AGENT, memory_state="off", occupant="mem0",
+                                      measured=False)
+    assert lines[-1].endswith("affordance-cue: cue off until it measures itself each sitting (mem0 is the memory "
+                              "plugin in use, not the bundled one)") and read == []
+
+
+@pytest.mark.parametrize("plant", ["symlink", "check"])
+def test_doctor_and_warm_share_one_record_dir_check(monkeypatch, tmp_path, plant):
+    if plant == "symlink":
+        (tmp_path / "elsewhere").mkdir()
+        (tmp_path / "affordance").symlink_to(tmp_path / "elsewhere")
+    else:
+        monkeypatch.setattr(calibration, "writable_dir", lambda d: False)
+    lines, _ = _affordance_cue_doctor(monkeypatch, tmp_path, _ROOT_AGENT, measured=False)
+    assert lines[-1].endswith(f"affordance-cue: the cue is measured anew each sitting because {tmp_path / 'affordance'} "
+                              "is not a usable directory")
+    assert calibration.usable_dir(tmp_path / "affordance") is None
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a directory this user cannot write")
+def test_a_record_dir_this_process_cannot_write_is_measured_in_memory(tmp_path, monkeypatch):
+    record_dir = tmp_path / "affordance"
+    record_dir.mkdir(mode=0o500)
+    try:
+        assert _again(FakeEmbedder(_record(tmp_path, monkeypatch)), record_dir)._ready is not None
+        assert list(record_dir.iterdir()) == []
+    finally:
+        record_dir.chmod(0o700)
 
 
 def test_the_warm_and_the_doctor_row_both_follow_entry_state(monkeypatch, tmp_path):
     monkeypatch.setattr(calibration, "entry_state", lambda entry, pins, prompts: ("partial", "1 of 4"))
     lines, _ = _affordance_cue_doctor(monkeypatch, tmp_path, _ROOT_AGENT)
-    assert "(1 of 4 done; it continues in the background at the next start)" in lines[-1]
+    assert "(1 of 4 done; a few minutes of CPU, yielding to your turns)" in lines[-1]
     monkeypatch.setattr(calibration, "entry_state", lambda entry, pins, prompts: ("ready", 0.25))
     holder, fake = _warmed(tmp_path / "w", monkeypatch)
     assert holder._ready[2] == 0.25 and len(fake.embedded) == 1

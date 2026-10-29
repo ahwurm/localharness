@@ -124,13 +124,23 @@ def record_path(record_dir: Path, model_name: str) -> Path:
     return record_dir / f"{hashlib.sha256(model_name.encode('utf-8')).hexdigest()[:16]}.yaml"
 
 
+def writable_dir(d: Path) -> bool:
+    """Whether `d` is, or can be made, a directory of its own this process may write; a symlink never is."""
+    try:
+        return stat.S_ISDIR(os.lstat(d).st_mode) and os.access(d, os.W_OK)
+    except FileNotFoundError:
+        return os.access(d.parent, os.W_OK)
+    except OSError:
+        return False
+
+
 def usable_dir(record_dir: Path | None) -> Path | None:
-    """`record_dir`, created; None when it is a symlink or not a directory, which is never replaced."""
+    """`record_dir`, created; None when it is not a writable directory of its own, which is never replaced."""
     if record_dir is None:
         return None
     try:
         record_dir.mkdir(parents=True, exist_ok=True)
-        return record_dir if stat.S_ISDIR(os.lstat(record_dir).st_mode) else None
+        return record_dir if writable_dir(record_dir) else None
     except OSError:
         return None
 

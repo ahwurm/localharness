@@ -374,32 +374,36 @@ _ROW_GLYPH = {"off": _INFO + "  ", "available": _INFO + "  ", "skipped": _WARN +
               "needs-extra": _WARN + " ", "unconfigured": _WARN + " "}
 
 
-def _affordance_check(model, memory_state, embedding_status, cached: bool, skill_tool_held: bool, bundled: bool,
-                      state: tuple, date):
+def _affordance_check(model, memory_state, embedding_status, cached: bool, skill_tool_held: bool, other: str | None,
+                      unusable: Path | None, state: tuple, date):
     """Whether the skill cue would run at the next start, and when not, the first reason why."""
+    from localharness.memory.config import MemoryConfig
     from localharness.plugins.api import Check
 
     def off(detail):
         return Check(name="affordance-cue", status="skip", detail=detail)
 
+    if other is not None:
+        return off(f"cue off until it measures itself each sitting ({other} is the memory plugin in use, not the "
+                   "bundled one)")
     if memory_state != "on":
         return off("cue off: the memory plugin is not on (the cue uses memory's embedder)")
     if embedding_status != "pass" or not cached:
         return off("cue off: waits on memory-embedding")
     if not skill_tool_held:
         return off("cue off: the skill tool is not enabled for the root")
-    if not bundled:
-        return off("cue off until it measures itself each sitting (a memory plugin other than the bundled one is in use)")
+    if unusable is not None:
+        return off(f"the cue is measured anew each sitting because {unusable} is not a usable directory")
     kind, detail = state
     if kind == "ready":
-        return Check(name="affordance-cue", status="pass", detail=f"ready — {model}, calibrated {date.isoformat()}")
-    if kind == "partial":
-        return off(f"cue off until it finishes measuring itself ({detail} done; it continues in the background at the "
-                   "next start)")
+        tested = "" if model == MemoryConfig.model_fields["embedding_model"].default else " (not release-tested)"
+        return Check(name="affordance-cue", status="pass",
+                     detail=f"ready — {model}, calibrated {date.isoformat()}{tested}")
     if kind == "failed":
         return off(f"cue off: {detail}")
-    return off("cue off until it measures itself in the background at the next start (a few minutes of CPU, yielding "
-               "to your turns)")
+    done = f"{detail} done; " if kind == "partial" else ""
+    return off(f"cue off until it has measured itself in the background ({done}a few minutes of CPU, yielding to your "
+               "turns); this shows ready when it is done")
 
 
 def _print_plugins(cfg_path: Path, workspace: Path | None, loader: ConfigLoader,
@@ -449,11 +453,11 @@ def _print_plugins(cfg_path: Path, workspace: Path | None, loader: ConfigLoader,
     for row in rows:
         print_plugin_row(row, failures)
     if root_agent is not None:
-        print_plugin_row(_affordance_row(cfg_path, rows, root_agent), failures)
+        print_plugin_row(_affordance_row(cfg_path, rows, root_agent, resolution.plan), failures)
 
 
-def _affordance_row(cfg_path: Path, rows, root_agent):
-    from localharness.agent.calibration import entry_state, labelled, read_entry, shipped_pins
+def _affordance_row(cfg_path: Path, rows, root_agent, plan):
+    from localharness.agent.calibration import entry_state, labelled, read_entry, shipped_pins, writable_dir
     from localharness.config.paths import local_folder
     from localharness.plugins.lifecycle import DoctorRow
     from localharness.tools.registry import allowed_by_config
@@ -462,17 +466,21 @@ def _affordance_row(cfg_path: Path, rows, root_agent):
     model = getattr(getattr(root_agent, "memory", None), "embedding_model", None)
     memory = next((r for r in rows if r.name == "memory"), None)
     embedding = next((c.status for c in memory.checks if c.name == "memory-embedding"), None) if memory else None
-    folder, entry, state = None, None, ("stale", "")
+    occupant, memory_entry = plan.memory_occupant, plan.entry("memory")
+    bundled = occupant == "memory" and memory_entry is not None and memory_entry.bundled
+    other = occupant if occupant is not None and not bundled else None
+    record_dir, folder, entry, state = cfg_path / "affordance", None, None, ("stale", "")
+    usable = writable_dir(record_dir)
     try:
         folder = local_folder(model, cfg_path)
-        if folder is not None:
-            entry = read_entry(cfg_path / "affordance", model)
+        if folder is not None and other is None and usable:
+            entry = read_entry(record_dir, model)
             state = entry_state(entry, shipped_pins(model, folder), labelled()[1])
     except Exception:  # noqa: BLE001 — an unreadable cache is a skip row, never a doctor crash
         pass
     check = _affordance_check(model, memory.state if memory else "off", embedding, folder is not None,
-                              allowed_by_config(root_agent.tools, "skill", "global"), bool(memory and memory.bundled),
-                              state, entry.get("date") if entry else None)
+                              allowed_by_config(root_agent.tools, "skill", "global"), other,
+                              None if usable else record_dir, state, entry.get("date") if entry else None)
     return DoctorRow("affordance-cue", "on", "", checks=(check,))
 
 
