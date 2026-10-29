@@ -377,7 +377,7 @@ _ROW_GLYPH = {"off": _INFO + "  ", "available": _INFO + "  ", "skipped": _WARN +
 def _affordance_check(model, memory_state, embedding_status, cached: bool, skill_tool_held: bool, other: str | None,
                       unusable: Path | None, state: tuple, date):
     """Whether the skill cue would run at the next start, and when not, the first reason why."""
-    from localharness.memory.config import MemoryConfig
+    from localharness.agent.calibration import TESTED_MODEL
     from localharness.plugins.api import Check
 
     def off(detail):
@@ -396,7 +396,7 @@ def _affordance_check(model, memory_state, embedding_status, cached: bool, skill
         return off(f"the cue is measured anew each sitting because {unusable} is not a usable directory")
     kind, detail = state
     if kind == "ready":
-        tested = "" if model == MemoryConfig.model_fields["embedding_model"].default else " (not release-tested)"
+        tested = "" if model == TESTED_MODEL else " (not release-tested)"
         return Check(name="affordance-cue", status="pass",
                      detail=f"ready — {model}, calibrated {date.isoformat()}{tested}")
     if kind == "failed":
