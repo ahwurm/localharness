@@ -384,8 +384,8 @@ def _affordance_check(model, memory_state, embedding_status, cached: bool, skill
         return Check(name="affordance-cue", status="skip", detail=detail)
 
     if other is not None:
-        return off(f"cue off until it measures itself each sitting ({other} is the memory plugin in use, not the "
-                   "bundled one)")
+        return off(f"cue measured anew in each session if {other}, the memory plugin in use, offers an embedder "
+                   "(another plugin's measurement is never stored)")
     if memory_state != "on":
         return off("cue off: the memory plugin is not on (the cue uses memory's embedder)")
     if embedding_status != "pass" or not cached:
@@ -402,8 +402,8 @@ def _affordance_check(model, memory_state, embedding_status, cached: bool, skill
     if kind == "failed":
         return off(f"cue off: {detail}")
     done = f"{detail} done; " if kind == "partial" else ""
-    return off(f"cue off until it has measured itself in the background ({done}a few minutes of CPU, yielding to your "
-               "turns); this shows ready when it is done")
+    return off(f"cue off until an open session has measured it in the background ({done}a few minutes of CPU, "
+               "yielding to your turns); this shows ready when it is done")
 
 
 def _print_plugins(cfg_path: Path, workspace: Path | None, loader: ConfigLoader,

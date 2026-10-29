@@ -108,6 +108,8 @@ def entry_state(entry, pins: dict, prompts) -> tuple[str, str | float]:
     if (not isinstance(rows, list) or {k: entry.get(k) for k in pins} != pins or len(rows) > len(prompts)
             or not isinstance(entry.get("date"), datetime.date) or not all(map(_row_ok, rows, prompts))):
         return "stale", "no record for this model and labelled set"
+    if "attempts" in entry and entry["date"] < datetime.date.today():
+        return "partial", f"{len(rows)} of {len(prompts)}"
     if "failed" in entry:
         why = f"measuring stopped on {entry['failed']} {ATTEMPTS} sittings in a row"
         return "failed", why if "attempts" in entry else NO_SEPARATION
@@ -201,7 +203,8 @@ def measure(embedder, pins: dict, entry: dict | None, idle, record_dir: Path | N
     skills, prompts = labelled()
     docs = normalise(embedder.embed_docs([s.description for s in skills]))
     rows = list(entry["rows"]) if entry else []
-    resumed, tries = len(rows), a if isinstance(a := (entry or {}).get("attempts"), int) else 0
+    a = (entry or {}).get("attempts") if (entry or {}).get("date") == datetime.date.today() else 0
+    resumed, tries = len(rows), a if isinstance(a, int) else 0
     try:
         for start in range(len(rows), len(prompts), BATCH):
             for item, label, text in prompts[start:start + BATCH]:
