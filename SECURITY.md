@@ -254,13 +254,16 @@ line sits after the guardrails and the body the model loads when cued arrives as
 inside a fence that marks it as the project's own text, the way a project's instructions file does
 ([Project instructions files](#project-instructions-files)); the fence is a marker, not a
 sandbox, because it labels the text and does not stop a model from following it. The harness
-may also cue a skill by name: with the memory plugin on and its default embedding model on
+may also cue a skill by name: with the memory plugin on and its embedding model on
 this machine, each request is compared on your machine with the skills' descriptions, and
 when one is close enough the model is sent one harness line naming that skill, which it may
 decline; the description never speaks in that line, only the checked name and whether it is
-a project skill. The threshold is a measured record shipped inside the package and read for
-that embedding model alone, never from a project or machine config, so no repository can
-lower it to make every request cue its own skill. The cue never downloads anything, and it
+a project skill. The threshold is measured on this machine by the harness's own memory engine
+from a labelled set shipped inside the package and stored in the protected `affordance/` entry
+of the machine directory, never read from a project or workspace, so no repository can lower it
+to make every request cue its own skill; another memory plugin's measurement is never stored or
+reused, and a custom embedding model is calibrated without the release's acceptance gate: all it
+is held to is that no must-not-cue labelled prompt crosses its threshold. The cue never downloads anything, and it
 identifies the cached embedding model by its content-addressed file names in the Hugging
 Face cache, without verifying the files. A project skill's body is stored as untrusted
 content, which keeps it from a child agent that holds a host-dangerous tool. The description alone
