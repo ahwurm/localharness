@@ -962,6 +962,7 @@ PROTECTED_CONFIG_DIR_ENTRIES: tuple[str, ...] = (
     "server-floor.json",
     "strata",
     "skills",
+    "affordance",
 )
 """The entries inside a harness config directory — the global one and any in-project
 ``.localharness/`` — that are protected in every mode.
@@ -982,6 +983,8 @@ hides a file the person never saw, and a replaced lock is lost exclusion. ``serv
 ``strata/`` holds the copies of Strata's config the harness writes before a launch and their logs, so
 a planted copy cannot change what the engine is started with. ``skills/`` holds the procedures every later start
 lists for the model and the model loads and follows, so a write there would be the model giving itself standing orders.
+``affordance/`` holds the skill cue's threshold measured on this machine, so a planted record would choose which skill
+the model is pointed at.
 
 Everything else under a config directory is allowed: ``agents/`` and ``divisions/`` (agent
 definitions — creating one through the harness is the harness working), ``tools/`` (scripts the

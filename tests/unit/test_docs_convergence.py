@@ -273,10 +273,10 @@ def test_protected_entries_doc():
 
 def test_protected_entries_doc_bites():
     good = _read("SECURITY.md")
-    assert "thirteen-entry" in good
-    assert check_protected_entries_doc(good.replace("thirteen-entry", "twelve-entry")) == [
-        f"SECURITY.md says twelve protected entries, the code has {len(PROTECTED_CONFIG_DIR_ENTRIES)}"]
-    assert len(check_protected_entries_doc(good.replace("thirteen-entry", "fourteen-entry"))) == 1
+    assert "fourteen-entry" in good
+    assert check_protected_entries_doc(good.replace("fourteen-entry", "thirteen-entry")) == [
+        f"SECURITY.md says thirteen protected entries, the code has {len(PROTECTED_CONFIG_DIR_ENTRIES)}"]
+    assert len(check_protected_entries_doc(good.replace("fourteen-entry", "fifteen-entry"))) == 1
     assert check_protected_entries_doc(good.replace("`overrides.yaml.lock`", "the overlay lock")) == [
         "protected entry not named in SECURITY.md: overrides.yaml.lock"]
     assert check_protected_entries_doc(good.replace("`model-library.json`", "`grants.yaml` `model-library.json`")) == [
@@ -285,7 +285,7 @@ def test_protected_entries_doc_bites():
         "not a protected entry: grants.yml"]
     assert check_protected_entries_doc("## Nothing\n") == ["the protected config-directory list is not found"]
     assert check_protected_entries_doc(good, [*PROTECTED_CONFIG_DIR_ENTRIES, "new.yaml"]) == [
-        f"SECURITY.md says thirteen protected entries, the code has {len(PROTECTED_CONFIG_DIR_ENTRIES) + 1}",
+        f"SECURITY.md says fourteen protected entries, the code has {len(PROTECTED_CONFIG_DIR_ENTRIES) + 1}",
         "protected entry not named in SECURITY.md: new.yaml"]
 
 
@@ -521,7 +521,7 @@ def check_skills_doc(security_text: str) -> list[str]:
     out += [f"SECURITY.md does not say {n}" for n in CLONE_NEEDLES if n not in whole]
     listed = PROTECTED_LIST.search(whole)
     after = whole[listed.end():] if listed else ""
-    out += [f"SECURITY.md does not say {n} after the thirteen-entry list" for n in ELSEWHERE_NEEDLES[:2] if n not in after]
+    out += [f"SECURITY.md does not say {n} after the fourteen-entry list" for n in ELSEWHERE_NEEDLES[:2] if n not in after]
     out += [f"SECURITY.md does not say {n}" for n in ELSEWHERE_NEEDLES[2:] if n not in whole]
     if "tools/capabilities.py" in ticks(body):
         out.append("the Skills section names the capability-floor module in backticks")
@@ -554,7 +554,7 @@ def test_skills_doc_bites():
     assert check_skills_doc(text.replace("agent files and skills load", "agent files load")) == [
         "SECURITY.md does not say config, agent files and skills load with no prompt"]
     assert check_skills_doc(re.sub(r"is\s+protected the same way", "is protected", text)) == [
-        f"SECURITY.md does not say {ELSEWHERE_NEEDLES[0]} after the thirteen-entry list"]
+        f"SECURITY.md does not say {ELSEWHERE_NEEDLES[0]} after the fourteen-entry list"]
     assert check_skills_doc(text.replace("A project skill is not that door", "A skill is no door")) == [
         f"SECURITY.md does not say {ELSEWHERE_NEEDLES[2]}"]
     for gone, pattern, instead in (("except the bundled one is a protected path", r"except\s+the\s+bundled\s+one\s+is", "is"),
