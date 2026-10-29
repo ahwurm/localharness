@@ -107,9 +107,16 @@ def global_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return folder
 
 
-def test_skills_is_the_thirteenth_protected_config_entry() -> None:
-    assert len(PROTECTED_CONFIG_DIR_ENTRIES) == 13
-    assert PROTECTED_CONFIG_DIR_ENTRIES[-1] == "skills"
+def test_skills_and_the_cue_record_are_the_last_two_of_fourteen_protected_config_entries() -> None:
+    assert len(PROTECTED_CONFIG_DIR_ENTRIES) == 14
+    assert PROTECTED_CONFIG_DIR_ENTRIES[-2:] == ("skills", "affordance")
+
+
+def test_a_model_write_to_the_cue_record_asks_in_auto_mode(project, global_dir) -> None:
+    decision = evaluate("write", {"path": str(global_dir / "affordance" / "x.yaml")}, WRITE, _ctx(project), SETTINGS)
+
+    assert decision.verdict is Verdict.ASK and decision.request.klass == "protected-path"
+    assert decision.request.grantable is False
 
 
 def test_a_write_under_localharness_skills_is_an_ungrantable_protected_ask(project, global_dir) -> None:
@@ -254,12 +261,12 @@ def test_the_origins_comparison_bites() -> None:
     assert _gate_gaps(tuple(reversed(ORIGINS))) == set()
 
 
-def test_security_md_names_skills_in_the_thirteen_entry_sentence() -> None:
+def test_security_md_names_skills_and_the_cue_record_in_the_fourteen_entry_sentence() -> None:
     text = (Path(__file__).resolve().parents[2] / "SECURITY.md").read_text(encoding="utf-8")
-    sentence = re.search(r"one thirteen-entry list protects (.*?)\. ", " ".join(text.split()))
+    sentence = re.search(r"one fourteen-entry list protects (.*?)\. ", " ".join(text.split()))
 
     assert check_protected_entries_doc(text) == []
-    assert sentence is not None and "`skills/**`" in sentence.group(1)
+    assert sentence is not None and "`skills/**`" in sentence.group(1) and "`affordance/**`" in sentence.group(1)
 
 
 def _cfg(add):

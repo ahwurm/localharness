@@ -15,6 +15,7 @@ import yaml
 
 from localharness.agent.affordance import normalise, scores
 from localharness.config.skills import Skill, read_skill
+from localharness.core.private_files import touch_private
 
 log = logging.getLogger(__name__)
 
@@ -127,6 +128,7 @@ def write_entry(record_dir: Path, model_name: str, entry: dict) -> None:
     path = record_path(record_dir, model_name)
     tmp = path.with_name(f"{path.name}.{os.getpid()}-{uuid4().hex[:8]}.tmp")
     try:
+        touch_private(tmp)
         tmp.write_text(yaml.safe_dump(entry, sort_keys=False, default_flow_style=None), encoding="utf-8")
         os.replace(tmp, path)
     finally:

@@ -1015,6 +1015,7 @@ def test_an_absent_record_is_measured_written_and_published_in_the_same_warm(tmp
     assert fake.asked == ASKED and len(entry["rows"]) == len(LAB) and entry["date"] == datetime.date.today()
     assert entry_state(entry, shipped_pins(MODEL, fake.folder), LAB) == ("ready", holder._ready[2])
     assert list(record_dir.iterdir()) == [record_path(record_dir, MODEL)]
+    assert os.name != "posix" or record_path(record_dir, MODEL).stat().st_mode & 0o077 == 0
     fake.asked.clear()
     assert _again(fake, record_dir)._ready[2] == holder._ready[2] and fake.asked == []
 
