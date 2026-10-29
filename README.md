@@ -79,7 +79,7 @@ A skill is a folder holding a `SKILL.md` in the open [Agent Skills](https://agen
 
 ## Status
 
-Early stage (v0.23.0, pre-1.0). Interfaces and config schema may change without notice. Each release's known limitations are listed in the [CHANGELOG](CHANGELOG.md).
+Early stage (v0.24.0, pre-1.0). Interfaces and config schema may change without notice. Each release's known limitations are listed in the [CHANGELOG](CHANGELOG.md).
 
 ## Links
 
