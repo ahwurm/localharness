@@ -1228,6 +1228,16 @@ def test_an_encode_error_that_recurs_three_sittings_running_is_failed_with_its_t
     assert _again(fake, record_dir)._ready is None and fake.asked == []
 
 
+def test_sittings_that_failed_on_an_earlier_day_are_measured_again_from_their_rows(tmp_path, monkeypatch):
+    record_dir, fake, _ = _failing_sittings(tmp_path, monkeypatch, 3)
+    path = record_path(record_dir, MODEL)
+    entry = read_entry(record_dir, MODEL)
+    path.write_text(yaml.safe_dump({**entry, "date": entry["date"] - datetime.timedelta(days=1)}), encoding="utf-8")
+    assert entry_state(read_entry(record_dir, MODEL), shipped_pins(MODEL, fake.folder), LAB)[0] == "partial"
+    fake.table = VECTORS
+    assert _again(fake, record_dir)._ready is not None and "attempts" not in read_entry(record_dir, MODEL)
+
+
 def test_progress_clears_the_failed_sittings_count(tmp_path, monkeypatch):
     record_dir, fake, attempts = _failing_sittings(tmp_path, monkeypatch, 2)
     fake.table = VECTORS
@@ -1438,13 +1448,14 @@ def test_the_labelled_skills_are_in_no_discovery_root(tmp_path):
 # --- doctor's affordance-cue row ------------------------------------------------------------------
 
 CUE_MODEL = "Qwen/Qwen3-Embedding-0.6B"
-_MEASURES = ("cue off until it has measured itself in the background (a few minutes of CPU, yielding to your turns); "
-             "this shows ready when it is done")
+_MEASURES = ("cue off until an open session has measured it in the background (a few minutes of CPU, yielding to "
+             "your turns); this shows ready when it is done")
 _READY = dict(model=CUE_MODEL, memory_state="on", embedding_status="pass", cached=True, skill_tool_held=True, other=None,
               unusable=None, state=("ready", 0.5), date=DATE)
 _DOCTOR_ROWS = [
     ("third-party-occupant", dict(other="mem0", memory_state="off", embedding_status=None), "skip",
-     "cue off until it measures itself each sitting (mem0 is the memory plugin in use, not the bundled one)"),
+     "cue measured anew in each session if mem0, the memory plugin in use, offers an embedder (another plugin's "
+     "measurement is never stored)"),
     ("memory-not-on", dict(memory_state="off", embedding_status=None),
      "skip", "cue off: the memory plugin is not on (the cue uses memory's embedder)"),
     ("embedding-failed", dict(embedding_status="fail"), "skip", "cue off: waits on memory-embedding"),
@@ -1454,7 +1465,7 @@ _DOCTOR_ROWS = [
     ("unusable-dir", dict(unusable=Path("/c/affordance")), "skip",
      "the cue is measured anew each sitting because /c/affordance is not a usable directory"),
     ("partial", dict(state=("partial", "40 of 180")), "skip",
-     "cue off until it has measured itself in the background (40 of 180 done; a few minutes of CPU, yielding to your "
+     "cue off until an open session has measured it in the background (40 of 180 done; a few minutes of CPU, yielding to your "
      "turns); this shows ready when it is done"),
     ("failed", dict(state=("failed", NO_SEPARATION)), "skip", f"cue off: {NO_SEPARATION}"),
     ("stale", dict(state=("stale", "")), "skip", _MEASURES),
@@ -1479,7 +1490,7 @@ def test_the_release_tested_model_is_the_memory_plugins_default():
 def test_affordance_check_never_warns_or_fails_and_every_off_row_says_so():
     checks = [doctor_cmd._affordance_check(**{**_READY, **r[1]}) for r in _DOCTOR_ROWS]
     assert {c.status for c in checks} == {"pass", "skip"}
-    assert all(c.detail.startswith(("cue off", "the cue is measured anew")) for c in checks if c.status != "pass")
+    assert all(c.detail.startswith(("cue off", "the cue is measured anew", "cue measured anew")) for c in checks if c.status != "pass")
 
 
 def test_doctor_and_the_engine_read_the_folder_through_one_function():
@@ -1538,8 +1549,8 @@ def test_affordance_cue_row_beside_a_third_party_memory_occupant_names_it_and_re
     monkeypatch.setattr(calibration, "read_entry", lambda *a: read.append(a))
     lines, _ = _affordance_cue_doctor(monkeypatch, tmp_path, _ROOT_AGENT, memory_state="off", occupant="mem0",
                                       measured=False)
-    assert lines[-1].endswith("affordance-cue: cue off until it measures itself each sitting (mem0 is the memory "
-                              "plugin in use, not the bundled one)") and read == []
+    assert lines[-1].endswith("affordance-cue: cue measured anew in each session if mem0, the memory plugin in use, "
+                              "offers an embedder (another plugin's measurement is never stored)") and read == []
 
 
 @pytest.mark.parametrize("plant", ["symlink", "check"])

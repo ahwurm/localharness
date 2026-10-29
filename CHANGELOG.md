@@ -15,7 +15,7 @@ All notable changes to LocalHarness are documented here. The format follows
   memory plugin is on, each request is compared, on your machine, with the skills' descriptions,
   using whatever embedding model the memory plugin uses; if one is close enough, by a threshold
   measured on this machine rather than chosen, the model gets one line from the harness naming the
-  skill and suggesting it load it, and you see one dim line, `hint to the model: skill <name>`. The
+  skill and suggesting it load it, and in the terminal you see one dim line, `hint to the model: skill <name>`. The
   cue never downloads anything; memory's own first use does. From the next start after that model
   is on this machine, the harness measures the cue's threshold in the background, yielding to your
   turns (a few minutes of CPU), and the cue starts once that is done; an upgrade that changes the
