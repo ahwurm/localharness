@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from datetime import date
@@ -23,7 +24,8 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
-from localharness.agent.affordance import CALIBRATION, Affordances, load_calibration, snapshot_files
+from localharness.agent.affordance import Affordances
+from localharness.agent.calibration import entry_state, labelled, measure, shipped_pins
 from localharness.agent.context import ContentStore, ContextManager, context_size_kwargs, floor_schemas, probe_served_window
 from localharness.agent.gate import PermissionGate, derive_session_boundary
 from localharness.agent.gate_types import Decision, PermissionRequest
@@ -258,13 +260,13 @@ async def root_registry(skill_set: SkillSet, cfg: AgentConfig) -> tuple[ToolRegi
 
 
 async def first_step_run(client, skill_set: SkillSet, cfg: AgentConfig, shape: Shape, prompt: str, work: Path,
-                         engine=None) -> Step:
+                         engine=None, record_dir: Path | None = None) -> Step:
     registry, state = await root_registry(skill_set, cfg)
     bus = EventBus()
     gate = PermissionGate(boundary=None, workspace=work, grants=GrantStore(work.parent / "grants.yaml"), mode="read-only")
     holder, spent = None, []
     if engine is not None:
-        holder = Affordances(skill_set, SimpleNamespace(embedder=lambda: engine), state)
+        holder = Affordances(skill_set, SimpleNamespace(embedder=lambda: engine), state, record_dir)
         holder.warm().join(timeout=300)
         cue = holder.cue
 
@@ -295,11 +297,11 @@ async def first_step_run(client, skill_set: SkillSet, cfg: AgentConfig, shape: S
 
 
 async def settled(client, skill_set: SkillSet, cfg: AgentConfig, shape: Shape, prompt: str, work: Path,
-                  engine=None) -> Step:
+                  engine=None, record_dir: Path | None = None) -> Step:
     """One request, tried twice; a second failure is an `error` step, which the bar counts against the model."""
     for _ in range(2):
         try:
-            step = await first_step_run(client, skill_set, cfg, shape, prompt, work, engine)
+            step = await first_step_run(client, skill_set, cfg, shape, prompt, work, engine, record_dir)
             assert render_listing(skill_set.skills) in step.system
             return step
         except Exception as exc:  # noqa: BLE001 - any failure of one request is recorded, not fatal to the run
@@ -395,23 +397,28 @@ def out_of_list(runs, names) -> dict[str, list[tuple[str, str]]]:
     return found
 
 
-def cue_reason(folder, calibration, files) -> str | None:
+def cue_reason(folder, state) -> str | None:
     if folder is None:
         return MODEL_ABSENT
-    if calibration is None:
-        return "no calibration record for the embedding model"
-    return "the cached embedding model is not the calibrated one" if files != calibration.snapshot_files else None
+    return None if state[0] == "ready" else f"the cue did not calibrate: {state[1]}"
 
 
-def cue_setup() -> tuple[ResonanceEngine | None, str | None, object | None]:
+def cue_setup(record_dir: Path) -> tuple[ResonanceEngine | None, str | None, dict | None]:
+    """The engine measured once into `record_dir`, so each holder reads the record; its entry carries the threshold."""
     engine = ResonanceEngine(DEFAULT_EMBEDDING_MODEL)
     try:
         folder = engine.ensure_local()
     except Exception:  # noqa: BLE001 - a model that cannot load is absent to the cue arm
         folder = None
-    calibration = load_calibration(engine.model_name) if folder is not None else None
-    reason = cue_reason(folder, calibration, snapshot_files(folder) if folder is not None else None)
-    return engine if reason is None else None, reason, calibration
+    if folder is None:
+        return None, MODEL_ABSENT, None
+    pins, idle = shipped_pins(engine.model_name, folder), threading.Event()
+    idle.set()
+    record_dir.mkdir(parents=True, exist_ok=True)
+    entry = measure(engine, pins, None, idle, record_dir)
+    state = entry_state(entry, pins, labelled()[1])
+    reason = cue_reason(folder, state)
+    return (engine, None, {**entry, "threshold": state[1]}) if reason is None else (None, reason, None)
 
 
 def cue_counts(runs, leg: str, skill: str) -> tuple[int, int, int, int, int]:
@@ -474,8 +481,8 @@ def cue_section(cue: dict, runs) -> list[str]:
     fired = [r for r in runs if r.step.cue is not None]
     return [
         "## The cue", "",
-        f"Embedder: {cue['embedder']} · Threshold: {cue['threshold']} (derived at load from the stored rows of the record "
-        f"dated {cue['date'].isoformat()})",
+        f"Embedder: {cue['embedder']} · Threshold: {cue['threshold']} (derived from the rows measured on this machine "
+        f"on {cue['date'].isoformat()})",
         "Calibration-set recall (fit: the prompts the threshold was derived from): "
         + "; ".join(f"{s} {k} of {n}" for s in skills for k, n in [fit(cue["rows"], cue["threshold"], s)]), "",
         *table(["skill", "set", "matching with the cue", "matching without", "near-miss plus unrelated with the cue",
@@ -737,12 +744,13 @@ async def test_the_subject_model_picks_a_listed_skill_on_its_own(live_endpoint, 
         requests = [(skill, kind, text) for skill in names for kind in KINDS for text in sets[skill][kind]]
         assert set(holdout()["skills"]) == set(names)
         held_out = [(skill, kind, text) for skill in names for kind in KINDS for text in holdout()["skills"][skill][kind]]
-        engine, reason, calibration = cue_setup()
+        record_dir = tmp_path / "affordance"
+        engine, reason, measured = cue_setup(record_dir)
         total = (RUNS + 1) * len(requests) + RUNS * len(held_out) + (RUNS * (len(requests) + len(held_out)) if engine else 0)
         runs: list[Run] = []
 
         async def one(leg: str, index: int, skill: str, kind: str, text: str, engine=None) -> None:
-            step = await settled(client, skill_set, cfg, shape, text, work, engine)
+            step = await settled(client, skill_set, cfg, shape, text, work, engine, record_dir)
             runs.append(Run(leg, skill, kind, text, index, step))
             print(f"{leg} {len(runs)}/{total} {skill} {kind} run {index}: {[name for name, _ in step.calls]}"
                   f"{' ' + step.error if step.error else ''}", flush=True)
@@ -773,9 +781,8 @@ async def test_the_subject_model_picks_a_listed_skill_on_its_own(live_endpoint, 
             "day": day, "run": number, "commit": commit, "tree": tree, "sha": sha, "model": model, "base_url": base_url, "window": window,
             "temperature": TEMPERATURE, "effort": shape.effort, "loop_window": shape.window, "tools": tools, "listing": listing,
             "minutes": int((time.monotonic() - started) // 60),
-            "cue": {"reason": reason, "embedder": DEFAULT_EMBEDDING_MODEL, "threshold": calibration.threshold if calibration else None,
-                    "date": calibration.date if calibration else None,
-                    "rows": yaml.safe_load(CALIBRATION.read_text(encoding="utf-8"))[DEFAULT_EMBEDDING_MODEL]["rows"] if calibration else []}}
+            "cue": {"reason": reason, "embedder": DEFAULT_EMBEDDING_MODEL, "threshold": measured and measured["threshold"],
+                    "date": measured and measured["date"], "rows": measured["rows"] if measured else []}}
         path = write_report(day, render_report(meta, runs, creator, stopped), number)
     except BaseException:
         with contextlib.suppress(FileExistsError):

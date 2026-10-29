@@ -1,4 +1,4 @@
-"""The skill cue over the local embedding model alone: the record, the three misses, the holdout, a stuffed description and named skills."""
+"""The skill cue over the local embedding model alone: a fresh measurement, the three misses, the holdout, a stuffed description and named skills."""
 from __future__ import annotations
 
 import dataclasses
@@ -6,6 +6,7 @@ import hashlib
 import itertools
 import shutil
 import statistics
+import threading
 import time
 from datetime import date
 from pathlib import Path
@@ -14,16 +15,17 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from localharness.agent.affordance import CALIBRATION, Affordances, load_calibration, snapshot_files
+from localharness.agent.affordance import Affordances
+from localharness.agent.calibration import entry_state, labelled, measure, shipped_pins, write_entry
 from localharness.agent.task_record import TaskState
 from localharness.cli.skill_session import LINE
 from localharness.config.skills import SkillSet
-from localharness.memory.resonance import DEFAULT_EMBEDDING_MODEL, EMBED_MAX_TOKENS
+from localharness.memory.resonance import EMBED_MAX_TOKENS
 from tests.integration.test_skills_model_live import HOLDOUT, KINDS, LABELLED, REPORTS, cell, git
 
 pytestmark = pytest.mark.live_embed
 
-STALE = "calibration is stale: run python scripts/gen_calibration.py"
+DRIFT = "the labelled prompts moved: update MISSES"
 MISSES = (
     (3, "What should I put in the history entry for these edits to the parser?"),
     (5, "Help me phrase the log line for this change; the team likes 'area: did thing'."),
@@ -44,14 +46,10 @@ def skill_set(config_dir: Path) -> SkillSet:
     return SkillSet.discover(config_dir, None)
 
 
-def record() -> dict:
-    return yaml.safe_load(CALIBRATION.read_text(encoding="utf-8"))[DEFAULT_EMBEDDING_MODEL]
-
-
-def warmed(skills: SkillSet, engine) -> Affordances:
-    holder = Affordances(skills, SimpleNamespace(embedder=lambda: engine), TaskState())
+def warmed(skills: SkillSet, engine, record_dir: Path) -> Affordances:
+    holder = Affordances(skills, SimpleNamespace(embedder=lambda: engine), TaskState(), record_dir)
     holder.warm().join(timeout=300)
-    assert holder._ready is not None, "the holder did not warm: no calibration entry, a snapshot mismatch or a containment"
+    assert holder._ready is not None, "the holder did not warm from the fresh measurement"
     return holder
 
 
@@ -69,21 +67,23 @@ async def timed(holder: Affordances, text: str) -> float:
 
 @pytest.fixture(scope="module")
 def ready(live_embedder, tmp_path_factory):
+    """`measure` once with no record dir; the holders then read that entry from a scratch dir instead of measuring again."""
     engine, folder = live_embedder
+    pins, idle = shipped_pins(engine.model_name, folder), threading.Event()
+    idle.set()
+    entry = measure(engine, pins, None, idle, None)
+    state, threshold = entry_state(entry, pins, labelled()[1])
+    assert state == "ready", threshold
+    record_dir = tmp_path_factory.mktemp("affordance")
+    write_entry(record_dir, engine.model_name, entry)
     skills = skill_set(tmp_path_factory.mktemp("cfg"))
-    return engine, folder, skills, warmed(skills, engine)
+    return engine, entry, threshold, skills, record_dir, warmed(skills, engine, record_dir)
 
 
-def test_the_record_pins_the_snapshot_the_engine_loaded(ready):
-    _, folder, _, _ = ready
-    assert record()["snapshot_files"] == snapshot_files(folder)
-
-
-async def test_every_calibration_prompt_picks_what_the_record_rows_give(ready):
-    engine, _, _, holder = ready
-    threshold = load_calibration(engine.model_name).threshold
-    rows, asked = record()["rows"], prompts(sets(LABELLED / "prompts.yaml"))
-    assert [tuple(row[:2]) for row in rows] == [(skill, kind) for skill, kind, _ in asked], STALE
+async def test_every_calibration_prompt_picks_what_the_fresh_rows_give(ready):
+    _, entry, threshold, _, _, holder = ready
+    rows, asked = entry["rows"], prompts(sets(LABELLED / "prompts.yaml"))
+    assert [tuple(row[:2]) for row in rows] == [(skill, kind) for skill, kind, _ in asked]
     expected = [top if score > threshold else None for _, _, top, score in rows]
     assert [await outcome(holder, text) for _, _, text in asked] == expected
 
@@ -91,31 +91,31 @@ async def test_every_calibration_prompt_picks_what_the_record_rows_give(ready):
 async def test_the_three_commit_message_misses_are_cued(ready):
     matching = sets(LABELLED / "prompts.yaml")["commit-message"]["matching"]
     for index, text in MISSES:
-        assert matching[index] == text, STALE
-        assert await outcome(ready[3], text) == "commit-message", text
+        assert matching[index] == text, DRIFT
+        assert await outcome(ready[5], text) == "commit-message", text
 
 
 async def test_the_holdout_draws_no_false_cue(ready):
     false = [(skill, kind, text, cued) for skill, kind, text in prompts(sets(HOLDOUT))
-             if (cued := await outcome(ready[3], text)) is not None and (kind != "matching" or cued != skill)]
+             if (cued := await outcome(ready[5], text)) is not None and (kind != "matching" or cued != skill)]
     assert false == []
 
 
 async def test_a_description_stuffed_with_its_matching_prompts_draws_no_holdout_false_cue(ready):
-    engine, _, skills, _ = ready
+    engine, _, _, skills, record_dir, _ = ready
     calibration = sets(LABELLED / "prompts.yaml")
     barred = [text for _, kind, text in prompts(sets(HOLDOUT)) if kind != "matching"]
     counts = {}
     for name in calibration:
         stuffed = " ".join(calibration[name]["matching"])
         holder = warmed(dataclasses.replace(skills, skills=tuple(
-            dataclasses.replace(s, description=stuffed) if s.name == name else s for s in skills.skills)), engine)
+            dataclasses.replace(s, description=stuffed) if s.name == name else s for s in skills.skills)), engine, record_dir)
         counts[name] = sum([await outcome(holder, text) == name for text in barred])
     assert counts == dict.fromkeys(calibration, 0)
 
 
 async def test_named_skills_and_cue_time_are_measured_into_the_report(ready):
-    engine, _, _, holder = ready
+    engine, entry, threshold, _, _, holder = ready
     calibration, held = sets(LABELLED / "prompts.yaml"), sets(HOLDOUT)
     forms = []
     for name in calibration:
@@ -131,14 +131,13 @@ async def test_named_skills_and_cue_time_are_measured_into_the_report(ready):
     day = date.today().isoformat()
     run, path = next((n, p) for n in itertools.count(1) if not (
         p := REPORTS / (f"affordance-gate-{day}.md" if n == 1 else f"affordance-gate-{day}-{n}.md")).exists())
-    calibrated = load_calibration(engine.model_name)
     lines = [
         "# Affordance cue, embedder only", "",
         f"Date: {day} · Run: {run}",
         f"Commit: {git('rev-parse', 'HEAD')} ({'dirty' if git('status', '--porcelain') else 'clean'} tree)",
         f"Module sha256: {hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}",
         f"Embedder: {engine.model_name}",
-        f"Threshold: {calibrated.threshold} (derived from the record dated {calibrated.date.isoformat()})", "",
+        f"Threshold: {threshold} (measured on this machine on {entry['date'].isoformat()})", "",
         f"Named-skill row: {len(off)} cues naming another skill over {len(forms)} cues",
         *(["", "| form | named | cued |", "|---|---|---|", *(f"| {cell(f)} | {cell(n)} | {cell(c)} |" for f, n, c in off)]
           if off else []), "",

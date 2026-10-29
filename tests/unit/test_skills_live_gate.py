@@ -12,8 +12,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from localharness.agent import affordance
-from localharness.agent.affordance import Calibration
+from localharness.agent import calibration
 from localharness.agent.gate import derive_session_boundary
 from localharness.agent.gate_types import PermissionRequest
 from localharness.config import skills as skill_config
@@ -89,7 +88,7 @@ async def test_a_cued_first_step_records_the_cue_its_line_and_its_time(tmp_path,
     fake = FakeEmbedder(tmp_path / "snapshot")
     fake.docs = np.eye(len(skill_set.skills))
     fake.answer = fake.docs[[s.name for s in skill_set.skills].index("release-notes")]
-    monkeypatch.setattr(affordance, "load_calibration", lambda name: Calibration(0.5, {}, datetime.date(2026, 10, 25)))
+    monkeypatch.setattr(calibration, "entry_state", lambda entry, pins, prompts: ("ready", 0.5))
     client = Spy(reply(calls=[SKILL]), reply("second request"))
     step = await first_step_run(client, skill_set, cfg, loop_shape(tmp_path / "cfg", cfg, URL, None), "Draft the release notes.",
                                 work, engine=fake)
@@ -758,11 +757,9 @@ async def test_the_creator_asker_denies_everything_but_a_write_under_the_skills_
 
 
 def test_the_cue_arm_names_why_it_did_not_run(tmp_path):
-    calibration = Calibration(0.5, {"model.safetensors": "aa11"}, datetime.date(2026, 10, 25))
-    assert live.cue_reason(None, None, None) == live.MODEL_ABSENT == "model absent"
-    assert live.cue_reason(tmp_path, None, {}) == "no calibration record for the embedding model"
-    assert live.cue_reason(tmp_path, calibration, {"model.safetensors": "bb22"}) == "the cached embedding model is not the calibrated one"
-    assert live.cue_reason(tmp_path, calibration, {"model.safetensors": "aa11"}) is None
+    assert live.cue_reason(None, None) == live.MODEL_ABSENT == "model absent"
+    assert live.cue_reason(tmp_path, ("failed", calibration.NO_SEPARATION)) == f"the cue did not calibrate: {calibration.NO_SEPARATION}"
+    assert live.cue_reason(tmp_path, ("ready", 0.5)) is None
 
 
 def cue_meta(reason=None) -> dict:
@@ -791,7 +788,7 @@ def test_a_cued_report_shows_the_cue_beside_run_2_and_the_closed_miss():
     text = render_report(cue_meta(), [*native, *without, *cue, *cued(synthetic(lambda s, k, n: k == "matching", "cue-holdout"))],
                          creator_runs(True, True, True))
     assert "Calibration-set recall (fit" in text and "bug-repro-test 1 of 1;" in text
-    assert "Threshold: 0.55 (derived at load from the stored rows of the record dated 2026-10-25)" in text
+    assert "Threshold: 0.55 (derived from the rows measured on this machine on 2026-10-25)" in text
     assert "| bug-repro-test | calibration | 30 of 30 | 26 of 30 (run 2) | 0 of 60 | +0 | 30 of 90 | 30 of 30 | 30 | 0 |" in text
     assert "| commit-message | holdout | 30 of 30 | 0 of 30 | 0 of 60 | +0 | 30 of 90 | 30 of 30 | 30 | 0 |" in text
     assert "cue() wall time per turn: median 0.010 s" in text and "first-token latency: median 0.200 s" in text
