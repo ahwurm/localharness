@@ -6,6 +6,7 @@ import datetime
 import hashlib
 import inspect
 import logging
+import os
 import re
 import shlex
 import sys
@@ -18,10 +19,11 @@ import numpy as np
 import pytest
 import yaml
 
-from localharness.agent import affordance, loop as loop_module, subagent
-from localharness.agent.affordance import (
-    Affordances, Calibration, Cue, calibrate, cued_skills, descriptions_digest, held_skills, load_calibration, normalise, pick,
-    scores, snapshot_files, task_skills,
+from localharness.agent import affordance, calibration, loop as loop_module, subagent
+from localharness.agent.affordance import Affordances, Cue, cued_skills, held_skills, normalise, pick, scores, task_skills
+from localharness.agent.calibration import (
+    NO_SEPARATION, calibrate, descriptions_digest, entry_state, read_entry, record_path, shipped_pins, snapshot_files,
+    write_entry,
 )
 from localharness.agent.context import ContentStore, ContextManager, TokenCounter, fixed_tokens
 from localharness.agent.loop import AgentLoop, base_system_prompt, render_index
@@ -53,7 +55,7 @@ from localharness.tools.builtin.task_tool import TaskTool
 from localharness.tools.registry import ToolRegistry, allowed_by_config
 from tests.conftest import FakeLLMResponse, FakeToolCall, MockLLMClient
 from tests.unit.test_capabilities import _production_registry
-from tests.unit.test_embedding_model_source import DEFAULT, MODEL, PURE, SHIPS_CODE, _cached, _write
+from tests.unit.test_embedding_model_source import MODEL, PURE, SHIPS_CODE, _cached, _write
 from tests.unit.test_memory_plugin import _ctx
 from tests.unit.test_loop_project_instructions import _FakeHandle, _build
 from tests.unit.test_skills_discovery import _skill
@@ -332,6 +334,22 @@ async def test_a_layer_start_passes_the_project_root_to_the_floor_and_the_index(
     (loop,) = agents
     assert loop._index == render_index(root, machine, args["held"], False, True)
     assert loop._index.split("\n")[1] == "Project: " + repr(one_line(str(root))) + "."
+
+
+@pytest.mark.parametrize("occupant, kept", [("memory", True), ("other-memory", False)])
+async def test_only_the_bundled_memory_occupant_keeps_a_record_and_only_in_the_machine_directory(
+        tmp_path, monkeypatch, fake_home, occupant, kept):
+    _, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
+    _skill(global_dir / "skills", "notes")
+    (ws / "affordance").mkdir()
+    if occupant != "memory":
+        monkeypatch.setattr(MemorySlot, "occupant_name", property(lambda self: occupant))
+    built = []
+    monkeypatch.setattr(Affordances, "warm", lambda self: built.append(self))
+    await _drive()
+    (holder,) = built
+    assert holder._record_dir == (resolve_config_dir(None) / "affordance" if kept else None)
+    assert not kept or ws.resolve() not in holder._record_dir.resolve().parents
 
 
 @pytest.mark.usefixtures("pkg")
@@ -702,32 +720,6 @@ def _snapshot(folder, files):
     return folder
 
 
-def _entry(rows=TABLE, files=None):
-    return {"rows": [list(r) for r in rows], "snapshot_files": files or {"config.json": "aa11"},
-            "max_seq": EMBED_MAX_TOKENS, "prompts_sha256": "0" * 64, "descriptions_sha256": "1" * 64,
-            "date": DATE, "commit": "abc1234 clean"}
-
-
-def _patch_record(tmp_path, monkeypatch, record):
-    path = tmp_path / "calibration.yaml"
-    path.write_text(record if isinstance(record, str) else yaml.safe_dump(record), encoding="utf-8")
-    monkeypatch.setattr(affordance, "CALIBRATION", path)
-
-
-def test_the_record_gives_the_derived_threshold_its_pins_and_its_date(tmp_path, monkeypatch):
-    _patch_record(tmp_path, monkeypatch, {DEFAULT: _entry()})
-    assert load_calibration(DEFAULT) == Calibration(0.5, {"config.json": "aa11"}, DATE)
-    assert load_calibration("lh-test/custom") is None
-
-
-@pytest.mark.parametrize("record", ["- a list\n- not a mapping\n", {DEFAULT: _entry(rows=[*TABLE, ("a", "maybe", "a", 0.1)])},
-                                    {DEFAULT: {**_entry(), "date": "2026-10-25"}}])
-def test_a_malformed_record_raises(tmp_path, monkeypatch, record):
-    _patch_record(tmp_path, monkeypatch, record)
-    with pytest.raises(ValueError):
-        load_calibration(DEFAULT)
-
-
 def test_snapshot_files_names_each_files_blob_and_leaves_out_what_no_loader_opens(tmp_path):
     folder = _snapshot(tmp_path / "snapshots" / "rev", {"config.json": "aa11", "1_Pooling/config.json": "bb22",
                                                         "README.md": "cc33", ".gitattributes": "dd44"})
@@ -735,10 +727,10 @@ def test_snapshot_files_names_each_files_blob_and_leaves_out_what_no_loader_open
     assert snapshot_files(folder) == {"config.json": "aa11", "1_Pooling/config.json": "bb22", "plain.txt": "plain.txt"}
 
 
-def test_the_descriptions_digest_hashes_sorted_name_and_description_lines():
+def test_the_descriptions_digest_hashes_name_and_description_lines_in_order():
     text = f"commit-message\0{COMMIT.description}\nnotes\0{NOTES.description}\n"
-    assert descriptions_digest([NOTES, COMMIT]) == descriptions_digest([COMMIT, NOTES])
-    assert descriptions_digest([NOTES, COMMIT]) == hashlib.sha256(text.encode()).hexdigest()
+    assert descriptions_digest([COMMIT, NOTES]) == hashlib.sha256(text.encode()).hexdigest()
+    assert descriptions_digest([NOTES, COMMIT]) != descriptions_digest([COMMIT, NOTES])
 
 
 def _call(args='{"name": "notes"}', name="skill"):
@@ -799,8 +791,11 @@ def test_a_name_is_named_by_a_whole_token_up_to_punctuation_and_case(turn, named
 
 SKILLS = (COMMIT, NOTES, REVIEW)
 TURN = "what goes in the history entry"
+LAB = [("commit-message", "matching", "lab a"), ("commit-message", "near_miss", "lab b"),
+       ("notes", "matching", "lab c"), ("notes", "unrelated", "lab d")]
 VECTORS = {COMMIT.description: [1.0, 0.0, 0.0], NOTES.description: [0.0, 1.0, 0.0],
-           REVIEW.description: [0.0, 0.0, 1.0], TURN: [1.0, 0.0, 0.0]}
+           REVIEW.description: [0.0, 0.0, 1.0], TURN: [1.0, 0.0, 0.0],
+           "lab a": [0.6, -0.8, 0.0], "lab b": [0.4, -0.9165, 0.0], "lab c": [0.0, 1.0, 0.0], "lab d": [0.3, -0.9539, 0.0]}
 
 
 class FakeEmbedder:
@@ -831,24 +826,25 @@ def _slot(embedder):
     return MemorySlot(_Answers(embedder), None, "memory")
 
 
-def _record(tmp_path, monkeypatch, model_name=MODEL):
-    """A calibration record for model_name deriving 0.50, pinned to a linked snapshot it builds; returns its folder."""
-    folder = _snapshot(tmp_path / "hub" / "snapshots" / "rev", {"config.json": "aa11", "model.safetensors": "bb22"})
-    _patch_record(tmp_path, monkeypatch, {model_name: _entry(files=snapshot_files(folder))})
-    return folder
+def _record(tmp_path, monkeypatch, prompts=LAB):
+    """The labelled set patched to `prompts` over SKILLS (LAB derives 0.50) and a linked snapshot; returns its folder."""
+    monkeypatch.setattr(calibration, "labelled", lambda: (list(SKILLS), list(prompts)))
+    return _snapshot(tmp_path / "hub" / "snapshots" / "rev", {"config.json": "aa11", "model.safetensors": "bb22"})
 
 
-def _warmed(tmp_path, monkeypatch, task_state=None, skills=SKILLS):
+def _warmed(tmp_path, monkeypatch, task_state=None, skills=SKILLS, record_dir=None):
     fake = FakeEmbedder(_record(tmp_path, monkeypatch))
-    holder = Affordances(SkillSet(skills, (), ()), _slot(fake), task_state)
+    holder = Affordances(SkillSet(skills, (), ()), _slot(fake), task_state, record_dir)
     holder.warm().join(timeout=5)
+    fake.asked.clear()
     return holder, fake
 
 
 async def test_a_warmed_holder_cues_the_top_skill_for_a_turn_that_resembles_it(tmp_path, monkeypatch):
     holder, fake = _warmed(tmp_path, monkeypatch)
+    assert holder._ready[2] == pytest.approx(0.50, abs=1e-4)
     assert await holder.cue(TURN, []) == Cue("commit-message", "machine", affordance._line(COMMIT))
-    assert fake.embedded == [[s.description for s in SKILLS]] and fake.asked == [TURN]
+    assert fake.embedded == [[s.description for s in SKILLS]] * 2 and fake.asked == [TURN]
 
 
 def _raise(exc):
@@ -858,16 +854,16 @@ def _raise(exc):
 
 
 @pytest.mark.parametrize("mutate, located, embedded", [
-    (lambda f, t, m: setattr(f, "model_name", "lh-test/custom"), 0, 0),
     (lambda f, t, m: setattr(f, "folder", None), 1, 0),
-    (lambda f, t, m: _patch_record(t, m, "- a list\n"), 0, 0),
-    (lambda f, t, m: m.setattr(affordance, "snapshot_files", _raise(OSError("unreadable"))), 1, 0),
+    (lambda f, t, m: m.setattr(calibration, "snapshot_files", _raise(OSError("unreadable"))), 1, 0),
     (lambda f, t, m: setattr(f, "folder", ResonanceUnavailable(MODEL, "no package")), 1, 0),
-    (lambda f, t, m: _patch_record(t, m, {MODEL: _entry(files={"config.json": "ff99"})}), 1, 0),
-    (lambda f, t, m: setattr(f, "docs", np.eye(3)[:2]), 1, 1),
+    (lambda f, t, m: m.setattr(calibration, "labelled", _raise(ValueError("unreadable labelled skills"))), 1, 0),
+    (lambda f, t, m: m.setattr(calibration, "labelled", lambda: (list(SKILLS), [p for p in LAB if p[1] == "matching"])),
+     1, 1),
+    (lambda f, t, m: setattr(f, "docs", np.eye(3)[:2]), 1, 2),
     (lambda f, t, m: setattr(f, "docs", np.array([[np.nan, 0, 0], [0, 1, 0], [0, 0, 1]])), 1, 1),
     (lambda f, t, m: setattr(f, "docs", np.array([[0.0, 0, 0], [0, 1, 0], [0, 0, 1]])), 1, 1),
-], ids=["no entry", "not local", "not a mapping", "pin raises", "refused", "other snapshot", "short", "nan", "zero row"])
+], ids=["not local", "pin raises", "refused", "labelled unreadable", "no separation", "short", "nan", "zero row"])
 def test_warm_turns_the_cue_off_cheapest_first_with_one_info_line(tmp_path, monkeypatch, caplog, mutate, located,
                                                                    embedded):
     fake, hooked = FakeEmbedder(_record(tmp_path, monkeypatch)), []
@@ -989,14 +985,168 @@ async def test_a_skill_found_after_warm_is_neither_embedded_nor_cued(tmp_path, m
     cfg = tmp_path / "cfg"
     _skill(cfg / "skills", "commit-message")
     skill_set = SkillSet.discover(cfg, None)
-    folder, table = _record(tmp_path, monkeypatch), {"Use commit-message when asked.": [1.0, 0.0]}
+    folder = _record(tmp_path, monkeypatch)
+    table = {**VECTORS, "Use commit-message when asked.": [1.0, 0.0, 0.0]}
     fake = FakeEmbedder(folder, table)
     holder = Affordances(skill_set, _slot(fake), None)
     holder.warm().join(timeout=5)
     _skill(cfg / "skills", "late")
     assert skill_set.find("late").name == "late" and [s.name for s in skill_set.skills] == ["commit-message", "late"]
-    fake.answer = [0.0, 1.0]
-    assert fake.embedded == [["Use commit-message when asked."]] and await holder.cue("late", []) is None
+    fake.answer = [0.0, 1.0, 0.0]
+    assert fake.embedded[-1:] == [["Use commit-message when asked."]] and await holder.cue("late", []) is None
+
+
+# --- the cue: the machine record -----------------------------------------------------------------
+
+ASKED = [t for *_, t in LAB]
+
+
+def _again(fake, record_dir):
+    holder = Affordances(SkillSet(SKILLS, (), ()), _slot(fake), None, record_dir)
+    holder.warm().join(timeout=5)
+    return holder
+
+
+def test_an_absent_record_is_measured_written_and_published_in_the_same_warm(tmp_path, monkeypatch):
+    record_dir = tmp_path / "cfg" / "affordance"
+    fake = FakeEmbedder(_record(tmp_path, monkeypatch))
+    holder = _again(fake, record_dir)
+    entry = read_entry(record_dir, MODEL)
+    assert fake.asked == ASKED and len(entry["rows"]) == len(LAB) and entry["date"] == datetime.date.today()
+    assert entry_state(entry, shipped_pins(MODEL, fake.folder), LAB) == ("ready", holder._ready[2])
+    assert list(record_dir.iterdir()) == [record_path(record_dir, MODEL)]
+    fake.asked.clear()
+    assert _again(fake, record_dir)._ready[2] == holder._ready[2] and fake.asked == []
+
+
+@pytest.mark.parametrize("pin, value", [("model_name", "lh-test/other"), ("snapshot_files", {"config.json": "ff99"}),
+                                        ("prompts_sha256", "0" * 64), ("descriptions_sha256", "1" * 64), ("rev", -1)])
+def test_each_pin_change_measures_again(tmp_path, monkeypatch, pin, value):
+    record_dir = tmp_path / "affordance"
+    fake = FakeEmbedder(_record(tmp_path, monkeypatch))
+    _again(fake, record_dir)
+    write_entry(record_dir, MODEL, {**read_entry(record_dir, MODEL), pin: value})
+    fake.asked.clear()
+    assert _again(fake, record_dir)._ready is not None and fake.asked == ASKED
+    assert read_entry(record_dir, MODEL)[pin] != value
+
+
+def test_a_partial_record_resumes_at_its_row_count(tmp_path, monkeypatch):
+    record_dir = tmp_path / "affordance"
+    fake = FakeEmbedder(_record(tmp_path, monkeypatch))
+    _again(fake, record_dir)
+    entry = read_entry(record_dir, MODEL)
+    write_entry(record_dir, MODEL, {**entry, "rows": entry["rows"][:3]})
+    assert entry_state(read_entry(record_dir, MODEL), shipped_pins(MODEL, fake.folder), LAB) == ("partial", "3 of 4")
+    fake.asked.clear()
+    assert _again(fake, record_dir)._ready is not None and fake.asked == ASKED[3:]
+    assert read_entry(record_dir, MODEL)["rows"] == entry["rows"]
+
+
+def _rows():
+    return [[item, label, "commit-message", 0.1] for item, label, _ in LAB]
+
+
+@pytest.mark.parametrize("rows", [
+    lambda r: r[:1] + [["commit-message", "matching", "notes", 0.1]] + r[2:],
+    lambda r: [["notes", *r[0][1:]]] + r[1:],
+    lambda r: r + [r[0]],
+    lambda r: [r[0][:3] + [1.5]] + r[1:],
+    lambda r: [r[0][:3] + [float("nan")]] + r[1:],
+    lambda r: [r[0][:3]] + r[1:],
+    lambda r: [tuple(r[0])] + r[1:],
+    lambda r: {"rows": r},
+], ids=["label at a position", "item at a position", "more rows than prompts", "score off the range", "nan",
+        "short row", "not a list", "not a list of rows"])
+def test_rows_that_are_not_a_prefix_of_the_labelled_order_are_stale(tmp_path, monkeypatch, rows):
+    pins = shipped_pins(MODEL, _record(tmp_path, monkeypatch))
+    entry = {**pins, "date": DATE, "rows": rows(_rows())}
+    assert entry_state(entry, pins, LAB)[0] == "stale"
+    assert entry_state({**pins, "date": DATE, "rows": _rows()}, pins, LAB)[0] == "ready"
+    assert entry_state({**pins, "date": "2026-10-25", "rows": _rows()}, pins, LAB)[0] == "stale"
+    assert entry_state(None, pins, LAB)[0] == "stale"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no FIFOs here")
+def test_a_fifo_a_link_or_an_oversized_record_reads_as_absent(tmp_path):
+    path = record_path(tmp_path, MODEL)
+    os.mkfifo(path)
+    assert read_entry(tmp_path, MODEL) is None
+    path.unlink()
+    path.write_text("rows: [" + "0.1, " * 20_000 + "]\n")
+    assert path.stat().st_size > calibration.MAX_RECORD and read_entry(tmp_path, MODEL) is None
+    (tmp_path / "real.yaml").write_text("rows: []\n")
+    path.unlink()
+    path.symlink_to(tmp_path / "real.yaml")
+    assert read_entry(tmp_path, MODEL) is None
+
+
+def test_a_failed_record_is_not_measured_again_until_a_pin_changes(tmp_path, monkeypatch, caplog):
+    record_dir = tmp_path / "affordance"
+    fake = FakeEmbedder(_record(tmp_path, monkeypatch, [p for p in LAB if p[1] == "matching"]))
+    with caplog.at_level(logging.INFO, logger="localharness.agent.affordance"):
+        assert _again(fake, record_dir)._ready is None
+    assert "failed" in read_entry(record_dir, MODEL) and NO_SEPARATION in caplog.text
+    fake.asked.clear()
+    assert _again(fake, record_dir)._ready is None and fake.asked == []
+    monkeypatch.setattr(calibration, "REV", calibration.REV + 1)
+    _again(fake, record_dir)
+    assert fake.asked == ["lab a", "lab c"]
+
+
+def test_a_record_that_cannot_be_written_still_publishes_for_the_sitting(tmp_path, monkeypatch):
+    monkeypatch.setattr(calibration, "write_entry", _raise(OSError("read-only file system")))
+    holder, _ = _warmed(tmp_path, monkeypatch, record_dir=tmp_path / "affordance")
+    assert holder._ready is not None and list((tmp_path / "affordance").iterdir()) == []
+
+
+def test_without_a_record_dir_the_holder_measures_and_never_reads_or_writes(tmp_path, monkeypatch):
+    touched = []
+    monkeypatch.setattr(calibration, "read_entry", lambda *a: touched.append(a))
+    monkeypatch.setattr(calibration, "write_entry", lambda *a: touched.append(a))
+    monkeypatch.setattr(calibration, "usable_dir", lambda d: touched.append(d))
+    holder, _ = _warmed(tmp_path, monkeypatch)
+    assert holder._ready is not None and touched == [None]
+
+
+@pytest.mark.parametrize("plant", ["symlink", "file"])
+def test_a_record_dir_that_is_a_link_or_a_file_is_left_alone_and_the_cue_measures_in_memory(tmp_path, monkeypatch,
+                                                                                           plant):
+    folder, target, record_dir = _record(tmp_path, monkeypatch), tmp_path / "elsewhere", tmp_path / "affordance"
+    target.mkdir()
+    write_entry(target, MODEL, {**shipped_pins(MODEL, folder), "date": DATE, "rows": [], "failed": "planted"})
+    planted = read_entry(target, MODEL)
+    record_dir.symlink_to(target) if plant == "symlink" else record_dir.write_text("x")
+    assert _again(FakeEmbedder(folder), record_dir)._ready is not None
+    assert read_entry(target, MODEL) == planted and len(list(target.iterdir())) == 1
+    assert record_dir.is_symlink() if plant == "symlink" else record_dir.read_text() == "x"
+
+
+def test_measuring_waits_while_a_turn_runs_and_resumes_when_the_last_one_ends(tmp_path, monkeypatch):
+    fake = FakeEmbedder(_record(tmp_path, monkeypatch))
+    holder = Affordances(SkillSet(SKILLS, (), ()), _slot(fake), None)
+    holder.turn_started()
+    holder.turn_started()
+    thread = holder.warm()
+    thread.join(timeout=0.2)
+    holder.turn_ended()
+    thread.join(timeout=0.2)
+    assert thread.is_alive() and fake.asked == []
+    holder.turn_ended()
+    thread.join(timeout=5)
+    assert holder._ready is not None and holder._turns == 0 and fake.asked == ASKED
+
+
+def test_a_busy_embedder_gives_up_after_its_bound_keeping_each_written_batch(tmp_path, monkeypatch, caplog):
+    for name, value in (("BATCH", 1), ("BUSY_S", 0.2), ("RETRY_S", 0.01)):
+        monkeypatch.setattr(calibration, name, value)
+    fake, tries = FakeEmbedder(_record(tmp_path, monkeypatch)), []
+    real = fake.try_embed_query
+    fake.try_embed_query = lambda text: tries.append(text) if text == "lab c" else real(text)
+    with caplog.at_level(logging.INFO, logger="localharness.agent.affordance"):
+        assert _again(fake, tmp_path / "affordance")._ready is None
+    assert "the embedder stayed busy for 0.2 s" in caplog.text and len(tries) > 2
+    assert [r[2] for r in read_entry(tmp_path / "affordance", MODEL)["rows"]] == ["commit-message", "commit-message"]
 
 
 # --- the cue: the loop ----------------------------------------------------------------------------
@@ -1056,6 +1206,12 @@ class _Holder:
     def __init__(self, order, answer=None, gate=None):
         self.order, self.answer, self.gate, self.calls = order, answer, gate, []
 
+    def turn_started(self):
+        self.order.append("started")
+
+    def turn_ended(self):
+        self.order.append("ended")
+
     def cue(self, turn, messages):
         self.order.append("cue")
         self.calls.append((turn, messages))
@@ -1079,7 +1235,7 @@ async def test_the_cue_starts_before_the_prompt_is_built_and_reads_the_sessions_
     real = loop_module.base_system_prompt
     monkeypatch.setattr(loop_module, "base_system_prompt", lambda *a, **k: order.append("prompt") or real(*a, **k))
     await loop.run_turn(TURN)
-    assert order == ["cue", "prompt"]
+    assert order == ["started", "cue", "prompt", "ended"]
     ((turn, messages),) = holder.calls
     assert turn == TURN and messages is seen.session.messages
 
@@ -1119,20 +1275,36 @@ async def test_the_pending_cue_is_cancelled_when_the_assembly_raises(tmp_path, m
     assert task.cancelled() and seen.requests == [] and seen.events == []
 
 
-# --- the calibration writer and file hygiene -------------------------------------------------------
+async def test_a_cancelled_turn_returns_the_in_flight_count_to_zero(tmp_path):
+    holder = Affordances(SkillSet(SKILLS, (), ()), MemorySlot(), None)
+    loop, _ = _cue_loop(tmp_path, holder)
+    asked = asyncio.Event()
+
+    async def hang(*args, **kwargs):
+        asked.set()
+        await asyncio.Event().wait()
+
+    loop._llm.stream_complete = hang
+    turn = asyncio.ensure_future(loop.run_turn(TURN))
+    await asked.wait()
+    assert holder._turns == 1 and not holder._idle.is_set()
+    turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+    assert holder._turns == 0 and holder._idle.is_set()
+
+
+# --- file hygiene -------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parents[2]
-GEN_CALIBRATION = ROOT / "scripts" / "gen_calibration.py"
-RECORD = Path(affordance.__file__).resolve().parent.parent / "assets" / "affordance" / "calibration.yaml"
 IDS = re.compile(r"\b(?:D|R|T|WR)-\d+|R§|§")
 
 
-def test_the_calibration_script_never_names_the_holdout():
-    assert "prompts_holdout" not in GEN_CALIBRATION.read_text(encoding="utf-8")
+def test_the_measuring_module_never_names_the_holdout():
+    assert "prompts_holdout" not in Path(calibration.__file__).read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("path", [Path(affordance.__file__), GEN_CALIBRATION, RECORD],
-                         ids=["affordance", "gen_calibration", "record"])
+@pytest.mark.parametrize("path", [Path(affordance.__file__), Path(calibration.__file__)], ids=["affordance", "calibration"])
 def test_the_cue_files_carry_no_review_or_plan_id(path):
     assert IDS.findall(path.read_text(encoding="utf-8")) == []
 
@@ -1148,7 +1320,7 @@ HOLDOUT = ROOT / "tests" / "fixtures" / "skills_live" / "prompts_holdout.yaml"
 def test_the_holdout_shares_no_prompt_with_the_calibration_set():
     def texts(path):
         sets = yaml.safe_load(path.read_text(encoding="utf-8"))["skills"]
-        return {t.strip().casefold() for groups in sets.values() for kind in affordance.LABELS for t in groups[kind]}
+        return {t.strip().casefold() for groups in sets.values() for kind in calibration.LABELS for t in groups[kind]}
     assert texts(HOLDOUT) and not texts(HOLDOUT) & texts(LABELLED / "prompts.yaml")
 
 
@@ -1164,70 +1336,64 @@ def test_the_labelled_skills_are_in_no_discovery_root(tmp_path):
 # --- doctor's affordance-cue row ------------------------------------------------------------------
 
 CUE_MODEL = "Qwen/Qwen3-Embedding-0.6B"
-CAL = Calibration(0.5, {"config.json": "a", "model.safetensors": "b"}, datetime.date(2026, 10, 25))
-_HF = f"`hf download {CUE_MODEL}`"
-_REFRESH = (f"{_HF} refreshes an old copy; if it still differs, a newer localharness may carry a calibration for "
-            "these weights")
-_READY = dict(memory_state="on", embedding_status="pass", skill_tool_held=True, unreadable={}, calibration=CAL,
-              cached_files=dict(CAL.snapshot_files), checkout=False)
+_MEASURES = ("cue off until it measures itself in the background at the next start (a few minutes of CPU, yielding to "
+             "your turns)")
+_READY = dict(memory_state="on", embedding_status="pass", cached=True, skill_tool_held=True, bundled=True,
+              state=("ready", 0.5), date=DATE)
 _DOCTOR_ROWS = [
     ("memory-not-on", dict(memory_state="off", embedding_status=None),
-     "skip", "cue off: the memory plugin is not on (the cue uses memory's embedder)", ""),
-    ("embedding-failed", dict(embedding_status="fail"), "skip", "cue off: waits on memory-embedding", ""),
-    ("embedding-missing", dict(embedding_status=None), "skip", "cue off: waits on memory-embedding", ""),
-    ("unreadable-cache", dict(unreadable={"cache": "OSError: denied"}, cached_files=None),
-     "warn", "cue off: calibration record or cached model unreadable: OSError: denied", _HF),
-    ("unreadable-record", dict(unreadable={"record": "ValueError: bad"}, calibration=None),
-     "warn", "cue off: calibration record or cached model unreadable: ValueError: bad", "`reinstall localharness`"),
-    ("unreadable-both", dict(unreadable={"record": "ValueError: bad", "cache": "OSError: denied"},
-                             calibration=None, cached_files=None),
-     "warn", "cue off: calibration record or cached model unreadable: OSError: denied; ValueError: bad",
-     f"{_HF}; `reinstall localharness`"),
-    ("not-cached", dict(cached_files=None), "skip", "cue off: waits on memory-embedding", ""),
-    ("skill-tool-not-held", dict(skill_tool_held=False), "skip", "cue off: the skill tool is not enabled for the root", ""),
-    ("no-calibration", dict(calibration=None), "skip", "cue off: calibrated for the default embedding model only", ""),
-    ("incomplete", dict(cached_files={"config.json": "a"}), "warn", "cue off: the embedding model download is incomplete",
-     f"{_HF} finishes it; the cue starts at the next start"),
-    ("mismatch", dict(cached_files={"config.json": "a", "model.safetensors": "c"}), "warn",
-     "cue off: the cached embedding model is not the one this release was calibrated on (nothing you did)", _REFRESH),
-    ("mismatch-in-a-checkout", dict(cached_files={"config.json": "a", "model.safetensors": "c"}, checkout=True), "warn",
-     "cue off: the cached embedding model is not the one this release was calibrated on (nothing you did)",
-     _REFRESH + "; `python scripts/gen_calibration.py` writes one"),
-    ("ready", {}, "pass", f"ready — {CUE_MODEL}, calibrated 2026-10-25", ""),
+     "skip", "cue off: the memory plugin is not on (the cue uses memory's embedder)"),
+    ("embedding-failed", dict(embedding_status="fail"), "skip", "cue off: waits on memory-embedding"),
+    ("embedding-missing", dict(embedding_status=None), "skip", "cue off: waits on memory-embedding"),
+    ("not-cached", dict(cached=False), "skip", "cue off: waits on memory-embedding"),
+    ("skill-tool-not-held", dict(skill_tool_held=False), "skip", "cue off: the skill tool is not enabled for the root"),
+    ("not-bundled", dict(bundled=False), "skip",
+     "cue off until it measures itself each sitting (a memory plugin other than the bundled one is in use)"),
+    ("partial", dict(state=("partial", "40 of 180")), "skip",
+     "cue off until it finishes measuring itself (40 of 180 done; it continues in the background at the next start)"),
+    ("failed", dict(state=("failed", NO_SEPARATION)), "skip", f"cue off: {NO_SEPARATION}"),
+    ("stale", dict(state=("stale", "")), "skip", _MEASURES),
+    ("ready", {}, "pass", f"ready — {CUE_MODEL}, calibrated 2026-10-25"),
 ]
 
 
-@pytest.mark.parametrize("given, status, detail, hint", [r[1:] for r in _DOCTOR_ROWS], ids=[r[0] for r in _DOCTOR_ROWS])
-def test_affordance_check_rows_in_order(given, status, detail, hint):
+@pytest.mark.parametrize("given, status, detail", [r[1:] for r in _DOCTOR_ROWS], ids=[r[0] for r in _DOCTOR_ROWS])
+def test_affordance_check_rows_in_order(given, status, detail):
     check = doctor_cmd._affordance_check(CUE_MODEL, **{**_READY, **given})
-    assert (check.name, check.status, check.detail, check.hint) == ("affordance-cue", status, detail, hint)
+    assert (check.name, check.status, check.detail, check.hint) == ("affordance-cue", status, detail, "")
 
 
-def test_affordance_check_is_never_a_failure_and_every_off_row_says_so():
+def test_affordance_check_never_warns_or_fails_and_every_off_row_says_so():
     checks = [doctor_cmd._affordance_check(CUE_MODEL, **{**_READY, **r[1]}) for r in _DOCTOR_ROWS]
-    assert all(c.status != "fail" for c in checks)
-    assert all(c.detail.startswith("cue off:") for c in checks if c.status != "pass")
+    assert {c.status for c in checks} == {"pass", "skip"}
+    assert all(c.detail.startswith("cue off") for c in checks if c.status != "pass")
 
 
 def test_doctor_and_the_engine_read_the_folder_through_one_function():
     assert resonance.local_folder is config_paths.local_folder
 
 
-def _affordance_cue_doctor(monkeypatch, tmp_path, root_agent, memory_state="on"):
+def _affordance_cue_doctor(monkeypatch, tmp_path, root_agent, memory_state="on", bundled=True, measured=True):
     import io
 
     from rich.console import Console
 
     async def rows(*_args, **_kwargs):
         return [DoctorRow("memory", memory_state, "", checks=(Check(name="memory-db", status="pass"),
-                                                             Check(name="memory-embedding", status="pass"))),
+                                                             Check(name="memory-embedding", status="pass")),
+                          bundled=bundled),
                 DoctorRow("p", "off", "p is off")]
+    folder = _record(tmp_path, monkeypatch)
+    if measured:
+        idle = threading.Event()
+        idle.set()
+        (tmp_path / "affordance").mkdir()
+        calibration.measure(FakeEmbedder(folder, model_name=CUE_MODEL), shipped_pins(CUE_MODEL, folder), None, idle,
+                            tmp_path / "affordance")
     monkeypatch.setattr("localharness.plugins.resolve.resolve", lambda _loader: SimpleNamespace(warnings=[]))
     monkeypatch.setattr("localharness.plugins.lifecycle.doctor_rows", rows)
     monkeypatch.setattr(doctor_cmd, "_print_remote_lock", lambda *_a: None)
-    monkeypatch.setattr(config_paths, "local_folder", lambda model, cfg: tmp_path)
-    monkeypatch.setattr(affordance, "snapshot_files", lambda folder: dict(CAL.snapshot_files))
-    monkeypatch.setattr(affordance, "load_calibration", lambda model: CAL if model == CUE_MODEL else None)
+    monkeypatch.setattr(config_paths, "local_folder", lambda model, cfg: folder)
     buf = io.StringIO()
     monkeypatch.setattr(doctor_cmd, "console", Console(file=buf, width=400, color_system=None))
     failures: list[str] = []
@@ -1241,8 +1407,27 @@ _ROOT_AGENT = SimpleNamespace(memory=SimpleNamespace(embedding_model=CUE_MODEL),
 def test_affordance_cue_row_follows_the_plugin_rows(monkeypatch, tmp_path):
     lines, failures = _affordance_cue_doctor(monkeypatch, tmp_path, _ROOT_AGENT)
     plugin = next(i for i, line in enumerate(lines) if "p: p is off" in line)
-    assert f"affordance-cue: ready — {CUE_MODEL}, calibrated 2026-10-25" in lines[-1]
+    assert f"affordance-cue: ready — {CUE_MODEL}, calibrated {datetime.date.today().isoformat()}" in lines[-1]
     assert plugin < len(lines) - 1 and failures == []
+
+
+def test_affordance_cue_row_without_a_record_says_it_measures_at_the_next_start(monkeypatch, tmp_path):
+    lines, failures = _affordance_cue_doctor(monkeypatch, tmp_path, _ROOT_AGENT, measured=False)
+    assert f"affordance-cue: {_MEASURES}" in lines[-1] and failures == []
+
+
+def test_affordance_cue_row_beside_another_memory_plugin_never_reads_the_record(monkeypatch, tmp_path):
+    lines, _ = _affordance_cue_doctor(monkeypatch, tmp_path, _ROOT_AGENT, bundled=False)
+    assert "measures itself each sitting (a memory plugin other than the bundled one is in use)" in lines[-1]
+
+
+def test_the_warm_and_the_doctor_row_both_follow_entry_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(calibration, "entry_state", lambda entry, pins, prompts: ("partial", "1 of 4"))
+    lines, _ = _affordance_cue_doctor(monkeypatch, tmp_path, _ROOT_AGENT)
+    assert "(1 of 4 done; it continues in the background at the next start)" in lines[-1]
+    monkeypatch.setattr(calibration, "entry_state", lambda entry, pins, prompts: ("ready", 0.25))
+    holder, fake = _warmed(tmp_path / "w", monkeypatch)
+    assert holder._ready[2] == 0.25 and len(fake.embedded) == 1
 
 
 def test_affordance_cue_row_is_absent_without_a_root_agent(monkeypatch, tmp_path):

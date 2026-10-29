@@ -374,38 +374,32 @@ _ROW_GLYPH = {"off": _INFO + "  ", "available": _INFO + "  ", "skipped": _WARN +
               "needs-extra": _WARN + " ", "unconfigured": _WARN + " "}
 
 
-def _affordance_check(model, memory_state, embedding_status, skill_tool_held, unreadable, calibration,
-                      cached_files, checkout: bool):
+def _affordance_check(model, memory_state, embedding_status, cached: bool, skill_tool_held: bool, bundled: bool,
+                      state: tuple, date):
     """Whether the skill cue would run at the next start, and when not, the first reason why."""
     from localharness.plugins.api import Check
 
-    def off(status, detail, hint=""):
-        return Check(name="affordance-cue", status=status, detail=f"cue off: {detail}", hint=hint)
+    def off(detail):
+        return Check(name="affordance-cue", status="skip", detail=detail)
 
     if memory_state != "on":
-        return off("skip", "the memory plugin is not on (the cue uses memory's embedder)")
-    if embedding_status != "pass":
-        return off("skip", "waits on memory-embedding")
-    if unreadable:
-        reasons = [unreadable[k] for k in ("cache", "record") if k in unreadable]
-        hints = [h for k, h in (("cache", f"`hf download {model}`"), ("record", "`reinstall localharness`"))
-                 if k in unreadable]
-        return off("warn", "calibration record or cached model unreadable: " + "; ".join(reasons), "; ".join(hints))
-    if cached_files is None:
-        return off("skip", "waits on memory-embedding")
+        return off("cue off: the memory plugin is not on (the cue uses memory's embedder)")
+    if embedding_status != "pass" or not cached:
+        return off("cue off: waits on memory-embedding")
     if not skill_tool_held:
-        return off("skip", "the skill tool is not enabled for the root")
-    if calibration is None:
-        return off("skip", "calibrated for the default embedding model only")
-    if not calibration.snapshot_files.keys() <= cached_files.keys():
-        return off("warn", "the embedding model download is incomplete",
-                   f"`hf download {model}` finishes it; the cue starts at the next start")
-    if cached_files != calibration.snapshot_files:
-        return off("warn", "the cached embedding model is not the one this release was calibrated on (nothing you did)",
-                   f"`hf download {model}` refreshes an old copy; if it still differs, a newer localharness may "
-                   "carry a calibration for these weights"
-                   + ("; `python scripts/gen_calibration.py` writes one" if checkout else ""))
-    return Check(name="affordance-cue", status="pass", detail=f"ready — {model}, calibrated {calibration.date.isoformat()}")
+        return off("cue off: the skill tool is not enabled for the root")
+    if not bundled:
+        return off("cue off until it measures itself each sitting (a memory plugin other than the bundled one is in use)")
+    kind, detail = state
+    if kind == "ready":
+        return Check(name="affordance-cue", status="pass", detail=f"ready — {model}, calibrated {date.isoformat()}")
+    if kind == "partial":
+        return off(f"cue off until it finishes measuring itself ({detail} done; it continues in the background at the "
+                   "next start)")
+    if kind == "failed":
+        return off(f"cue off: {detail}")
+    return off("cue off until it measures itself in the background at the next start (a few minutes of CPU, yielding "
+               "to your turns)")
 
 
 def _print_plugins(cfg_path: Path, workspace: Path | None, loader: ConfigLoader,
@@ -459,9 +453,8 @@ def _print_plugins(cfg_path: Path, workspace: Path | None, loader: ConfigLoader,
 
 
 def _affordance_row(cfg_path: Path, rows, root_agent):
-    from localharness.agent.affordance import load_calibration, snapshot_files
+    from localharness.agent.calibration import entry_state, labelled, read_entry, shipped_pins
     from localharness.config.paths import local_folder
-    from localharness.config.skills import PACKAGE_DIR
     from localharness.plugins.lifecycle import DoctorRow
     from localharness.tools.registry import allowed_by_config
 
@@ -469,19 +462,17 @@ def _affordance_row(cfg_path: Path, rows, root_agent):
     model = getattr(getattr(root_agent, "memory", None), "embedding_model", None)
     memory = next((r for r in rows if r.name == "memory"), None)
     embedding = next((c.status for c in memory.checks if c.name == "memory-embedding"), None) if memory else None
-    unreadable, cached_files, calibration = {}, None, None
+    folder, entry, state = None, None, ("stale", "")
     try:
         folder = local_folder(model, cfg_path)
-        cached_files = snapshot_files(folder) if folder is not None else None
-    except Exception as exc:  # noqa: BLE001 — an unreadable cache is a warn row, never a doctor crash
-        unreadable["cache"] = f"{type(exc).__name__}: {exc}".splitlines()[0]
-    try:
-        calibration = load_calibration(model)
-    except Exception as exc:  # noqa: BLE001 — as above
-        unreadable["record"] = f"{type(exc).__name__}: {exc}".splitlines()[0]
-    check = _affordance_check(model, memory.state if memory else "off", embedding,
-                              allowed_by_config(root_agent.tools, "skill", "global"), unreadable, calibration,
-                              cached_files, (PACKAGE_DIR.parent.parent / "scripts" / "gen_calibration.py").is_file())
+        if folder is not None:
+            entry = read_entry(cfg_path / "affordance", model)
+            state = entry_state(entry, shipped_pins(model, folder), labelled()[1])
+    except Exception:  # noqa: BLE001 — an unreadable cache is a skip row, never a doctor crash
+        pass
+    check = _affordance_check(model, memory.state if memory else "off", embedding, folder is not None,
+                              allowed_by_config(root_agent.tools, "skill", "global"), bool(memory and memory.bundled),
+                              state, entry.get("date") if entry else None)
     return DoctorRow("affordance-cue", "on", "", checks=(check,))
 
 

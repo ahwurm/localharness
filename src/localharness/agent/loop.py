@@ -1852,6 +1852,8 @@ class AgentLoop:
         # D-75: True only when the turn ends by something that is not an Exception (Esc's
         # CancelledError, KeyboardInterrupt): the turn-end check below must not await then.
         cancelled = False
+        if self._affordances is not None:
+            self._affordances.turn_started()
         try:
             try:
                 summary = await self._execute_loop(session, task, on_token, images)
@@ -1910,6 +1912,8 @@ class AgentLoop:
             cancelled = True
             raise
         finally:
+            if self._affordances is not None:
+                self._affordances.turn_ended()
             # D-37, D-75: the turn-end check of the project instructions file, on every way out (a
             # normal end, an error, Esc, a crash). `section` is synchronous and owns its own OSErrors,
             # so the store transition (e.g. harness_written) lands before any await here; a notice from
