@@ -1,19 +1,21 @@
 """The cue's threshold measured on this machine from the shipped labelled set, and its record in the machine directory."""
 from __future__ import annotations
 
+import atexit
 import datetime
 import hashlib
 import logging
 import math
 import os
 import stat
+import threading
 import time
 from pathlib import Path
 from uuid import uuid4
 
+import numpy as np
 import yaml
 
-from localharness.agent.affordance import normalise, scores
 from localharness.config.skills import Skill, read_skill
 from localharness.core.private_files import touch_private
 
@@ -29,7 +31,27 @@ BATCH = 8
 RETRY_S = 0.05
 BUSY_S = 60.0
 MAX_RECORD = 64 * 1024
+ATTEMPTS = 3
 NO_SEPARATION = "this embedding model does not separate the skills well enough"
+STOP = threading.Event()
+atexit.register(STOP.set)
+
+
+def normalise(a) -> np.ndarray:
+    a = np.asarray(a, dtype=np.float32)
+    if a.ndim not in (1, 2) or not np.isfinite(a).all():
+        raise ValueError(f"not a finite vector or matrix: shape {a.shape}")
+    norms = np.linalg.norm(a, axis=-1, keepdims=True)
+    if not (np.isfinite(norms) & (norms > 0)).all():
+        raise ValueError("a zero or non-finite norm")
+    return a / norms
+
+
+def scores(matrix, vec) -> np.ndarray:
+    matrix, vec = np.asarray(matrix), np.asarray(vec)
+    if matrix.ndim != 2 or vec.ndim != 1 or matrix.shape[1] != vec.shape[0]:
+        raise ValueError(f"cannot score a {vec.shape} vector against a {matrix.shape} matrix")
+    return normalise(matrix) @ normalise(vec)
 
 
 def calibrate(rows) -> float:
@@ -47,8 +69,9 @@ def calibrate(rows) -> float:
 
 
 def snapshot_files(folder: Path) -> dict[str, str]:
-    """Each file's relative path mapped to the name of what it links to: a cache snapshot's blob."""
-    return {rel: p.resolve().name for p in Path(folder).rglob("*")
+    """Each file's relative path mapped to its linked blob's name, or for a plain file its size and mtime."""
+    return {rel: p.resolve().name if p.is_symlink() else f"{(st := p.stat()).st_size}-{st.st_mtime_ns}"
+            for p in Path(folder).rglob("*")
             if p.is_file() and (rel := p.relative_to(folder).as_posix()) not in UNREAD}
 
 
@@ -85,13 +108,16 @@ def entry_state(entry, pins: dict, prompts) -> tuple[str, str | float]:
             or not isinstance(entry.get("date"), datetime.date) or not all(map(_row_ok, rows, prompts))):
         return "stale", "no record for this model and labelled set"
     if "failed" in entry:
-        return "failed", NO_SEPARATION
+        why = f"measuring stopped on {entry['failed']} {ATTEMPTS} sittings in a row"
+        return "failed", why if "attempts" in entry else NO_SEPARATION
     if len(rows) < len(prompts):
         return "partial", f"{len(rows)} of {len(prompts)}"
     try:
-        return "ready", calibrate(rows)
+        threshold = calibrate(rows)
     except ValueError:
         return "failed", NO_SEPARATION
+    separated = any(label == "matching" and top == item and s > threshold for item, label, top, s in rows)
+    return ("ready", threshold) if separated else ("failed", NO_SEPARATION)
 
 
 def record_path(record_dir: Path, model_name: str) -> Path:
@@ -135,11 +161,15 @@ def write_entry(record_dir: Path, model_name: str, entry: dict) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def _written(record_dir: Path | None, model_name: str, entry: dict) -> Path | None:
+def _written(record_dir: Path | None, pins: dict, entry: dict) -> Path | None:
     if record_dir is None:
         return None
+    stored = read_entry(record_dir, pins["model_name"]) or {}
+    if ({k: stored.get(k) for k in pins} == pins and isinstance(r := stored.get("rows"), list)
+            and len(r) > len(entry["rows"])):
+        return record_dir
     try:
-        write_entry(record_dir, model_name, entry)
+        write_entry(record_dir, pins["model_name"], entry)
         return record_dir
     except OSError as exc:
         log.info("skill cue record not written, measured for this sitting only: %s", exc)
@@ -156,21 +186,30 @@ def _query(embedder, text: str):
 
 
 def measure(embedder, pins: dict, entry: dict | None, idle, record_dir: Path | None) -> dict:
-    """The labelled prompts scored from `entry`'s rows on, a batch at a time while `idle` is set, written after each."""
+    """The labelled prompts scored from `entry`'s rows on, each while `idle` is set, written after each batch."""
     skills, prompts = labelled()
     docs = normalise(embedder.embed_docs([s.description for s in skills]))
     rows = list(entry["rows"]) if entry else []
-    for start in range(len(rows), len(prompts), BATCH):
-        idle.wait()
-        for item, label, text in prompts[start:start + BATCH]:
-            s = scores(docs, _query(embedder, text))
-            i = int(s.argmax())
-            rows.append([item, label, skills[i].name, float(s[i])])
-        entry = {**pins, "date": datetime.date.today(), "rows": rows}
-        record_dir = _written(record_dir, embedder.model_name, entry)
+    resumed, tries = len(rows), a if isinstance(a := (entry or {}).get("attempts"), int) else 0
+    try:
+        for start in range(len(rows), len(prompts), BATCH):
+            for item, label, text in prompts[start:start + BATCH]:
+                idle.wait()
+                if STOP.is_set():
+                    return entry
+                s = scores(docs, _query(embedder, text))
+                i = int(s.argmax())
+                rows.append([item, label, skills[i].name, float(np.clip(s[i], -1.0, 1.0))])
+            entry = {**pins, "date": datetime.date.today(), "rows": rows}
+            record_dir = _written(record_dir, pins, entry)
+    except Exception as exc:
+        tries = (0 if len(rows) > resumed else tries) + 1
+        failed = {"failed": type(exc).__name__} if tries >= ATTEMPTS else {}
+        _written(record_dir, pins, {**pins, "date": datetime.date.today(), "rows": rows, "attempts": tries, **failed})
+        raise
     try:
         calibrate(rows)
     except ValueError as exc:
         entry = {**entry, "failed": str(exc)}
-        _written(record_dir, embedder.model_name, entry)
+        _written(record_dir, pins, entry)
     return entry
