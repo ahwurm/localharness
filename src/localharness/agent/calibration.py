@@ -24,6 +24,7 @@ log = logging.getLogger(__name__)
 ASSETS = Path(__file__).resolve().parent.parent / "assets"
 PROMPTS = ASSETS / "affordance" / "prompts.yaml"
 LABELS = ("matching", "near_miss", "unrelated")
+TESTED_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 UNREAD = ("README.md", ".gitattributes")
 # bumped by hand when the engine's query or document encoding changes
 REV = 1

@@ -1470,6 +1470,12 @@ def test_affordance_check_rows_in_order(given, status, detail):
     assert (check.name, check.status, check.detail, check.hint) == ("affordance-cue", status, detail, "")
 
 
+def test_the_release_tested_model_is_the_memory_plugins_default():
+    from localharness.memory.config import MemoryConfig
+
+    assert calibration.TESTED_MODEL == MemoryConfig().embedding_model == CUE_MODEL
+
+
 def test_affordance_check_never_warns_or_fails_and_every_off_row_says_so():
     checks = [doctor_cmd._affordance_check(**{**_READY, **r[1]}) for r in _DOCTOR_ROWS]
     assert {c.status for c in checks} == {"pass", "skip"}
