@@ -17,7 +17,7 @@ from localharness.memory.resonance import EMBED_MAX_TOKENS
 pytestmark = pytest.mark.xfail(strict=True, reason="placeholder calibration record: run python scripts/gen_calibration.py, then delete this marker")
 
 ROOT = Path(__file__).resolve().parents[2]
-FIXTURES = ROOT / "tests" / "fixtures" / "skills_live"
+LABELLED = ROOT / "src" / "localharness" / "assets" / "affordance"
 RECORD = Path(affordance.__file__).resolve().parent.parent / "assets" / "affordance" / "calibration.yaml"
 STALE = "calibration is stale: run python scripts/gen_calibration.py"
 DEFAULT = MemoryConfig.model_fields["embedding_model"].default
@@ -38,9 +38,9 @@ def test_the_record_is_keyed_by_the_default_embedding_model_and_its_rows_load():
 
 
 def test_the_record_pins_the_prompts_and_the_descriptions_in_the_tree(tmp_path):
-    shutil.copytree(FIXTURES / "skills", tmp_path / "skills")
+    shutil.copytree(LABELLED / "skills", tmp_path / "skills")
     skills = SkillSet.discover(tmp_path, None).skills
-    assert entry()["prompts_sha256"] == hashlib.sha256((FIXTURES / "prompts.yaml").read_bytes()).hexdigest(), STALE
+    assert entry()["prompts_sha256"] == hashlib.sha256((LABELLED / "prompts.yaml").read_bytes()).hexdigest(), STALE
     assert entry()["descriptions_sha256"] == descriptions_digest(skills), STALE
 
 

@@ -229,6 +229,11 @@ def _check(label: str, lexical_dir: Path, real_dir: Path, entry: str, bundled: f
     return Skill(name, description, label, skill_md, label == "project")
 
 
+def read_skill(directory: Path, label: str) -> Skill | Skipped | None:
+    """One skill directory read with discovery's checks, outside every discovery root."""
+    return _check(label, directory.parent, directory.parent.resolve(), directory.name, frozenset())
+
+
 def _scan(origins) -> tuple[tuple[str | None, Skill | Skipped], ...]:
     listed = [(label, lexical, real, *_entries(lexical)) for label, lexical, real in origins]
 
