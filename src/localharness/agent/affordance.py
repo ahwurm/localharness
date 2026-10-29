@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from localharness.agent import calibration
+from localharness.agent.calibration import normalise, scores
 from localharness.core.types import is_harness_message
 
 if TYPE_CHECKING:
@@ -30,23 +32,6 @@ class Cue:
     name: str
     origin: str
     line: str
-
-
-def normalise(a) -> np.ndarray:
-    a = np.asarray(a, dtype=np.float32)
-    if a.ndim not in (1, 2) or not np.isfinite(a).all():
-        raise ValueError(f"not a finite vector or matrix: shape {a.shape}")
-    norms = np.linalg.norm(a, axis=-1, keepdims=True)
-    if not (np.isfinite(norms) & (norms > 0)).all():
-        raise ValueError("a zero or non-finite norm")
-    return a / norms
-
-
-def scores(matrix, vec) -> np.ndarray:
-    matrix, vec = np.asarray(matrix), np.asarray(vec)
-    if matrix.ndim != 2 or vec.ndim != 1 or matrix.shape[1] != vec.shape[0]:
-        raise ValueError(f"cannot score a {vec.shape} vector against a {matrix.shape} matrix")
-    return normalise(matrix) @ normalise(vec)
 
 
 def pick(scores: np.ndarray, threshold: float) -> int | None:
@@ -134,20 +119,19 @@ class Affordances:
             log.info("skill cue off: %s", why)
 
     def _publish(self, skills: tuple[Skill, ...]) -> str | None:
-        from localharness.agent.calibration import entry_state, labelled, measure, read_entry, shipped_pins, usable_dir
-
         embedder = self._slot.embedder()
         if embedder is None:
             return "the memory slot offers no embedder"
         folder = embedder.ensure_local()
         if folder is None:
             return "embedding model not on this machine yet"
-        pins, prompts, record_dir = shipped_pins(embedder.model_name, folder), labelled()[1], usable_dir(self._record_dir)
-        entry = read_entry(record_dir, embedder.model_name) if record_dir is not None else None
-        state, detail = entry_state(entry, pins, prompts)
+        pins = calibration.shipped_pins(embedder.model_name, folder)
+        prompts, record_dir = calibration.labelled()[1], calibration.usable_dir(self._record_dir)
+        entry = calibration.read_entry(record_dir, embedder.model_name) if record_dir is not None else None
+        state, detail = calibration.entry_state(entry, pins, prompts)
         if state in ("stale", "partial"):
-            entry = measure(embedder, pins, entry if state == "partial" else None, self._idle, record_dir)
-            state, detail = entry_state(entry, pins, prompts)
+            entry = calibration.measure(embedder, pins, entry if state == "partial" else None, self._idle, record_dir)
+            state, detail = calibration.entry_state(entry, pins, prompts)
         if state != "ready":
             return detail
         matrix = normalise(embedder.embed_docs([s.description for s in skills]))

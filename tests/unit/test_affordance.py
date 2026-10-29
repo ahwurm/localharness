@@ -724,7 +724,17 @@ def test_snapshot_files_names_each_files_blob_and_leaves_out_what_no_loader_open
     folder = _snapshot(tmp_path / "snapshots" / "rev", {"config.json": "aa11", "1_Pooling/config.json": "bb22",
                                                         "README.md": "cc33", ".gitattributes": "dd44"})
     (folder / "plain.txt").write_text("x")
-    assert snapshot_files(folder) == {"config.json": "aa11", "1_Pooling/config.json": "bb22", "plain.txt": "plain.txt"}
+    st = (folder / "plain.txt").stat()
+    assert snapshot_files(folder) == {"config.json": "aa11", "1_Pooling/config.json": "bb22",
+                                      "plain.txt": f"{st.st_size}-{st.st_mtime_ns}"}
+
+
+def test_a_configured_folders_weights_rewritten_in_place_change_the_pin(tmp_path):
+    (tmp_path / "model.safetensors").write_bytes(b"a")
+    (tmp_path / "README.md").write_text("r")
+    before = snapshot_files(tmp_path)
+    (tmp_path / "model.safetensors").write_bytes(b"bb")
+    assert list(before) == ["model.safetensors"] and snapshot_files(tmp_path) != before
 
 
 def test_the_descriptions_digest_hashes_name_and_description_lines_in_order():
@@ -1045,7 +1055,15 @@ def test_a_partial_record_resumes_at_its_row_count(tmp_path, monkeypatch):
 
 
 def _rows():
-    return [[item, label, "commit-message", 0.1] for item, label, _ in LAB]
+    return [[item, label, "commit-message", 0.5 if label == "matching" and item == "commit-message" else 0.1]
+            for item, label, _ in LAB]
+
+
+def test_a_complete_table_with_no_admitted_score_above_the_must_not_cue_maximum_is_failed(tmp_path, monkeypatch):
+    pins = shipped_pins(MODEL, _record(tmp_path, monkeypatch))
+    tied = [[item, label, "commit-message", 0.1] for item, label, _ in LAB]
+    assert calibrate(tied) == 0.1
+    assert entry_state({**pins, "date": DATE, "rows": tied}, pins, LAB) == ("failed", NO_SEPARATION)
 
 
 @pytest.mark.parametrize("rows", [
@@ -1136,6 +1154,82 @@ def test_measuring_waits_while_a_turn_runs_and_resumes_when_the_last_one_ends(tm
     holder.turn_ended()
     thread.join(timeout=5)
     assert holder._ready is not None and holder._turns == 0 and fake.asked == ASKED
+
+
+def test_measuring_yields_before_each_prompt_not_only_each_batch(tmp_path, monkeypatch):
+    fake = FakeEmbedder(_record(tmp_path, monkeypatch))
+    holder, real = Affordances(SkillSet(SKILLS, (), ()), _slot(fake), None), fake.try_embed_query
+
+    def first_starts_a_turn(text):
+        if not fake.asked:
+            holder.turn_started()
+        return real(text)
+    fake.try_embed_query = first_starts_a_turn
+    thread = holder.warm()
+    thread.join(timeout=0.2)
+    assert thread.is_alive() and fake.asked == ["lab a"] and calibration.BATCH > len(LAB)
+    holder.turn_ended()
+    thread.join(timeout=5)
+    assert holder._ready is not None and fake.asked == ASKED
+
+
+def test_measuring_stops_encoding_once_the_interpreter_is_exiting(tmp_path, monkeypatch):
+    stop = threading.Event()
+    monkeypatch.setattr(calibration, "STOP", stop)
+    fake = FakeEmbedder(_record(tmp_path, monkeypatch))
+    real = fake.try_embed_query
+    fake.try_embed_query = lambda text: (stop.set(), real(text))[1]
+    assert _again(fake, tmp_path / "affordance")._ready is None and fake.asked == ["lab a"]
+    assert read_entry(tmp_path / "affordance", MODEL) is None
+
+
+def test_a_write_never_replaces_a_longer_record_under_the_same_pins(tmp_path, monkeypatch):
+    record_dir, fake = tmp_path / "affordance", FakeEmbedder(_record(tmp_path, monkeypatch))
+    _again(fake, record_dir)
+    full, pins = read_entry(record_dir, MODEL), shipped_pins(MODEL, fake.folder)
+    calibration._written(record_dir, pins, {**full, "rows": full["rows"][:1]})
+    assert read_entry(record_dir, MODEL) == full
+    calibration._written(record_dir, {**pins, "rev": -1}, {**full, "rev": -1, "rows": full["rows"][:1]})
+    assert len(read_entry(record_dir, MODEL)["rows"]) == 1
+
+
+def test_a_score_rounded_past_one_is_stored_as_one(tmp_path, monkeypatch):
+    past_one = np.nextafter(np.float32(1), np.float32(2))
+    monkeypatch.setattr(calibration, "scores", lambda docs, vec: np.array([past_one, 0, 0], dtype=np.float32))
+    fake, idle = FakeEmbedder(_record(tmp_path, monkeypatch)), threading.Event()
+    idle.set()
+    pins = shipped_pins(MODEL, fake.folder)
+    entry = calibration.measure(fake, pins, None, idle, None)
+    assert past_one > 1 and {r[3] for r in entry["rows"]} == {1.0}
+    assert entry_state(entry, pins, LAB) == ("failed", NO_SEPARATION)
+
+
+def _failing_sittings(tmp_path, monkeypatch, n):
+    monkeypatch.setattr(calibration, "BATCH", 1)
+    fake = FakeEmbedder(_record(tmp_path, monkeypatch), {**VECTORS, "lab c": [0, 0, 0]})
+    record_dir = tmp_path / "affordance"
+    return record_dir, fake, [(_again(fake, record_dir), read_entry(record_dir, MODEL).get("attempts"))[1]
+                              for _ in range(n)]
+
+
+def test_an_encode_error_that_recurs_three_sittings_running_is_failed_with_its_type(tmp_path, monkeypatch):
+    record_dir, fake, attempts = _failing_sittings(tmp_path, monkeypatch, 3)
+    assert attempts == [1, 2, 3]
+    assert entry_state(read_entry(record_dir, MODEL), shipped_pins(MODEL, fake.folder), LAB) == (
+        "failed", "measuring stopped on ValueError 3 sittings in a row")
+    fake.asked.clear()
+    assert _again(fake, record_dir)._ready is None and fake.asked == []
+
+
+def test_progress_clears_the_failed_sittings_count(tmp_path, monkeypatch):
+    record_dir, fake, attempts = _failing_sittings(tmp_path, monkeypatch, 2)
+    fake.table = VECTORS
+    assert attempts == [1, 2] and _again(fake, record_dir)._ready is not None
+    assert "attempts" not in read_entry(record_dir, MODEL)
+
+
+def test_the_record_module_never_imports_the_cue():
+    assert "localharness.agent.affordance" not in Path(calibration.__file__).read_text(encoding="utf-8")
 
 
 def test_a_busy_embedder_gives_up_after_its_bound_keeping_each_written_batch(tmp_path, monkeypatch, caplog):
