@@ -35,7 +35,7 @@ from localharness.config import paths as config_paths
 from localharness.config.paths import resolve_config_dir
 from localharness.config.loader import ConfigLoader
 from localharness.config.models import AgentConfig, ToolConfig
-from localharness.config.skills import Skill, SkillSet
+from localharness.config.skills import Skill, SkillSet, read_skill
 from localharness.core.bus import EventBus
 from localharness.core.events import AffordanceCued
 from localharness.core.types import harness_message, human_message, is_harness_message, provider_messages
@@ -1141,11 +1141,24 @@ def test_the_id_pattern_bites():
     assert IDS.findall("D-14 R-28 T-05 WR-09 R§2 §8 1-D WORD-1 PID-3") == ["D-14", "R-28", "T-05", "WR-09", "R§", "§"]
 
 
+LABELLED = ROOT / "src" / "localharness" / "assets" / "affordance"
+HOLDOUT = ROOT / "tests" / "fixtures" / "skills_live" / "prompts_holdout.yaml"
+
+
 def test_the_holdout_shares_no_prompt_with_the_calibration_set():
-    def texts(name):
-        sets = yaml.safe_load((ROOT / "tests" / "fixtures" / "skills_live" / name).read_text(encoding="utf-8"))["skills"]
+    def texts(path):
+        sets = yaml.safe_load(path.read_text(encoding="utf-8"))["skills"]
         return {t.strip().casefold() for groups in sets.values() for kind in affordance.LABELS for t in groups[kind]}
-    assert texts("prompts_holdout.yaml") and not texts("prompts_holdout.yaml") & texts("prompts.yaml")
+    assert texts(HOLDOUT) and not texts(HOLDOUT) & texts(LABELLED / "prompts.yaml")
+
+
+def test_the_labelled_skills_are_in_no_discovery_root(tmp_path):
+    (tmp_path / ".localharness").mkdir()
+    found = SkillSet.discover(tmp_path, tmp_path)
+    labelled = {p.parent.name for p in LABELLED.glob("skills/*/SKILL.md")}
+    assert len(labelled) == 5 and not labelled & {s.name for s in found.skills}
+    assert (LABELLED / "skills").resolve() not in {real for _, _, real in found.origins}
+    assert {read_skill(LABELLED / "skills" / name, "machine").name for name in labelled} == labelled
 
 
 # --- doctor's affordance-cue row ------------------------------------------------------------------

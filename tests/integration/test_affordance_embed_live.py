@@ -19,7 +19,7 @@ from localharness.agent.task_record import TaskState
 from localharness.cli.skill_session import LINE
 from localharness.config.skills import SkillSet
 from localharness.memory.resonance import DEFAULT_EMBEDDING_MODEL, EMBED_MAX_TOKENS
-from tests.integration.test_skills_model_live import FIXTURES, KINDS, REPORTS, cell, git
+from tests.integration.test_skills_model_live import HOLDOUT, KINDS, LABELLED, REPORTS, cell, git
 
 pytestmark = pytest.mark.live_embed
 
@@ -31,8 +31,8 @@ MISSES = (
 )
 
 
-def sets(name: str) -> dict:
-    return yaml.safe_load((FIXTURES / name).read_text(encoding="utf-8"))["skills"]
+def sets(path: Path) -> dict:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))["skills"]
 
 
 def prompts(group: dict) -> list[tuple[str, str, str]]:
@@ -40,7 +40,7 @@ def prompts(group: dict) -> list[tuple[str, str, str]]:
 
 
 def skill_set(config_dir: Path) -> SkillSet:
-    shutil.copytree(FIXTURES / "skills", config_dir / "skills")
+    shutil.copytree(LABELLED / "skills", config_dir / "skills")
     return SkillSet.discover(config_dir, None)
 
 
@@ -82,29 +82,29 @@ def test_the_record_pins_the_snapshot_the_engine_loaded(ready):
 async def test_every_calibration_prompt_picks_what_the_record_rows_give(ready):
     engine, _, _, holder = ready
     threshold = load_calibration(engine.model_name).threshold
-    rows, asked = record()["rows"], prompts(sets("prompts.yaml"))
+    rows, asked = record()["rows"], prompts(sets(LABELLED / "prompts.yaml"))
     assert [tuple(row[:2]) for row in rows] == [(skill, kind) for skill, kind, _ in asked], STALE
     expected = [top if score > threshold else None for _, _, top, score in rows]
     assert [await outcome(holder, text) for _, _, text in asked] == expected
 
 
 async def test_the_three_commit_message_misses_are_cued(ready):
-    matching = sets("prompts.yaml")["commit-message"]["matching"]
+    matching = sets(LABELLED / "prompts.yaml")["commit-message"]["matching"]
     for index, text in MISSES:
         assert matching[index] == text, STALE
         assert await outcome(ready[3], text) == "commit-message", text
 
 
 async def test_the_holdout_draws_no_false_cue(ready):
-    false = [(skill, kind, text, cued) for skill, kind, text in prompts(sets("prompts_holdout.yaml"))
+    false = [(skill, kind, text, cued) for skill, kind, text in prompts(sets(HOLDOUT))
              if (cued := await outcome(ready[3], text)) is not None and (kind != "matching" or cued != skill)]
     assert false == []
 
 
 async def test_a_description_stuffed_with_its_matching_prompts_draws_no_holdout_false_cue(ready):
     engine, _, skills, _ = ready
-    calibration = sets("prompts.yaml")
-    barred = [text for _, kind, text in prompts(sets("prompts_holdout.yaml")) if kind != "matching"]
+    calibration = sets(LABELLED / "prompts.yaml")
+    barred = [text for _, kind, text in prompts(sets(HOLDOUT)) if kind != "matching"]
     counts = {}
     for name in calibration:
         stuffed = " ".join(calibration[name]["matching"])
@@ -116,7 +116,7 @@ async def test_a_description_stuffed_with_its_matching_prompts_draws_no_holdout_
 
 async def test_named_skills_and_cue_time_are_measured_into_the_report(ready):
     engine, _, _, holder = ready
-    calibration, held = sets("prompts.yaml"), sets("prompts_holdout.yaml")
+    calibration, held = sets(LABELLED / "prompts.yaml"), sets(HOLDOUT)
     forms = []
     for name in calibration:
         for text in calibration[name]["matching"] + held[name]["matching"]:

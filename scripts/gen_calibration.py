@@ -11,15 +11,14 @@ from pathlib import Path
 import yaml
 
 from localharness.agent.affordance import LABELS, calibrate, descriptions_digest, scores, snapshot_files
-from localharness.config.skills import Skill, _check
+from localharness.config.skills import Skill, read_skill
 from localharness.memory.resonance import DEFAULT_EMBEDDING_MODEL, ResonanceEngine
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def read_skills(directory: Path, label: str, bundled: frozenset[str]) -> list[Skill]:
-    found = [_check(label, directory, directory.resolve(), path.parent.name, bundled)
-             for path in sorted(directory.glob("*/SKILL.md"))]
+def read_skills(directory: Path, label: str) -> list[Skill]:
+    found = [read_skill(path.parent, label) for path in sorted(directory.glob("*/SKILL.md"))]
     if skipped := [s for s in found if not isinstance(s, Skill)]:
         raise SystemExit("\n".join(f"{s.path}: {s.reason}" for s in skipped))
     return found
@@ -31,14 +30,13 @@ def git(*args: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--fixtures", type=Path, default=ROOT / "tests" / "fixtures" / "skills_live" / "skills")
+    parser.add_argument("--fixtures", type=Path, default=ROOT / "src" / "localharness" / "assets" / "affordance" / "skills")
     parser.add_argument("--bundled", type=Path, default=ROOT / "src" / "localharness" / "assets" / "skills")
-    parser.add_argument("--prompts", type=Path, default=ROOT / "tests" / "fixtures" / "skills_live" / "prompts.yaml")
+    parser.add_argument("--prompts", type=Path, default=ROOT / "src" / "localharness" / "assets" / "affordance" / "prompts.yaml")
     parser.add_argument("--out", type=Path, default=ROOT / "src" / "localharness" / "assets" / "affordance" / "calibration.yaml")
     args = parser.parse_args()
     prompts = yaml.safe_load(args.prompts.read_text(encoding="utf-8"))["skills"]
-    bundled = read_skills(args.bundled, "bundled", frozenset())
-    skills = read_skills(args.fixtures, "machine", frozenset(s.name for s in bundled)) + bundled
+    skills = read_skills(args.fixtures, "machine") + read_skills(args.bundled, "bundled")
     if {s.name for s in skills} != set(prompts):
         raise SystemExit(f"skills {sorted(s.name for s in skills)} differ from the prompts' {sorted(prompts)}")
     engine = ResonanceEngine(DEFAULT_EMBEDDING_MODEL)

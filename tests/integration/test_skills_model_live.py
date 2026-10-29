@@ -67,7 +67,8 @@ CREATOR_MAX_ACTIONS = 40
 CREATOR_MAX_MINUTES = 30.0
 MAX_ERROR_STREAK = 10
 ROOT_DIR = Path(__file__).resolve().parents[2]
-FIXTURES = ROOT_DIR / "tests" / "fixtures" / "skills_live"
+LABELLED = ROOT_DIR / "src" / "localharness" / "assets" / "affordance"
+HOLDOUT = ROOT_DIR / "tests" / "fixtures" / "skills_live" / "prompts_holdout.yaml"
 NO_CHILD_AGENTS = ["explore", "web-researcher", "cruncher", "search-verifier"]
 KINDS = ("matching", "near_miss", "unrelated")
 NON_ANSWERS = ("degenerate", "reasoning_cut", "length")
@@ -116,15 +117,15 @@ class Shape:
 
 
 def prompts() -> dict:
-    return yaml.safe_load((FIXTURES / "prompts.yaml").read_text(encoding="utf-8"))
+    return yaml.safe_load((LABELLED / "prompts.yaml").read_text(encoding="utf-8"))
 
 
 def holdout() -> dict:
-    return yaml.safe_load((FIXTURES / "prompts_holdout.yaml").read_text(encoding="utf-8"))
+    return yaml.safe_load(HOLDOUT.read_text(encoding="utf-8"))
 
 
 def install(config_dir: Path) -> SkillSet:
-    shutil.copytree(FIXTURES / "skills", config_dir / "skills")
+    shutil.copytree(LABELLED / "skills", config_dir / "skills")
     return SkillSet.discover(config_dir, None)
 
 

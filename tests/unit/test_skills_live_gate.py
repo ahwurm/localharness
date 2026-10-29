@@ -25,7 +25,7 @@ from localharness.tools.builtin.skill_tool import render_listing
 import tests.integration.test_skills_model_live as live
 from tests.conftest import FakeLLMResponse, FakeToolCall, MockLLMClient
 from tests.integration.test_skills_model_live import (
-    CREATOR_BAR, CREATOR_MAX_ACTIONS, CREATOR_MAX_MINUTES, FALSE_BAR, FIXTURES, KINDS, MATCHING_BAR, MAX_ERROR_STREAK, NOT_FINISHED, NOT_SERVING,
+    CREATOR_BAR, CREATOR_MAX_ACTIONS, CREATOR_MAX_MINUTES, FALSE_BAR, KINDS, LABELLED, MATCHING_BAR, MAX_ERROR_STREAK, NOT_FINISHED, NOT_SERVING,
     NOT_SUBJECT, RUNS, TEMPERATURE, VARIANT_A, VARIANT_B, CreatorRun, Run, RunStopped, Step, count, creator_asker, creator_run, first_step, first_step_run, hit,
     flaw_of, install, judge, loop_shape, meets, neutral_sitting, not_run_report, out_of_list, passed, prompts, render_report, root_config, run_number, settled,
     sizes, stop_on_failing_server, subject_served, write_report, xml_mode)
@@ -265,7 +265,7 @@ def test_no_request_names_a_skill(tmp_path):
 
 
 def test_no_fixture_skill_carries_an_install_or_fetch_step():
-    files = [*(FIXTURES / "skills").glob("*/SKILL.md"), FIXTURES / "prompts.yaml"]
+    files = [*(LABELLED / "skills").glob("*/SKILL.md"), LABELLED / "prompts.yaml"]
     assert len(files) == 6
     for path in files:
         text = path.read_text(encoding="utf-8")
