@@ -4,7 +4,9 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
-## [Unreleased]
+## [0.24.0] — 2026-10-28
+
+**The affordance layer.** The root's prompt carries a short derived map of where its skills and agents live and how they enter a task, and the harness can point the model at a skill the request resembles.
 
 ### Added
 - **the index** — The root's prompt now carries a short map: the project; where skills live and
