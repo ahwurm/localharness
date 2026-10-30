@@ -99,3 +99,8 @@ async def test_retain_window_names_the_refetching_tool_and_mints_one_id_per_call
     for fid in ("pg-1", "pg-2"):
         assert (await WebPageQueryTool(store).run(fetch_id=fid, pattern="xxx")).success
     assert not inspect.iscoroutinefunction(retain_window)
+
+
+async def test_retain_window_without_a_refetch_names_no_start_index_recall():
+    out = retain_window(ContentStore(), "x" * 1200, "https://a.test/", 0, 500, None).output
+    assert "web_page_query(" in out and "start_index" not in out and out.endswith("the full retained page]")

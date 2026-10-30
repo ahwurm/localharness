@@ -139,7 +139,7 @@ def _html_to_text(html: str) -> str:
     return text.strip()
 
 
-def retain_window(store: Any, text: str, url: str, start: int, max_chars: int, refetch: str) -> ToolResult:
+def retain_window(store: Any, text: str, url: str, start: int, max_chars: int, refetch: str | None) -> ToolResult:
     """Retain the whole `text` in `store` and return one window of it, banner-framed, with the paging tail."""
     cap = max(500, min(int(max_chars), FETCH_MAX_CHARS))
     start = max(0, int(start))
@@ -156,7 +156,7 @@ def retain_window(store: Any, text: str, url: str, start: int, max_chars: int, r
     end = start + len(window)
     more = end < full_len
     nav = f'web_page_query("{fid}", pattern) to search the full retained page'
-    if more:
+    if more and refetch:
         nav += f"; or {refetch} start_index={end} for the next window"
     tail = f"\n\n[chars {start}-{end} of {full_len} | fetch_id={fid} | {nav}]"
     return ToolResult(
