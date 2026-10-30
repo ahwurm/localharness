@@ -830,9 +830,15 @@ async def test_phone_a_raising_receipt_never_breaks_the_forwarder(tmp_path):
 class _FakeLoop:
     def __init__(self) -> None:
         self.turns: list[str] = []
+        self.subtypes: list[str] = []
+        self.nudges: list[tuple[str, str]] = []
 
-    async def run_turn(self, task, on_token=None, images=None):
+    async def run_turn(self, task, on_token=None, images=None, subtype="request"):
         self.turns.append(task)
+        self.subtypes.append(subtype)
+
+    def push_user_nudge(self, text, subtype="request"):
+        self.nudges.append((text, subtype))
 
     _config = None
 

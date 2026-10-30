@@ -436,7 +436,7 @@ def test_repl_normal_input_routes_to_agent():
     repl = OrchestratorREPL(orchestrator=mock_orch, agent_loop=mock_loop, channel=mock_channel, bus=mock_bus)
     asyncio.run(repl.run())
 
-    mock_loop.run_turn.assert_called_once_with(task="do something", on_token=None)
+    mock_loop.run_turn.assert_called_once_with(task="do something", on_token=None, subtype="typed")
     # REPL should NOT call send_message with the summary — TaskComplete event does it
     summary_calls = [
         c for c in mock_channel.send_message.call_args_list

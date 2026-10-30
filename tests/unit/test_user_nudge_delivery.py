@@ -30,7 +30,7 @@ class TestPushUserNudge:
     def test_push_appends(self, mock_llm_client, bus):
         loop = _make_loop(mock_llm_client, [mock_llm_client.Response(content="ok")], bus)
         loop.push_user_nudge("hey do X")
-        assert loop._user_nudge_inbox == ["hey do X"]
+        assert loop._user_nudge_inbox == [("hey do X", "request")]
 
     def test_push_ignores_blank(self, mock_llm_client, bus):
         loop = _make_loop(mock_llm_client, [mock_llm_client.Response(content="ok")], bus)

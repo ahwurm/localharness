@@ -90,7 +90,7 @@ async def test_tier2_nudge_verdict_upgrades_still_queued_message():
         assert kind == "tier2_result"
         await repl._handle_box_event(kind, payload)
         assert not repl._fifo  # pulled from the queue …
-        agent.push_user_nudge.assert_called_once_with("index the tests directory")  # … and nudged
+        agent.push_user_nudge.assert_called_once_with("index the tests directory", "steering")  # … and nudged
     finally:
         repl._turn_task.cancel()
 
