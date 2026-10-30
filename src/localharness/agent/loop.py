@@ -1264,6 +1264,7 @@ class AgentLoop:
         index: str = "",
         affordances: Affordances | None = None,
         turn: int = 0,
+        request_note: "Callable[[], str] | None" = None,
     ) -> None:
         self._config = config
         self.turn = turn
@@ -1274,6 +1275,7 @@ class AgentLoop:
         self._bus = bus
         self._ctx = context_manager
         self._task_context = task_context
+        self._request_note = request_note
         # How the last run_turn ended ("complete", "error", "stuck", "budget_*", ...): a
         # delegating parent reads it to report the child's runtime-truth status.
         self.last_terminated_reason: str | None = None
@@ -3216,12 +3218,16 @@ class AgentLoop:
         packed, budget = await self._ctx.build_messages(messages, tools)
         # An empty packet (a TaskState with no active record) is an ordinary request.
         packet = self._task_context.packet() if self._task_context is not None else ""
+        note = self._request_note() if self._request_note is not None else ""
         if packet:
             # Request-local, after every lossy transform: one current packet, no growing log.
             packed = [*packed, harness_message(packet, "active_task")]
+        if note:
+            packed = [*packed, harness_message(note, "request_note")]
+        if packet or note:
             packed = self._ctx.ensure_active_references(packed, tools, enforce_budget=True)
             budget = replace(budget, current_usage=self._ctx._token_counter.estimate_messages(packed))
-        active = bool(packet) or bool(
+        active = bool(packet) or bool(note) or bool(
             getattr(getattr(self._ctx, "_content_store", None), "active_references", ())
         )
         mode = getattr(getattr(self._llm, "config", None), "tool_call_mode", "native")
