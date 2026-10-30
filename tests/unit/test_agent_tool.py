@@ -420,3 +420,14 @@ async def test_a_delegation_arg_error_is_a_validation_error_and_other_value_erro
     bad = await _make_agent_tool(runner=refuses)._execute(agent_id="coder", task="x", tools=["x"])
     assert (bad.error_type, bad.error) == ("validation_error", "coder has no x; its tools: y.")
     assert (await _make_agent_tool(runner=missing)._execute(agent_id="coder", task="x")).error_type == "not_found"
+
+
+@pytest.mark.asyncio
+async def test_the_held_list_reaches_the_metadata_only_when_a_result_carries_one():
+    from localharness.agent.subagent import DelegationResult
+
+    narrowed = await _make_agent_tool(runner=AsyncMock(return_value=DelegationResult("t", tools=["a"])))._execute(
+        agent_id="coder", task="x")
+    plain = await _make_agent_tool(runner=AsyncMock(return_value=DelegationResult("t")))._execute(
+        agent_id="coder", task="x")
+    assert narrowed.metadata["tools"] == ["a"] and "tools" not in plain.metadata

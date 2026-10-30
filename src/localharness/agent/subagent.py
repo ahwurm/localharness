@@ -21,7 +21,7 @@ import logging
 import os
 import re
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -628,7 +628,8 @@ class DelegationResult:
     """What a delegation returns (0.16.5 D8): the findings text plus runtime-observed facts.
     `status`, `terminated_reason`, `tool_calls`, `artifacts` (paths the child's successful
     write/edit calls named) and `child_session_id` come from the runtime; `handoff` is the
-    child's own HANDOFF block, parsed or None. `str(result)` is the text, so string callers work."""
+    child's own HANDOFF block, parsed or None; `tools` is the narrowed set the child held, None when
+    the call did not narrow. `str(result)` is the text, so string callers work."""
     text: str
     status: str = "completed"
     terminated_reason: str | None = None
@@ -636,6 +637,7 @@ class DelegationResult:
     artifacts: list[str] = field(default_factory=list)
     child_session_id: str | None = None
     handoff: dict | None = None
+    tools: list[str] | None = None
 
     def __str__(self) -> str:
         return self.text
@@ -851,13 +853,26 @@ def _validated_narrowing(name: str, tools: list[str], base: Any, load_agent: Cal
     return wanted
 
 
-def prepend_toolset(task: str, allowed: list[str]) -> str:
-    """Prefix a config-child brief with its exact toolset (capability fact, not inference)."""
+def prepend_toolset(task: str, allowed: list[str], narrowed: bool = False) -> str:
+    """Prefix a child brief with its exact toolset (capability fact, not inference)."""
     names = ", ".join(allowed) if allowed else "none"
+    cannot = "use anything else" if narrowed and "agent" in allowed else "delegate or use anything else"
+    ignore = " Ignore any tool your instructions name that is not in this list." if narrowed else ""
     return (
-        f"(Your ONLY available tools: {names}. You cannot delegate or use anything else — "
-        f"if the task needs a tool you lack, say so immediately instead of improvising.)\n\n{task}"
+        f"(Your ONLY available tools: {names}. You cannot {cannot} — "
+        f"if the task needs a tool you lack, say so immediately instead of improvising.{ignore})\n\n{task}"
     )
+
+
+def _with_tools(result: Any, held: list[str] | None) -> Any:
+    return replace(result, tools=held) if held is not None and isinstance(result, DelegationResult) else result
+
+
+def _advertised_tools(registry: Any, config: Any) -> list[str]:
+    try:
+        return sorted(registry.get_tools_for_agent(config.name, config.division or "", config.tools))
+    except Exception:  # never let the diagnostic mask the failure it is describing
+        return sorted(registry._schemas)
 
 
 def format_child_findings(agent_name: str, task: str, summary: str, tool_calls_used: int) -> str:
@@ -909,6 +924,7 @@ async def dispatch_config_subagent(
     parent_remaining_fn: "Callable[[], tuple[int, float]] | None" = None,
     shape: str | None = None,
     project_instructions: Any = None,
+    narrowed: bool = False,
 ) -> DelegationResult:
     """Spawn a child from a YAML-defined AgentConfig, run one turn, return distilled findings.
 
@@ -968,7 +984,7 @@ async def dispatch_config_subagent(
     actions = "no action limit" if action_limit == 0 else f"{action_limit} actions"
     minutes = "no time limit" if time_limit == 0 else f"{time_limit:g} minutes"
     held = [name for name in allowed if child_registry.has(name)]
-    task = prepend_toolset(f"Budget: {actions}, {minutes}.\n\n{task}", held)
+    task = prepend_toolset(f"Budget: {actions}, {minutes}.\n\n{task}", held, narrowed)
 
     summary = await child_loop.run_turn(task)
     tool_calls_used = _count_session_tool_calls(bus, child_loop.current_session_id)
@@ -1111,6 +1127,7 @@ async def dispatch_web_subagent(
     budget_labels: Any = None,
     on_child_loop: Callable[[Any], None] | None = None,
     project_instructions: Any = None,
+    narrowed: bool = False,
 ) -> DelegationResult:
     """Spawn a web-research child (web_search/web_fetch[/web_page_query] only), run one turn, return findings.
 
@@ -1174,7 +1191,15 @@ async def dispatch_web_subagent(
         _refuse_below_floor(child_config, child_registry, context_manager, llm)
         if on_child_loop is not None:
             on_child_loop(child_loop)  # every retry attempt rebinds the slot to the loop now running
-        brief = task if attempt == 0 else ZERO_CALL_RETRY_PREFIX + task
+        if attempt == 0:
+            brief = task
+        elif narrowed:
+            brief = ("PREVIOUS ATTEMPT INVALID: you produced text without executing a single tool. "
+                     f"Your tools ({', '.join(_advertised_tools(child_registry, child_config))}) ARE "
+                     "available to you — begin by actually CALLING one of them (a real tool invocation, "
+                     f"not text that looks like one).\n\n{task}")
+        else:
+            brief = ZERO_CALL_RETRY_PREFIX + task
         summary = await child_loop.run_turn(brief)
         tool_calls_used = _count_session_tool_calls(bus, child_loop.current_session_id)
         if tool_calls_used > 0:
@@ -1187,14 +1212,7 @@ async def dispatch_web_subagent(
     # component from a zero-call run and "repairs" a toolset that was never empty — the live
     # 2026-09-17 chain: false memory ("missing its search tool") -> source dive -> bash+ddgs
     # bypass. The count is evidence, so the failure can never again be read as absence.
-    try:
-        advertised = sorted(
-            child_registry.get_tools_for_agent(
-                child_config.name, child_config.division or "", child_config.tools
-            )
-        )
-    except Exception:  # never let the diagnostic mask the failure it is describing
-        advertised = sorted(child_registry._schemas)
+    advertised = _advertised_tools(child_registry, child_config)
     return DelegationResult((
         f"SUBAGENT RUN FAILED (agent_id={child_config.name}, tool calls: 0 after "
         f"{1 + WEB_ZERO_CALL_RETRIES} attempts). The researcher answered in prose without "
@@ -2046,13 +2064,14 @@ def make_explore_agent_runner(
         name = _sanitize_agent_name(agent_id)
         slot: list = [None]  # the built-in child's own remaining_budget, once its loop is built
         child_agent_tool = _build_child_agent_tool(name, slot)
-        reg = base_registry
+        reg, held = base_registry, None
         if tools:
             from localharness.tools.registry import ToolRegistry
             wanted = _validated_narrowing(name, tools, base_registry, load_agent, child_agent_tool is not None)
             reg = ToolRegistry.from_allowed([t for t in wanted if t != "agent"], base_registry=base_registry)
             if "agent" not in wanted:
                 child_agent_tool = None
+            held = [t for t in wanted if t != "agent" and reg.has(t)] + (["agent"] if child_agent_tool else [])
         # Grant-target safety (the keystone's structural floor): a granted handle is readable via
         # tool_result_get/chunk (NOT untrusted-ingest), so refuse handing one to a host-dangerous
         # target — else attacker-controllable bytes sit one call from a host action. Fail closed,
@@ -2115,7 +2134,7 @@ def make_explore_agent_runner(
                 if load_failure is not None:
                     raise ValueError(load_failure)
                 raise ValueError(_not_wired_text(agent_id, name, searched, available_agents, reason))
-            return await dispatch_config_subagent(
+            return _with_tools(await dispatch_config_subagent(
                 task,
                 agent_config=cfg,
                 llm=llm,
@@ -2138,7 +2157,8 @@ def make_explore_agent_runner(
                 unattended_max_actions=unattended_max_actions,
                 parent_remaining_fn=parent_remaining_fn,
                 shape=shape,
-            )
+                narrowed=held is not None,
+            ), held)
         # Built-in subagents are TUNABLE via an optional agents/<name>.yaml overlay (the real
         # budget knob): base = the code-defined default config, overlaid per-field by the yaml
         # when one exists (absent = pure defaults / no behavior change; malformed = explicit
@@ -2147,6 +2167,8 @@ def make_explore_agent_runner(
         # structural toolset stays fixed by the dispatcher — the overlay tunes AgentConfig fields.
         # The overlay's result (or the bare builder result when no hook is wired) goes through the
         # dispatch seam, and the seam's copy is what the child is built on (D-48).
+        if held is not None:
+            task = prepend_toolset(task, held, narrowed=True)
         cb = _children_budget(children_budget)
         base = base_builder(name, budget=cb.for_name(name))
         built = load_builtin_override(name, base) if load_builtin_override is not None else base
@@ -2157,7 +2179,7 @@ def make_explore_agent_runner(
         config_override, budget_fallback, budget_labels = _child_budget(
             built, name, children_budget=children_budget, shape=shape,
             parent_remaining=parent_remaining_fn)
-        return await dispatch(
+        return _with_tools(await dispatch(
             task,
             llm=llm,
             bus=bus,
@@ -2183,6 +2205,7 @@ def make_explore_agent_runner(
             budget_fallback=budget_fallback,
             budget_labels=budget_labels,
             on_child_loop=lambda loop: slot.__setitem__(0, getattr(loop, "remaining_budget", None)),
-        )
+            **({"narrowed": True} if held is not None and name == "web-researcher" else {}),
+        ), held)
 
     return _run_agent
