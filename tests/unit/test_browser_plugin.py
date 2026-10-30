@@ -41,7 +41,22 @@ class FakeResponse:
 
 class FakePage:
     def __init__(self, context):
-        self.context, self.url = context, "about:blank"
+        self.context, self.url, self.closed = context, "about:blank", False
+
+    def is_closed(self):
+        return self.closed
+
+    async def close(self):
+        self.closed = True
+
+    async def wait_for_load_state(self, state="load", timeout=None):
+        pass
+
+    async def aria_snapshot(self, mode=None, timeout=None):
+        world = self.context.browser.world
+        if world.on_snapshot:
+            await world.on_snapshot(self.url)
+        return world.snapshots[self.url]
 
     async def goto(self, url, wait_until=None, timeout=None):
         world = self.context.browser.world
@@ -72,6 +87,9 @@ class FakePage:
 class FakeContext:
     def __init__(self, browser, options):
         self.browser, self.options, self.routes, self.open = browser, options, [], True
+
+    def on(self, event, handler):
+        pass
 
     async def route(self, pattern, handler):
         self.browser.world.events.append(("route", pattern))
@@ -132,6 +150,8 @@ class World:
         self.canary = "proxy"
         self.launch_error = None
         self.on_goto = None
+        self.on_snapshot = None
+        self.snapshots = {}
         self.eval_error = None
         self.eval_result = UNSET
         self.argv_edit = lambda argv: argv
