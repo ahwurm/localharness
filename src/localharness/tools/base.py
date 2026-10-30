@@ -139,6 +139,11 @@ class StoreBound(Protocol):
     def bound_to(self, store: Any) -> ToolProtocol: ...
 
 
+@runtime_checkable
+class StoreReleasing(Protocol):
+    async def release_store(self, store: Any) -> None: ...
+
+
 class Tool(ABC):
     """Base class for all LocalHarness tools. Subclass and implement info() and _execute()."""
 

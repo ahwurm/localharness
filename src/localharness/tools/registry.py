@@ -8,7 +8,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ValidationError, create_model
 from pydantic.fields import FieldInfo
 
-from localharness.tools.base import StoreBound, Tool, ToolProtocol, ToolResult, ToolSchema, ToolVetoed
+from localharness.tools.base import StoreBound, StoreReleasing, Tool, ToolProtocol, ToolResult, ToolSchema, ToolVetoed
 from localharness.tools.capabilities import (
     IngestViaExecError,
     assert_no_coresidence,
@@ -111,6 +111,10 @@ class ContributedTool:
         if isinstance(self._inner, StoreBound):
             return ContributedTool(self._inner.bound_to(store), self._source_plugin, self._overrides)
         return self
+
+    async def release_store(self, store: Any) -> None:
+        if isinstance(self._inner, StoreReleasing):
+            await self._inner.release_store(store)
 
     async def run(self, **kwargs: Any) -> ToolResult:
         try:

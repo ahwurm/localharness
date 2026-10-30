@@ -1,9 +1,12 @@
 """Built-in tools registration."""
 import asyncio
+import logging
 from pathlib import Path
 from typing import Any
 
 from localharness.tools.registry import ToolRegistry
+
+log = logging.getLogger(__name__)
 
 
 async def register_builtin_tools(
@@ -77,3 +80,15 @@ def bind_agent_store_tools(registry: ToolRegistry, store: Any) -> None:
     for tool in registry.global_tools():
         if isinstance(tool, StoreBound) and (bound := tool.bound_to(store)) is not tool:
             registry.rebind_global(bound)
+
+
+async def release_agent_store_tools(registry: ToolRegistry, store: Any) -> None:
+    """End this agent's per-store tool state (a child's dispatch `finally` calls it). One tool's
+    failure never stops the others or reaches the caller; cancellation still propagates."""
+    from localharness.tools.base import StoreReleasing
+    for tool in registry.global_tools():
+        if isinstance(tool, StoreReleasing):
+            try:
+                await tool.release_store(store)
+            except Exception:  # noqa: BLE001
+                log.warning("release_store failed for tool %s", tool.info().name, exc_info=True)

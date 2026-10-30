@@ -14,6 +14,7 @@ Design:
 """
 from __future__ import annotations
 
+import asyncio
 import difflib
 import functools
 import inspect
@@ -941,6 +942,7 @@ async def dispatch_config_subagent(
         )
 
     from localharness.agent.loop import AgentLoop
+    from localharness.tools.builtin import release_agent_store_tools
     from localharness.tools.registry import ToolRegistry
 
     allowed = _config_child_allowed(agent_config)
@@ -954,42 +956,46 @@ async def dispatch_config_subagent(
         agent_config, "default", children_budget=children_budget,
         shape=shape, parent_remaining=parent_remaining_fn)
     _kill, _compact = _child_runtime_paths(agent_config, config_dir, state_dir=state_dir)
-    child_loop = AgentLoop(
-        config=agent_config,
-        llm=llm,
-        bus=child_bus,
-        context_manager=_child_ctx_with_store_tools(context_manager, child_registry),
-        tool_registry=child_registry,
-        permission_evaluator=permission_evaluator,
-        gate=gate,
-        kill_file_path=_kill,
-        compact_md_path=_compact,
-        effort=effort, effort_ratios=effort_ratios,
-        template_margin_ratio=template_margin_ratio,
-        project_instructions=project_instructions,
-        server_recovery=server_recovery,
-        unattended_max_actions=unattended_max_actions,
-        budget_fallback=budget_fallback,
-        budget_labels=budget_labels,
-    )
-    _refuse_below_floor(agent_config, child_registry, context_manager, llm)
+    ctx = _child_ctx_with_store_tools(context_manager, child_registry)
+    try:
+        child_loop = AgentLoop(
+            config=agent_config,
+            llm=llm,
+            bus=child_bus,
+            context_manager=ctx,
+            tool_registry=child_registry,
+            permission_evaluator=permission_evaluator,
+            gate=gate,
+            kill_file_path=_kill,
+            compact_md_path=_compact,
+            effort=effort, effort_ratios=effort_ratios,
+            template_margin_ratio=template_margin_ratio,
+            project_instructions=project_instructions,
+            server_recovery=server_recovery,
+            unattended_max_actions=unattended_max_actions,
+            budget_fallback=budget_fallback,
+            budget_labels=budget_labels,
+        )
+        _refuse_below_floor(agent_config, child_registry, context_manager, llm)
 
-    # Make the limits and the toolset explicit in the brief — small models attend weakly to absent
-    # tools (observed live: a bash-less child globbed for `pip` instead of saying "I have no
-    # shell"). The brief is built AFTER the loop so it prints the limits that loop will enforce
-    # (action_limit / time_limit), and names only the tools its registry holds: a name
-    # `from_allowed` skipped (a typo, a plugin not installed) must not be advertised.
-    action_limit, time_limit = child_loop.action_limit(), child_loop.time_limit()
-    actions = "no action limit" if action_limit == 0 else f"{action_limit} actions"
-    minutes = "no time limit" if time_limit == 0 else f"{time_limit:g} minutes"
-    held = [name for name in allowed if child_registry.has(name)]
-    task = prepend_toolset(f"Budget: {actions}, {minutes}.\n\n{task}", held, narrowed)
+        # Make the limits and the toolset explicit in the brief — small models attend weakly to absent
+        # tools (observed live: a bash-less child globbed for `pip` instead of saying "I have no
+        # shell"). The brief is built AFTER the loop so it prints the limits that loop will enforce
+        # (action_limit / time_limit), and names only the tools its registry holds: a name
+        # `from_allowed` skipped (a typo, a plugin not installed) must not be advertised.
+        action_limit, time_limit = child_loop.action_limit(), child_loop.time_limit()
+        actions = "no action limit" if action_limit == 0 else f"{action_limit} actions"
+        minutes = "no time limit" if time_limit == 0 else f"{time_limit:g} minutes"
+        held = [name for name in allowed if child_registry.has(name)]
+        task = prepend_toolset(f"Budget: {actions}, {minutes}.\n\n{task}", held, narrowed)
 
-    summary = await child_loop.run_turn(task)
-    tool_calls_used = _count_session_tool_calls(bus, child_loop.current_session_id)
-    return _delegation_result(
-        format_child_findings(agent_config.name, task, summary, tool_calls_used),
-        child_loop, bus, summary, tool_calls_used)
+        summary = await child_loop.run_turn(task)
+        tool_calls_used = _count_session_tool_calls(bus, child_loop.current_session_id)
+        return _delegation_result(
+            format_child_findings(agent_config.name, task, summary, tool_calls_used),
+            child_loop, bus, summary, tool_calls_used)
+    finally:
+        await asyncio.shield(release_agent_store_tools(child_registry, ctx._content_store))
 
 
 async def dispatch_explore_subagent(
@@ -1143,6 +1149,7 @@ async def dispatch_web_subagent(
         )
 
     from localharness.agent.loop import AgentLoop
+    from localharness.tools.builtin import release_agent_store_tools
     from localharness.tools.registry import ToolRegistry
 
     # config_override (when present) is the built-in base with an agents/web-researcher.yaml
@@ -1168,62 +1175,66 @@ async def dispatch_web_subagent(
 
     # A research run that called no tool produced no research. Fresh loop per attempt — the
     # retry must not inherit a context already anchored on the refusal it is correcting.
-    for attempt in range(1 + WEB_ZERO_CALL_RETRIES):
-        child_loop = AgentLoop(
-            config=child_config,
-            llm=llm,
-            bus=child_bus,
-            context_manager=_child_ctx_with_store_tools(context_manager, child_registry),
-            tool_registry=child_registry,
-            permission_evaluator=permission_evaluator,
-            gate=gate,
-            kill_file_path=_kill,
-            compact_md_path=_compact,
-            effort=effort, effort_ratios=effort_ratios,
-            template_margin_ratio=template_margin_ratio,
-            project_instructions=project_instructions,
-            server_recovery=server_recovery,
-            unattended_max_actions=unattended_max_actions,
-            budget_fallback=budget_fallback,
-            budget_labels=budget_labels,
-        )
-        _refuse_below_floor(child_config, child_registry, context_manager, llm)
-        if on_child_loop is not None:
-            on_child_loop(child_loop)  # every retry attempt rebinds the slot to the loop now running
-        if attempt == 0:
-            brief = task
-        elif narrowed:
-            brief = ("PREVIOUS ATTEMPT INVALID: you produced text without executing a single tool. "
-                     f"Your tools ({', '.join(_advertised_tools(child_registry, child_config))}) ARE "
-                     "available to you — begin by actually CALLING one of them (a real tool invocation, "
-                     f"not text that looks like one).\n\n{task}")
-        else:
-            brief = ZERO_CALL_RETRY_PREFIX + task
-        summary = await child_loop.run_turn(brief)
-        tool_calls_used = _count_session_tool_calls(bus, child_loop.current_session_id)
-        if tool_calls_used > 0:
-            return _delegation_result(format_web_findings(task, summary, tool_calls_used),
-                                      child_loop, bus, summary, tool_calls_used)
+    ctx = _child_ctx_with_store_tools(context_manager, child_registry)
+    try:
+        for attempt in range(1 + WEB_ZERO_CALL_RETRIES):
+            child_loop = AgentLoop(
+                config=child_config,
+                llm=llm,
+                bus=child_bus,
+                context_manager=ctx,
+                tool_registry=child_registry,
+                permission_evaluator=permission_evaluator,
+                gate=gate,
+                kill_file_path=_kill,
+                compact_md_path=_compact,
+                effort=effort, effort_ratios=effort_ratios,
+                template_margin_ratio=template_margin_ratio,
+                project_instructions=project_instructions,
+                server_recovery=server_recovery,
+                unattended_max_actions=unattended_max_actions,
+                budget_fallback=budget_fallback,
+                budget_labels=budget_labels,
+            )
+            _refuse_below_floor(child_config, child_registry, context_manager, llm)
+            if on_child_loop is not None:
+                on_child_loop(child_loop)  # every retry attempt rebinds the slot to the loop now running
+            if attempt == 0:
+                brief = task
+            elif narrowed:
+                brief = ("PREVIOUS ATTEMPT INVALID: you produced text without executing a single tool. "
+                         f"Your tools ({', '.join(_advertised_tools(child_registry, child_config))}) ARE "
+                         "available to you — begin by actually CALLING one of them (a real tool invocation, "
+                         f"not text that looks like one).\n\n{task}")
+            else:
+                brief = ZERO_CALL_RETRY_PREFIX + task
+            summary = await child_loop.run_turn(brief)
+            tool_calls_used = _count_session_tool_calls(bus, child_loop.current_session_id)
+            if tool_calls_used > 0:
+                return _delegation_result(format_web_findings(task, summary, tool_calls_used),
+                                          child_loop, bus, summary, tool_calls_used)
 
-    # Zero calls on every attempt: the text is fabrication-shaped, and a fabricated transcript
-    # labeled "failed" still reads like findings to a weak parent — so it is DISCARDED.
-    # Report what the child was ACTUALLY handed. Without this the parent infers a broken
-    # component from a zero-call run and "repairs" a toolset that was never empty — the live
-    # 2026-09-17 chain: false memory ("missing its search tool") -> source dive -> bash+ddgs
-    # bypass. The count is evidence, so the failure can never again be read as absence.
-    advertised = _advertised_tools(child_registry, child_config)
-    return DelegationResult((
-        f"SUBAGENT RUN FAILED (agent_id={child_config.name}, tool calls: 0 after "
-        f"{1 + WEB_ZERO_CALL_RETRIES} attempts). The researcher answered in prose without "
-        "executing any web tool, so it produced no evidence; its text was discarded. "
-        f"Its tools WERE advertised on every request: {advertised}. This is the model "
-        "DECLINING to call them, not a missing or broken tool — do not 'repair' the "
-        "web-researcher's toolset, and do not research this yourself with bash/curl. "
-        "Re-delegate once, or TELL THE USER the researcher is refusing and stop. Treat this "
-        "delegation as FAILED — do not present an answer to this task as researched."
-    ), status="failed", terminated_reason=getattr(child_loop, "last_terminated_reason", None),
-        tool_calls=0,
-        child_session_id=child_loop.current_session_id)
+        # Zero calls on every attempt: the text is fabrication-shaped, and a fabricated transcript
+        # labeled "failed" still reads like findings to a weak parent — so it is DISCARDED.
+        # Report what the child was ACTUALLY handed. Without this the parent infers a broken
+        # component from a zero-call run and "repairs" a toolset that was never empty — the live
+        # 2026-09-17 chain: false memory ("missing its search tool") -> source dive -> bash+ddgs
+        # bypass. The count is evidence, so the failure can never again be read as absence.
+        advertised = _advertised_tools(child_registry, child_config)
+        return DelegationResult((
+            f"SUBAGENT RUN FAILED (agent_id={child_config.name}, tool calls: 0 after "
+            f"{1 + WEB_ZERO_CALL_RETRIES} attempts). The researcher answered in prose without "
+            "executing any web tool, so it produced no evidence; its text was discarded. "
+            f"Its tools WERE advertised on every request: {advertised}. This is the model "
+            "DECLINING to call them, not a missing or broken tool — do not 'repair' the "
+            "web-researcher's toolset, and do not research this yourself with bash/curl. "
+            "Re-delegate once, or TELL THE USER the researcher is refusing and stop. Treat this "
+            "delegation as FAILED — do not present an answer to this task as researched."
+        ), status="failed", terminated_reason=getattr(child_loop, "last_terminated_reason", None),
+            tool_calls=0,
+            child_session_id=child_loop.current_session_id)
+    finally:
+        await asyncio.shield(release_agent_store_tools(child_registry, ctx._content_store))
 
 
 # --- search-verifier (P3): blind claim verification + keep-flag ledger --------------------------
@@ -1357,6 +1368,7 @@ async def dispatch_search_verifier_subagent(
         )
 
     from localharness.agent.loop import AgentLoop
+    from localharness.tools.builtin import release_agent_store_tools
     from localharness.tools.registry import ToolRegistry
 
     # config_override (when present) is the built-in base with an agents/search-verifier.yaml
@@ -1371,43 +1383,47 @@ async def dispatch_search_verifier_subagent(
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
 
     _kill, _compact = _child_runtime_paths(child_config, config_dir, state_dir=state_dir)
-    child_loop = AgentLoop(
-        config=child_config,
-        llm=llm,
-        bus=child_bus,
-        context_manager=_child_ctx_with_store_tools(context_manager, child_registry),
-        tool_registry=child_registry,
-        permission_evaluator=permission_evaluator,
-        gate=gate,
-        kill_file_path=_kill,
-        compact_md_path=_compact,
-        effort=effort, effort_ratios=effort_ratios,
-        template_margin_ratio=template_margin_ratio,
-        project_instructions=project_instructions,
-        server_recovery=server_recovery,
-        unattended_max_actions=unattended_max_actions,
-        budget_fallback=budget_fallback,
-        budget_labels=budget_labels,
-    )
-    _refuse_below_floor(child_config, child_registry, context_manager, llm)
-    if on_child_loop is not None:
-        on_child_loop(child_loop)
+    ctx = _child_ctx_with_store_tools(context_manager, child_registry)
+    try:
+        child_loop = AgentLoop(
+            config=child_config,
+            llm=llm,
+            bus=child_bus,
+            context_manager=ctx,
+            tool_registry=child_registry,
+            permission_evaluator=permission_evaluator,
+            gate=gate,
+            kill_file_path=_kill,
+            compact_md_path=_compact,
+            effort=effort, effort_ratios=effort_ratios,
+            template_margin_ratio=template_margin_ratio,
+            project_instructions=project_instructions,
+            server_recovery=server_recovery,
+            unattended_max_actions=unattended_max_actions,
+            budget_fallback=budget_fallback,
+            budget_labels=budget_labels,
+        )
+        _refuse_below_floor(child_config, child_registry, context_manager, llm)
+        if on_child_loop is not None:
+            on_child_loop(child_loop)
 
-    summary = await child_loop.run_turn(task)
-    tool_calls_used = _count_session_tool_calls(bus, child_loop.current_session_id)
+        summary = await child_loop.run_turn(task)
+        tool_calls_used = _count_session_tool_calls(bus, child_loop.current_session_id)
 
-    claim, entity, source_url = _parse_verifier_task(task)
-    verdict = _parse_verifier_verdict(summary)
-    if tool_calls_used == 0 and isinstance(verdict, dict):
-        # A verifier that opened no source verified nothing, whatever its prose claims —
-        # the same zero-call fabrication shape the web-researcher guards against.
-        verdict = {**verdict, "verdict": "UNVERIFIABLE",
-                   "evidence": "verifier made zero tool calls; verdict coerced"}
-    write_verification_ledger(
-        run_id=parent_session_id, claim=claim, entity=entity, source_url=source_url, verdict=verdict
-    )
-    return _delegation_result(format_verifier_flag(claim, entity, verdict, tool_calls_used),
-                              child_loop, bus, summary, tool_calls_used)
+        claim, entity, source_url = _parse_verifier_task(task)
+        verdict = _parse_verifier_verdict(summary)
+        if tool_calls_used == 0 and isinstance(verdict, dict):
+            # A verifier that opened no source verified nothing, whatever its prose claims —
+            # the same zero-call fabrication shape the web-researcher guards against.
+            verdict = {**verdict, "verdict": "UNVERIFIABLE",
+                       "evidence": "verifier made zero tool calls; verdict coerced"}
+        write_verification_ledger(
+            run_id=parent_session_id, claim=claim, entity=entity, source_url=source_url, verdict=verdict
+        )
+        return _delegation_result(format_verifier_flag(claim, entity, verdict, tool_calls_used),
+                                  child_loop, bus, summary, tool_calls_used)
+    finally:
+        await asyncio.shield(release_agent_store_tools(child_registry, ctx._content_store))
 
 
 def _count_session_tool_calls(bus: Any, session_id: str | None) -> int:
