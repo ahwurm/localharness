@@ -47,13 +47,15 @@ NO_DESCRIPTION = ("<path> has no description", "add a description: line saying w
 LONG_DESCRIPTION = ("<path> description is over 1024 characters", "shorten it to 1024 characters")
 MULTILINE_DESCRIPTION = ("<path> description is more than one line", "write it on one line")
 CONTROL_DESCRIPTION = ("<path> description holds a control character", "remove the control characters")
+BAD_PURPOSE = ("<path> purpose is not one line of plain text", "write purpose: on one line")
+BAD_TOOLS = ("<path> tools is not a list of tool names", "write tools: as a list of tool names")
 CAP_PROJECT = ("<dir> is past the 32 project skills kept", "remove project skills you do not need")
 CAP_TOTAL = ("<dir> is past the 64 skills kept", "remove skills you do not need")
 SHADOWED = ("<dir> is shadowed by <other>", "rename yours to keep both")
 RULES = (
     OVER_256, NOT_REGULAR, OUTSIDE, CONTROL_PATH, TOO_LARGE, UNREADABLE, NO_FRONTMATTER, UNPARSEABLE,
     ANCHORS, NOT_MAPPING, NO_NAME, BAD_NAME, LONG_NAME, NAME_DIR, BUNDLED_NAME, NO_DESCRIPTION,
-    LONG_DESCRIPTION, MULTILINE_DESCRIPTION, CONTROL_DESCRIPTION, CAP_PROJECT, CAP_TOTAL, SHADOWED,
+    LONG_DESCRIPTION, MULTILINE_DESCRIPTION, CONTROL_DESCRIPTION, BAD_PURPOSE, BAD_TOOLS, CAP_PROJECT, CAP_TOTAL, SHADOWED,
 )
 
 
@@ -64,6 +66,8 @@ class Skill:
     origin: str
     path: Path
     untrusted: bool
+    purpose: str = ""
+    tools: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -226,7 +230,21 @@ def _check(label: str, lexical_dir: Path, real_dir: Path, entry: str, bundled: f
         return _skip(MULTILINE_DESCRIPTION, skill_md.parent, path=skill_md)
     if _control(description):
         return _skip(CONTROL_DESCRIPTION, skill_md.parent, path=skill_md)
-    return Skill(name, description, label, skill_md, label == "project")
+    purpose = data.get("purpose")
+    if purpose is not None and not (
+        isinstance(purpose, str) and len(purpose) <= MAX_DESCRIPTION and not _control(purpose.removesuffix("\n"))
+    ):
+        return _skip(BAD_PURPOSE, skill_md.parent, path=skill_md)
+    tools = data.get("tools")
+    if tools is not None and not (
+        isinstance(tools, list)
+        and all(isinstance(t, str) and t and not any(c.isspace() for c in t) and not _control(t) for t in tools)
+    ):
+        return _skip(BAD_TOOLS, skill_md.parent, path=skill_md)
+    return Skill(
+        name, description, label, skill_md, label == "project",
+        (purpose or "").strip(), None if tools is None else tuple(dict.fromkeys(tools)),
+    )
 
 
 def read_skill(directory: Path, label: str) -> Skill | Skipped | None:

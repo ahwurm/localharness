@@ -383,7 +383,7 @@ def test_the_quoted_rules_comparison_bites() -> None:
     edited = [line.replace("rename yours to keep both", "rename it") for line in lines]
     swapped = [*lines[:first], lines[first + 1], lines[first], *lines[first + 2:]]
 
-    assert len(RULE_LINES) == 22
+    assert len(RULE_LINES) == 24
     for mutated in (dropped, edited, swapped):
         assert quoted_rules("\n".join(mutated)) != RULE_LINES
 

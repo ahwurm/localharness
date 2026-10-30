@@ -3,6 +3,8 @@
 ## Fields
 - `name`: lowercase letters and digits joined by single hyphens, at most 64 characters, equal to the directory name.
 - `description`: one line, at most 1024 characters, best at most 250. Avoid `: ` and ` #` inside it, or quote it.
+- `purpose`, optional: one line of plain text, at most 1024 characters. Nothing reads it yet.
+- `tools`, optional: a list of tool names. Nothing reads it yet.
 - Every other key is ignored. `allowed-tools` grants nothing.
 
 ## Layout
@@ -69,6 +71,8 @@ A project skill shadows a machine one of the same name. A bundled name cannot be
 - `skipped: <path> description is over 1024 characters. shorten it to 1024 characters.`
 - `skipped: <path> description is more than one line. write it on one line.`
 - `skipped: <path> description holds a control character. remove the control characters.`
+- `skipped: <path> purpose is not one line of plain text. write purpose: on one line.`
+- `skipped: <path> tools is not a list of tool names. write tools: as a list of tool names.`
 - `skipped: <dir> is past the 32 project skills kept. remove project skills you do not need.`
 - `skipped: <dir> is past the 64 skills kept. remove skills you do not need.`
 - `skipped: <dir> is shadowed by <other>. rename yours to keep both.`
