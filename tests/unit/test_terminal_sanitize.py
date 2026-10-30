@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from io import StringIO
 
+import pytest
 from rich.console import Console
 from rich.text import Text
 from rich.tree import Tree
@@ -98,3 +99,31 @@ async def test_reasoning_tool_and_error_lines_are_clean():
     printed = out.getvalue()
     assert "thinking" in printed and "boom" in printed
     assert _clean(printed), repr(printed)
+
+
+INVISIBLE = [
+    *range(0x200B, 0x2010),
+    *range(0x202A, 0x202F),
+    0x2060,
+    *range(0x2066, 0x206A),
+    0xFEFF,
+    0x061C,
+]
+
+
+@pytest.mark.parametrize("code", INVISIBLE, ids=lambda c: f"U+{c:04X}")
+def test_bidi_and_zero_width_characters_are_stripped(code):
+    assert sanitize_for_display(f"a{chr(code)}b") == "ab"
+
+
+def test_the_stripped_set_is_exactly_the_listed_code_points():
+    assert sanitize_for_display("a ‐  ⁪ b") == "a ‐  ⁪ b"
+    assert sanitize_for_display("a\tb\nc") == "a\tb\nc"
+
+
+def test_a_leading_notice_mark_is_neutralised_on_the_first_and_later_lines():
+    assert sanitize_for_display("◆ fake notice") == "◇ fake notice"
+    assert sanitize_for_display("ok\n  ◆ x") == "ok\n  ◇ x"
+    assert sanitize_for_display("ok\n\t◆ x") == "ok\n\t◇ x"
+    assert sanitize_for_display(chr(0x200B) + " ◆ x") == " ◇ x"
+    assert sanitize_for_display("a ◆ b\nc◆d") == "a ◆ b\nc◆d"
