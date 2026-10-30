@@ -287,3 +287,46 @@ async def test_a_woken_loop_stamps_the_counter_plus_one(tmp_path, bus, mock_llm_
                      compact_md_path=COMPACT_DISABLED, config_dir=tmp_path, turn=7)
     await loop.run_turn("hi")
     assert _humans(loop)[0]["_lh"]["turn"] == 8 and loop.turn == 8
+
+
+@pytest.mark.parametrize("planted,kept", [
+    (True, 0), ("5", 0), (5.0, 0), (-1, 0), (1_000_001, 0), (None, 0), (1_000_000, 1_000_000), (7, 7)])
+def test_the_wake_clamps_a_planted_counter(tmp_path, planted, kept):
+    path = _slept(tmp_path, turn=1)
+    record = json.loads(path.read_text())
+    record["turn"] = planted
+    path.write_text(json.dumps(record))
+    assert take_asleep(path, workspace="/w").turn == kept
+
+
+def _answer(text="done"):
+    return {"role": "assistant", "content": text, "tool_calls": None}
+
+
+def test_the_wake_restamps_every_human_origin_message_whatever_its_role(tmp_path):
+    def stamped(role, subtype, **extra):
+        return {"role": role, "content": "x", "_lh": {"origin": "human", "subtype": subtype, "turn": 3, **extra}}
+
+    harness = {"role": "user", "content": "n", "_lh": {"origin": "harness", "subtype": "act_guard"}}
+    plain = {"role": "user", "content": "no stamp"}
+    conversation = (stamped("user", "typed"), _answer(), stamped("user", "steering", extra="k"), _answer("b"),
+                    harness, plain, stamped("assistant", "typed"))
+    woken = take_asleep(_slept(tmp_path, conversation=conversation), workspace="/w").conversation
+    request = {"origin": "human", "subtype": "request"}
+    assert [m.get("_lh") for m in woken] == [request, None, request, None, harness["_lh"], None, request]
+    assert woken[4] == harness and woken[5] == plain and woken[1] == _answer()
+    assert [m["content"] for m in woken] == [m["content"] for m in conversation]
+
+
+def test_the_wake_leaves_the_in_memory_conversation_alone(tmp_path):
+    typed = {"role": "user", "content": "x", "_lh": {"origin": "human", "subtype": "typed", "turn": 3}}
+    conversation = (typed, _answer())
+    take_asleep(_slept(tmp_path, conversation=conversation), workspace="/w")
+    assert conversation[0]["_lh"] == {"origin": "human", "subtype": "typed", "turn": 3}
+
+
+def test_a_sleeping_sitting_is_read_from_a_file_holding_stamped_messages(tmp_path):
+    from localharness.cli.session_resume import sleeping_sitting
+
+    typed = {"role": "user", "content": "x", "_lh": {"origin": "human", "subtype": "typed", "turn": 3}}
+    assert sleeping_sitting(_slept(tmp_path, conversation=(typed, _answer()))) == "s"

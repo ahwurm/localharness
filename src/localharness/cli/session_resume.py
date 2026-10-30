@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from localharness.core.private_files import write_private_bytes
-from localharness.core.types import is_harness_message
+from localharness.core.types import MessageProvenance, is_harness_message
 
 log = logging.getLogger(__name__)
 
@@ -198,8 +198,16 @@ def _parse(record: Any) -> tuple[Resume, str]:
     workspace = record["workspace"]
     if not all(isinstance(v, str) for v in (*fields.values(), workspace)):
         raise ValueError("a text field is not text")
-    return Resume(action=SLEEP_ACTION, conversation=tuple(conversation), eviction_store=None,
+    return Resume(action=SLEEP_ACTION, conversation=tuple(map(_restamped, conversation)), eviction_store=None,
                   queued=(), turn=_turn(record.get("turn")), **fields), workspace
+
+
+def _restamped(message: dict) -> dict:
+    """A file cannot say who spoke: every message it labels human is the person's request, with no number."""
+    stamp = message.get("_lh")
+    if isinstance(stamp, dict) and stamp.get("origin") == "human":
+        return {**message, "_lh": MessageProvenance(origin="human", subtype="request")}
+    return message
 
 
 def _turn(value: Any) -> int:
