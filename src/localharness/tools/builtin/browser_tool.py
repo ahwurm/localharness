@@ -117,6 +117,16 @@ def _sweep_profiles() -> None:
                 shutil.rmtree(d, ignore_errors=True)
 
 
+def render_error(api, e: Exception, proxy: Proxy, refusals: int, navigating: bool) -> RenderError:
+    """A Playwright failure as the RenderError kind the model's line is chosen by; a refusal counted since `refusals` during a navigation is a redirect."""
+    if isinstance(e, api.TimeoutError):
+        return RenderError("timeout")
+    if "Download is starting" in str(e):
+        return RenderError("file")
+    log.info("browser_fetch render failed: %s", _first_line(e)[:200])
+    return RenderError("redirected" if navigating and proxy.refusals > refusals else "failed")
+
+
 async def _cost_route(route) -> None:
     await (route.abort() if route.request.resource_type in _SKIPPED_TYPES else route.continue_())
 
@@ -137,6 +147,8 @@ class BrowserRuntime:
         self._in_flight = 0
         self._idle: asyncio.TimerHandle | None = None
         self._idle_task: asyncio.Task | None = None
+        self._sessions: dict[int, Any] = {}
+        self._session_slot = asyncio.Semaphore(1)
         self._api: Any = None
         self._proxy: Proxy | None = None
         self._pw: Any = None
@@ -226,8 +238,30 @@ class BrowserRuntime:
                 return await self._render(browser, proxy, url)
         finally:
             self._in_flight -= 1
-            if not self._in_flight and self._browser is not None:
-                self._idle = asyncio.get_running_loop().call_later(self._idle_s, self._start_idle_close)
+            self._arm_idle()
+
+    async def take_slot(self) -> bool:
+        """The one session slot, without waiting; `browser_fetch`'s two slots are never held by a session."""
+        if self._session_slot.locked():
+            return False
+        await self._session_slot.acquire()
+        return True
+
+    def track(self, session) -> None:
+        self._cancel_idle()
+        self._sessions[id(session.store)] = session
+
+    def release(self, session) -> None:
+        if self._sessions.get(id(session.store)) is not session:
+            return
+        del self._sessions[id(session.store)]
+        self._session_slot.release()
+        self._arm_idle()
+
+    def _arm_idle(self) -> None:
+        if not (self._in_flight or self._sessions) and self._browser is not None:
+            self._cancel_idle()
+            self._idle = asyncio.get_running_loop().call_later(self._idle_s, self._start_idle_close)
 
     async def _new_context(self, browser) -> tuple[Any, RouteFlags]:
         """A context whose route aborts a non-GET document request (read-only convention, not a data-out control)."""
@@ -254,7 +288,7 @@ class BrowserRuntime:
         return context, flags
 
     async def _render(self, browser, proxy: Proxy, url: str) -> Rendered:
-        api, context, navigating = self._api, None, False
+        api, context, navigating, refusals = self._api, None, False, 0
         try:
             context, _ = await self._new_context(browser)
             page = await context.new_page()
@@ -270,13 +304,8 @@ class BrowserRuntime:
             capped, text = got
             text = re.sub(r"\n\s*\n\s*\n+", "\n\n", re.sub(r"[ \t]+", " ", text[:FETCH_MAX_BODY_BYTES])).strip()
             return Rendered(page.url, response.status if response else 200, text, capped)
-        except api.TimeoutError:
-            raise RenderError("timeout") from None
-        except api.Error as e:
-            if "Download is starting" in str(e):
-                raise RenderError("file") from None
-            log.info("browser_fetch render failed: %s", _first_line(e)[:200])
-            raise RenderError("redirected" if navigating and proxy.refusals > refusals else "failed") from None
+        except (api.TimeoutError, api.Error) as e:
+            raise render_error(api, e, proxy, refusals, navigating) from None
         finally:
             if context is not None:
                 with contextlib.suppress(Exception):
@@ -292,7 +321,7 @@ class BrowserRuntime:
 
     async def _close_if_idle(self) -> None:
         async with self._lock:
-            if not self._in_flight:
+            if not (self._in_flight or self._sessions):
                 await self._teardown()
 
     async def close(self) -> None:
@@ -302,6 +331,8 @@ class BrowserRuntime:
 
     async def _teardown(self) -> None:
         owned, self._browser, self._pw, self._proxy = (self._browser, self._pw, self._proxy), None, None, None
+        for session in [x for x in self._sessions.values() if x.context is not None]:
+            await session.close()
         for handle, stop in zip(owned, ("close", "stop", "close")):
             if handle is not None:
                 with contextlib.suppress(Exception):
@@ -329,6 +360,28 @@ _EMPTY = ("[rendered text is under 80 characters — the page is empty or blocki
 _NOT_AVAILABLE = ("browser_fetch is not available on this machine ({reason}); use the search snippet or another source. "
                   "The person can run `localharness doctor`.")
 
+def fail(message: str, error_type: str = "execution_error") -> ToolResult:
+    return ToolResult(output="", success=False, error=message, error_type=error_type)  # type: ignore[arg-type]
+
+
+async def refusal(url: str) -> ToolResult | None:
+    """The result that turns a non-https or non-public URL away before any browser work, or None."""
+    if not url.lower().startswith("https://"):
+        return fail(_NOT_HTTPS, "validation_error")
+    try:
+        await netguard.check(url, allow_private=False)
+    except netguard.NotPublic as exc:
+        return fail(_NOT_PUBLIC.format(host=exc.host), "validation_error")
+    except netguard.Refused as exc:
+        return fail(f"{exc} {_NO_RETRY}", "validation_error")
+    return None
+
+
+def render_line(e: RenderError) -> str:
+    return {"timeout": _TIMED_OUT, "file": _FILE, "unavailable": _NOT_AVAILABLE.format(reason=e.detail),
+            "redirected": _REDIRECTED}.get(e.kind) or _FAILED
+
+
 _WEB = WebFetchTool(store=object()).info().parameters
 _PARAMETERS = {**_WEB, "properties": {
     **_WEB["properties"], "url": {**_WEB["properties"]["url"], "description": "The https URL to render."}}}
@@ -352,19 +405,12 @@ class BrowserFetchTool(Tool):
         return BrowserFetchTool(self._runtime, store)
 
     async def _execute(self, url: str, max_chars: int = FETCH_DEFAULT_CHARS, start_index: int = 0) -> ToolResult:
-        if not url.lower().startswith("https://"):
-            return self.err(_NOT_HTTPS, error_type="validation_error")
-        try:
-            await netguard.check(url, allow_private=False)
-        except netguard.NotPublic as exc:
-            return self.err(_NOT_PUBLIC.format(host=exc.host), error_type="validation_error")
-        except netguard.Refused as exc:
-            return self.err(f"{exc} {_NO_RETRY}", error_type="validation_error")
+        if refused := await refusal(url):
+            return refused
         try:
             page = await self._runtime.render(url)
         except RenderError as e:
-            return self.err({"timeout": _TIMED_OUT, "file": _FILE, "unavailable": _NOT_AVAILABLE.format(reason=e.detail),
-                             "redirected": _REDIRECTED}.get(e.kind) or _FAILED)
+            return self.err(render_line(e))
         if page.status >= 400:
             return self.err(_HTTP_FAILED.format(status=page.status))
         if len(page.text.strip()) < 80:
