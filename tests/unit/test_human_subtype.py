@@ -234,3 +234,23 @@ def _count_in_source(literal):
 
 def test_steering_is_spelled_at_exactly_the_two_nudge_sites():
     assert _count_in_source('"steering"') == {"cli/repl.py": 2}
+
+
+@pytest.mark.asyncio
+async def test_acp_prompt_runs_typed_and_an_idle_approve_follow_up_runs_request(tmp_path, monkeypatch):
+    from tests.unit.test_instructions_channels import _block, _handle, _prompt_channel
+
+    channel, _ = _prompt_channel(tmp_path, _handle(tmp_path))
+
+    async def approved(verb, arg):
+        return "Human approved pending #1."
+
+    monkeypatch.setattr(channel, "_run_pending_command", approved)
+    await channel.prompt("sess", _block("hello"))
+    await channel.prompt("sess", _block("/approve 1"))
+    assert channel._agent_loop.turns == ["hello", "Human approved pending #1."]
+    assert channel._agent_loop.subtypes == ["typed", "request"]
+
+
+def test_typed_is_spelled_at_the_repl_input_path_and_the_acp_prompt_only():
+    assert _count_in_source('"typed"') == {"cli/repl.py": 1, "channels/acp.py": 1}

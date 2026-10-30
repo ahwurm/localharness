@@ -147,7 +147,7 @@ async def test_without_the_attribute_the_bare_word_is_a_message(tmp_path):
     repl = _repl(channel, gate)
     started: list[str] = []
 
-    async def _turn(task, on_token=None):
+    async def _turn(task, on_token=None, **kw):
         started.append(task)
         return "done"
 

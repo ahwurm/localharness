@@ -764,7 +764,8 @@ class AcpChannel(ChannelAdapter):
 
         self._streamed_this_turn = False
         task = asyncio.create_task(
-            self._agent_loop.run_turn(task=text, on_token=self._on_token, images=images))
+            self._agent_loop.run_turn(task=text, on_token=self._on_token, images=images,
+                                      subtype="request" if verb else "typed"))
         self._turn_task = task
         try:
             # `asyncio.wait` rather than `await task`: a cancelled turn must be reported as

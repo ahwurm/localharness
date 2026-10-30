@@ -139,7 +139,7 @@ class TestSubmitPolicy:
         await _pending_turn(repl)
         try:
             await repl._handle_box_event("submit", "stop, wrong file")
-            agent.push_user_nudge.assert_called_once_with("stop, wrong file")
+            agent.push_user_nudge.assert_called_once_with("stop, wrong file", "steering")
             assert any("nudging" in f for f in ch.flashes)
             assert not repl._fifo
         finally:
@@ -162,7 +162,7 @@ class TestSubmitPolicy:
         await _pending_turn(repl)
         try:
             await repl._handle_box_event("submit", "!keep going anyway")
-            agent.push_user_nudge.assert_called_once_with("keep going anyway")
+            agent.push_user_nudge.assert_called_once_with("keep going anyway", "steering")
         finally:
             repl._turn_task.cancel()
 

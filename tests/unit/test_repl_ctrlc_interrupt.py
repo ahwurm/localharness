@@ -58,7 +58,7 @@ def test_ctrl_c_during_turn_cancels_turn_not_session():
     turn_started = asyncio.Event()
     cancelled_inside = False
 
-    async def hanging_turn(task, on_token=None):
+    async def hanging_turn(task, on_token=None, **kw):
         turn_started.set()
         try:
             await asyncio.sleep(100)  # in-flight; hangs until cancelled
@@ -96,7 +96,7 @@ def test_ctrl_c_during_turn_cancels_turn_not_session():
 def test_second_ctrl_c_restores_default_sigint_escape_hatch():
     turn_started = asyncio.Event()
 
-    async def hanging_turn(task, on_token=None):
+    async def hanging_turn(task, on_token=None, **kw):
         turn_started.set()
         await asyncio.sleep(100)
 
@@ -133,7 +133,7 @@ def test_ctrl_c_during_turn_reaps_the_turns_bash_child(tmp_path):
     pidfile = tmp_path / "child.pid"
     turn_started = asyncio.Event()
 
-    async def bash_turn(task, on_token=None):
+    async def bash_turn(task, on_token=None, **kw):
         turn_started.set()
         await BashExecTool().run(command=f"echo $$ > {pidfile}; exec sleep 30", timeout_s=30)
 
@@ -245,7 +245,7 @@ def test_the_turn_handler_puts_back_the_sigint_handler_it_found():
     def marker(signum, frame):  # stands in for uvicorn's handle_exit
         pass
 
-    async def quick_turn(task, on_token=None):
+    async def quick_turn(task, on_token=None, **kw):
         await asyncio.sleep(0)
         return "done"
 
