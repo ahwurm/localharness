@@ -133,7 +133,7 @@ def test_with_a_layer_the_project_line_comes_first_and_the_directories_are_relat
 async def test_no_delegated_agent_holds_skill_or_task(tmp_path):
     reg = await _production_registry()
     state = TaskState(None, workspace=str(tmp_path))
-    await reg.register(SkillTool(_notes(tmp_path), ContentStore(), state, result_cap=lambda: 50_000), scope="global")
+    await reg.register(SkillTool(_notes(tmp_path), ContentStore(), result_cap=lambda: 50_000), scope="global")
     await reg.register(TaskTool(state), scope="global")
     names = {*BUILTIN_AGENT_NAMES, *subagent._STATIC_TOOLSETS, *subagent._WEB_ROLES}
     for name in names:

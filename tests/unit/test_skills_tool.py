@@ -1,7 +1,6 @@
 """The skill tool and its seams: schema, results, retention, taint and task references."""
 import ast
 import inspect
-import json
 import textwrap
 from types import SimpleNamespace
 from typing import get_args
@@ -21,7 +20,7 @@ from localharness.tools.base import Tool, ToolResult, ToolSchema
 from localharness.tools.builtin.chunk_tool import ChunkTool
 from localharness.tools.builtin.cruncher_exec import UntrustedHandleError, bind_clean_origin_bodies
 from localharness.core.fence import TAG
-from localharness.tools.builtin.skill_tool import SKILLS_FENCE_HEADER, STEP_FULL_TAIL, TASK_FULL_TAIL, SkillTool, skill_schema
+from localharness.tools.builtin.skill_tool import SKILLS_FENCE_HEADER, STEP_FULL_TAIL, SkillTool, skill_schema
 from localharness.tools.builtin.task_tool import TaskTool
 from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
 from localharness.tools.capabilities import GrantTargetError
@@ -114,85 +113,6 @@ def fill(store, step, *names):
         store.declare_active_reference(step, store.put(name), name)
 
 
-async def test_room_without_a_live_task_answers_none_with_the_source_as_step(tmp_path):
-    assert TaskState().room(ContentStore(), "skill x") == ("skill x", "none", True)
-    state, tool = tool_for(tmp_path)
-    await start(tool)
-    store = ContentStore()
-    state.paused = True
-    assert state.room(store, "skill x") == ("skill x", "none", True)
-    state.paused = False
-    state.current.retired = True
-    assert state.room(store, "skill x") == ("skill x", "none", True)
-    state.current.retired = False
-    state.current.closed = True
-    assert state.room(store, "skill x") == ("skill x", "none", True)
-
-
-async def test_room_names_the_step_a_refresh_would_declare(tmp_path):
-    state, tool = tool_for(tmp_path)
-    await start(tool)
-    store = ContentStore()
-    assert state.room(store, "skill x") == (f"task {state.current.id}", "add", True)
-    store.declare_active_reference("build", store.put("a"), "a")
-    assert state.room(store, "skill x") == ("build", "add", True)
-
-
-async def test_room_task_answer_at_three_and_four_references(tmp_path):
-    state, tool = tool_for(tmp_path)
-    await start(tool)
-    store = ContentStore()
-    for name in ("a", "b", "c"):
-        state.add_reference(Reference(name, handle=name))
-    assert state.room(store, "skill x")[1] == "add"
-    state.add_reference(Reference("d", handle="d"))
-    assert state.room(store, "skill x")[1] == "full"
-    assert state.room(store, "d")[1] == "replace"
-
-
-async def test_room_store_answer_at_three_and_four_sources(tmp_path):
-    state, tool = tool_for(tmp_path)
-    await start(tool)
-    store = ContentStore()
-    fill(store, "build", "a", "b", "c")
-    assert state.room(store, "skill x") == ("build", "add", True)
-    fill(store, "build", "d")
-    assert state.room(store, "skill x") == ("build", "add", False)
-    store.clear_active_references()
-    fill(store, "build", "a", "b", "c", "skill x")
-    assert state.room(store, "skill x")[2] is True
-
-
-async def test_room_with_no_task_ignores_a_full_set_of_another_step(tmp_path):
-    store = ContentStore()
-    fill(store, "task 7", "a", "b", "c", "d")
-    assert TaskState().room(store, "skill x") == ("skill x", "none", True)
-
-
-async def test_room_compares_sources_as_exact_strings(tmp_path):
-    state, tool = tool_for(tmp_path)
-    await start(tool)
-    state.add_reference(Reference("skill Release", handle="r"))
-    store = ContentStore()
-    assert state.room(store, "skill release")[1] == "add"
-    assert state.room(store, "skill Release")[1] == "replace"
-    fill(store, "build", "skill Release", "b", "c", "d")
-    assert state.room(store, "skill release")[2] is False
-
-
-async def test_room_changes_nothing_and_repeats(tmp_path):
-    state, tool = tool_for(tmp_path)
-    await start(tool)
-    state.add_reference(Reference("a", handle="a"))
-    store = ContentStore()
-    fill(store, "build", "a", "b")
-    seen = (store.active_step, store.active_references, list(state.current.references), state.path.read_bytes())
-    first = state.room(store, "skill x")
-    assert state.room(store, "skill x") == first
-    assert seen == (store.active_step, store.active_references, list(state.current.references),
-                    state.path.read_bytes())
-
-
 MARKER = "\n... [output cut: 2000 chars total — head kept] ..."
 
 
@@ -248,7 +168,7 @@ def discovered(dirs):
 
 
 def skill_tool(tmp_path, found, cap=50_000, store=None):
-    return SkillTool(found, store or ContentStore(), TaskState(tmp_path / "task.json", workspace=str(tmp_path)), lambda: cap)
+    return SkillTool(found, store or ContentStore(), lambda: cap)
 
 
 async def test_the_skill_tool_loads_a_bundled_body_without_its_frontmatter(tmp_path, dirs):
@@ -451,32 +371,18 @@ async def test_a_project_body_is_stored_untrusted_and_a_bundled_body_trusted(tmp
 STEP_TAIL = "\n\n" + STEP_FULL_TAIL
 
 
-def task_tail(name):
-    return "\n\n" + TASK_FULL_TAIL.format(name=name)
-
-
-def reserve(name):
-    return len(STEP_TAIL + task_tail(name))
+def reserve():
+    return len(STEP_TAIL)
 
 
 def sized(directory, name, n, char="x"):
     return _skill(directory, name, f"---\nname: {name}\ndescription: Use it.\n---\n{char * n}\n")
 
 
-async def live(tmp_path, found, store, cap=50_000, workspace=None):
-    state, task = tool_for(workspace or tmp_path)
-    await start(task)
-    return state, task, SkillTool(found, store, state, lambda: cap)
-
-
-def test_the_tails_are_exactly_the_words_the_model_acts_on():
+def test_the_tail_is_exactly_the_words_the_model_acts_on():
     assert STEP_FULL_TAIL == (
         "[not pinned: this step already holds four references, so this skill may be evicted before you finish; "
         "if it is, the eviction note names the tool_result_get id that restores it]"
-    )
-    assert TASK_FULL_TAIL == (
-        "[not kept across turns: the task already holds four references; to keep it, drop one with "
-        'task(action="reference", source="<source>", drop=true), then call skill(\'{name}\') again]'
     )
 
 
@@ -484,7 +390,7 @@ async def test_the_tool_cuts_with_the_registry_helper_so_the_registry_never_cuts
     cap = 2000
 
     def room_for(name, directory, extra):
-        whole = cap - reserve(name)
+        whole = cap - reserve()
         sized(directory, name, whole - len(header(name, "bundled", directory)) - 2 + extra)
         return whole
 
@@ -497,18 +403,18 @@ async def test_the_tool_cuts_with_the_registry_helper_so_the_registry_never_cuts
     whole = room_for("exact", dirs.bundled, 0)
     over_whole = room_for("over", dirs.bundled, 1)
     sized(dirs.project, "projected", 5000)
-    await registry.register(SkillTool(discovered(dirs), store, TaskState(), lambda: cap), scope="global")
+    await registry.register(SkillTool(discovered(dirs), store, lambda: cap), scope="global")
 
     async def load(name):
         return await registry.dispatch("skill", {"name": name}, "agent-1", "div-1", config)
 
     exact = await load("exact")
-    (active,) = store.active_references
+    active = store.active_references[-1]
     assert (exact.truncated, len(exact.output), exact.output == store.get(active.handle)) == (False, whole, True)
     assert exact.output.endswith("x")
 
     over = await load("over")
-    (active,) = store.active_references
+    active = store.active_references[-1]
     assert over.output == store.get(active.handle) and len(over.output) == over_whole <= cap
     assert over.truncated is True and over.original_length == over_whole + 1
     body_whole = over_whole + 1 - len(header("over", "bundled", dirs.bundled)) - 2
@@ -516,7 +422,7 @@ async def test_the_tool_cuts_with_the_registry_helper_so_the_registry_never_cuts
 
     puts.clear()
     projected = await load("projected")
-    (active,) = store.active_references
+    active = store.active_references[-1]
     assert projected.truncated is True and projected.output == store.get(active.handle) and len(projected.output) <= cap
     assert puts == ["untrusted"] and store.origin(active.handle) == "untrusted"
     closing = f"</project-instructions {TAG}>"
@@ -535,7 +441,7 @@ async def test_a_full_step_gets_the_step_tail_and_no_pin(tmp_path, dirs):
     _skill(dirs.bundled, "notes")
     _skill(dirs.project, "release-notes")
     store = ContentStore()
-    _, _, tool = await live(tmp_path, discovered(dirs), store)
+    tool = skill_tool(tmp_path, discovered(dirs), store=store)
     for name in ("notes", "release-notes"):
         store.clear_active_references()
         fill(store, "build", *"abcd")
@@ -544,72 +450,41 @@ async def test_a_full_step_gets_the_step_tail_and_no_pin(tmp_path, dirs):
         store.put = lambda body, origin="trusted", **kw: (puts.append(origin), real_put(body, origin=origin, **kw))[1]
         result = await tool.run(name=name)
         store.put = real_put
-        assert result.output.endswith(STEP_TAIL) and "[not kept" not in result.output
+        assert result.output.endswith(STEP_TAIL)
         assert store.active_references == before
         assert puts == ["untrusted" if name == "release-notes" else "trusted"]
         assert store.get(ContentStore().put(result.output)) == result.output
 
 
-async def test_a_full_task_gets_the_task_tail_and_keeps_its_references(tmp_path, dirs):
-    _skill(dirs.bundled, "notes")
-    store = ContentStore()
-    state, _, tool = await live(tmp_path, discovered(dirs), store)
-    for name in "abcd":
-        state.add_reference(Reference(name, handle=name))
-    result = await tool.run(name="notes")
-    assert result.output.endswith(task_tail("notes")) and STEP_FULL_TAIL not in result.output
-    assert sources(state) == list("abcd")
-    (active,) = store.active_references
-    assert (active.source, store.get(active.handle)) == ("skill notes", result.output)
-
-    store.clear_active_references()
-    fill(store, "build", *"abcd")
-    both = await tool.run(name="notes")
-    assert both.output.endswith(STEP_TAIL + task_tail("notes"))
-    assert [a.source for a in store.active_references] == list("abcd") and sources(state) == list("abcd")
-
-
 @pytest.mark.parametrize("already", [3, 4])
-async def test_the_fourth_pin_and_the_fourth_reference_fit_and_the_fifth_does_not(tmp_path, dirs, already):
+async def test_the_fourth_pin_fits_and_the_fifth_does_not(tmp_path, dirs, already):
     _skill(dirs.bundled, "notes")
     store = ContentStore()
-    state, _, tool = await live(tmp_path, discovered(dirs), store)
     fill(store, "build", *"abcd"[:already])
-    for name in "abcd"[:already]:
-        state.add_reference(Reference(name, handle=name))
-    result = await tool.run(name="notes")
-    pinned, kept = "skill notes" in [a.source for a in store.active_references], "skill notes" in sources(state)
-    assert (pinned, kept) == (already == 3, already == 3)
-    assert (STEP_FULL_TAIL in result.output, TASK_FULL_TAIL.split("{")[0] in result.output) == (already == 4, already == 4)
+    result = await skill_tool(tmp_path, discovered(dirs), store=store).run(name="notes")
+    assert ("skill notes" in [a.source for a in store.active_references], STEP_FULL_TAIL in result.output) == (
+        already == 3, already == 4)
 
 
-async def test_both_tails_fit_the_cap_for_the_longest_name(tmp_path, dirs):
+async def test_the_step_tail_fits_the_cap_for_the_longest_name(tmp_path, dirs):
     name, cap = "a" * 64, 2000
     sized(dirs.bundled, name, 5000)
     store = ContentStore()
-    state, _, tool = await live(tmp_path, discovered(dirs), store, cap=cap)
     fill(store, "build", *"abcd")
-    for n in "abcd":
-        state.add_reference(Reference(n, handle=n))
-    result = await tool.run(name=name)
-    assert len(result.output) <= cap
-    assert result.output.endswith(STEP_TAIL + task_tail(name))
-    head = result.output[: -len(STEP_TAIL + task_tail(name))]
-    assert len(head) == cap - reserve(name) and head.endswith("chars total — head kept] ...")
+    result = await skill_tool(tmp_path, discovered(dirs), cap=cap, store=store).run(name=name)
+    assert len(result.output) <= cap and result.output.endswith(STEP_TAIL)
+    head = result.output[: -len(STEP_TAIL)]
+    assert len(head) == cap - reserve() and head.endswith("chars total — head kept] ...")
 
 
-async def test_an_over_cap_project_body_keeps_its_closing_marker_and_the_tails_follow_it(tmp_path, dirs):
+async def test_an_over_cap_project_body_keeps_its_closing_marker_and_the_step_tail_follows_it(tmp_path, dirs):
     cap, closing = 2000, f"</project-instructions {TAG}>"
     sized(dirs.project, "big", 5000)
     store = ContentStore()
-    state, _, tool = await live(tmp_path, discovered(dirs), store, cap=cap)
     fill(store, "build", *"abcd")
-    for n in "abcd":
-        state.add_reference(Reference(n, handle=n))
-    out = (await tool.run(name="big")).output
-    tails = STEP_TAIL + task_tail("big")
-    assert len(out) <= cap and out.endswith(tails)
-    fenced = out[: -len(tails)]
+    out = (await skill_tool(tmp_path, discovered(dirs), cap=cap, store=store).run(name="big")).output
+    assert len(out) <= cap and out.endswith(STEP_TAIL)
+    fenced = out[: -len(STEP_TAIL)]
     assert fenced.endswith(closing) and fenced.count(closing) == 1
     assert fenced.index("[output cut:") < fenced.index(closing)
 
@@ -618,60 +493,36 @@ async def test_lengths_count_code_points_and_the_handle_is_the_hash_of_the_deliv
     sized(dirs.bundled, "notes", 5000, char="é")
     store = ContentStore()
     result = await skill_tool(tmp_path, discovered(dirs), cap=2000, store=store).run(name="notes")
-    assert len(result.output) == 2000 - reserve("notes") and result.output.count("é") > 1000
+    assert len(result.output) == 2000 - reserve() and result.output.count("é") > 1000
     (active,) = store.active_references
     assert active.handle == ContentStore().put(result.output) and store.get(active.handle) == result.output
 
 
-async def test_a_load_in_a_live_task_is_a_handle_reference_that_both_keepers_share(tmp_path, dirs):
-    _skill(dirs.bundled, "notes")
-    store = ContentStore()
-    state, task, tool = await live(tmp_path, discovered(dirs), store)
-    state.add_reference(Reference("first", handle="first"))
-    result = await tool.run(name="notes")
-    (active,) = store.active_references
-    reference = state.current.references[-1]
-    assert reference.path is None and reference.source == "skill notes"
-    assert reference.handle == active.handle == ContentStore().put(result.output)
-    assert store.get(reference.handle) == result.output
-
-    again = await tool.run(name="notes")
-    assert again.output == result.output and sources(state) == ["first", "skill notes"]
-    assert [a.source for a in store.active_references] == ["skill notes"]
-    assert state.current.references[1].handle == reference.handle
-
-    await task.run(action="reference", source="saved", handle=reference.handle)
-    saved = json.loads(state.path.read_text())["references"]
-    assert set(saved[-1]) == set(saved[-2])
-
-
-async def test_a_model_reference_of_the_same_source_is_replaced_and_a_neighbour_is_not(tmp_path, dirs):
-    _skill(dirs.bundled, "notes")
-    state, _, tool = await live(tmp_path, discovered(dirs), ContentStore())
-    state.add_reference(Reference("skill notes", handle="old"))
-    state.add_reference(Reference("skill notes-2", handle="two"))
-    result = await tool.run(name="notes")
-    assert sources(state) == ["skill notes", "skill notes-2"]
-    assert state.current.references[0].handle != "old" and state.current.references[1].handle == "two"
-    assert ContentStore().put(result.output) == state.current.references[0].handle
-
-
-@pytest.mark.parametrize("mode", ["none", "paused", "retired"])
-async def test_no_live_task_means_no_reference_and_no_task_tail(tmp_path, dirs, mode):
+async def test_a_load_in_a_live_task_leaves_the_records_references_unchanged(tmp_path, dirs):
     _skill(dirs.bundled, "notes")
     state, task = tool_for(tmp_path)
-    if mode != "none":
-        await start(task)
-        state.paused = mode == "paused"
-        state.current.retired = mode == "retired"
-    before = state.path.read_bytes() if state.path.exists() else None
+    await start(task)
+    state.add_reference(Reference("first", handle="first"))
+    before = state.path.read_bytes()
     store = ContentStore()
-    result = await SkillTool(discovered(dirs), store, state, lambda: 50_000).run(name="notes")
-    assert "[not" not in result.output
-    assert (state.path.read_bytes() if state.path.exists() else None) == before
-    assert [a.source for a in store.active_references] == ["skill notes"] and store.active_step == "skill notes"
-    if mode == "none":
-        assert state.current is None and not state.path.exists()
+    tool = skill_tool(tmp_path, discovered(dirs), store=store)
+    result = await tool.run(name="notes")
+    again = await tool.run(name="notes")
+    assert again.output == result.output
+    assert sources(state) == ["first"] and state.path.read_bytes() == before
+    (active,) = store.active_references
+    assert (active.source, store.get(active.handle)) == ("skill notes", result.output)
+
+
+async def test_a_reload_replaces_its_own_source_in_the_step_and_not_a_neighbour(tmp_path, dirs):
+    _skill(dirs.bundled, "notes")
+    store = ContentStore()
+    fill(store, "build", "skill notes", "skill notes-2")
+    neighbour = store.active_references[1]
+    result = await skill_tool(tmp_path, discovered(dirs), store=store).run(name="notes")
+    ours, other = store.active_references
+    assert (ours.source, other) == ("skill notes", neighbour) and store.get(ours.handle) == result.output
+    assert store.active_step == "build"
 
 
 async def test_a_frontmatter_only_skill_is_stored_and_declared(tmp_path, dirs):
@@ -682,35 +533,26 @@ async def test_a_frontmatter_only_skill_is_stored_and_declared(tmp_path, dirs):
     assert result.output == header("bare", "bundled", dirs.bundled) + "\n\n" and store.get(active.handle) == result.output
 
 
-async def test_capacity_is_asked_once_before_anything_is_stored(tmp_path, dirs, monkeypatch):
+async def test_capacity_is_asked_of_the_store_once_before_anything_is_stored(tmp_path, dirs, monkeypatch):
     _skill(dirs.bundled, "notes")
     store = ContentStore()
-    state, _, tool = await live(tmp_path, discovered(dirs), store)
+    tool = skill_tool(tmp_path, discovered(dirs), store=store)
     calls = []
-    room, put = state.room, store.put
-    monkeypatch.setattr(state, "room", lambda *a: (calls.append("room"), room(*a))[1])
+    room, put = store.room, store.put
+    monkeypatch.setattr(store, "room", lambda *a: (calls.append("room"), room(*a))[1])
     monkeypatch.setattr(store, "put", lambda *a, **k: (calls.append("put"), put(*a, **k))[1])
     await tool.run(name="notes")
     assert calls == ["room", "put"]
 
 
-async def test_a_bundled_skill_reference_survives_refresh_and_reads_unavailable_after_restart(tmp_path, dirs):
+async def test_a_bundled_skill_body_outlives_its_pin_and_reads_unavailable_in_a_fresh_store(tmp_path, dirs):
     _skill(dirs.bundled, "notes")
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
     store = ContentStore()
-    state, _, tool = await live(tmp_path, discovered(dirs), store, workspace=workspace)
-    assert not dirs.bundled.is_relative_to(workspace)
-    result = await tool.run(name="notes")
+    result = await skill_tool(tmp_path, discovered(dirs), store=store).run(name="notes")
+    (active,) = store.active_references
     store.clear_active_references()
-    state.refresh_references(store)
-    reference = state.current.references[0]
-    assert reference.status == "current" and reference.path is None
-    assert [(a.source, store.get(a.handle)) for a in store.active_references] == [("skill notes", result.output)]
-
-    restarted = TaskState.load(state.path, str(workspace))[0]
-    restarted.refresh_references(ContentStore())
-    assert restarted.current.references[0].status == "unavailable; read it again"
+    assert store.get(active.handle) == result.output
+    assert ContentStore().get(active.handle) is None
 
 
 async def both_loaded(tmp_path, dirs, store):
@@ -720,7 +562,7 @@ async def both_loaded(tmp_path, dirs, store):
     loaded = {}
     for name in ("notes", "release-notes"):
         result = await tool.run(name=name)
-        loaded[name] = (result.output, store.active_references[0].handle)
+        loaded[name] = (result.output, store.active_references[-1].handle)
     return loaded
 
 

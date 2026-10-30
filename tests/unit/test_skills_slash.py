@@ -722,12 +722,9 @@ async def test_a_word_longer_than_a_row_name_is_looked_up_and_a_row_backed_word_
 
 async def test_the_listing_and_the_enum_stay_as_start_fixed_them(terminal, monkeypatch, tmp_path):
     from localharness.agent.context import ContentStore
-    from localharness.agent.task_record import TaskState
     from localharness.tools.builtin import skill_tool
 
-    tool = skill_tool.SkillTool(
-        terminal.found, ContentStore(), TaskState(tmp_path / "task.json", workspace=str(tmp_path)), lambda: 10_000,
-    )
+    tool = skill_tool.SkillTool(terminal.found, ContentStore(), lambda: 10_000)
     assert tool.info().parameters["properties"]["name"]["enum"] == ["notes"]
     write_skill(terminal.cfg / "skills", "fresh")
     with monkeypatch.context() as m:
@@ -793,7 +790,7 @@ async def test_a_start_with_a_skill_hands_one_warmed_holder_to_the_loop_and_the_
     await _start_async(None, False, False, str(tmp_path))
     holder = seen["agent"]._affordances
     assert isinstance(holder, Affordances) and warmed == [holder]
-    assert seen["session"]._affordances is holder and holder._task_state is seen["tool"]._state
+    assert seen["session"]._affordances is holder
 
 
 async def test_a_root_denied_the_skill_tool_gets_no_holder(tmp_path, pkg, rows, monkeypatch):

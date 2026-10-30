@@ -337,6 +337,18 @@ class ContentStore:
         self.active_step = None
         self._active_references.clear()
 
+    def room(self, source: str) -> tuple[str, bool]:
+        """The step a declaration of `source` would join and whether that step has room for it."""
+        step = self.active_step or source
+        held = self._active_references.keys() if self.active_step == step else ()
+        return step, source in held or len(held) < MAX_ACTIVE_REFERENCES
+
+    def withdraw(self) -> bool:
+        """Clear the active set; True when it held any reference."""
+        held = bool(self._active_references)
+        self.clear_active_references()
+        return held
+
     def declare_active_reference(self, step: str, handle: str, source: str | None = None) -> None:
         """Opt in a stored snapshot for one bounded step, replacing this source's revision.
 

@@ -3153,7 +3153,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         await tool_registry.register(TaskTool(task_state), scope="global")
         if skill_set.skills:
             await tool_registry.register(
-                SkillTool(skill_set, eviction_store, task_state, result_cap=lambda: tool_registry.result_size_cap_chars),
+                SkillTool(skill_set, eviction_store, result_cap=lambda: tool_registry.result_size_cap_chars),
                 scope="global")
         from localharness.agent.context import floor_schemas
         try:

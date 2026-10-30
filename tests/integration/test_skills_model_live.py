@@ -253,7 +253,7 @@ async def root_registry(skill_set: SkillSet, cfg: AgentConfig) -> tuple[ToolRegi
     await registry.register(AgentTool(agent_runner=no_child, available_agents=NO_CHILD_AGENTS), scope="global")
     await registry.register(TaskTool(state), scope="global")
     await registry.register(
-        SkillTool(skill_set, ContentStore(), state, result_cap=lambda: registry.result_size_cap_chars), scope="global")
+        SkillTool(skill_set, ContentStore(), result_cap=lambda: registry.result_size_cap_chars), scope="global")
     apply_root_capability_floor(cfg.tools, registry.global_schemas())
     assert "skill" in registry.get_tools_for_agent(cfg.name, cfg.division or "", cfg.tools)
     return registry, state
