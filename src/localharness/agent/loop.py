@@ -1382,7 +1382,7 @@ class AgentLoop:
         # are drained into durable session history at the next step boundary (same #82 seam as
         # the stuck-recovery nudge). A one-loop, cooperative-async inbox — the REPL coroutine
         # appends, the turn coroutine drains; no lock needed. Distinct from the stuck detector.
-        self._user_nudge_inbox: list[str] = []
+        self._user_nudge_inbox: list[tuple[str, str]] = []
         # Prior-session context (compact.md) is FOLDED into the single leading system message,
         # never appended as a second system message — strict chat templates reject a non-leading
         # system role (vLLM/Qwen: "System message must be at the beginning"; the SEMA-05 P0).
@@ -1754,18 +1754,15 @@ class AgentLoop:
             "so the permission gate asks about it", tool_name,
         )
 
-    def push_user_nudge(self, text: str) -> None:
-        """Queue a user-typed nudge for delivery to the running turn at its next step
-        boundary (type-anytime input box). Session-persisted via the same seam as the #82
-        stuck-recovery nudge, but a DISTINCT source: it never touches the stuck detector or
-        its max_nudges_per_turn accounting. Multiple nudges stack (FIFO). No-op on blank.
+    def push_user_nudge(self, text: str, subtype: str = "request") -> None:
+        """Queue a nudge for the running turn's next step boundary (FIFO, no-op on blank).
 
-        `/approve` reuses it: a human answering a call the gate parked (owner ruling 2026-09-12)
-        reaches the running turn the same way any typed steer does, so the approval is a sentence
-        the model reads at the next step boundary rather than a second path into tool dispatch."""
+        A distinct source from the stuck detector: it never touches max_nudges_per_turn.
+        `/approve` reuses it (owner ruling 2026-09-12), so an approval is a sentence the
+        model reads at the next step boundary, not a second path into tool dispatch."""
         text = (text or "").strip()
         if text:
-            self._user_nudge_inbox.append(text)
+            self._user_nudge_inbox.append((text, subtype))
 
     def resume_state(self) -> tuple[list[Message], str]:
         """(the model-side conversation, the prior-session context folded into the system prompt) —
@@ -2152,8 +2149,8 @@ class AgentLoop:
             # session history (#82 seam), so this iteration's build_messages replays them. A
             # distinct source from the stuck detector — deliberately outside its accounting.
             while self._user_nudge_inbox:
-                nudge = self._user_nudge_inbox.pop(0)
-                session.push(human_message(nudge, "steering", turn=self.turn))
+                nudge, nudge_subtype = self._user_nudge_inbox.pop(0)
+                session.push(human_message(nudge, nudge_subtype, turn=self.turn))
                 if self._task_context is not None:
                     self._task_context.observe_human(nudge)
                 log.info(

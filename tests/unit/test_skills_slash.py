@@ -661,7 +661,7 @@ async def test_a_skill_written_after_start_gets_its_notice_and_its_row_at_its_fi
     assert terminal.channel.sent == [(f"added since start: fresh (machine, {str(path)!r})", {"style": "system.info"})]
     fresh = next(s for s in terminal.session.skill_set.skills if s.name == "fresh")
     assert all_rows()[-1] == skill_row(fresh)
-    assert terminal.repl._slash_followup == fresh_line()
+    assert terminal.repl._slash_followup == (fresh_line(), "request")
     terminal.channel.sent.clear()
     await terminal.repl._dispatch_input("/fresh again")
     assert terminal.channel.sent == []
@@ -698,10 +698,10 @@ async def test_a_hostile_word_never_reaches_the_disk(terminal, monkeypatch, word
 async def test_the_word_is_lower_cased_on_the_live_path_too(terminal):
     write_skill(terminal.cfg / "skills", "fresh")
     assert await terminal.repl._handle_slash("/FRESH go") is True
-    assert terminal.repl._slash_followup == fresh_line()
+    assert terminal.repl._slash_followup == (fresh_line(), "request")
     terminal.repl._slash_followup = None
     assert await terminal.repl._handle_slash("/NOTES") is True
-    assert terminal.repl._slash_followup == NOTES_LINE
+    assert terminal.repl._slash_followup == (NOTES_LINE, "request")
 
 
 async def test_a_word_longer_than_a_row_name_is_looked_up_and_a_row_backed_word_is_not(terminal, monkeypatch):
@@ -761,7 +761,7 @@ async def test_a_skill_at_start_is_a_row_that_asks_the_model_to_load_it(tmp_path
     await _start_async(None, False, False, str(tmp_path))
     (notes,) = seen_set[0]
     assert seen["rows"][-1] == skill_row(notes)
-    assert seen["followups"] == ["The person invoked /notes with: draft. Call skill('notes') and follow it."]
+    assert seen["followups"] == [("The person invoked /notes with: draft. Call skill('notes') and follow it.", "request")]
     assert seen["session"].skill_set is seen["tool"]._skills
     assert all_rows() == SLASH_COMMANDS
 

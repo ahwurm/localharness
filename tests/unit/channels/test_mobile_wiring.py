@@ -121,11 +121,11 @@ async def test_a_channel_that_declares_nothing_is_left_alone():
 async def test_the_nudge_handle_reaches_push_user_nudge_only_while_a_turn_runs():
     """`push_user_nudge` is a public method built for precisely this, drained at the next step
     boundary. With nothing running there is nothing to steer, and the honest answer is False."""
-    pushed: list[str] = []
+    pushed: list[tuple[str, str]] = []
 
     class _Agent:
-        def push_user_nudge(self, text):
-            pushed.append(text)
+        def push_user_nudge(self, text, subtype="request"):
+            pushed.append((text, subtype))
 
     repl = _repl(MobileChannel(bus=EventBus(), config={}))
     repl._agent = _Agent()
@@ -139,7 +139,7 @@ async def test_the_nudge_handle_reaches_push_user_nudge_only_while_a_turn_runs()
     repl._turn_task = asyncio.ensure_future(_forever())
     try:
         assert await repl._nudge_from_channel("  use ripgrep  ") is True
-        assert pushed == ["use ripgrep"]
+        assert pushed == [("use ripgrep", "steering")]
         assert await repl._nudge_from_channel("   ") is False
     finally:
         repl._turn_task.cancel()
