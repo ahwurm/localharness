@@ -633,4 +633,4 @@ def test_spec_00_lists_the_agent_loop_parameters() -> None:
     listed = re.findall(r"`([^`]+)`", line.split(":", 1)[1])
 
     assert listed == [p for p in inspect.signature(AgentLoop.__init__).parameters if p != "self"]
-    assert listed[-4:] == ["project_instructions", "skills", "index", "affordances"]
+    assert listed[-4:] == ["index", "affordances", "turn", "request_note"]
