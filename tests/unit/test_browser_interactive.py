@@ -5,18 +5,22 @@ import asyncio
 import contextlib
 import gc
 import weakref
+from types import SimpleNamespace
 
 import pytest
 
 from localharness.agent.context import ContentStore
 from localharness.tools.builtin import bind_agent_store_tools, browser_session, browser_tool
 from localharness.tools.builtin.browser_session import (
-    _BUSY, _NO_STORE, CHANGED_NOTE, LOW_CONTENT, NAV_TIMEOUT_S, SHORTER_NOTE, SNAPSHOT_S, TOP_NOTE, UNCHANGED_CHARS,
-    UNCHANGED_NOTE, WINDOW_CHARS, BrowserOpenTool, window_start,
+    _BAD_REF, _BUSY, _CLOSED, _NEW_WINDOW, _NO_PAGE, _NO_STORE, _PASSWORD, _POPUP, _POST, _STALE, CHANGED_NOTE,
+    LOW_CONTENT, NAV_TIMEOUT_S, SHORTER_NOTE, SNAPSHOT_S, TEXT_MAX, TOP_NOTE, UNCHANGED_CHARS, UNCHANGED_NOTE,
+    WINDOW_CHARS, BrowserClickTool, BrowserOpenTool, BrowserScrollTool, BrowserTypeTool, window_start,
 )
 from localharness.tools.builtin.web_tool import UNTRUSTED_BANNER, WebPageQueryTool
 from localharness.tools.registry import ToolRegistry
-from tests.unit.test_browser_plugin import gate_on, runtime, tool_contexts, until, world  # noqa: F401  (fixtures)
+from tests.unit.test_browser_plugin import (  # noqa: F401  (fixtures)
+    FakeError, FakeTimeout, gate_on, runtime, tool_contexts, until, world,
+)
 from tests.unit.test_web_fetch_guard import public_web
 
 URL = "https://a.test/"
@@ -326,3 +330,230 @@ async def test_a_failed_launch_gives_the_unavailable_line_and_leaves_no_session_
 def test_the_tools_timeout_exceeds_the_sum_of_the_bounds_inside_it():
     assert BrowserOpenTool.timeout_s == 2 * NAV_TIMEOUT_S + 40
     assert NAV_TIMEOUT_S + NAV_TIMEOUT_S + SNAPSHOT_S < BrowserOpenTool.timeout_s
+
+
+@pytest.fixture
+async def acting(opener, world, runtime):  # noqa: F811
+    tool, store = opener
+    assert (await tool.run(url=OPEN)).success
+    session = runtime._sessions[id(store)]
+    return SimpleNamespace(
+        store=store, session=session, open=tool, click=BrowserClickTool(runtime, store),
+        type=BrowserTypeTool(runtime, store), scroll=BrowserScrollTool(runtime, store))
+
+
+@pytest.mark.parametrize("ref", ["e1 >> css=a", "e1=", "e1\n", "E1", "", "e" * 17, "e1\r", "[ref=e1]"])
+async def test_a_ref_that_is_not_a_plain_ref_is_refused_before_any_locator_is_built(acting, world, ref):  # noqa: F811
+    for got in (await acting.click.run(ref=ref), await acting.type.run(ref=ref, text="x")):
+        assert (got.success, got.error, got.error_type) == (False, _BAD_REF, "validation_error")
+    assert world.refs == [] and world.acts == []
+
+
+async def test_a_ref_of_sixteen_lowercase_letters_and_digits_is_built(acting, world):  # noqa: F811
+    assert (await acting.click.run(ref="e" + "a1" * 7 + "9")).success
+    assert world.refs == ["e" + "a1" * 7 + "9"]
+
+
+async def test_an_action_before_any_open_gets_the_no_page_line_and_the_root_copy_the_no_store_line(runtime, world):  # noqa: F811
+    store = ContentStore()
+    for got in (await BrowserClickTool(runtime, store).run(ref="e1"),
+                await BrowserTypeTool(runtime, store).run(ref="e1", text="x"),
+                await BrowserScrollTool(runtime, store).run(direction="down")):
+        assert (got.success, got.error) == (False, _NO_PAGE)
+    for got in (await BrowserClickTool(runtime).run(ref="e1"), await BrowserScrollTool(runtime).run(direction="up")):
+        assert (got.success, got.error, got.error_type) == (False, _NO_STORE, "validation_error")
+    assert world.contexts == [] and world.refs == []
+
+
+async def test_a_ref_the_page_does_not_count_is_answered_at_once_and_nothing_is_clicked(acting, world):  # noqa: F811
+    world.counts["e9"] = 0
+    got = await acting.click.run(ref="e9")
+    assert (got.success, got.error) == (False, _STALE.format(ref="e9"))
+    assert world.acts == [] and (await acting.type.run(ref="e9", text="x")).error == _STALE.format(ref="e9")
+
+
+async def test_a_password_field_is_refused_and_nothing_is_typed(acting, world):  # noqa: F811
+    world.attrs[("e1", "type")] = "Password"
+    got = await acting.type.run(ref="e1", text="hunter2", submit=True)
+    assert (got.success, got.error) == (False, _PASSWORD) and world.acts == []
+
+
+async def test_text_over_256_characters_is_a_validation_error_and_256_is_typed(acting, world):  # noqa: F811
+    got = await acting.type.run(ref="e1", text="x" * (TEXT_MAX + 1))
+    assert (got.success, got.error_type) == (False, "validation_error") and world.acts == [] and world.refs == []
+    assert (await acting.type.run(ref="e1", text="x" * TEXT_MAX)).success and world.acts == [("e1", "fill", "x" * TEXT_MAX)]
+
+
+async def test_the_three_tools_act_on_the_one_session_and_return_the_updated_page(acting, world, runtime):  # noqa: F811
+    got = await acting.click.run(ref="e3")
+    assert got.success and f"URL: {OPEN}" in got.output and got.output.endswith(UNCHANGED_NOTE)
+    assert (await acting.type.run(ref="e4", text="hi", submit=True)).success
+    assert (await acting.scroll.run(direction="down")).success and (await acting.scroll.run(direction="up")).success
+    assert world.acts == [("e3", "click"), ("e4", "fill", "hi"), ("e4", "press", "Enter"), ("wheel", 720), ("wheel", -720)]
+    assert len(runtime._sessions) == 1 and len(tool_contexts(world)) == 1
+
+
+async def test_an_unsubmitted_type_fills_without_pressing_enter(acting, world):  # noqa: F811
+    await acting.type.run(ref="e4", text="hi")
+    assert world.acts == [("e4", "fill", "hi")]
+
+
+async def test_a_direction_that_is_neither_down_nor_up_is_a_validation_error(acting, world):  # noqa: F811
+    got = await acting.scroll.run(direction="sideways")
+    assert (got.success, got.error_type) == (False, "validation_error") and world.acts == []
+
+
+async def test_after_a_click_adds_items_the_window_starts_near_them_with_the_changed_note(acting, world):  # noqa: F811
+    async def more(ref, *what):
+        world.snapshots[OPEN] = snap("- heading \"List\" [level=1]", *links(405))
+
+    world.on_act = more
+    got = await acting.click.run(ref="e3")
+    assert got.success and 'link "item 404" [ref=e404]' in got.output
+    assert got.output.endswith(CHANGED_NOTE.format(fid="pg-2")) and 'item 5"' not in got.output
+
+
+async def test_a_form_post_gives_the_fixed_line_and_no_new_snapshot(acting, world, runtime):  # noqa: F811
+    async def post(ref, *what):
+        acting.session.flags.post_refused = True
+
+    world.on_act = post
+    got = await acting.click.run(ref="e1")
+    assert (got.success, got.error) == (False, _POST) and acting.store.get("pg-2") is None
+
+
+async def test_a_download_a_timeout_a_redirect_and_a_failure_each_map_to_browser_fetchs_lines(acting, world, runtime):  # noqa: F811
+    def raising(error, refusal=False):
+        async def act(ref, *what):
+            if refusal:
+                runtime._proxy.refusals += 1
+            raise error
+
+        world.on_act = act
+
+    for error, refusal, line in [(FakeError("Page.click: Download is starting"), False, browser_tool._FILE),
+                                 (FakeTimeout("slow"), False, browser_tool._TIMED_OUT),
+                                 (FakeError("net::ERR_FAILED"), True, browser_tool._REDIRECTED),
+                                 (FakeError("net::ERR_FAILED"), False, browser_tool._FAILED)]:
+        raising(error, refusal)
+        got = await acting.click.run(ref="e1")
+        assert (got.success, got.error) == (False, line)
+    assert not acting.session.closed
+
+
+async def test_after_the_backstop_or_a_release_the_next_action_gets_the_closed_line(opener, world, runtime, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(browser_session, "SESSION_IDLE_S", 0.05)
+    tool, store = opener
+    click = BrowserClickTool(runtime, store)
+    await tool.run(url=OPEN)
+    await until(lambda: not runtime._sessions)
+    assert (await click.run(ref="e1")).error == _CLOSED
+    monkeypatch.setattr(browser_session, "SESSION_IDLE_S", 600)
+    await tool.run(url=OPEN)
+    await tool.release_store(store)
+    assert (await click.run(ref="e1")).error == _CLOSED and (await BrowserScrollTool(runtime, store).run(direction="up")).error == _CLOSED
+    assert (await tool.run(url=OPEN)).success and (await click.run(ref="e1")).success
+
+
+async def test_an_action_re_arms_the_backstop(acting, world, runtime, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(browser_session, "SESSION_IDLE_S", 0.3)
+    for _ in range(3):
+        await asyncio.sleep(0.15)
+        assert (await acting.click.run(ref="e1")).success
+    assert runtime._sessions
+    await until(lambda: not runtime._sessions)
+
+
+async def test_a_page_that_closed_itself_gets_the_closed_line_and_frees_the_slot(acting, world, runtime):  # noqa: F811
+    acting.session.page.closed = True
+    got = await acting.click.run(ref="e1")
+    assert (got.success, got.error) == (False, _CLOSED) and world.acts == []
+    assert not runtime._sessions and not runtime._session_slot.locked() and world.open_contexts() == 0
+
+
+async def test_a_page_that_closes_itself_during_the_click_gets_the_closed_line(acting, world, runtime):  # noqa: F811
+    async def close(ref, *what):
+        acting.session.page.closed = True
+
+    world.on_act = close
+    got = await acting.click.run(ref="e1")
+    assert (got.success, got.error) == (False, _CLOSED) and not runtime._sessions and not runtime._session_slot.locked()
+
+
+async def test_a_hung_click_returns_inside_the_tools_timeout(acting, world, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(browser_session, "ACT_S", 0.1)
+    never = asyncio.Event()
+
+    async def hang(ref, *what):
+        await never.wait()
+
+    world.on_act = hang
+    got = await asyncio.wait_for(acting.click.run(ref="e1"), BrowserClickTool.timeout_s)
+    assert (got.success, got.error) == (False, browser_tool._TIMED_OUT)
+
+
+async def test_a_release_during_a_hung_action_force_closes_within_the_lock_wait(acting, world, runtime, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(browser_session, "LOCK_WAIT_S", 0.05)
+    never = asyncio.Event()
+
+    async def hang(ref, *what):
+        await never.wait()
+
+    world.on_act = hang
+    task = asyncio.create_task(acting.click.run(ref="e1"))
+    await until(lambda: world.acts)
+    await asyncio.wait_for(acting.click.release_store(acting.store), 1)
+    assert not runtime._sessions and not runtime._session_slot.locked() and world.open_contexts() == 0
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+async def test_two_simultaneous_actions_on_one_session_never_overlap(acting, world):  # noqa: F811
+    running, peak = 0, 0
+
+    async def slow(ref, *what):
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await asyncio.sleep(0.05)
+        running -= 1
+
+    world.on_act = slow
+    got = await asyncio.gather(acting.click.run(ref="e1"), acting.click.run(ref="e2"), acting.scroll.run(direction="down"))
+    assert all(g.success for g in got) and peak == 1 and len(world.acts) == 3
+
+
+async def test_a_popup_that_committed_is_closed_and_named_with_its_popup_closed_too(acting, world):  # noqa: F811
+    pages = []
+
+    async def open_popups(ref, *what):
+        context = acting.session.context
+        pages.extend([context.popup("https://p.test/one"), context.popup("https://p.test/two")])
+
+    world.on_act = open_popups
+    got = await acting.click.run(ref="e1")
+    assert got.success and all(p.closed for p in pages) and not acting.session.page.closed
+    assert _POPUP.format(url="https://p.test/one") in got.output and _POPUP.format(url="https://p.test/two") in got.output
+    assert got.output.endswith(UNCHANGED_NOTE) and got.output.index("https://p.test/two") < got.output.index(UNCHANGED_NOTE)
+
+
+async def test_a_popup_that_never_leaves_about_blank_gives_the_new_window_line(acting, world, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(browser_session, "POPUP_S", 0.05)
+    pages = []
+
+    async def blank(ref, *what):
+        pages.append(acting.session.context.popup())
+
+    world.on_act = blank
+    got = await acting.click.run(ref="e1")
+    assert got.success and _NEW_WINDOW in got.output and "about:blank" not in got.output and pages[0].closed
+
+
+async def test_a_popup_url_is_cut_to_200_characters(acting, world):  # noqa: F811
+    async def long(ref, *what):
+        acting.session.context.popup("https://p.test/" + "a" * 500)
+
+    world.on_act = long
+    got = await acting.click.run(ref="e1")
+    assert _POPUP.format(url=("https://p.test/" + "a" * 500)[:200]) in got.output and "a" * 200 not in got.output
