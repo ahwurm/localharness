@@ -23,6 +23,7 @@ from localharness.config import skills
 from localharness.cli.app import app
 from localharness.config.skills import BUNDLED_NAME, LISTING_BUDGET_CHARS, ORIGINS, SkillSet, Skipped, skip_line
 from localharness.agent import subagent
+from tests.unit.test_subagent_narrowing import LEAF_TOOLSETS
 from localharness.agent.context import ContentStore
 from localharness.agent.task_record import MAX_REFERENCES, TaskState
 from localharness.tools.builtin.skill_tool import SkillTool
@@ -309,9 +310,10 @@ async def test_the_grant_target_toolset_omits_skill(root_registry) -> None:
     assert got == ["read"]
 
 
-@pytest.mark.parametrize("name", [*subagent._STATIC_TOOLSETS, *subagent._WEB_ROLES])
+@pytest.mark.parametrize("name", [*LEAF_TOOLSETS, *subagent._WEB_ROLES])
 async def test_no_built_in_role_holds_the_skill_tool(root_registry, name) -> None:
-    assert "skill" not in subagent.builtin_toolset(name, root_registry), name
+    toolset = LEAF_TOOLSETS[name] if name in LEAF_TOOLSETS else subagent.builtin_toolset(name, root_registry)
+    assert "skill" not in toolset, name
 
 
 DESCRIPTION = (

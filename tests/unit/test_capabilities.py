@@ -280,8 +280,10 @@ async def test_every_builtin_toolset_is_clean(monkeypatch, with_bundled_web):
     reg = await _builtin_registry()
     if with_bundled_web:
         await reg.register(_FakeWebTool(), source_plugin="fakeweb")
-    for name in [*subagent._STATIC_TOOLSETS, *subagent._WEB_ROLES]:
-        toolset = subagent.builtin_toolset(name, reg)
+    from tests.unit.test_subagent_narrowing import LEAF_TOOLSETS
+
+    for name in [*LEAF_TOOLSETS, *subagent._WEB_ROLES]:
+        toolset = LEAF_TOOLSETS[name] if name in LEAF_TOOLSETS else subagent.builtin_toolset(name, reg)
         schemas = [reg.schema_of(n) for n in toolset]
         assert None not in schemas, f"'{name}' names a tool no builtin declares: {toolset}"
         assert not any(is_host_dangerous(s) for s in schemas), f"'{name}' holds a host-dangerous tool"
