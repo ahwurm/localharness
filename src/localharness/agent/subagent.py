@@ -780,7 +780,6 @@ def _config_child_allowed(agent_config: Any) -> list[str]:
 _STATIC_TOOLSETS: dict[str, list[str]] = {
     "explore": EXPLORE_TOOLS,
     "cruncher": CRUNCHER_TOOLS,
-    "chunk-summarizer": CHUNK_SUMMARIZER_TOOLS,
 }
 _WEB_ROLES = ("web-researcher", "search-verifier")
 

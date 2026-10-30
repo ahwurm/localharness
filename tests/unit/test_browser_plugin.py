@@ -1357,11 +1357,12 @@ async def base_with(cache, tmp_path, *, browser=True):
 
 
 async def test_both_web_roles_hold_the_tool_after_the_three_and_explore_does_not(cache, world, tmp_path):
-    from localharness.agent.subagent import _STATIC_TOOLSETS, builtin_toolset
+    from localharness.agent.subagent import builtin_toolset
+    from tests.unit.test_subagent_narrowing import LEAF_TOOLSETS
 
     base = await base_with(cache, tmp_path)
     assert [builtin_toolset(r, base) for r in WEB_ROLES] == [[*THREE, "browser_fetch"]] * 2
-    assert all("browser_fetch" not in builtin_toolset(n, base) for n in _STATIC_TOOLSETS)
+    assert all("browser_fetch" not in toolset for toolset in LEAF_TOOLSETS.values())
 
 
 async def test_the_floors_of_the_web_roles_price_four_schemas_and_three_without_it(cache, world, tmp_path, monkeypatch):
@@ -1389,12 +1390,30 @@ async def test_the_root_is_denied_the_tool_and_its_schema_names_the_plugin(cache
 async def test_every_builtin_toolset_stays_clean_with_the_real_tool(cache, world, tmp_path):
     from localharness.agent import subagent
     from localharness.tools.capabilities import assert_no_coresidence, is_host_dangerous
+    from tests.unit.test_subagent_narrowing import LEAF_TOOLSETS
 
     base = await base_with(cache, tmp_path)
-    for name in [*subagent._STATIC_TOOLSETS, *subagent._WEB_ROLES]:
-        schemas = [base.schema_of(n) for n in subagent.builtin_toolset(name, base)]
+    for name in [*LEAF_TOOLSETS, *subagent._WEB_ROLES]:
+        toolset = LEAF_TOOLSETS[name] if name in LEAF_TOOLSETS else subagent.builtin_toolset(name, base)
+        schemas = [base.schema_of(n) for n in toolset]
         assert None not in schemas and not any(is_host_dangerous(s) for s in schemas)
         assert_no_coresidence(schemas, agent_id=name)
+
+
+async def test_a_narrowed_browser_fetch_is_the_copy_bound_to_the_childs_own_store(cache, world, tmp_path, monkeypatch):
+    from tests.unit.test_subagent_narrowing import install_fake_loop, make_runner
+
+    loops = install_fake_loop(monkeypatch)
+    monkeypatch.setenv("LOCALHARNESS_VERIFICATION_LEDGER_DIR", str(tmp_path / "ledger"))
+    base = await base_with(cache, tmp_path)
+    await make_runner(base, object(), max_subagent_depth=1)("web-researcher", "t", tools=["browser_fetch"])
+
+    child = loops[0]
+    entry = child.tool_registry._find_tool_by_name("browser_fetch")
+    assert child.held == {"browser_fetch"}
+    assert entry._inner._store is child.context_manager._content_store
+    assert entry._inner._store is not base._find_tool_by_name("browser_fetch")._inner._store
+    await entry._inner._runtime.close()
 
 
 async def test_a_fetch_id_is_found_in_its_own_child_and_not_in_another(cache, world, tmp_path, monkeypatch):

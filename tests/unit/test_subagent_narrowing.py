@@ -22,6 +22,7 @@ class FakeLoop:
     def __init__(self, **kw):
         self.tool_registry = kw["tool_registry"]
         self.config = kw["config"]
+        self.context_manager = kw["context_manager"]
         self.briefs: list[str] = []
         self.current_session_id = "child-sid"
         self.last_terminated_reason = None
@@ -248,3 +249,26 @@ async def test_omitting_tools_leaves_every_child_as_it_was(base, loops, mock_llm
         assert loops[0].briefs == [task]
     if agent == "web-researcher":
         assert loops[1].briefs == [ZERO_CALL_RETRY_PREFIX + task]
+
+
+@pytest.mark.parametrize("names,refused", [(["read"], False), (None, True), (["read", "bash_exec"], True)])
+async def test_the_grant_gate_judges_the_narrowed_set(base, loops, mock_llm_client, names, refused):
+    runner = make_runner(base, mock_llm_client([]), load_agent=lambda n: config_child(n))
+    call = runner("cfg", "t", grant_handles=["h"], **({} if names is None else {"tools": names}))
+    if refused:
+        with pytest.raises(Exception, match="bash_exec"):
+            await call
+        assert loops == []
+    else:
+        await call
+        assert loops[0].held == {"read"}
+
+
+async def test_a_bash_holding_chunk_summarizer_yaml_is_refused_a_grant(base, loops, mock_llm_client):
+    assert subagent.builtin_toolset("chunk-summarizer", base) is None
+    load = lambda n: config_child(n, ("read", "bash_exec"))  # noqa: E731
+    assert subagent._resolve_target_toolset("chunk-summarizer", load, base) == ["read", "bash_exec"]
+    runner = make_runner(base, mock_llm_client([]), load_agent=load)
+    with pytest.raises(Exception, match="bash_exec"):
+        await runner("chunk-summarizer", "t", grant_handles=["h"])
+    assert loops == []
