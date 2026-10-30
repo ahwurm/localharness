@@ -39,9 +39,67 @@ class FakeResponse:
         self.status, self.headers = status, {"content-type": content_type}
 
 
+class FakeHandle:
+    def __init__(self, world, ref):
+        self.world, self.ref = world, ref
+
+    async def _act(self, *what):
+        self.world.acts.append((self.ref, *what))
+        if self.world.on_act:
+            await self.world.on_act(self.ref, *what)
+
+    async def click(self, timeout=None):
+        await self._act("click")
+
+    async def fill(self, text, timeout=None):
+        await self._act("fill", text)
+
+    async def press(self, key, timeout=None):
+        await self._act("press", key)
+
+    async def get_attribute(self, name):
+        return self.world.attrs.get((self.ref, name))
+
+
+class FakeLocator:
+    def __init__(self, world, ref):
+        self.world, self.ref = world, ref
+
+    async def count(self):
+        return self.world.counts.get(self.ref, 1)
+
+    async def element_handle(self, timeout=None):
+        return FakeHandle(self.world, self.ref)
+
+
+class FakeMouse:
+    def __init__(self, world):
+        self.world = world
+
+    async def wheel(self, dx, dy):
+        self.world.acts.append(("wheel", dy))
+        if self.world.on_act:
+            await self.world.on_act("wheel", dy)
+
+
 class FakePage:
+    viewport_size = {"width": 1280, "height": 720}
+
     def __init__(self, context):
         self.context, self.url, self.closed = context, "about:blank", False
+        self.mouse = FakeMouse(context.browser.world)
+
+    def get_by_ref(self, ref):
+        world = self.context.browser.world
+        world.refs.append(ref)
+        return FakeLocator(world, ref)
+
+    async def wait_for_url(self, predicate, wait_until=None, timeout=None):
+        for _ in range(int((timeout or 0) / 10) + 1):
+            if predicate(self.url):
+                return
+            await asyncio.sleep(0.01)
+        raise FakeTimeout("wait_for_url")
 
     def is_closed(self):
         return self.closed
@@ -87,9 +145,18 @@ class FakePage:
 class FakeContext:
     def __init__(self, browser, options):
         self.browser, self.options, self.routes, self.open = browser, options, [], True
+        self.handlers, self.pages = {}, []
 
     def on(self, event, handler):
-        pass
+        self.handlers.setdefault(event, []).append(handler)
+
+    def popup(self, url="about:blank"):
+        page = FakePage(self)
+        page.url = url
+        self.pages.append(page)
+        for handler in self.handlers.get("page", []):
+            handler(page)
+        return page
 
     async def route(self, pattern, handler):
         self.browser.world.events.append(("route", pattern))
@@ -100,7 +167,9 @@ class FakeContext:
 
     async def new_page(self):
         self.browser.world.events.append(("new_page", ""))
-        return FakePage(self)
+        page = FakePage(self)
+        self.pages.append(page)
+        return page
 
     async def close(self):
         self.open = False
@@ -152,6 +221,7 @@ class World:
         self.on_goto = None
         self.on_snapshot = None
         self.snapshots = {}
+        self.refs, self.acts, self.counts, self.attrs, self.on_act = [], [], {}, {}, None
         self.eval_error = None
         self.eval_result = UNSET
         self.argv_edit = lambda argv: argv
@@ -447,10 +517,10 @@ async def test_a_render_opens_one_context_with_the_exact_options_and_routes_befo
 
 class FakeRoute:
     def __init__(self, resource_type, method="GET"):
-        self.request, self.did = SimpleNamespace(resource_type=resource_type, method=method), None
+        self.request, self.did, self.code = SimpleNamespace(resource_type=resource_type, method=method), None, None
 
-    async def abort(self):
-        self.did = "abort"
+    async def abort(self, code=None):
+        self.did, self.code = "abort", code
 
     async def continue_(self):
         self.did = "continue"
@@ -473,11 +543,17 @@ async def route_through_the_factory(world, runtime, kind, method):
     ((_, handler),) = context.routes
     route = FakeRoute(kind, method)
     await handler(route)
+    world.last_abort_code = route.code
     return route.did, flags
 
 
 async def test_a_non_get_document_request_is_aborted_and_flagged(world, runtime):
     assert await route_through_the_factory(world, runtime, "document", "POST") == ("abort", browser_tool.RouteFlags(True))
+
+
+async def test_a_refused_document_post_is_aborted_as_cancelled_so_the_page_keeps_its_document(world, runtime):
+    await route_through_the_factory(world, runtime, "document", "POST")
+    assert world.last_abort_code == "aborted"
 
 
 async def test_a_get_document_request_continues_unflagged(world, runtime):

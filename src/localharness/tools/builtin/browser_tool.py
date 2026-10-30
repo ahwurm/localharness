@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -148,6 +149,7 @@ class BrowserRuntime:
         self._idle: asyncio.TimerHandle | None = None
         self._idle_task: asyncio.Task | None = None
         self._sessions: dict[int, Any] = {}
+        self._ended: weakref.WeakSet = weakref.WeakSet()
         self._session_slot = asyncio.Semaphore(1)
         self._api: Any = None
         self._proxy: Proxy | None = None
@@ -250,6 +252,7 @@ class BrowserRuntime:
     def track(self, session) -> None:
         self._cancel_idle()
         self._sessions[id(session.store)] = session
+        self._ended.discard(session.store)
 
     def release(self, session) -> None:
         if self._sessions.get(id(session.store)) is not session:
@@ -271,7 +274,7 @@ class BrowserRuntime:
             request = route.request
             if request.resource_type == "document" and request.method != "GET":
                 flags.post_refused = True
-                await route.abort()
+                await route.abort("aborted")  # the default code commits Chromium's error page over the document
             else:
                 await _cost_route(route)
 
