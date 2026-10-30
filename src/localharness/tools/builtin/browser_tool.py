@@ -121,6 +121,11 @@ async def _cost_route(route) -> None:
     await (route.abort() if route.request.resource_type in _SKIPPED_TYPES else route.continue_())
 
 
+@dataclass
+class RouteFlags:
+    post_refused: bool = False
+
+
 class BrowserRuntime:
     def __init__(self, config):
         self._config = config
@@ -224,14 +229,34 @@ class BrowserRuntime:
             if not self._in_flight and self._browser is not None:
                 self._idle = asyncio.get_running_loop().call_later(self._idle_s, self._start_idle_close)
 
+    async def _new_context(self, browser) -> tuple[Any, RouteFlags]:
+        """A context whose route aborts a non-GET document request (read-only convention, not a data-out control)."""
+        flags = RouteFlags()
+
+        async def handler(route) -> None:
+            request = route.request
+            if request.resource_type == "document" and request.method != "GET":
+                flags.post_refused = True
+                await route.abort()
+            else:
+                await _cost_route(route)
+
+        context = await browser.new_context(
+            accept_downloads=False, service_workers="block", java_script_enabled=True, bypass_csp=False,
+            ignore_https_errors=False, user_agent=self._ua)
+        try:
+            await context.route("**/*", handler)
+            await context.add_init_script(_INIT)
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await context.close()
+            raise
+        return context, flags
+
     async def _render(self, browser, proxy: Proxy, url: str) -> Rendered:
         api, context, navigating = self._api, None, False
         try:
-            context = await browser.new_context(
-                accept_downloads=False, service_workers="block", java_script_enabled=True, bypass_csp=False,
-                ignore_https_errors=False, user_agent=self._ua)
-            await context.route("**/*", _cost_route)
-            await context.add_init_script(_INIT)
+            context, _ = await self._new_context(browser)
             page = await context.new_page()
             refusals, navigating = proxy.refusals, True
             response = await page.goto(url, wait_until="load", timeout=NAV_TIMEOUT_S * 1000)
