@@ -5,9 +5,10 @@ import logging
 import math
 import re
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, Sequence
 
 from localharness.core.bus import EventBus
+from localharness.core.caps import Caps
 from localharness.core.events import (
     Action,
     CompactionTriggered,
@@ -88,6 +89,20 @@ rather than spelled out, so the two cannot drift apart. C1 (U+0080–U+009F) bec
 honours 8-bit controls reads U+009B as CSI and U+009D as OSC: the same sequences without the ESC."""
 
 
+INVISIBLE_CHARS_RE = re.compile(
+    "["
+    + "".join(
+        map(chr, (*range(0x200B, 0x2010), *range(0x202A, 0x202F), 0x2060, *range(0x2066, 0x206A), 0xFEFF, 0x061C))
+    )
+    + "]"
+)
+"""Zero-width, bidi-override and bidi-isolate characters: they reorder or hide what the person reads."""
+
+NOTICE_MARK = "◆"
+NEUTRAL_MARK = "◇"
+LEADING_MARK_RE = re.compile(rf"^([ \t]*){NOTICE_MARK}", re.MULTILINE)
+
+
 def sanitize_for_display(text: str) -> str:
     """Strip terminal control characters from text a channel is about to render.
 
@@ -98,16 +113,28 @@ def sanitize_for_display(text: str) -> str:
     this before their own escaping (rich markup escaping is about markup, not about the
     terminal), because the answer to a mangled question is a permission the human did not grant.
 
-    Tab and newline survive (:data:`KEPT_CONTROL_CHARS`): they are layout, not control.
+    Tab and newline survive (:data:`KEPT_CONTROL_CHARS`): they are layout, not control. A
+    :data:`NOTICE_MARK` that opens a line becomes :data:`NEUTRAL_MARK`, so text cannot pass for a
+    harness notice.
     """
     if not text:
         return text
-    return CONTROL_CHARS_RE.sub("", ESCAPE_SEQUENCE_RE.sub("", text))
+    bare = INVISIBLE_CHARS_RE.sub("", CONTROL_CHARS_RE.sub("", ESCAPE_SEQUENCE_RE.sub("", text)))
+    return LEADING_MARK_RE.sub(rf"\1{NEUTRAL_MARK}", bare)
 
 
 def one_line(text: str) -> str:
     """`sanitize_for_display` with every run of whitespace, newlines included, collapsed to one space."""
     return " ".join(sanitize_for_display(text.replace("\r", " ")).split())
+
+
+def notice(subject: str, state: str, commands: Sequence[str], tail: str = "") -> str:
+    """One harness line: `◆ subject state · command · … · tail clause · …`."""
+    head = " ".join(p for p in (NOTICE_MARK, one_line(subject), one_line(state)) if p)
+    cmds = [c for c in map(one_line, commands) if c]
+    clauses = [c for c in one_line(tail).split(" · ") if c]
+    line = lambda: " · ".join([head, *cmds, *clauses])  # noqa: E731
+    return line()
 
 
 def permission_denied_reason(error: str | None) -> str | None:
