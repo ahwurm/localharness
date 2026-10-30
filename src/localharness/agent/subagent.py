@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any
 from localharness.config.models import (
     AgentConfig, BudgetConfig, ChildBudget, ChildrenBudgetConfig, PermissionConfig, ToolConfig,
 )
-from localharness.tools.builtin.agent_tool import BUILTIN_AGENT_NAMES, INVALID_AGENT_NAME
+from localharness.tools.builtin.agent_tool import BUILTIN_AGENT_NAMES, INVALID_AGENT_NAME, DelegationArgError
 
 if TYPE_CHECKING:
     from localharness.plugins.api import MemoryWriteHandle
@@ -831,6 +831,24 @@ def _resolve_target_toolset(name: str, load_agent: Callable[[str], Any] | None, 
         except Exception:
             return []
     return []
+
+
+def _validated_narrowing(name: str, tools: list[str], base: Any, load_agent: Callable[[str], Any] | None,
+                         has_agent: bool) -> list[str]:
+    """The model's tool names, bare and deduped; DelegationArgError unless each is in the target's set."""
+    from localharness.tools.registry import _bare_name
+    wanted = list(dict.fromkeys(_bare_name(t) for t in tools))
+    if name == "cruncher":
+        raise DelegationArgError("cruncher's tools are run by the harness, not chosen; omit tools.")
+    resolved = [_bare_name(n) for n in _resolve_target_toolset(name, load_agent, base)]
+    if not resolved and name != "explore" and name not in _WEB_ROLES:
+        return wanted
+    held = [n for n in dict.fromkeys(resolved) if base.has(n)] + (["agent"] if has_agent else [])
+    if bad := [t for t in wanted if t not in held]:
+        raise DelegationArgError(
+            f"{name} has no {', '.join(bad)}; its tools: {', '.join(held)}. "
+            "Retry with names from that list, or omit tools.")
+    return wanted
 
 
 def prepend_toolset(task: str, allowed: list[str]) -> str:
@@ -2024,8 +2042,17 @@ def make_explore_agent_runner(
 
     async def _run_agent(agent_id: str, task: str,
                          grant_handles: list[str] | None = None,
-                         shape: str | None = None) -> DelegationResult:
+                         shape: str | None = None, tools: list[str] | None = None) -> DelegationResult:
         name = _sanitize_agent_name(agent_id)
+        slot: list = [None]  # the built-in child's own remaining_budget, once its loop is built
+        child_agent_tool = _build_child_agent_tool(name, slot)
+        reg = base_registry
+        if tools:
+            from localharness.tools.registry import ToolRegistry
+            wanted = _validated_narrowing(name, tools, base_registry, load_agent, child_agent_tool is not None)
+            reg = ToolRegistry.from_allowed([t for t in wanted if t != "agent"], base_registry=base_registry)
+            if "agent" not in wanted:
+                child_agent_tool = None
         # Grant-target safety (the keystone's structural floor): a granted handle is readable via
         # tool_result_get/chunk (NOT untrusted-ingest), so refuse handing one to a host-dangerous
         # target — else attacker-controllable bytes sit one call from a host action. Fail closed,
@@ -2037,12 +2064,10 @@ def make_explore_agent_runner(
                 # child's allowlist (bare, mcp:TOOL, plugin:PLUGIN.TOOL). A name the base registry
                 # cannot resolve is skipped: from_allowed skips it too, so the child cannot hold it.
                 assert_grant_target_safe(
-                    [s for n in _resolve_target_toolset(name, load_agent, base_registry)
-                     if (s := base_registry.schema_of(n)) is not None],
+                    [s for n in _resolve_target_toolset(name, load_agent, reg)
+                     if (s := reg.schema_of(n)) is not None],
                     agent_id=name,
                 )
-        slot: list = [None]  # the built-in child's own remaining_budget, once its loop is built
-        child_agent_tool = _build_child_agent_tool(name, slot)
         child_ctx = _make_child_ctx(grant_handles)
         # D-11: the parent's level is read NOW, at this dispatch — never captured when the runner
         # was built — so a /effort between two dispatches reaches the second child.
@@ -2095,7 +2120,7 @@ def make_explore_agent_runner(
                 agent_config=cfg,
                 llm=llm,
                 bus=bus,
-                base_registry=base_registry,
+                base_registry=reg,
                 parent_session_id=get_parent_session_id(),
                 permission_evaluator=permission_evaluator,
                 gate=gate,
@@ -2136,7 +2161,7 @@ def make_explore_agent_runner(
             task,
             llm=llm,
             bus=bus,
-            base_registry=base_registry,
+            base_registry=reg,
             parent_session_id=get_parent_session_id(),
             permission_evaluator=permission_evaluator,
             gate=gate,

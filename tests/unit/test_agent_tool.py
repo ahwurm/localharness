@@ -365,3 +365,58 @@ def test_a_roster_empty_at_construction_shows_names_added_later():
     tool = AgentTool(agent_runner=AsyncMock(), available_agents=roster)
     roster.append("late-agent")
     assert "late-agent" in tool.info().description
+
+
+# --- tools: per-call narrowing of the specialist's own tools ---------------------------------
+
+def test_tools_is_an_optional_string_array_in_the_schema():
+    params = _make_agent_tool().info().parameters
+    assert params["properties"]["tools"]["type"] == "array"
+    assert params["properties"]["tools"]["items"] == {"type": "string"}
+    assert "tools" not in params["required"]
+
+
+@pytest.mark.asyncio
+async def test_tools_ride_as_a_keyword_only_when_non_empty():
+    runner = AsyncMock(return_value="ok")
+    tool = _make_agent_tool(runner=runner)
+    await tool._execute(agent_id="coder", task="x", tools=[])
+    runner.assert_awaited_once_with("coder", "x", None)
+    runner.reset_mock()
+    await tool._execute(agent_id="coder", task="x", tools=["web_fetch"])
+    runner.assert_awaited_once_with("coder", "x", None, tools=["web_fetch"])
+    runner.reset_mock()
+    await tool._execute(agent_id="coder", task="x", shape="review", tools=["web_fetch"])
+    runner.assert_awaited_once_with("coder", "x", None, shape="review", tools=["web_fetch"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tools", [["a", 3], "web_fetch", [None]])
+async def test_non_string_tools_are_refused_before_dispatch(tools):
+    runner = AsyncMock(return_value="ok")
+    result = await _make_agent_tool(runner=runner)._execute(agent_id="coder", task="x", tools=tools)
+    assert result.success is False and result.error_type == "validation_error"
+    runner.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_runner_without_tools_or_shape_still_works_when_none_are_given():
+    async def three_arg(agent_id, task, grant_handles=None):
+        return "ok"
+
+    assert (await _make_agent_tool(runner=three_arg).run(agent_id="coder", task="x", tools=[])).success
+
+
+@pytest.mark.asyncio
+async def test_a_delegation_arg_error_is_a_validation_error_and_other_value_errors_stay_not_found():
+    from localharness.tools.builtin.agent_tool import DelegationArgError
+
+    async def refuses(*a, **k):
+        raise DelegationArgError("coder has no x; its tools: y.")
+
+    async def missing(*a, **k):
+        raise ValueError("not wired")
+
+    bad = await _make_agent_tool(runner=refuses)._execute(agent_id="coder", task="x", tools=["x"])
+    assert (bad.error_type, bad.error) == ("validation_error", "coder has no x; its tools: y.")
+    assert (await _make_agent_tool(runner=missing)._execute(agent_id="coder", task="x")).error_type == "not_found"
