@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import inspect
+import time
 
 import pytest
 
 from localharness.agent import subagent
 from localharness.agent.context import COMPACT_DISABLED, CompactionPipeline, ContentStore, TokenCounter
-from localharness.agent.loop import AgentLoop, BudgetLabels, BudgetTracker
+from localharness.agent.loop import AgentLoop, BudgetLabels, BudgetTracker, Session
 from localharness.agent.permissions import PermissionEvaluator
 from localharness.agent.subagent import DelegationResult, make_explore_agent_runner
 from localharness.config.models import AgentConfig, BudgetConfig, ChildBudget, PermissionConfig, ToolConfig
@@ -338,3 +339,25 @@ async def test_a_nested_runner_carries_run_config_child_too(base, loops, monkeyp
         get_parent_session_id=lambda: "sid", max_subagent_depth=2)
     await runner("web-researcher", "t")
     assert built and all(callable(r.run_config_child) for r in built)
+
+
+def aged(seconds: float, excluded: float = 0.0) -> Session:
+    return Session(agent_id="a", session_id="s", messages=[], start_time=time.monotonic() - seconds,
+                   excluded_seconds=excluded)
+
+
+def test_budget_minutes_subtracts_excluded_seconds_and_elapsed_minutes_does_not():
+    session = aged(300, excluded=180)
+    assert session.budget_minutes() == pytest.approx(2.0, abs=0.05)
+    assert session.elapsed_minutes() == pytest.approx(5.0, abs=0.05)
+
+
+def test_the_time_check_reads_budget_minutes_and_reports_elapsed_minutes():
+    tracker = BudgetTracker(max_actions=0, max_duration_minutes=4)
+    assert tracker.check(aged(300, excluded=180)) is None
+    violation = tracker.check(aged(300))
+    assert violation.reason == "time" and violation.current == pytest.approx(5.0, abs=0.05)
+
+
+def test_excluded_seconds_defaults_to_zero():
+    assert Session(agent_id="a", session_id="s", messages=[]).excluded_seconds == 0.0

@@ -143,6 +143,7 @@ class Session:
     # a reasoning cut or a degenerate abort on it is handled exactly as on a first attempt. Re-armed once
     # a call goes through; a second connection error in a row ends the turn.
     connection_retry_used: bool = False
+    excluded_seconds: float = 0.0
 
     @property
     def baton_nudge_used(self) -> bool:
@@ -157,6 +158,10 @@ class Session:
 
     def elapsed_minutes(self) -> float:
         return self.elapsed_seconds() / 60.0
+
+    def budget_minutes(self) -> float:
+        """Elapsed minutes less the seconds a caller excluded; read only by the time-budget comparison."""
+        return (self.elapsed_seconds() - self.excluded_seconds) / 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -445,7 +450,7 @@ class BudgetTracker:
                 current=session.actions_taken,
                 message=message,
             )
-        if self.max_duration_minutes > 0 and session.elapsed_minutes() >= self.max_duration_minutes:
+        if self.max_duration_minutes > 0 and session.budget_minutes() >= self.max_duration_minutes:
             message = (
                 f"Agent reached the time limit of {self.max_duration_minutes:.1f} minutes. "
                 f"Stopping after {session.actions_taken} tool calls."

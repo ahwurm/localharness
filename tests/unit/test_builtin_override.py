@@ -21,6 +21,7 @@ from localharness.config.loader import (
     ConfigParseError,
     ConfigValidationError,
 )
+from localharness.tools.registry import ToolRegistry
 
 
 def _loader(tmp_path: Path) -> ConfigLoader:
@@ -111,7 +112,7 @@ async def test_runner_passes_override_config_to_web_dispatch(monkeypatch):
     overridden.permissions.budget.max_actions = 40
 
     runner = subagent.make_explore_agent_runner(
-        llm=object(), bus=object(), base_registry=object(),
+        llm=object(), bus=object(), base_registry=ToolRegistry(),
         permission_evaluator=object(), get_parent_session_id=lambda: "sid",
         load_builtin_override=lambda name, base: overridden if name == "web-researcher" else base,
     )
@@ -131,7 +132,7 @@ async def test_runner_without_override_hook_passes_the_seams_copy_of_the_builder
         return "ok"
     monkeypatch.setattr(subagent, "dispatch_web_subagent", _fake_web)
     runner = subagent.make_explore_agent_runner(
-        llm=object(), bus=object(), base_registry=object(),
+        llm=object(), bus=object(), base_registry=ToolRegistry(),
         permission_evaluator=object(), get_parent_session_id=lambda: "sid",
     )
     await runner("web-researcher", "research X")
