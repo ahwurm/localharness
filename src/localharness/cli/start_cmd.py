@@ -3190,6 +3190,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             kill_file_path=kill_file_path,
             compact_md_path=compact_md_path,
             session_id=sitting_id,  # SESS-01: the whole sitting shares this id
+            turn=resume.turn if resume is not None else 0,
             # SAFE-04: core reads the org guardrails every turn, memory on or off. `cfg_path` is the
             # always-global config dir — the same global-only primitive MemoryStore's
             # global_base_dir receives and the plugin context's paths.global_config_dir will carry;
@@ -3561,7 +3562,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             restart_request = Restart(request, Resume(
                 action=request, agent_name=agent_name_str, conversation=tuple(conversation),
                 prior_context=prior, eviction_store=eviction_store, queued=repl.queued,
-                gate_mode=gate.mode, previous_sitting_id=sitting_id))
+                gate_mode=gate.mode, previous_sitting_id=sitting_id, turn=agent_loop.turn))
             if request == SLEEP_ACTION:
                 write_asleep(asleep_file, restart_request.resume, workspace=os.getcwd())
                 log.info("session %s asleep at %s", sitting_id, asleep_file)

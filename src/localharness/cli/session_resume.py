@@ -46,6 +46,7 @@ ASLEEP_FILE = "asleep.json"
 scan ever lists it)."""
 
 ASLEEP_FORMAT = 1
+MAX_TURN = 1_000_000
 SLEEP_ACTION: tuple[str, str] = ("sleep", "")
 """`Resume.action` for a thread that slept, next to `("enable" | "disable", plugin)`."""
 RELOAD_ACTION: tuple[str, str] = ("reload", "")
@@ -71,6 +72,7 @@ class Resume:
     failed_check: str = ""           # from the step: its check's first row that failed
     skipped_check: str = ""          # from the step: its first skipped row, when none failed
     step_stopped: bool = False       # the step was stopped (Ctrl-C, Ctrl-D, a refusal or an error)
+    turn: int = 0                    # AgentLoop.turn: the rebuilt loop's next turn is this plus one
 
     @property
     def slept(self) -> bool:
@@ -105,6 +107,7 @@ def write_asleep(path: Path, resume: Resume, *, workspace: str) -> None:
         "gate_mode": resume.gate_mode,
         "prior_context": resume.prior_context,
         "conversation": list(resume.conversation),
+        "turn": resume.turn,
     }
     tmp = path.with_name(path.name + ".tmp")
     write_private_bytes(tmp, json.dumps(record, ensure_ascii=True).encode("utf-8"))
@@ -196,4 +199,8 @@ def _parse(record: Any) -> tuple[Resume, str]:
     if not all(isinstance(v, str) for v in (*fields.values(), workspace)):
         raise ValueError("a text field is not text")
     return Resume(action=SLEEP_ACTION, conversation=tuple(conversation), eviction_store=None,
-                  queued=(), **fields), workspace
+                  queued=(), turn=_turn(record.get("turn")), **fields), workspace
+
+
+def _turn(value: Any) -> int:
+    return value if type(value) is int and 0 <= value <= MAX_TURN else 0

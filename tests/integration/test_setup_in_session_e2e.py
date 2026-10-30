@@ -258,7 +258,7 @@ def test_enabling_a_plugin_in_a_session_keeps_the_conversation_and_offers_its_to
     assert "image" not in s.lifecycles[0][1].loaded_names and "image" in s.lifecycles[1][1].loaded_names
     # the same conversation reaches the model, and the new tool is offered
     messages = _carried(s)
-    assert messages[len(s.conversations[0]):] == [human_message("draw a lighthouse", "typed", 1)]
+    assert messages[len(s.conversations[0]):] == [human_message("draw a lighthouse", "typed", 2)]
     assert "generate_image" in _first_request(s, 2)["tools"]
     assert "generate_image" not in _first_request(s, 1)["tools"]
     # the eviction store the carried stubs name comes along
@@ -401,7 +401,7 @@ def test_typed_ahead_lines_are_played_after_the_restart(run):
 
     assert s.runs == 2
     messages = _carried(s)
-    assert messages[len(s.conversations[0]):] == [human_message("and then this", "typed", 1)]
+    assert messages[len(s.conversations[0]):] == [human_message("and then this", "typed", 2)]
 
 
 def test_a_secret_typed_in_the_step_never_reaches_a_session_file(run, monkeypatch, tmp_path):
