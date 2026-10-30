@@ -749,11 +749,11 @@ CONFIG_CHILD_DEFAULT_TOOLS: list[str] = ["read", "glob", "grep", "git_read"]
 OPTIONAL_BUILTIN_TOOLS: tuple[str, ...] = ("git_read",)
 
 
-def _without_unoffered_optional_tools(agent_config: Any, child_registry: Any) -> Any:
-    """WR-05 / IN-53: drop an optional built-in the child registry does not hold from `tools.add`."""
+def _without_unoffered_optional_tools(agent_config: Any, child_registry: Any, narrowed: bool = False) -> Any:
+    """Drop from `tools.add` an optional built-in, or under narrowing any tool, the child registry does not hold."""
     tool_cfg = getattr(agent_config, "tools", None)
     add = list(getattr(tool_cfg, "add", None) or [])
-    keep = [n for n in add if n not in OPTIONAL_BUILTIN_TOOLS or child_registry.has(n)]
+    keep = [n for n in add if child_registry.has(n) or (not narrowed and n not in OPTIONAL_BUILTIN_TOOLS)]
     if len(keep) == len(add):
         return agent_config
     return agent_config.model_copy(update={"tools": tool_cfg.model_copy(update={"add": keep})})
@@ -945,7 +945,7 @@ async def dispatch_config_subagent(
 
     allowed = _config_child_allowed(agent_config)
     child_registry = ToolRegistry.from_allowed(allowed, base_registry=base_registry)
-    agent_config = _without_unoffered_optional_tools(agent_config, child_registry)
+    agent_config = _without_unoffered_optional_tools(agent_config, child_registry, narrowed)
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
     # The child's budget is chosen once, here, from the parent's remainder as it stands NOW (D-32).
     # Every config child takes the `default` entry (D-33), whatever it is called: a (model-writable)
