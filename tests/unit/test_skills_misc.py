@@ -25,7 +25,7 @@ from localharness.config.skills import BUNDLED_NAME, LISTING_BUDGET_CHARS, ORIGI
 from localharness.agent import subagent
 from tests.unit.test_subagent_narrowing import LEAF_TOOLSETS
 from localharness.agent.context import ContentStore
-from localharness.agent.task_record import MAX_REFERENCES, TaskState
+from localharness.agent.task_record import MAX_REFERENCES
 from localharness.tools.builtin.skill_tool import SkillTool
 from localharness.tools.registry import ToolRegistry
 from tests.unit.agent.test_auto_mode import SETTINGS, SHELL, WRITE, _ctx, _shell, _verdict
@@ -287,7 +287,7 @@ async def root_registry(tmp_path, monkeypatch) -> ToolRegistry:
     _skill(tmp_path / "cfg" / "skills", "alpha")
     skill_set = SkillSet.discover(tmp_path / "cfg", None)
     base = await _production_registry()
-    await base.register(SkillTool(skill_set, ContentStore(), TaskState(None, workspace=str(tmp_path)), result_cap=lambda: 50_000), scope="global")
+    await base.register(SkillTool(skill_set, ContentStore(), result_cap=lambda: 50_000), scope="global")
     assert "skill" in [s.name for s in base.global_schemas()]
     return base
 

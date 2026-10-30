@@ -10,7 +10,6 @@ import pytest
 
 from localharness.agent import subagent
 from localharness.agent.context import ContentStore, TokenCounter
-from localharness.agent.task_record import TaskState
 from localharness.agent.loop import _fence_instructions, base_system_prompt
 from localharness.cli import model_cmd, start_serving
 from localharness.cli.workspace import MachineTrust
@@ -454,7 +453,7 @@ async def test_the_built_in_role_floors_do_not_move_when_the_root_holds_the_skil
     reg = await _production_registry()
     counter, llm = TokenCounter(offline=True), SimpleNamespace(config=None)
     before = subagent.builtin_role_floors(reg, counter, llm, None)
-    tool = SkillTool(_notes(tmp_path), ContentStore(), TaskState(None, workspace=str(tmp_path)), result_cap=lambda: 50_000)
+    tool = SkillTool(_notes(tmp_path), ContentStore(), result_cap=lambda: 50_000)
     await reg.register(tool, scope="global")
     after = subagent.builtin_role_floors(reg, counter, llm, None)
     assert before == after
@@ -492,8 +491,8 @@ async def test_start_builds_one_skill_set_for_the_floor_the_prompt_and_the_tool(
     assert [s.name for s in seen[0]] == ["notes"]
     assert loop._skills == render_listing(seen[0]) and "- notes: Use notes when asked." in loop._skills
     assert loop._tools.schema_of("skill").parameters["properties"]["name"]["enum"] == ["notes"]
-    tool, task = loop._tools._tools["global"]["skill"], loop._tools._tools["global"]["task"]
-    assert isinstance(tool, SkillTool) and tool._state is task._state and tool._store is loop._ctx._content_store
+    tool = loop._tools._tools["global"]["skill"]
+    assert isinstance(tool, SkillTool) and tool._store is loop._ctx._content_store
     assert calls[0][1] == loop.floor()
     registry = loop._tools
     assert tool._result_cap() == registry.result_size_cap_chars

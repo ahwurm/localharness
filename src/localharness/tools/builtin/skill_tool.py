@@ -4,7 +4,6 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 
 from localharness.agent.context import ContentStore
-from localharness.agent.task_record import Reference, TaskState
 from localharness.config.skills import MAX_NAME, NAME, Skill, SkillSet, Skipped, shown
 from localharness.core.fence import fence_project_text
 from localharness.tools.base import Tool, ToolResult, ToolSchema
@@ -23,10 +22,6 @@ SKILL_DESCRIPTION = (
 STEP_FULL_TAIL = (
     "[not pinned: this step already holds four references, so this skill may be evicted before you finish; "
     "if it is, the eviction note names the tool_result_get id that restores it]"
-)
-TASK_FULL_TAIL = (
-    "[not kept across turns: the task already holds four references; to keep it, drop one with "
-    "task(action=\"reference\", source=\"<source>\", drop=true), then call skill('{name}') again]"
 )
 
 
@@ -64,15 +59,10 @@ def _body(text: str) -> str:
     return "\n".join(lines).strip("\r\n")
 
 
-def _tails(name: str, step_full: bool, task_full: bool) -> str:
-    return ("\n\n" + STEP_FULL_TAIL if step_full else "") + ("\n\n" + TASK_FULL_TAIL.format(name=name) if task_full else "")
-
-
 class SkillTool(Tool):
-    def __init__(self, skills: SkillSet, store: ContentStore, state: TaskState, result_cap: Callable[[], int]) -> None:
+    def __init__(self, skills: SkillSet, store: ContentStore, result_cap: Callable[[], int]) -> None:
         self._skills = skills
         self._store = store
-        self._state = state
         self._result_cap = result_cap
         self._names = tuple(s.name for s in skills.skills)
 
@@ -97,14 +87,12 @@ class SkillTool(Tool):
         def compose(part: str) -> str:
             return f"{header}\n\n{fence_project_text(SKILLS_FENCE_HEADER, part) if record.untrusted else part}"
 
-        budget = max(self._result_cap() - len(_tails(name, True, True)) - len(compose("x")) + 1, 0)
+        budget = max(self._result_cap() - len("\n\n" + STEP_FULL_TAIL) - len(compose("x")) + 1, 0)
         cut = cut_output(body, budget)
         source = f"skill {name}"
-        step, task, has_room = self._state.room(self._store, source)
-        final = compose(cut) + _tails(name, not has_room, task == "full")
+        step, fits = self._store.room(source)
+        final = compose(cut) + ("" if fits else "\n\n" + STEP_FULL_TAIL)
         handle = self._store.put(final, origin="untrusted" if record.untrusted else "trusted")
-        if has_room:
+        if fits:
             self._store.declare_active_reference(step, handle, source)
-        if task in ("add", "replace"):
-            self._state.add_reference(Reference(source, handle=handle))
         return self.ok(final, **({"truncated": True, "original_length": len(compose(body))} if cut != body else {}))
