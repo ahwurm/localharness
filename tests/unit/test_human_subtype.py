@@ -1,8 +1,14 @@
 """The person's turns carry the typed or steering subtype and a turn number; every other caller is request."""
+import json
 from types import SimpleNamespace
 
 import pytest
 
+from localharness.agent.context import COMPACT_DISABLED, ContextManager
+from localharness.agent.loop import AgentLoop
+from localharness.agent.permissions import PermissionEvaluator
+from localharness.cli.session_resume import SLEEP_ACTION, Resume, asleep_path, take_asleep, write_asleep
+from localharness.config.models import AgentConfig
 from localharness.core.bus import EventBus
 from localharness.core.types import human_message, provider_messages
 from tests.unit.test_task_context import make_loop
@@ -254,3 +260,30 @@ async def test_acp_prompt_runs_typed_and_an_idle_approve_follow_up_runs_request(
 
 def test_typed_is_spelled_at_the_repl_input_path_and_the_acp_prompt_only():
     assert _count_in_source('"typed"') == {"cli/repl.py": 1, "channels/acp.py": 1}
+
+
+def _slept(tmp_path, turn=None, conversation=()):
+    path = asleep_path(tmp_path / "sessions")
+    fields = dict(action=SLEEP_ACTION, agent_name="a", conversation=tuple(conversation), prior_context="",
+                  eviction_store=None, queued=(), gate_mode="unattended", previous_sitting_id="s")
+    write_asleep(path, Resume(**fields, **({} if turn is None else {"turn": turn})), workspace="/w")
+    return path
+
+
+def test_the_counter_crosses_a_sleep_and_an_old_file_reads_zero(tmp_path):
+    assert take_asleep(_slept(tmp_path, turn=7), workspace="/w").turn == 7
+    path = _slept(tmp_path)
+    record = json.loads(path.read_text())
+    del record["turn"]
+    path.write_text(json.dumps(record))
+    assert take_asleep(path, workspace="/w").turn == 0
+
+
+@pytest.mark.asyncio
+async def test_a_woken_loop_stamps_the_counter_plus_one(tmp_path, bus, mock_llm_client):
+    cfg = AgentConfig.model_validate({"name": "w", "role": "r", "permissions": {"mode": "unattended", "deny_patterns": []}})
+    loop = AgentLoop(cfg, mock_llm_client([mock_llm_client.Response(content="ok")]), bus,
+                     ContextManager(max_context_tokens=32768), None, PermissionEvaluator(),
+                     compact_md_path=COMPACT_DISABLED, config_dir=tmp_path, turn=7)
+    await loop.run_turn("hi")
+    assert _humans(loop)[0]["_lh"]["turn"] == 8 and loop.turn == 8
