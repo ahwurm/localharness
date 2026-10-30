@@ -1,6 +1,6 @@
 """Shared primitive types used across all LocalHarness components."""
 from dataclasses import dataclass
-from typing import Any, Literal, NewType, TypedDict
+from typing import Any, Literal, NewType, NotRequired, TypedDict
 
 from localharness.core.content import Content, strip_private
 
@@ -24,6 +24,7 @@ class MessageProvenance(TypedDict):
 
     origin: Literal["human", "harness"]
     subtype: str
+    turn: NotRequired[int]
 
 
 class ToolOutcome(TypedDict):
@@ -54,11 +55,13 @@ class ToolProvenance(TypedDict):
 # ``ToolProvenance`` (tool messages); readers test the key they need, never the shape.
 
 
-def human_message(content: Content, subtype: str = "request") -> Message:
+def human_message(content: Content, subtype: str = "request", turn: int | None = None) -> Message:
     """A human turn: a ``str``, or OpenAI content parts when an image rides with the text
     (see :mod:`localharness.core.content`)."""
-    return {"role": "user", "content": content,
-            "_lh": MessageProvenance(origin="human", subtype=subtype)}
+    provenance = MessageProvenance(origin="human", subtype=subtype)
+    if turn is not None:
+        provenance["turn"] = turn
+    return {"role": "user", "content": content, "_lh": provenance}
 
 
 def harness_message(content: str, subtype: str) -> Message:

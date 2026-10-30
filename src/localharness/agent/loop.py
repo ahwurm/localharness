@@ -1263,8 +1263,10 @@ class AgentLoop:
         skills: str = "",
         index: str = "",
         affordances: Affordances | None = None,
+        turn: int = 0,
     ) -> None:
         self._config = config
+        self.turn = turn
         self._llm = llm
         # Share of the window held back for chat-template overhead (autosense.template_margin_ratio);
         # None keeps 1/64, the number this loop always used (_window_headroom).
@@ -1793,6 +1795,7 @@ class AgentLoop:
         initial_messages: list[Message] | None = None,
         on_token: Callable | None = None,
         images: list[dict] | None = None,
+        subtype: str = "request",
     ) -> str:
         """Execute a full agent turn. Never raises — all errors become summary strings.
 
@@ -1801,6 +1804,7 @@ class AgentLoop:
         bookkeeping (task summary, memory, task record) reads."""
         from localharness.core.events import TurnStarted, TurnCompleted, TurnFailed, BudgetSpec
 
+        self.turn += 1
         # Session continuity: reuse prior conversation if available
         if self._conversation:
             prior = list(self._conversation)
@@ -1856,7 +1860,7 @@ class AgentLoop:
             self._affordances.turn_started()
         try:
             try:
-                summary = await self._execute_loop(session, task, on_token, images)
+                summary = await self._execute_loop(session, task, on_token, images, subtype)
             finally:
                 # Back at the caller's depth BEFORE the turn's ending is published: a TurnFailed or
                 # TurnCompleted handler (or a task it creates, which copies the context) that starts a
@@ -1992,7 +1996,7 @@ class AgentLoop:
         return summary
 
     async def _execute_loop(self, session: Session, task: str, on_token: Callable | None,
-                            images: list[dict] | None = None) -> str:
+                            images: list[dict] | None = None, subtype: str = "request") -> str:
         from localharness.provider.client import (
             ProviderConnectionError,
             ProviderDegenerateError,
@@ -2104,7 +2108,8 @@ class AgentLoop:
                 # First turn — insert the single leading system message at front
                 session.messages.insert(0, {"role": "system", "content": system_prompt})
             session.push(human_message(
-                [*([text_part(task)] if task else []), *images] if images else task
+                [*([text_part(task)] if task else []), *images] if images else task,
+                subtype, turn=self.turn,
             ))
             cue = await pending if pending else None
         finally:
@@ -2148,7 +2153,7 @@ class AgentLoop:
             # distinct source from the stuck detector — deliberately outside its accounting.
             while self._user_nudge_inbox:
                 nudge = self._user_nudge_inbox.pop(0)
-                session.push(human_message(nudge, "steering"))
+                session.push(human_message(nudge, "steering", turn=self.turn))
                 if self._task_context is not None:
                     self._task_context.observe_human(nudge)
                 log.info(

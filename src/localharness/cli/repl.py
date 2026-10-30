@@ -723,9 +723,9 @@ class OrchestratorREPL:
             )
             return None
 
-        return await self._start_user_turn(user_input)
+        return await self._start_user_turn(user_input, "typed")
 
-    async def _start_user_turn(self, text: str) -> Optional[asyncio.Task]:
+    async def _start_user_turn(self, text: str, subtype: str = "request") -> Optional[asyncio.Task]:
         """Publish the UserMessage and start the turn task for one line of ordinary input.
 
         The tail of `_dispatch_input`, named so `/approve` can reach it too: an approval typed at
@@ -770,7 +770,7 @@ class OrchestratorREPL:
         # `images=` only when there are any: every agent-loop stand-in that takes (task, on_token)
         # keeps working, and a text-only line is the call it always was.
         extra = {"images": images} if images else {}
-        return asyncio.ensure_future(self._agent.run_turn(task=text, on_token=on_token, **extra))
+        return asyncio.ensure_future(self._agent.run_turn(task=text, on_token=on_token, subtype=subtype, **extra))
 
     # ------------------------------------------------------------------ #
     # Persistent type-anytime input box coordinator (box mode)
