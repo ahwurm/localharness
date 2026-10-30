@@ -22,6 +22,10 @@ INVALID_AGENT_NAME = "the file name is the agent name: lowercase letters, digits
 ROSTER_NAME_CAP = 24
 
 
+class DelegationArgError(ValueError):
+    """A delegation argument the model must fix and retry; a validation error, not a missing agent."""
+
+
 def _roster(names: Iterable[str]) -> str:
     """The first ROSTER_NAME_CAP names in order, then ' and N more'; '' for none."""
     names = list(names)
@@ -178,6 +182,13 @@ class AgentTool(Tool):
                             "review: a larger one."
                         ),
                     },
+                    "tools": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": (
+                            "Optional: restrict the subagent to these of its own tools (e.g. ['web_fetch']). "
+                            "Omit for its full set; a wrong name is refused with the agent's tool list."
+                        ),
+                    },
                 },
                 "required": ["agent_id", "task"],
             },
@@ -191,22 +202,22 @@ class AgentTool(Tool):
         purpose: str | None = None, inputs: list[str] | None = None,
         constraints: str | None = None, expected_output: str | None = None,
         checks: list[str] | None = None, stop_condition: str | None = None,
-        shape: str | None = None,
+        shape: str | None = None, tools: list[str] | None = None,
     ) -> ToolResult:
         # The registry's validator maps JSON types only and ignores `enum`, so the two values are
         # checked here, before anything is dispatched.
         if shape is not None and shape not in SHAPES:
             return self.err(f"shape must be 'lookup' or 'review', not {shape!r}",
                             error_type="validation_error")
+        if tools is not None and not (isinstance(tools, list) and all(isinstance(t, str) for t in tools)):
+            return self.err("tools must be a list of tool names", error_type="validation_error")
         brief = compose_brief(task, purpose, inputs, constraints, expected_output, checks,
                               stop_condition)
         try:
-            # `shape` rides only when the model supplied one: the runner contract stays three
-            # positional arguments, so every existing runner (and test fake) keeps working.
-            if shape is None:
-                result = await self._agent_runner(agent_id, brief, grant_handles)
-            else:
-                result = await self._agent_runner(agent_id, brief, grant_handles, shape=shape)
+            # `shape` and `tools` ride only when the model supplied them: the runner contract stays
+            # three positional arguments, so every existing runner (and test fake) keeps working.
+            extra = {**({"shape": shape} if shape is not None else {}), **({"tools": tools} if tools else {})}
+            result = await self._agent_runner(agent_id, brief, grant_handles, **extra)
             if isinstance(result, str):
                 return self.ok(result, delegated_to=agent_id, status="completed",
                                terminated_reason=None, tool_calls=0, artifacts=[],
@@ -216,6 +227,8 @@ class AgentTool(Tool):
                            terminated_reason=result.terminated_reason,
                            tool_calls=result.tool_calls, artifacts=list(result.artifacts),
                            child_session_id=result.child_session_id, handoff=result.handoff)
+        except DelegationArgError as exc:
+            return self.err(str(exc), error_type="validation_error")
         except ValueError as exc:
             # The runner's ValueErrors are actionable by design ("dispatch not wired
             # (available: ...) — you can CREATE one..."); rebuilding a generic not-found from
