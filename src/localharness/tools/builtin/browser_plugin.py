@@ -1,4 +1,4 @@
-"""The browser plugin: browser_fetch, the Chromium download and four doctor rows.
+"""The browser plugin: browser_fetch and the browser_open, click, type and scroll session tools, the Chromium download and four doctor rows.
 
 Off by default. plugins/builtin.py imports this module for every `--help`, `doctor` and `plugins list`,
 so it imports only pydantic and the plugin API; playwright, the tool and the runtime are imported
@@ -168,10 +168,13 @@ class BrowserPlugin(Plugin):
         """Nothing without Chromium: a tool that cannot work never reaches a prompt or the model's budget."""
         if _binary(ctx.config) is None:
             return []
+        from localharness.tools.builtin.browser_session import (
+            BrowserClickTool, BrowserOpenTool, BrowserScrollTool, BrowserTypeTool)
         from localharness.tools.builtin.browser_tool import BrowserFetchTool, BrowserRuntime
 
         self._runtime = BrowserRuntime(ctx.config)
-        return [BrowserFetchTool(self._runtime)]
+        return [cls(self._runtime) for cls in (
+            BrowserFetchTool, BrowserOpenTool, BrowserClickTool, BrowserTypeTool, BrowserScrollTool)]
 
     async def stop(self, ctx: PluginContext) -> None:
         if self._runtime is not None:
