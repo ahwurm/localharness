@@ -637,10 +637,10 @@ protected paths and the irreversible operations still ask there, and `~/.ssh` an
 exactly the things a boundary-less session is most likely to reach.
 
 **Two things deliberately never ask, and both are a judgment you should check against your own
-threat model.** Network reads (`web_fetch`, `web_search`, `web_page_query`, and `browser_fetch` with the browser plugin on) are silent: seven in ten
+threat model.** Network reads (`web_fetch`, `web_search`, `web_page_query`, and `browser_fetch` and `browser_open` with the browser plugin on) are silent: seven in ten
 real tool calls are web fetches, and a prompt per host would fire in a third of all sessions. Set
-`permissions.ask.network_hosts: true` for a per-host prompt (for `browser_fetch`, once per page: the
-hosts a page loads from are not asked about). What keeps a silent fetch off your own
+`permissions.ask.network_hosts: true` for a per-host prompt (for the browser tools, once per `browser_fetch` page and once per `browser_open`, not per click: the
+hosts a page loads from, and a click that moves to another public host, are not asked about). What keeps a silent fetch off your own
 network is a rule rather than a question: `web_fetch` and `browser_fetch` reach only public addresses (see
 [What a web fetch may reach](#what-a-web-fetch-may-reach)). Data carried out to a public host is
 handled structurally instead — the agents that ship with LocalHarness and read the web hold no tool
@@ -1267,7 +1267,7 @@ at start is the only place a stripped plugin tool is named; `localharness doctor
 And a plugin tool that ingests is kept apart from the host tools, and the phone's permission prompt
 labels it untrusted from what it declares, but the terminal does not mark it where you read its output:
 the terminal's "web results — UNTRUSTED, treated as data only" note covers the three built-in web tools only
-(a `browser_fetch` result still opens with the untrusted banner the model reads).
+(a result of `browser_fetch` or of the four session tools still opens with the untrusted banner the model reads).
 
 Memory is split the same way, and one part of it is trusted. What `memory_search` and `memory_get`
 return is marked untrusted, like web content: a recalled fact is fenced as data. What the
@@ -1438,13 +1438,43 @@ and the machine-level `browser.sandbox: false` is the way to accept an unsandbox
 whose bugs reach your user account below the tool declarations. The AppArmor profile route grants
 user-namespace creation to the executable at the headless shell's path under your home, so name
 that exact path and reload the profile after a Playwright upgrade moves it. With
-`permissions.ask.network_hosts: true` the first `browser_fetch` from a host asks as a `web_fetch`
-would, once per page, and the hosts the page then loads from are not asked about. And data out is
+`permissions.ask.network_hosts: true` the first `browser_fetch` or `browser_open` from a host asks as a
+`web_fetch` would, once per page or per `browser_open`; the hosts the page then loads from, and a
+click that moves to another public host, are not asked about. And data out is
 wider than `web_fetch`'s one GET: a rendered page can send requests by any verb to many public
 hosts and read their answers in page code, carrying what the model put in the URL and what the page
 itself holds. The agents that hold `browser_fetch` (the web researcher and the search verifier, or
 an agent you give it) hold no tool that reads your files or changes your machine, the capability
 floor keeps it that way, and not honouring the allowlist keeps this to public hosts.
+
+Beside `browser_fetch` the plugin gives those same agents four session tools: `browser_open`,
+`browser_click`, `browser_type` and `browser_scroll`. They reach exactly the agents `browser_fetch`
+reaches, under the same floor, so no new pair of capabilities is allowed together. `browser_open`
+opens a page and returns it as an accessibility snapshot whose elements carry refs; the other three
+act on a ref from the latest snapshot and return the page, windowed to what changed. Each agent gets
+one session, on a browser context of its own: cookies persist inside it and none survive it, it
+ends when the agent finishes, and it is a slot apart from the two `browser_fetch` pages, so at most
+three contexts exist. One session exists at a time; a second agent that asks for one is told to use
+`browser_fetch`. A session left untouched for 600 seconds is closed; that backstop is a constant, not
+a setting, so a project's `browser.idle_close_s` cannot make sessions unusable or hold the slot.
+The session has no credential: a password field is refused, and a navigation that would submit a
+form (a document `POST`) is aborted and the page is left as it was. That abort is a convention that
+keeps the session read-only, not a control on data out: `XHR`, `fetch`, `sendBeacon` and `<a ping>`
+pass, and a `POST` fired by a page's script on the agent's click is the accepted residual for a
+session that holds nothing to act with. A link that opens a new window has the window closed, and
+the model is told the address to open instead.
+
+Data out is wider again with `browser_type`. The text the model types, at most 256 characters, sits
+in a page whose scripts may send it to any public host (autocomplete and autosave do), and a `url`
+is at most 2048. What is at risk is the researcher's own context, the same class as the URL leak
+with a larger ceiling; the search verifier receives only a claim, an entity and a URL and answers
+in strict JSON, so its ceiling is lower. The snapshot is a wider injection surface than page text:
+`aria-label`, `alt`, `title`, text that is off-screen or only for screen readers, and iframe
+content are all chosen by the page's author and invisible to a human reader. A `[ref=…]` look-alike
+inside a name resolves only to a real element, so the worst case is a click on a different real
+element. What stands against it is what covers `browser_fetch`: the untrusted banner first, a header
+the page cannot forge, the role's own sentence about untrusted pages, and a result marked
+untrusted at its origin.
 
 **What this does NOT cover for the browser.** Behind an environment proxy the plugin's proxy hands
 each `CONNECT` to that proxy after the same check, and the upstream resolves the name again, the
@@ -1457,7 +1487,10 @@ Playwright's own installer from Playwright's servers over https after you say ye
 checks no signature of its own. Chromium is a program with its own bugs, and the sandbox and
 `playwright install` keeping it current are what stand against them. And with two pages loading at once,
 a private-address request one page makes while the other page's own load fails can make that failure
-read as a redirect to a non-public address — both lines are fixed text that end in the same action.
+read as a redirect to a non-public address — both lines are fixed text that end in the same action. The
+session tools add what the paragraph above names as accepted: a script's own `POST` on a click, text
+typed into a page reaching any public host it loads, and a page that hides instructions in names the
+model reads; none of these is stopped by the document-`POST` abort, which only keeps navigation read-only.
 
 ## Securing the endpoint
 
