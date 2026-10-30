@@ -483,8 +483,7 @@ async def test_resolve_target_toolset_never_loads_root():
     assert loaded == []
 
 
-STATIC_ROLES = {"explore": ["read", "glob", "grep"], "cruncher": ["tool_result_get", "chunk"],
-                "chunk-summarizer": ["tool_result_get"]}
+STATIC_ROLES = {"explore": ["read", "glob", "grep"], "cruncher": ["tool_result_get", "chunk"]}
 WEB_ROLES = ("web-researcher", "search-verifier")
 THREE = ["web_search", "web_fetch", "web_page_query"]
 
@@ -507,6 +506,7 @@ async def test_builtin_toolset_with_builtins_only_is_todays_lists():
     for name, today in STATIC_ROLES.items():
         assert builtin_toolset(name, base) == today
     assert builtin_toolset("nope", base) is None and builtin_toolset("", base) is None
+    assert builtin_toolset("chunk-summarizer", base) is None  # resolved from its yaml like any config child
     builtin_toolset("explore", base).append("bash_exec")
     builtin_toolset("web-researcher", base).append("bash_exec")
     assert builtin_toolset("explore", base) == STATIC_ROLES["explore"]
