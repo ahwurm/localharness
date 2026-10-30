@@ -1243,6 +1243,8 @@ tools may not fetch through an exec tool such as `bash_exec`. Built-in tools, MC
 wrapper declares them untrusted) and plugin tools are judged the same way, whatever scope they
 arrive in.
 
+A delegating model may narrow a specialist to a subset of its own tools for one call; narrowing only removes tools, and the grant gate and the floors judge the narrowed set.
+
 **A residual that is now closed.** Tool classification used to read tool names. A plugin tool that
 reached an agent through the inherited global scope therefore needed a separate per-tool tag before
 the checks knew what it was. Now every tool carries its own declarations, the three readers above

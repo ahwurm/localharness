@@ -1026,6 +1026,16 @@ _FILE_WRITE_TOOLS = frozenset({"write", "edit"})
 _MAX_ARG_PREVIEW = 120
 
 
+def _delegate_label(agent_id: str, tools: Any) -> str:
+    """The receipt label: the delegate, plus its narrowed tools (bare names, cut past 60 characters)."""
+    from localharness.tools.registry import _bare_name
+    names = [_bare_name(t) for t in tools if isinstance(t, str)] if isinstance(tools, list) else []
+    if not names:
+        return agent_id
+    text = f"tools: {', '.join(names)}"
+    return f"{agent_id} ({text if len(text) <= 60 else text[:59] + '…'})"
+
+
 def _tool_call_summary(tool_name: str, arguments: dict[str, Any]) -> str:
     """One-line, body-free summary of a tool call (no markup; caller adds ◆ + style).
 
@@ -1418,7 +1428,7 @@ class TerminalChannel(ChannelAdapter):
                     # Stash the delegate for the completion receipt (send_tool_result): a
                     # SUCCESS Observation carries only the summary, not who ran it (#73).
                     d = arguments.get("agent_id")
-                    self._last_agent_delegate = d if isinstance(d, str) else None
+                    self._last_agent_delegate = _delegate_label(d, arguments.get("tools")) if isinstance(d, str) else None
                 summary = _tool_call_summary(tool_name, arguments)
                 # no_wrap + ellipsis: a long preview stays ONE physical line (cropped to
                 # the terminal), never wrapping the view open (FIX B).

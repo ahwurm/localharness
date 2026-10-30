@@ -804,12 +804,12 @@ class TestMarkupSafetyAndCompactCalls:
 # ---------------------------------------------------------------------------
 
 
-def _agent_action(delegate: str, task: str = "Write three puns about databases."):
+def _agent_action(delegate: str, task: str = "Write three puns about databases.", **extra):
     from localharness.core.events import Action
     return Action(
         agent_id="orchestrator", session_id="s1", action_type="tool_call",
         tool_call_id="tc1", tool_name="agent",
-        tool_params={"agent_id": delegate, "task": task},
+        tool_params={"agent_id": delegate, "task": task, **extra},
     )
 
 
@@ -875,6 +875,34 @@ class TestAgentDelegationReceipt:
         rendered = out.getvalue()
         assert "— completed" in rendered
         assert "FAILED" not in rendered
+
+    @pytest.mark.asyncio
+    async def test_a_narrowed_delegation_shows_its_tools_on_both_receipts(self):
+        ch, out = self._pipe()
+        await ch.on_action(_agent_action("web-researcher", tools=["web_fetch", "mcp:X"]))
+        await ch.on_observation(_agent_observation(output="done", error=None))
+        await ch.on_action(_agent_action("web-researcher", tools=["web_fetch"]))
+        await ch.on_observation(_agent_observation(output=_FAIL_MSG, error=_FAIL_MSG))
+        rendered = out.getvalue()
+        assert "◆ agent web-researcher (tools: web_fetch, X) — completed" in rendered
+        assert "◆ agent web-researcher (tools: web_fetch) — FAILED:" in rendered
+
+    @pytest.mark.asyncio
+    async def test_a_long_tool_list_is_cut_with_an_ellipsis(self):
+        ch, out = self._pipe()
+        names = [f"tool_number_{i}" for i in range(8)]
+        await ch.on_action(_agent_action("coder", tools=names))
+        await ch.on_observation(_agent_observation(output="done", error=None))
+        label = out.getvalue().split("agent coder (")[1].split(")")[0]
+        assert len(label) == 60 and label.endswith("…") and label.startswith("tools: tool_number_0, ")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("extra", [{}, {"tools": []}])
+    async def test_no_tools_prints_todays_line(self, extra):
+        ch, out = self._pipe()
+        await ch.on_action(_agent_action("joke-writer", **extra))
+        await ch.on_observation(_agent_observation(output="done", error=None))
+        assert "◆ agent joke-writer — completed" in out.getvalue()
 
 
 # ---------------------------------------------------------------------------
