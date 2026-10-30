@@ -1312,6 +1312,11 @@ class AgentConfig(BaseModel):
         ),
     )
 
+    purpose: Optional[str] = Field(
+        default=None,
+        description="One line naming what this agent is for, shown beside its name in the agent tool's roster.",
+    )
+
     tools_required: bool = Field(
         default=False,
         description=(

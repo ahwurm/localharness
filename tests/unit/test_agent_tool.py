@@ -431,3 +431,104 @@ async def test_the_held_list_reaches_the_metadata_only_when_a_result_carries_one
     plain = await _make_agent_tool(runner=AsyncMock(return_value=DelegationResult("t")))._execute(
         agent_id="coder", task="x")
     assert narrowed.metadata["tools"] == ["a"] and "tools" not in plain.metadata
+
+
+# --- purpose: one line beside each name on the roster -----------------------------------------
+
+class _Purposes(list):
+    def __init__(self, names, purposes):
+        super().__init__(names)
+        self._p = purposes
+
+    def purpose(self, name):
+        return self._p.get(name, "")
+
+
+def _roster_line(names, purposes):
+    description = _text(agents=_Purposes(names, purposes))
+    return description.split("Available agents: ", 1)[1].split(". Use this when", 1)[0]
+
+
+def test_purpose_from_an_agent_file_shows_beside_its_name_through_the_real_loader(tmp_path):
+    from localharness.config.loader import ConfigLoader
+    from localharness.orchestrator.cards import AgentCardRegistry
+
+    layer = tmp_path / "proj" / ".localharness"
+    loader = ConfigLoader(config_dir=tmp_path / "machine", local_config_dir=layer, project_trusted=True)
+    agents = layer / "agents"
+    agents.mkdir(parents=True)
+    (agents / "fixer.yaml").write_text(
+        "name: fixer\nrole: r\npurpose: Fixes failing tests\n", encoding="utf-8")
+    (agents / "plain.yaml").write_text("name: plain\nrole: r\n", encoding="utf-8")
+    registry = AgentCardRegistry(loader=loader)
+    assert registry.refresh() == []
+    description = AgentTool(agent_runner=AsyncMock(), available_agents=registry).info().description
+    assert "fixer (Fixes failing tests)" in description
+    assert "explore, web-researcher, cruncher, search-verifier, fixer (Fixes failing tests), plain." in description
+
+
+@pytest.mark.parametrize("purpose", [None, "", "  \n\t ", chr(0x200B) + chr(0x202E)])
+def test_purpose_none_empty_whitespace_and_invisible_all_render_bare(purpose):
+    from localharness.config.models import AgentConfig
+    from localharness.orchestrator.cards import AgentCardRegistry
+
+    registry = AgentCardRegistry()
+    registry.register_from_config(AgentConfig(name="q", role="r", purpose=purpose))
+    assert registry.purpose("q") == ""
+    assert _roster_line(["q", "b"], {"q": registry.purpose("q")}) == "q, b"
+
+
+def test_purpose_is_absent_from_a_roster_without_a_purpose_method():
+    assert "Available agents: coder, researcher." in _text(agents=["coder", "researcher"])
+
+
+def test_two_agents_with_the_same_purpose_each_show_it_and_a_bare_name_between_stays_bare():
+    assert _roster_line(["a", "b", "c"], {"a": "Fixes", "c": "Fixes"}) == "a (Fixes), b, c (Fixes)"
+
+
+def shown_roster(registry, name):
+    class R:
+        def __iter__(self): return iter([name])
+        purpose = staticmethod(registry.purpose)
+    return R()
+
+
+def test_purpose_is_cut_at_80_code_points_by_the_card_and_shown_sanitised():
+    from localharness.config.models import AgentConfig
+    from localharness.orchestrator.cards import AgentCardRegistry
+
+    hostile = "ab" + chr(0x202E) + chr(0x200B) + "\nc\x07" + "x" * 100
+    card = AgentCardRegistry().register_from_config(AgentConfig(name="q", role="r", purpose=hostile))
+    shown = AgentCardRegistry()
+    shown.register(card)
+    assert len(card.purpose) == 80 and card.purpose.startswith("ab c")
+    assert all(c not in card.purpose for c in (chr(0x202E), chr(0x200B), "\n", "\x07"))
+    assert shown.purpose("q") == card.purpose and shown.purpose("nope") == ""
+    assert f"q ({card.purpose})" in _text(agents=shown_roster(shown, "q"))
+
+
+def test_purpose_is_counted_in_code_points_not_bytes():
+    from localharness.config.models import AgentConfig
+    from localharness.orchestrator.cards import AgentCardRegistry
+
+    card = AgentCardRegistry().register_from_config(AgentConfig(name="q", role="r", purpose="é" * 90))
+    assert card.purpose == "é" * 80
+
+
+def test_the_24_name_cap_and_its_tail_hold_with_purposes_and_no_name_is_dropped_for_one():
+    names = _names(30)
+    line = _roster_line(names, {n: "p" * 80 for n in names})
+    assert line == ", ".join(f"{n} ({'p' * 80})" for n in names[:24]) + " and 6 more"
+    assert "a24" not in line
+
+
+def test_the_not_found_texts_list_names_only_even_with_purposes():
+    names = _Purposes(["coder"], {"coder": "Writes code"})
+    for exc in (KeyError("x"), ValueError("")):
+        tool = _make_agent_tool(runner=AsyncMock(side_effect=exc), agents=names)
+        result = asyncio.run(tool._execute(agent_id="nope", task="t"))
+        assert "Available: coder" in result.error and "Writes code" not in result.error
+
+
+def test_roster_keeps_names_in_order_with_purposes():
+    assert _roster_line(["z", "a", "m"], {"a": "A one"}) == "z, a (A one), m"

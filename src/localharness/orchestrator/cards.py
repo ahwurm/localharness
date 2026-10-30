@@ -21,6 +21,7 @@ from localharness.config.loader import (
     Origin,
 )
 from localharness.config.models import AgentConfig
+from localharness.core.caps import Caps
 from localharness.tools.builtin.agent_tool import BUILTIN_AGENT_NAMES, INVALID_AGENT_NAME
 
 log = logging.getLogger(__name__)
@@ -47,6 +48,7 @@ class AgentCard(BaseModel):
 
     # Capability metadata
     description: str
+    purpose: str = ""
     capabilities: list[str] = []
     input_types: list[str] = ["task_description"]
     output_types: list[str] = ["markdown_report"]
@@ -155,11 +157,14 @@ class AgentCardRegistry:
 
     def generate_card(self, config: "AgentConfig") -> AgentCard:
         """Generate an AgentCard from an AgentConfig."""
+        from localharness.channels.base import one_line
+
         return AgentCard(
             agent_id=config.name,
             name=config.name,
             division_id=config.division or "default",
             description=config.role[:200],
+            purpose=one_line(config.purpose or "")[:Caps.LINE],
             capabilities=config.capabilities,
             model=config.model,
             max_context_tokens=config.context.max_context_tokens if config.context else DEFAULT_MAX_CONTEXT_TOKENS,
@@ -185,6 +190,10 @@ class AgentCardRegistry:
 
     def get(self, agent_id: str) -> AgentCard | None:
         return self._cards.get(agent_id)
+
+    def purpose(self, agent_id: str) -> str:
+        card = self._cards.get(agent_id)
+        return card.purpose if card else ""
 
     def all_cards(self) -> list[AgentCard]:
         return list(self._cards.values())

@@ -26,11 +26,12 @@ class DelegationArgError(ValueError):
     """A delegation argument the model must fix and retry; a validation error, not a missing agent."""
 
 
-def _roster(names: Iterable[str]) -> str:
-    """The first ROSTER_NAME_CAP names in order, then ' and N more'; '' for none."""
+def _roster(names: Iterable[str], purpose: Callable[[str], str] | None = None) -> str:
+    """The first ROSTER_NAME_CAP names in order, each 'name (purpose)' when it has one, then ' and N more'; '' for none."""
     names = list(names)
     tail = f" and {len(names) - ROSTER_NAME_CAP} more" if len(names) > ROSTER_NAME_CAP else ""
-    return ", ".join(names[:ROSTER_NAME_CAP]) + tail
+    shown = ((n, purpose(n) if purpose else "") for n in names[:ROSTER_NAME_CAP])
+    return ", ".join(f"{n} ({p})" if p else n for n, p in shown) + tail
 
 
 def compose_brief(
@@ -113,7 +114,7 @@ class AgentTool(Tool):
         )
 
     def info(self) -> ToolSchema:
-        agent_list = _roster(self._available_agents) or "none configured"
+        agent_list = _roster(self._available_agents, getattr(self._available_agents, "purpose", None)) or "none configured"
         return ToolSchema(
             name="agent",
             group="delegate",
