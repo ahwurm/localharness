@@ -19,7 +19,7 @@ from localharness.tools.builtin.browser_session import (
 from localharness.tools.builtin.web_tool import UNTRUSTED_BANNER, WebPageQueryTool
 from localharness.tools.registry import ToolRegistry
 from tests.unit.test_browser_plugin import (  # noqa: F401  (fixtures)
-    FakeError, FakeTimeout, gate_on, runtime, tool_contexts, until, world,
+    BROWSER, FakeError, FakeTimeout, base_with, cache, gate_on, runtime, tool_contexts, until, world,
 )
 from tests.unit.test_web_fetch_guard import public_web
 
@@ -557,3 +557,91 @@ async def test_a_popup_url_is_cut_to_200_characters(acting, world):  # noqa: F81
     world.on_act = long
     got = await acting.click.run(ref="e1")
     assert _POPUP.format(url=("https://p.test/" + "a" * 500)[:200]) in got.output and "a" * 200 not in got.output
+
+
+SESSION = BROWSER[1:]
+
+
+async def test_both_web_roles_hold_the_session_tools_only_when_chromium_is_installed_and_no_leaf_does(cache, world, tmp_path):  # noqa: F811
+    from localharness.agent.subagent import builtin_toolset
+    from tests.unit.test_subagent_narrowing import LEAF_TOOLSETS
+
+    with_chromium, without = await base_with(cache, tmp_path), await base_with(cache, tmp_path, browser=False)
+    for role in ("web-researcher", "search-verifier"):
+        assert all(n in builtin_toolset(role, with_chromium) for n in SESSION)
+        assert not any(n in builtin_toolset(role, without) for n in SESSION)
+    assert not any(n in toolset for toolset in LEAF_TOOLSETS.values() for n in SESSION)
+
+
+async def run_children(cache, tmp_path, monkeypatch, mock_llm_client, agent, task, browser=True, **kw):  # noqa: F811
+    from tests.unit.test_subagent_narrowing import install_fake_loop, make_runner
+
+    loops = install_fake_loop(monkeypatch)
+    monkeypatch.setenv("LOCALHARNESS_VERIFICATION_LEDGER_DIR", str(tmp_path / "ledger"))
+    base = await base_with(cache, tmp_path, browser=browser)
+    await make_runner(base, mock_llm_client([]), max_subagent_depth=1)(agent, task, **kw)
+    return loops
+
+
+@pytest.mark.parametrize("kw,browser,sentence", [
+    ({}, True, True), ({"tools": ["web_fetch"]}, True, False), ({"tools": ["browser_open", "browser_click"]}, True, True),
+    ({}, False, False)])
+async def test_the_researcher_sentence_is_in_its_role_only_when_it_holds_browser_open(
+        cache, world, tmp_path, monkeypatch, mock_llm_client, kw, browser, sentence):  # noqa: F811
+    from localharness.agent.subagent import BROWSER_RESEARCHER_ADDENDUM, build_web_researcher_config
+
+    loops = await run_children(cache, tmp_path, monkeypatch, mock_llm_client, "web-researcher", "t", browser, **kw)
+    base_role = build_web_researcher_config("web-researcher").role
+    assert loops and all((lp.config.role.endswith(BROWSER_RESEARCHER_ADDENDUM)) is sentence for lp in loops)
+    assert all(lp.config.role.startswith(base_role) for lp in loops)
+
+
+async def test_the_zero_call_retry_brief_is_the_prefix_and_the_task_unchanged(cache, world, tmp_path, monkeypatch, mock_llm_client):  # noqa: F811
+    from localharness.agent.subagent import ZERO_CALL_RETRY_PREFIX
+
+    loops = await run_children(cache, tmp_path, monkeypatch, mock_llm_client, "web-researcher", "t")
+    assert [lp.briefs for lp in loops] == [["t"], [ZERO_CALL_RETRY_PREFIX + "t"]]
+
+
+async def test_the_verifier_sentence_is_in_its_role_only_when_it_holds_browser_open(cache, world, tmp_path, monkeypatch, mock_llm_client):  # noqa: F811
+    from localharness.agent.subagent import BROWSER_VERIFIER_ADDENDUM, SEARCH_VERIFIER_ROLE
+    from tests.unit.test_subagent_narrowing import VERIFIER_TASK
+
+    (loop,) = await run_children(cache, tmp_path, monkeypatch, mock_llm_client, "search-verifier", VERIFIER_TASK)
+    assert loop.config.role == SEARCH_VERIFIER_ROLE + BROWSER_VERIFIER_ADDENDUM
+    (loop,) = await run_children(cache, tmp_path, monkeypatch, mock_llm_client, "search-verifier", VERIFIER_TASK, False)
+    assert loop.config.role == SEARCH_VERIFIER_ROLE
+
+
+async def test_a_researcher_narrowed_to_open_and_click_holds_those_two_bound_to_its_store_and_its_dispatch_releases_the_session(
+        cache, world, tmp_path, monkeypatch, mock_llm_client):  # noqa: F811
+    from tests.unit.test_subagent_narrowing import FakeLoop, make_runner
+
+    public_web(monkeypatch)
+    world.pages[OPEN] = (200, "", "text/html")
+    world.snapshots[OPEN] = snap("- heading", *links(8))
+    seen = {}
+
+    class SessionLoop(FakeLoop):
+        async def run_turn(self, brief, *a, **k):
+            seen["opened"] = (await self.tool_registry._find_tool_by_name("browser_open").run(url=OPEN)).success
+            rt = self.tool_registry._find_tool_by_name("browser_open")._inner._runtime
+            seen["during"] = [s.store for s in rt._sessions.values()]
+            seen["slot_held"] = rt._session_slot.locked()
+            return await super().run_turn(brief, *a, **k)
+
+    FakeLoop.loops = []
+    monkeypatch.setattr("localharness.agent.loop.AgentLoop", SessionLoop)
+    monkeypatch.setenv("LOCALHARNESS_VERIFICATION_LEDGER_DIR", str(tmp_path / "ledger"))
+    base = await base_with(cache, tmp_path)
+    rt = base._find_tool_by_name("browser_open")._inner._runtime
+    await make_runner(base, mock_llm_client([]), max_subagent_depth=1)("web-researcher", "t", tools=["browser_open", "browser_click"])
+
+    child = FakeLoop.loops[0]
+    assert child.held == {"browser_open", "browser_click"}
+    store = child.context_manager._content_store
+    for name in ("browser_open", "browser_click"):
+        assert child.tool_registry._find_tool_by_name(name)._inner._store is store
+        assert child.tool_registry._find_tool_by_name(name)._inner._store is not base._find_tool_by_name(name)._inner._store
+    assert seen["opened"] and seen["during"] == [store] and seen["slot_held"]
+    assert not rt._sessions and not rt._session_slot.locked() and world.open_contexts() == 0

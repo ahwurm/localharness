@@ -346,7 +346,8 @@ _DESCRIPTION = (
     "Like web_fetch, but runs the page's JavaScript first (slow, up to 30 s). If web_fetch returned "
     "\"low extractable text\" for an https URL, call this once with the same URL — web_fetch's "
     "\"do NOT re-fetch\" means do not call web_fetch again, not this tool. Otherwise use web_fetch. "
-    "Same start_index and fetch_id; search the full page with web_page_query.")
+    "Same start_index and fetch_id; search the full page with web_page_query. "
+    "To click or type on the page, use browser_open.")
 _CAPPED = (f"[rendered text capped at {FETCH_MAX_BODY_BYTES} characters — the rest of this page was not read; "
            "the retained text is a PREFIX, not the full page]")
 _NOT_HTTPS = "browser_fetch renders https pages only. For http://… use web_fetch."

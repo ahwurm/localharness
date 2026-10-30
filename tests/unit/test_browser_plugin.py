@@ -754,7 +754,8 @@ DESCRIPTION = (
     "Like web_fetch, but runs the page's JavaScript first (slow, up to 30 s). If web_fetch returned "
     "\"low extractable text\" for an https URL, call this once with the same URL — web_fetch's "
     "\"do NOT re-fetch\" means do not call web_fetch again, not this tool. Otherwise use web_fetch. "
-    "Same start_index and fetch_id; search the full page with web_page_query.")
+    "Same start_index and fetch_id; search the full page with web_page_query. "
+    "To click or type on the page, use browser_open.")
 PAGE = "x" * 3000 + " needle " + "y" * 2992
 
 
@@ -1170,11 +1171,13 @@ def test_linux_reads_xdg_cache_home_and_a_zero_path_means_the_package_folder(mon
 # --- with the binary: one tool over one runtime, the launch and sandbox rows, the download, stop() ----------------
 
 
-async def test_tools_returns_the_one_fetch_tool_over_the_runtime_the_plugin_keeps(cache, world, tmp_path):
+async def test_tools_returns_fetch_and_the_four_session_tools_over_the_one_runtime_the_plugin_keeps(cache, world, tmp_path):
     install_shell(cache)
     plugin = BrowserPlugin()
-    (tool,) = await plugin.tools(plugin_ctx(tmp_path, idle_close_s=7))
-    assert isinstance(tool, BrowserFetchTool) and tool._runtime is plugin._runtime and plugin._runtime._idle_s == 7
+    tools = await plugin.tools(plugin_ctx(tmp_path, idle_close_s=7))
+    tool = tools[0]
+    assert [t.info().name for t in tools] == BROWSER and isinstance(tool, BrowserFetchTool)
+    assert all(t._runtime is plugin._runtime for t in tools) and plugin._runtime._idle_s == 7
     assert world.launches == []
     await tool.bound_to(ContentStore()).run(url="https://example.com/")
     assert world.browsers[0].connected
@@ -1277,7 +1280,7 @@ async def test_the_machine_level_sandbox_off_is_a_warning_that_names_the_setting
 async def test_doctors_launch_never_touches_the_session_runtime(cache, world, tmp_path):
     install_shell(cache)
     plugin = BrowserPlugin()
-    (tool,) = await plugin.tools(plugin_ctx(tmp_path))
+    tool, *_ = await plugin.tools(plugin_ctx(tmp_path))
     await tool.run(url="https://example.com/")
     session_browser = world.browsers[0]
     await plugin.doctor(plugin_ctx(tmp_path))
@@ -1465,6 +1468,7 @@ def test_doctor_with_the_plugin_on_and_no_chromium_says_why_in_four_rows(home, c
 # --- which agents hold it ----------------------------------------------------------------------------------
 
 THREE = ["web_search", "web_fetch", "web_page_query"]
+BROWSER = ["browser_fetch", "browser_open", "browser_click", "browser_type", "browser_scroll"]
 WEB_ROLES = ("web-researcher", "search-verifier")
 
 
@@ -1484,16 +1488,16 @@ async def test_both_web_roles_hold_the_tool_after_the_three_and_explore_does_not
     from tests.unit.test_subagent_narrowing import LEAF_TOOLSETS
 
     base = await base_with(cache, tmp_path)
-    assert [builtin_toolset(r, base) for r in WEB_ROLES] == [[*THREE, "browser_fetch"]] * 2
-    assert all("browser_fetch" not in toolset for toolset in LEAF_TOOLSETS.values())
+    assert [builtin_toolset(r, base) for r in WEB_ROLES] == [[*THREE, *BROWSER]] * 2
+    assert not any(name in toolset for toolset in LEAF_TOOLSETS.values() for name in BROWSER)
 
 
-async def test_the_floors_of_the_web_roles_price_four_schemas_and_three_without_it(cache, world, tmp_path, monkeypatch):
+async def test_the_floors_of_the_web_roles_price_the_browser_schemas_and_three_without_them(cache, world, tmp_path, monkeypatch):
     from localharness.agent import subagent
 
     seen: list[list[str]] = []
     monkeypatch.setattr(subagent, "role_floor", lambda cfg, schemas, **kw: seen.append([s.name for s in schemas]) or 0)
-    for browser, want in ((True, [*THREE, "browser_fetch"]), (False, THREE)):
+    for browser, want in ((True, [*THREE, *BROWSER]), (False, THREE)):
         seen.clear()
         subagent.builtin_role_floors(await base_with(cache, tmp_path, browser=browser), None, None, None)
         assert [names for names in seen if "web_fetch" in names] == [want, want]
@@ -1505,9 +1509,11 @@ async def test_the_root_is_denied_the_tool_and_its_schema_names_the_plugin(cache
 
     base = await base_with(cache, tmp_path)
     schemas = {s.name: s for s in base.global_schemas()}
-    assert "browser_fetch" in apply_root_capability_floor(ToolConfig(), schemas.values())
-    schema = schemas["browser_fetch"]
-    assert schema.source_plugin == "browser" and "ingest" in schema.model_fields_set and schema.ingest == "untrusted"
+    denied = apply_root_capability_floor(ToolConfig(), schemas.values())
+    for name in BROWSER:
+        schema = schemas[name]
+        assert name in denied
+        assert schema.source_plugin == "browser" and "ingest" in schema.model_fields_set and schema.ingest == "untrusted"
 
 
 async def test_every_builtin_toolset_stays_clean_with_the_real_tool(cache, world, tmp_path):
@@ -1519,6 +1525,7 @@ async def test_every_builtin_toolset_stays_clean_with_the_real_tool(cache, world
     for name in [*LEAF_TOOLSETS, *subagent._WEB_ROLES]:
         toolset = LEAF_TOOLSETS[name] if name in LEAF_TOOLSETS else subagent.builtin_toolset(name, base)
         schemas = [base.schema_of(n) for n in toolset]
+        assert (name in subagent._WEB_ROLES) == all(n in toolset for n in BROWSER)
         assert None not in schemas and not any(is_host_dangerous(s) for s in schemas)
         assert_no_coresidence(schemas, agent_id=name)
 
