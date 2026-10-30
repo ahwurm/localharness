@@ -85,11 +85,13 @@ def test_rules_are_the_data_in_order():
         ("<path> description is over 1024 characters", "shorten it to 1024 characters"),
         ("<path> description is more than one line", "write it on one line"),
         ("<path> description holds a control character", "remove the control characters"),
+        ("<path> purpose is not one line of plain text", "write purpose: on one line"),
+        ("<path> tools is not a list of tool names", "write tools: as a list of tool names"),
         ("<dir> is past the 32 project skills kept", "remove project skills you do not need"),
         ("<dir> is past the 64 skills kept", "remove skills you do not need"),
         ("<dir> is shadowed by <other>", "rename yours to keep both"),
     )
-    assert len({fix for _, fix in skills.RULES}) == 22
+    assert len({fix for _, fix in skills.RULES}) == 24
 
 
 def _tree(name):
@@ -241,6 +243,14 @@ def _control_description(cfg, proj, pkg):
     return _expect(skills.CONTROL_DESCRIPTION, path=_write(cfg, _fm(description='"a\\eb"')))
 
 
+def _bad_purpose(cfg, proj, pkg):
+    return _expect(skills.BAD_PURPOSE, path=_write(cfg, _fm(extra="purpose: 7\n")))
+
+
+def _bad_tools(cfg, proj, pkg):
+    return _expect(skills.BAD_TOOLS, path=_write(cfg, _fm(extra="tools: read\n")))
+
+
 def _cap_project(cfg, proj, pkg):
     for i in range(33):
         last = _skill(proj / ".localharness" / "skills", f"s{i:02d}")
@@ -280,6 +290,8 @@ CASES = [
     (skills.LONG_DESCRIPTION, _long_description),
     (skills.MULTILINE_DESCRIPTION, _multiline_description),
     (skills.CONTROL_DESCRIPTION, _control_description),
+    (skills.BAD_PURPOSE, _bad_purpose),
+    (skills.BAD_TOOLS, _bad_tools),
     (skills.CAP_PROJECT, _cap_project),
     (skills.CAP_TOTAL, _cap_total),
     (skills.SHADOWED, _shadowed),
@@ -322,7 +334,7 @@ def _bundled_and(entry, text):
 def _project_cap_and_control(cfg, proj, pkg):
     for i in range(32):
         _skill(proj / ".localharness" / "skills", f"s{i:02d}")
-    return _skill(proj / ".localharness" / "skills", "s32", _fm("s32", '"a\\tb"')), {}
+    return _skill(proj / ".localharness" / "skills", "s32", _fm("s32", extra="tools: read\n")), {}
 
 
 def _total_cap_and_shadow(cfg, proj, pkg):
@@ -353,7 +365,9 @@ PAIRS = [
     (skills.NO_DESCRIPTION, skills.LONG_DESCRIPTION, _plain(_fm(description='"' + " " * 1025 + '"'))),
     (skills.LONG_DESCRIPTION, skills.MULTILINE_DESCRIPTION, _plain(_fm(description=f'"{"d" * 1025}\\nx"'))),
     (skills.MULTILINE_DESCRIPTION, skills.CONTROL_DESCRIPTION, _plain(_fm(description='"a\\nb"'))),
-    (skills.CONTROL_DESCRIPTION, skills.CAP_PROJECT, _project_cap_and_control),
+    (skills.CONTROL_DESCRIPTION, skills.BAD_PURPOSE, _plain(_fm(description='"a\\tb"', extra="purpose: 7\n"))),
+    (skills.BAD_PURPOSE, skills.BAD_TOOLS, _plain(_fm(extra="purpose: 7\ntools: read\n"))),
+    (skills.BAD_TOOLS, skills.CAP_PROJECT, _project_cap_and_control),
     (skills.CAP_TOTAL, skills.SHADOWED, _total_cap_and_shadow),
 ]
 UNREACHABLE = [
@@ -548,12 +562,13 @@ def test_echoed_names_are_cut_to_64_and_echoed_paths_are_whole(cfg):
     assert long_entry in _only(cfg)[-1]
 
 
-def test_unknown_keys_are_ignored_and_a_skill_has_five_fields(cfg):
+def test_unknown_keys_are_ignored_and_a_skill_has_seven_fields(cfg):
     extra = "allowed-tools: [bash]\nmetadata:\n  k: v\nlicense: MIT\n"
     _write(cfg, _fm(extra=extra))
     (kept,) = SkillSet.discover(cfg, None).skills
     assert kept.name == "a"
-    assert [f.name for f in dataclasses.fields(skills.Skill)] == ["name", "description", "origin", "path", "untrusted"]
+    assert [f.name for f in dataclasses.fields(skills.Skill)] == [
+        "name", "description", "origin", "path", "untrusted", "purpose", "tools"]
 
 
 def test_no_project_root_reads_no_project_origin(cfg, proj):
@@ -661,9 +676,9 @@ def test_regular_file_test_is_lstat():
 
 def test_every_rule_has_a_case():
     assert {pair for pair, _ in CASES} == set(skills.RULES)
-    assert len(CASES) == len(skills.RULES) == 22
+    assert len(CASES) == len(skills.RULES) == 24
     fixes = [fix for _, fix in skills.RULES]
-    assert len(set(fixes)) == 22 and all(fixes)
+    assert len(set(fixes)) == 24 and all(fixes)
 
 
 def test_the_entry_bound_is_256_and_the_257th_sorted_name_is_never_read(cfg):
@@ -1096,3 +1111,65 @@ def test_discover_find_and_read_body_write_and_print_nothing(tmp_path, cfg, proj
     assert _snapshot(tmp_path) == before
     captured = capsys.readouterr()
     assert (captured.out, captured.err) == ("", "")
+
+
+def _found(cfg, extra):
+    _write(cfg, _fm(extra=extra))
+    return SkillSet.discover(cfg, None)
+
+
+def test_purpose_and_tools_parse_onto_the_skill(cfg):
+    found = _found(cfg, "purpose: Drafts release notes\ntools: [read, grep, read]\n")
+    assert [(s.purpose, s.tools) for s in found.skills] == [("Drafts release notes", ("read", "grep"))]
+    assert found.skipped == ()
+
+
+def test_a_skill_without_purpose_or_tools_has_empty_purpose_and_no_tools(cfg):
+    found = _found(cfg, "")
+    assert [(s.purpose, s.tools) for s in found.skills] == [("", None)]
+
+
+def test_empty_tools_list_is_an_empty_tuple_and_null_values_are_absent(cfg):
+    assert [s.tools for s in _found(cfg, "tools: []\n").skills] == [()]
+    found = _found(cfg, "tools:\npurpose:\n")
+    assert [(s.purpose, s.tools) for s in found.skills] == [("", None)]
+
+
+@pytest.mark.parametrize("extra", [
+    "purpose: 7\n", "purpose: [a]\n", 'purpose: "a\\nb"\n', 'purpose: "a\\u202eb"\n',
+    'purpose: "a\\u200bb"\n', 'purpose: "a\\x07b"\n', "purpose: |\n  one\n  two\n",
+    f"purpose: {'p' * 1025}\n",
+])
+def test_a_malformed_purpose_skips_the_skill_with_its_own_line(cfg, extra):
+    found = _found(cfg, extra)
+    assert found.skills == ()
+    assert [skip_line(s) for s in found.skipped] == [_expect(skills.BAD_PURPOSE, path=cfg / "skills" / "a" / "SKILL.md")]
+
+
+def test_a_purpose_at_the_cap_is_kept(cfg):
+    assert [s.purpose for s in _found(cfg, f"purpose: {'p' * 1024}\n").skills] == ["p" * 1024]
+
+
+@pytest.mark.parametrize("extra", [
+    "tools: read\n", "tools: {a: b}\n", "tools: [1]\n", "tools: [read, null]\n", 'tools: [""]\n',
+    'tools: [" "]\n', 'tools: ["a b"]\n', 'tools: ["a\\u202eb"]\n', 'tools: ["a\\nb"]\n',
+])
+def test_malformed_tools_skip_the_skill_with_their_own_line(cfg, extra):
+    found = _found(cfg, extra)
+    assert found.skills == ()
+    assert [skip_line(s) for s in found.skipped] == [_expect(skills.BAD_TOOLS, path=cfg / "skills" / "a" / "SKILL.md")]
+
+
+def test_tools_keep_their_listed_order_with_duplicates_removed(cfg):
+    found = _found(cfg, "tools: [z, a, z, m, a]\n")
+    assert found.skills[0].tools == ("z", "a", "m")
+
+
+def test_only_the_display_and_parse_modules_read_a_purpose():
+    allowed = {"orchestrator/cards.py", "config/skills.py", "tools/builtin/agent_tool.py", "agent/task_record.py"}
+    readers = {
+        str(path.relative_to(SRC))
+        for path in SRC.rglob("*.py")
+        if any(isinstance(n, ast.Attribute) and n.attr == "purpose" for n in ast.walk(ast.parse(path.read_text())))
+    }
+    assert readers <= allowed
