@@ -223,7 +223,7 @@ async def test_grandchild_runs_at_depth_two_via_injected_tool(monkeypatch):
     monkeypatch.setattr(subagent, "dispatch_explore_subagent", _spy_explore)
 
     runner = subagent.make_explore_agent_runner(
-        llm=object(), bus=object(), base_registry=object(),
+        llm=object(), bus=object(), base_registry=ToolRegistry(),
         permission_evaluator=object(), get_parent_session_id=lambda: "sid",
         depth=0, max_subagent_depth=2, available_agents=["web-researcher"],
     )
@@ -254,7 +254,7 @@ async def test_kill_switch_cap_one_makes_child_leaf(monkeypatch):
     monkeypatch.setattr(subagent, "dispatch_web_subagent", _spy_web)
 
     runner = subagent.make_explore_agent_runner(
-        llm=object(), bus=object(), base_registry=object(),
+        llm=object(), bus=object(), base_registry=ToolRegistry(),
         permission_evaluator=object(), get_parent_session_id=lambda: "sid",
         depth=0, max_subagent_depth=1, available_agents=["web-researcher"],
     )

@@ -129,7 +129,7 @@ async def test_runner_routes_search_verifier(monkeypatch):
     monkeypatch.setattr(subagent, "dispatch_search_verifier_subagent", _spy)
 
     runner = subagent.make_explore_agent_runner(
-        llm=object(), bus=object(), base_registry=object(),
+        llm=object(), bus=object(), base_registry=ToolRegistry(),
         permission_evaluator=object(), get_parent_session_id=lambda: "sid",
     )
     out = await runner("search-verifier", "claim: x\nentity: y\nsource_url: z")
@@ -147,7 +147,7 @@ async def test_web_researcher_is_non_leaf_advertising_only_the_verifier(monkeypa
     monkeypatch.setattr(subagent, "dispatch_web_subagent", _spy_web)
 
     runner = subagent.make_explore_agent_runner(
-        llm=object(), bus=object(), base_registry=object(),
+        llm=object(), bus=object(), base_registry=ToolRegistry(),
         permission_evaluator=object(), get_parent_session_id=lambda: "sid",
         depth=0, max_subagent_depth=2, available_agents=["web-researcher", "search-verifier"],
     )
