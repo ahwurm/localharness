@@ -646,7 +646,8 @@ class DelegationResult:
     `status`, `terminated_reason`, `tool_calls`, `artifacts` (paths the child's successful
     write/edit calls named) and `child_session_id` come from the runtime; `handoff` is the
     child's own HANDOFF block, parsed or None; `tools` is the narrowed set the child held, None when
-    the call did not narrow. `str(result)` is the text, so string callers work."""
+    the call did not narrow; `raw` is the child's own final answer, "" when the dispatch kept none.
+    `str(result)` is the text, so string callers work."""
     text: str
     status: str = "completed"
     terminated_reason: str | None = None
@@ -655,6 +656,7 @@ class DelegationResult:
     child_session_id: str | None = None
     handoff: dict | None = None
     tools: list[str] | None = None
+    raw: str = ""
 
     def __str__(self) -> str:
         return self.text
@@ -851,14 +853,14 @@ def _resolve_target_toolset(name: str, load_agent: Callable[[str], Any] | None, 
     return []
 
 
-def _validated_narrowing(name: str, tools: list[str], base: Any, load_agent: Callable[[str], Any] | None,
-                         has_agent: bool) -> list[str]:
+def _validated_narrowing(name: str, tools: list[str], base: Any, config: Any, has_agent: bool) -> list[str]:
     """The model's tool names, bare and deduped; DelegationArgError unless each is in the target's set."""
     from localharness.tools.registry import _bare_name
     wanted = list(dict.fromkeys(_bare_name(t) for t in tools))
     if name == "cruncher":
         raise DelegationArgError("cruncher's tools are run by the harness, not chosen; omit tools.")
-    resolved = [_bare_name(n) for n in _resolve_target_toolset(name, load_agent, base)]
+    resolved = [_bare_name(n) for n in (_config_child_allowed(config) if config is not None
+                                        else builtin_toolset(name, base) or [])]
     if not resolved and name != "explore" and name not in _WEB_ROLES:
         return wanted
     held = [n for n in dict.fromkeys(resolved) if base.has(n)] + (["agent"] if has_agent else [])
@@ -941,6 +943,9 @@ async def dispatch_config_subagent(
     shape: str | None = None,
     project_instructions: Any = None,
     narrowed: bool = False,
+    budget: "tuple[str, ChildBudget] | None" = None,
+    request_note: "Callable[[], str] | None" = None,
+    compact_md_path: Any = None,
 ) -> DelegationResult:
     """Spawn a child from a YAML-defined AgentConfig, run one turn, return distilled findings.
 
@@ -968,9 +973,17 @@ async def dispatch_config_subagent(
     # The child's budget is chosen once, here, from the parent's remainder as it stands NOW (D-32).
     # Every config child takes the `default` entry (D-33), whatever it is called: a (model-writable)
     # agents/chunk-summarizer.yaml must not pick up that built-in's rung by its name (IN-57).
-    agent_config, budget_fallback, budget_labels = _child_budget(
-        agent_config, "default", children_budget=children_budget,
-        shape=shape, parent_remaining=parent_remaining_fn)
+    if budget is None:
+        agent_config, budget_fallback, budget_labels = _child_budget(
+            agent_config, "default", children_budget=children_budget,
+            shape=shape, parent_remaining=parent_remaining_fn)
+    else:
+        from localharness.agent.loop import BudgetLabels
+        row, given = budget
+        agent_config = agent_config.model_copy(deep=True)
+        agent_config.permissions.budget.max_actions = given.actions
+        agent_config.permissions.budget.max_duration_minutes = given.minutes
+        budget_fallback, budget_labels = None, BudgetLabels(actions=row, minutes=row, fallback=None)
     _kill, _compact = _child_runtime_paths(agent_config, config_dir, state_dir=state_dir)
     ctx = _child_ctx_with_store_tools(context_manager, child_registry)
     try:
@@ -983,7 +996,7 @@ async def dispatch_config_subagent(
             permission_evaluator=permission_evaluator,
             gate=gate,
             kill_file_path=_kill,
-            compact_md_path=_compact,
+            compact_md_path=_compact if compact_md_path is None else compact_md_path,
             effort=effort, effort_ratios=effort_ratios,
             template_margin_ratio=template_margin_ratio,
             project_instructions=project_instructions,
@@ -991,6 +1004,7 @@ async def dispatch_config_subagent(
             unattended_max_actions=unattended_max_actions,
             budget_fallback=budget_fallback,
             budget_labels=budget_labels,
+            request_note=request_note,
         )
         _refuse_below_floor(agent_config, child_registry, context_manager, llm)
 
@@ -1492,7 +1506,7 @@ def _delegation_result(text: str, child_loop: Any, bus: Any, summary: str,
     return DelegationResult(
         text, status=_delegation_status(reason), terminated_reason=reason,
         tool_calls=tool_calls, artifacts=_session_written_paths(bus, sid),
-        child_session_id=sid, handoff=parse_handoff(summary))
+        child_session_id=sid, handoff=parse_handoff(summary), raw=summary)
 
 
 def build_cruncher_config(
@@ -2023,7 +2037,7 @@ def make_explore_agent_runner(
       AgentTool calls the runner 2-arg. Nesting stops at `max_subagent_depth` (cap); `=1` disables it.
     """
 
-    def _make_child_ctx(grant_handles: list[str] | None = None) -> Any:
+    def _make_child_ctx(grant_handles: list[str] | None = None, pipeline: Any = None) -> Any:
         """Fresh ContextManager per child, carrying the parent's model-aware token_counter
         (exact /tokenize counts, not tiktoken) and the window `window()` returns now — so children
         account for context the same way the parent does instead of falling to bare defaults.
@@ -2043,6 +2057,8 @@ def make_explore_agent_runner(
             kwargs["content_store"] = ContentStore(
                 parent=parent_store, granted=frozenset(grant_handles)
             )
+        if pipeline is not None:
+            kwargs["pipeline"] = pipeline
         return ContextManager(**kwargs)
 
     def _build_child_agent_tool(name: str, slot: list) -> Any:
@@ -2091,16 +2107,93 @@ def make_explore_agent_runner(
         )
         return AgentTool(agent_runner=child_runner, available_agents=delegatees)
 
+    async def run_config_child(
+        config: Any, task: str, budget: "tuple[str, ChildBudget] | None" = None,
+        request_note: "Callable[[], str] | None" = None, compact_md_path: Any = None,
+        grant_handles: list[str] | None = None, tools: list[str] | None = None,
+        shape: str | None = None, pipeline: Any = None,
+    ) -> DelegationResult:
+        """Run one config child on `task`: narrowed by `tools`, granted `grant_handles` only when its toolset is host-safe."""
+        reg, held = base_registry, None
+        if tools:
+            from localharness.tools.registry import ToolRegistry
+            wanted = _validated_narrowing(config.name, tools, base_registry, config, False)
+            reg = ToolRegistry.from_allowed([t for t in wanted if t != "agent"], base_registry=base_registry)
+            held = [t for t in wanted if t != "agent" and reg.has(t)]
+        if grant_handles:
+            from localharness.tools.capabilities import (
+                GrantTargetError, assert_grant_target_safe, floor_enabled,
+            )
+            if floor_enabled():
+                try:
+                    names = _config_child_allowed(config)
+                except Exception as exc:
+                    raise GrantTargetError(
+                        f"refusing to grant content handle(s) to subagent '{config.name}': "
+                        "its toolset could not be resolved."
+                    ) from exc
+                assert_grant_target_safe(
+                    [s for n in names if (s := reg.schema_of(n)) is not None], agent_id=config.name)
+        parent_effort = effort_fn() if effort_fn is not None else None
+        return _with_tools(await dispatch_config_subagent(
+            task,
+            agent_config=config,
+            llm=llm,
+            bus=bus,
+            base_registry=reg,
+            parent_session_id=get_parent_session_id(),
+            permission_evaluator=permission_evaluator,
+            gate=gate,
+            context_manager=_make_child_ctx(grant_handles, pipeline),
+            depth=depth,
+            max_subagent_depth=max_subagent_depth,
+            config_dir=config_dir,
+            state_dir=state_dir,
+            effort=child_effort(parent_effort, getattr(config, "effort", None)),
+            effort_ratios=effort_ratios,
+            template_margin_ratio=template_margin_ratio,
+            project_instructions=project_instructions,
+            server_recovery=server_recovery,
+            children_budget=children_budget,
+            unattended_max_actions=unattended_max_actions,
+            parent_remaining_fn=parent_remaining_fn,
+            shape=shape,
+            narrowed=held is not None,
+            budget=budget,
+            request_note=request_note,
+            compact_md_path=compact_md_path,
+        ), held)
+
     async def _run_agent(agent_id: str, task: str,
                          grant_handles: list[str] | None = None,
                          shape: str | None = None, tools: list[str] | None = None) -> DelegationResult:
         name = _sanitize_agent_name(agent_id)
+        if builtin_toolset(name, base_registry) is None:
+            cfg = None
+            searched: list[str] = []
+            load_failure: str | None = None
+            reason: str | None = None
+            # The root agent is 'orchestrator': never loadable as a delegation child
+            if load_agent is not None and name != "orchestrator":
+                try:
+                    cfg = load_agent(name)
+                except Exception as exc:
+                    # Duck-typed: ConfigNotFoundError carries the directories it searched.
+                    searched = list(getattr(exc, "searched_paths", None) or [])
+                    load_failure = _load_failure_text(agent_id, exc)
+                    reason = INVALID_AGENT_NAME if str(exc.__cause__) == INVALID_AGENT_NAME else None
+                    cfg = None
+            if cfg is None:
+                if load_failure is not None:
+                    raise ValueError(load_failure)
+                raise ValueError(_not_wired_text(agent_id, name, searched, available_agents, reason))
+            return await run_config_child(cfg, task, grant_handles=grant_handles, tools=tools, shape=shape)
         slot: list = [None]  # the built-in child's own remaining_budget, once its loop is built
         child_agent_tool = _build_child_agent_tool(name, slot)
         reg, held = base_registry, None
         if tools:
             from localharness.tools.registry import ToolRegistry
-            wanted = _validated_narrowing(name, tools, base_registry, load_agent, child_agent_tool is not None)
+            wanted = _validated_narrowing(name, tools, base_registry, None, child_agent_tool is not None)
             reg = ToolRegistry.from_allowed([t for t in wanted if t != "agent"], base_registry=base_registry)
             if "agent" not in wanted:
                 child_agent_tool = None
@@ -2121,11 +2214,11 @@ def make_explore_agent_runner(
                     agent_id=name,
                 )
         child_ctx = _make_child_ctx(grant_handles)
-        # D-11: the parent's level is read NOW, at this dispatch — never captured when the runner
-        # was built — so a /effort between two dispatches reaches the second child.
+        # The parent's level is read NOW, at this dispatch, so a /effort between two dispatches
+        # reaches the second child.
         parent_effort = effort_fn() if effort_fn is not None else None
         if name == "cruncher":
-            # J3: harness-orchestrated over-window reduce. child_ctx carries the granted read-through
+            # Harness-orchestrated over-window reduce. child_ctx carries the granted read-through
             # store; grant_handles names which over-window bodies to crunch.
             r = await dispatch_cruncher_subagent(
                 task, grant_handles=grant_handles, llm=llm, bus=bus, base_registry=base_registry,
@@ -2141,57 +2234,13 @@ def make_explore_agent_runner(
                 unattended_max_actions=unattended_max_actions,
                 parent_remaining_fn=parent_remaining_fn, shape=shape,
             )
-            return r if isinstance(r, DelegationResult) else DelegationResult(str(r))
+            return r if isinstance(r, DelegationResult) else DelegationResult(str(r), raw=str(r))
         if name == "explore":
             dispatch, base_builder = dispatch_explore_subagent, build_explore_config
         elif name == "web-researcher":
             dispatch, base_builder = dispatch_web_subagent, build_web_researcher_config
-        elif name == "search-verifier":
-            dispatch, base_builder = dispatch_search_verifier_subagent, build_search_verifier_config
         else:
-            cfg = None
-            searched: list[str] = []
-            load_failure: str | None = None
-            reason: str | None = None
-            # Phase 33.1: the root agent is 'orchestrator' — never loadable as a delegation child
-            if load_agent is not None and name != "orchestrator":
-                try:
-                    cfg = load_agent(name)
-                except Exception as exc:
-                    # Duck-typed: ConfigNotFoundError carries the directories it searched.
-                    searched = list(getattr(exc, "searched_paths", None) or [])
-                    load_failure = _load_failure_text(agent_id, exc)
-                    reason = INVALID_AGENT_NAME if str(exc.__cause__) == INVALID_AGENT_NAME else None
-                    cfg = None
-            if cfg is None:
-                if load_failure is not None:
-                    raise ValueError(load_failure)
-                raise ValueError(_not_wired_text(agent_id, name, searched, available_agents, reason))
-            return _with_tools(await dispatch_config_subagent(
-                task,
-                agent_config=cfg,
-                llm=llm,
-                bus=bus,
-                base_registry=reg,
-                parent_session_id=get_parent_session_id(),
-                permission_evaluator=permission_evaluator,
-                gate=gate,
-                context_manager=child_ctx,
-                depth=depth,
-                max_subagent_depth=max_subagent_depth,
-                config_dir=config_dir,
-                state_dir=state_dir,
-                effort=child_effort(parent_effort, getattr(cfg, "effort", None)),
-                effort_ratios=effort_ratios,
-                template_margin_ratio=template_margin_ratio,
-                project_instructions=project_instructions,
-                server_recovery=server_recovery,
-                children_budget=children_budget,
-                unattended_max_actions=unattended_max_actions,
-                parent_remaining_fn=parent_remaining_fn,
-                shape=shape,
-                narrowed=held is not None,
-            ), held)
+            dispatch, base_builder = dispatch_search_verifier_subagent, build_search_verifier_config
         # Built-in subagents are TUNABLE via an optional agents/<name>.yaml overlay (the real
         # budget knob): base = the code-defined default config, overlaid per-field by the yaml
         # when one exists (absent = pure defaults / no behavior change; malformed = explicit
@@ -2199,7 +2248,7 @@ def make_explore_agent_runner(
         # the bench runner) => None => the dispatch builds its own default, unchanged. The
         # structural toolset stays fixed by the dispatcher — the overlay tunes AgentConfig fields.
         # The overlay's result (or the bare builder result when no hook is wired) goes through the
-        # dispatch seam, and the seam's copy is what the child is built on (D-48).
+        # dispatch seam, and the seam's copy is what the child is built on.
         if held is not None:
             task = prepend_toolset(task, held, narrowed=True)
         cb = _children_budget(children_budget)
@@ -2241,4 +2290,5 @@ def make_explore_agent_runner(
             **({"narrowed": True} if held is not None and name == "web-researcher" else {}),
         ), held)
 
+    _run_agent.run_config_child = run_config_child
     return _run_agent
