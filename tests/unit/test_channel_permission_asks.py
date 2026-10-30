@@ -409,7 +409,7 @@ async def test_the_terminal_keeps_the_bare_word_as_a_message(tmp_path):
     repl = _repl(channel, gate)
     started: list[str] = []
 
-    async def _turn(task, on_token=None):
+    async def _turn(task, on_token=None, **kw):
         started.append(task)
         return "done"
 
@@ -516,7 +516,7 @@ async def test_slash_approve_on_an_idle_session_leaves_a_turn_to_start(tmp_path)
 
     assert await repl._handle_slash("/approve") is True
     assert repl._slash_followup is not None
-    assert "approved pending #1" in repl._slash_followup
+    assert "approved pending #1" in repl._slash_followup[0]
 
 
 @pytest.mark.asyncio
@@ -580,7 +580,7 @@ class _BoxChannel(_RecordingChannel):
 def _turn_agent(started: list[str]) -> types.SimpleNamespace:
     """An AgentLoop stand-in that records the turns an idle-session approval starts."""
 
-    async def _run_turn(task, on_token=None):
+    async def _run_turn(task, on_token=None, **kw):
         started.append(task)
         return "done"
 

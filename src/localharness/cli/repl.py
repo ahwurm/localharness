@@ -389,7 +389,7 @@ class OrchestratorREPL:
         # A sentence a slash command left for the MODEL, to be started as an ordinary user turn
         # once the command has been handled (`/approve` on an idle session). Consumed and
         # cleared by _dispatch_input; None the rest of the time.
-        self._slash_followup: Optional[str] = None
+        self._slash_followup: Optional[tuple[str, str]] = None
         self._skills = skills
         self._switch = ModelSwitch(agent_loop, bus, channel, harness_config, self._session_gate, config_dir)
         # Pictures attached for the NEXT turn (/image, Ctrl+V, a dropped path), consumed by
@@ -565,7 +565,7 @@ class OrchestratorREPL:
         clean = (text or "").strip()
         if not clean or not self._turn_running():
             return False
-        self._agent.push_user_nudge(clean)
+        self._agent.push_user_nudge(clean, "steering")
         return True
 
     async def _cancel_from_channel(self) -> bool:
@@ -686,7 +686,7 @@ class OrchestratorREPL:
                 # place that owns "a line of input became a turn", and each caller adopts the
                 # returned task its own way (box coordinator, classic loop).
                 follow, self._slash_followup = self._slash_followup, None
-                return None if follow is None else await self._start_user_turn(follow)
+                return None if follow is None else await self._start_user_turn(*follow)
 
         # PRD §3.4: a chat platform with no slash convention of its own sets `bare_mode_command`,
         # so `mode <name>` as the first word is the same command there. Terminal users type
@@ -917,9 +917,9 @@ class OrchestratorREPL:
         follow, self._slash_followup = self._slash_followup, None
         if follow is None:
             return
-        task = await self._start_user_turn(follow)
+        task = await self._start_user_turn(*follow)
         if task is not None:
-            self._start_turn_task(task, follow)
+            self._start_turn_task(task, follow[0])
 
     async def _route_during_turn(self, clean: str, forced: bool) -> None:
         """Decide nudge vs queue for a message typed while a turn runs, deliver it, and reflect
@@ -972,7 +972,7 @@ class OrchestratorREPL:
             rule_or_reason=decision.reason, text_preview=_route_preview(clean),
         ))
         if decision.route is input_router.Route.NUDGE:
-            self._agent.push_user_nudge(clean)
+            self._agent.push_user_nudge(clean, "steering")
             await self._channel.box_echo_prompt(clean, annotation="→ nudge")
             self._channel.box_flash_decision("→ nudging current turn")
         else:
@@ -1490,7 +1490,7 @@ class OrchestratorREPL:
             if self._agent is not None:
                 self._agent.push_user_nudge(nudge)
         elif approve:
-            self._slash_followup = nudge
+            self._slash_followup = (nudge, "request")
 
     async def _handle_slash(self, cmd: str) -> bool:
         """Handle a slash command from the ONE table (cli/slash_commands.py). Returns True if
@@ -1548,7 +1548,7 @@ class OrchestratorREPL:
             self._skills.arm(row.name[1:])
             self._agent.push_user_nudge(line)
         else:
-            self._slash_followup = line
+            self._slash_followup = (line, "request")
 
     async def _run_plugin_slash(self, row: SlashCommand, args: str) -> None:
         """A plugin's slash row (PAPI-11). Its failure — an exception, a sys.exit(), or a reply
