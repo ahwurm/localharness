@@ -74,6 +74,8 @@ class Session:
         self.lock = asyncio.Lock()
         self.prev: tuple[str, str] | None = None
         self.closed = False
+        self._timer: asyncio.TimerHandle | None = None
+        self._expiry: asyncio.Task | None = None
 
     def live(self) -> bool:
         browser = self.runtime._browser
@@ -83,6 +85,7 @@ class Session:
         if self.closed:
             return
         self.closed = True
+        self._disarm()
         if self.context is not None:
             try:
                 await self.context.close()
@@ -92,34 +95,68 @@ class Session:
         self.prev = self.store = None
 
     async def release(self) -> None:
-        await self.close()
+        """Close after waiting for an action to finish, but not past `LOCK_WAIT_S`."""
+        held = False
+        try:
+            await asyncio.wait_for(self.lock.acquire(), LOCK_WAIT_S)
+            held = True
+        except asyncio.TimeoutError:
+            pass
+        try:
+            await self.close()
+        finally:
+            if held:
+                self.lock.release()
+
+    def _disarm(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+
+    def _arm(self) -> None:
+        self._disarm()
+        self._timer = asyncio.get_running_loop().call_later(SESSION_IDLE_S, self._expire)
+
+    def _expire(self) -> None:
+        self._expiry = asyncio.ensure_future(self.release())
 
     async def open(self, url: str) -> ToolResult:
         async with self.lock:
             if self.closed:
                 return fail(_CLOSED)
-            runtime = self.runtime
-            if self.page is None:
-                try:
-                    await _bounded(self._start(), NAV_TIMEOUT_S)
-                except BaseException as e:
-                    await self.close()
-                    if not isinstance(e, Exception):
-                        raise
-                    return fail(render_line(e if isinstance(e, RenderError) else RenderError("failed")))
-            api, proxy, refusals, navigating = runtime._api, runtime._proxy, runtime._proxy.refusals, True
             try:
-                response = await _bounded(self.page.goto(url, wait_until="load", timeout=NAV_TIMEOUT_S * 1000), NAV_TIMEOUT_S)
-                navigating = False
-                if response and "application/pdf" in response.headers.get("content-type", ""):
-                    raise RenderError("file")
-                if response and response.status >= 400:
-                    return fail(_HTTP_FAILED.format(status=response.status))
-                return await self._snapshot()
-            except RenderError as e:
-                return fail(render_line(e))
-            except (api.TimeoutError, api.Error) as e:
-                return fail(render_line(render_error(api, e, proxy, refusals, navigating)))
+                return await self._open(url)
+            finally:
+                if not self.closed:
+                    self._arm()
+
+    async def _open(self, url: str) -> ToolResult:
+        runtime = self.runtime
+        if self.page is None:
+            try:
+                await _bounded(self._start(), NAV_TIMEOUT_S)
+            except BaseException as e:
+                await self.close()
+                if not isinstance(e, Exception):
+                    raise
+                return fail(render_line(e if isinstance(e, RenderError) else RenderError("failed")))
+        if (proxy := runtime._proxy) is None or self.closed:
+            return fail(_CLOSED)
+        api, refusals, navigating = runtime._api, proxy.refusals, True
+        try:
+            response = await _bounded(self.page.goto(url, wait_until="load", timeout=NAV_TIMEOUT_S * 1000), NAV_TIMEOUT_S)
+            navigating = False
+            if self.closed:
+                return fail(_CLOSED)
+            if response and "application/pdf" in response.headers.get("content-type", ""):
+                raise RenderError("file")
+            if response and response.status >= 400:
+                return fail(_HTTP_FAILED.format(status=response.status))
+            return await self._snapshot()
+        except RenderError as e:
+            return fail(render_line(e))
+        except (api.TimeoutError, api.Error) as e:
+            return fail(render_line(render_error(api, e, proxy, refusals, navigating)))
 
     async def _start(self) -> None:
         browser = await self.runtime.ensure()
