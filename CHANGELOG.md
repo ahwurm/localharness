@@ -4,6 +4,22 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.25.0] — 2026-10-29
+
+**Click-through browsing and per-call tool narrowing.** The web researcher can open a public page, click, type into a search box and scroll on it inside the browser plugin's existing sandbox and public-only proxy, and a delegating model can hand a specialist a subset of its own tools for one call.
+
+### Added
+- **browser sessions** — with the browser plugin enabled, the web researcher and the search verifier hold `browser_open`, `browser_click`, `browser_type` and `browser_scroll`. `browser_open` returns the page as an accessibility snapshot with element refs; each action returns the updated page, shown from just above what changed, with the rest searchable through `web_page_query`. One session per agent, anonymous: no cookies or storage survive it, and it ends when the agent's task ends (or after 10 minutes without an action). A click or script that would submit a form by POST is stopped and the page left as it was; typing into a password field is refused; popups are closed and their address reported. Every refusal tells the model what to do next. Enabling the plugin is unchanged.
+- **`agent(tools=[...])`** — a delegating model can narrow a specialist to some of its own tools for one call, for example the web researcher to the browser tools. Narrowing only removes tools: a name the agent does not have is refused with the agent's tool list, the child is told exactly which tools it holds, and the terminal shows `agent <name> (tools: …) — completed`.
+
+### Changed
+- `browser_fetch` drops a form a page tries to auto-submit by POST after loading, and returns the page as loaded.
+- The grant gate judges `chunk-summarizer` by its `agents/chunk-summarizer.yaml`, the config it actually runs, and judges a narrowed specialist by the tools it holds.
+
+### Known limitations
+- Sites that block headless browsers (measured: reddit, DuckDuckGo's HTML endpoint) return a near-empty page; the tool says so and does not retry.
+- Signed-in browsing, screenshots, and `localhost`/`http` pages remain out of scope.
+
 ## [0.24.0] — 2026-10-28
 
 **The affordance layer.** The root's prompt carries a short derived map of where its skills and agents live and how they enter a task, and the harness can point the model at a skill the request resembles.
