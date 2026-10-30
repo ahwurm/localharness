@@ -426,8 +426,8 @@ async def test_a_render_opens_one_context_with_the_exact_options_and_routes_befo
 
 
 class FakeRoute:
-    def __init__(self, resource_type):
-        self.request, self.did = SimpleNamespace(resource_type=resource_type), None
+    def __init__(self, resource_type, method="GET"):
+        self.request, self.did = SimpleNamespace(resource_type=resource_type, method=method), None
 
     async def abort(self):
         self.did = "abort"
@@ -445,6 +445,33 @@ async def test_only_image_media_and_font_requests_are_aborted(world, runtime, ki
     route = FakeRoute(kind)
     await handler(route)
     assert pattern == "**/*" and route.did == did
+
+
+async def route_through_the_factory(world, runtime, kind, method):
+    browser = await runtime.ensure()
+    context, flags = await runtime._new_context(browser)
+    ((_, handler),) = context.routes
+    route = FakeRoute(kind, method)
+    await handler(route)
+    return route.did, flags
+
+
+async def test_a_non_get_document_request_is_aborted_and_flagged(world, runtime):
+    assert await route_through_the_factory(world, runtime, "document", "POST") == ("abort", browser_tool.RouteFlags(True))
+
+
+async def test_a_get_document_request_continues_unflagged(world, runtime):
+    assert await route_through_the_factory(world, runtime, "document", "GET") == ("continue", browser_tool.RouteFlags(False))
+
+
+@pytest.mark.parametrize("kind", ["xhr", "fetch", "script", "ping"])
+async def test_a_post_sub_request_continues_and_leaves_the_flag_unset(world, runtime, kind):
+    assert await route_through_the_factory(world, runtime, kind, "POST") == ("continue", browser_tool.RouteFlags(False))
+
+
+@pytest.mark.parametrize("kind", ["image", "media", "font"])
+async def test_skipped_types_still_abort_without_the_flag(world, runtime, kind):
+    assert await route_through_the_factory(world, runtime, kind, "GET") == ("abort", browser_tool.RouteFlags(False))
 
 
 @pytest.mark.parametrize("text,expected", [("a  b\t\tc\n\n\n\nd", "a b c\n\nd"), ("  \n padded \n", "padded"), ("", "")])
