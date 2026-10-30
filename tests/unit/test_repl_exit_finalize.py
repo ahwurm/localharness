@@ -91,7 +91,7 @@ async def test_exit_grace_finalizes_inflight_turn():
     repl._exit_grace_seconds = 1.0
     completed = asyncio.Event()
 
-    async def finishing(task=None, on_token=None):
+    async def finishing(task=None, on_token=None, **kw):
         await asyncio.sleep(0.15)  # finalization window (answer rendered, completion pending)
         completed.set()
         return "done"
@@ -116,7 +116,7 @@ async def test_exit_does_not_hang_on_stuck_turn():
     repl._box_ctrl_q = None
     repl._exit_grace_seconds = 0.1
 
-    async def hanging(task=None, on_token=None):
+    async def hanging(task=None, on_token=None, **kw):
         await asyncio.sleep(3600)
 
     agent.run_turn = AsyncMock(side_effect=hanging)
@@ -193,7 +193,7 @@ async def _box_session_ended_mid_legend(tmp_path, *, answer, grace, end, observe
     ch.start_input_box = _counting_start
     seen: dict = {"decision": None, "turn": None, "cancelled": False}
 
-    async def run_turn(task=None, on_token=None):
+    async def run_turn(task=None, on_token=None, **kw):
         seen["turn"] = asyncio.current_task()
         try:
             seen["decision"] = (await ch.ask_permission(_request())).kind
