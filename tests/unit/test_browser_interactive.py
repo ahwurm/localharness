@@ -1,15 +1,22 @@
 """window_start and the browser_open session on a fake Chromium: no browser, no playwright."""
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import gc
+import weakref
+
 import pytest
 
 from localharness.agent.context import ContentStore
+from localharness.tools.builtin import bind_agent_store_tools, browser_session, browser_tool
 from localharness.tools.builtin.browser_session import (
-    CHANGED_NOTE, LOW_CONTENT, SHORTER_NOTE, TOP_NOTE, UNCHANGED_CHARS, UNCHANGED_NOTE, WINDOW_CHARS, BrowserOpenTool,
-    window_start,
+    _BUSY, _NO_STORE, CHANGED_NOTE, LOW_CONTENT, NAV_TIMEOUT_S, SHORTER_NOTE, SNAPSHOT_S, TOP_NOTE, UNCHANGED_CHARS,
+    UNCHANGED_NOTE, WINDOW_CHARS, BrowserOpenTool, window_start,
 )
 from localharness.tools.builtin.web_tool import UNTRUSTED_BANNER, WebPageQueryTool
-from tests.unit.test_browser_plugin import runtime, tool_contexts, world  # noqa: F401  (fixtures)
+from localharness.tools.registry import ToolRegistry
+from tests.unit.test_browser_plugin import gate_on, runtime, tool_contexts, until, world  # noqa: F401  (fixtures)
 from tests.unit.test_web_fetch_guard import public_web
 
 URL = "https://a.test/"
@@ -137,3 +144,185 @@ async def test_release_store_ends_the_session_and_frees_the_slot_and_the_context
     await tool.release_store(store)
     assert not runtime._sessions and not runtime._session_slot.locked() and world.open_contexts() == 0
     await tool.release_store(store)
+
+
+def second_slot(runtime):  # noqa: F811
+    runtime._session_slot = asyncio.Semaphore(2)
+
+
+async def test_the_backstop_ends_an_idle_session(opener, world, runtime, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(browser_session, "SESSION_IDLE_S", 0.05)
+    tool, _ = opener
+    await tool.run(url=OPEN)
+    await until(lambda: not runtime._sessions)
+    assert world.open_contexts() == 0 and not runtime._session_slot.locked()
+
+
+async def test_the_process_idle_close_spares_a_live_session_and_chromium_closes_after_the_last_release(opener, world, runtime):  # noqa: F811
+    runtime._idle_s = 0.05
+    tool, store = opener
+    await tool.run(url=OPEN)
+    await asyncio.sleep(0.2)
+    await runtime._close_if_idle()
+    (browser,) = world.browsers
+    assert browser.connected and not browser.closed and world.open_contexts() == 1
+    await tool.release_store(store)
+    await until(lambda: browser.closed, 1)
+    assert world.stopped == 1
+
+
+async def test_runtime_close_ends_every_session_through_the_one_path(opener, world, runtime):  # noqa: F811
+    tool, _ = opener
+    await tool.run(url=OPEN)
+    (session,) = runtime._sessions.values()
+    await runtime.close()
+    assert session.closed and not runtime._sessions and not runtime._session_slot.locked() and world.open_contexts() == 0
+    assert session.store is None and session.prev is None
+
+
+async def test_a_browser_restart_ends_sessions_holding_a_context_but_not_the_one_still_opening(opener, world, runtime):  # noqa: F811
+    second_slot(runtime)
+    tool, _ = opener
+    await tool.run(url=OPEN)
+    (first,) = runtime._sessions.values()
+    world.browsers[0].connected = False
+    other = BrowserOpenTool(runtime, ContentStore())
+    got = await other.run(url=OPEN)
+    assert got.success and first.closed and len(world.launches) == 2
+    (second,) = runtime._sessions.values()
+    assert second is not first and not second.closed
+
+
+async def test_two_stores_get_two_sessions_and_the_default_store_copy_is_refused(opener, world, runtime):  # noqa: F811
+    second_slot(runtime)
+    tool, store = opener
+    other = ContentStore()
+    assert (await tool.run(url=OPEN)).success and (await BrowserOpenTool(runtime, other).run(url=OPEN)).success
+    assert len(runtime._sessions) == 2 and len(tool_contexts(world)) == 2
+    refused = await BrowserOpenTool(runtime).run(url=OPEN)
+    assert (refused.success, refused.error, refused.error_type) == (False, _NO_STORE, "validation_error")
+    assert len(runtime._sessions) == 2
+
+
+async def test_a_prefixed_alias_the_binding_did_not_rebind_gets_the_no_store_line(opener, runtime):  # noqa: F811
+    base = ToolRegistry()
+    await base.register(BrowserOpenTool(runtime), scope="global", source_plugin="browser")
+    child = ToolRegistry.from_allowed(["plugin:browser.browser_open"], base)
+    store = ContentStore()
+    bind_agent_store_tools(child, store)
+    bare, alias = (child._tools["global"][n] for n in ("browser_open", "plugin:browser.browser_open"))
+    assert (await alias.run(url=OPEN)).error == _NO_STORE
+    assert (await bare.run(url=OPEN)).success
+    assert runtime._sessions[id(store)].store is store
+
+
+async def test_a_leftover_session_holds_its_store_so_a_new_store_never_inherits_its_page(opener, world, runtime):  # noqa: F811
+    tool, store = opener
+    await tool.run(url=OPEN)
+    (old,) = runtime._sessions.values()
+    ref = weakref.ref(store)
+    del tool, store
+    gc.collect()
+    assert ref() is old.store
+    fresh = BrowserOpenTool(runtime, ContentStore())
+    assert (await fresh.run(url=OPEN)).error == _BUSY
+    second_slot(runtime)
+    assert (await fresh.run(url=OPEN)).success
+    assert len(runtime._sessions) == 2 and fresh._runtime._sessions[id(fresh._store)].page is not old.page
+
+
+async def test_a_second_agent_is_told_the_session_is_busy_at_once_and_the_holder_reuses_its_context(opener, world, runtime):  # noqa: F811
+    tool, store = opener
+    await tool.run(url=OPEN)
+    (session,) = runtime._sessions.values()
+    page = session.page
+    before = len(world.contexts)
+    busy = await asyncio.wait_for(BrowserOpenTool(runtime, ContentStore()).run(url=OPEN), 0.5)
+    assert (busy.success, busy.error) == (False, _BUSY) and len(world.contexts) == before
+    assert (await BrowserOpenTool(runtime, store).run(url=OPEN)).success
+    assert runtime._sessions[id(store)] is session and session.page is page and len(world.contexts) == before
+
+
+async def test_browser_fetch_keeps_its_two_slots_beside_a_held_session(opener, world, runtime, monkeypatch):  # noqa: F811
+    tool, _ = opener
+    await tool.run(url=OPEN)
+    gates = gate_on(world, *(f"https://example.com/{i}" for i in range(3)))
+    world.pages[OPEN] = (200, "", "text/html")
+    tasks = [asyncio.create_task(runtime.render(u)) for u in gates]
+    await until(lambda: len(tool_contexts(world)) == 3)
+    await asyncio.sleep(0.05)
+    assert len(tool_contexts(world)) == 3 and world.open_contexts() == 3
+    for g in gates.values():
+        g.set()
+    await asyncio.gather(*tasks)
+    assert len(tool_contexts(world)) == 4 and runtime._sessions
+
+
+def hang_goto(world, url: str = OPEN) -> asyncio.Event:  # noqa: F811
+    gate = asyncio.Event()
+
+    async def wait(u):
+        if u == url:
+            await gate.wait()
+
+    world.on_goto = wait
+    return gate
+
+
+async def test_an_open_whose_goto_hangs_returns_the_timeout_line_inside_the_tools_bound(opener, world, runtime, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(browser_session, "NAV_TIMEOUT_S", 0.1)
+    hang_goto(world)
+    tool, _ = opener
+    got = await asyncio.wait_for(tool.run(url=OPEN), 2)
+    assert (got.success, got.error) == (False, browser_tool._TIMED_OUT)
+
+
+async def test_a_release_during_a_hung_open_force_closes_within_the_lock_wait(opener, world, runtime, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(browser_session, "LOCK_WAIT_S", 0.05)
+    hang_goto(world)
+    tool, store = opener
+    task = asyncio.create_task(tool.run(url=OPEN))
+    await until(lambda: ("goto", OPEN) in world.events)
+    await asyncio.wait_for(tool.release_store(store), 1)
+    assert not runtime._sessions and not runtime._session_slot.locked() and world.open_contexts() == 0
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+async def test_a_hung_snapshot_returns_the_timeout_line(opener, world, runtime, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(browser_session, "SNAPSHOT_S", 0.1)
+    never = asyncio.Event()
+
+    async def hang(url):
+        await never.wait()
+
+    world.on_snapshot = hang
+    tool, _ = opener
+    got = await asyncio.wait_for(tool.run(url=OPEN), 2)
+    assert (got.success, got.error) == (False, browser_tool._TIMED_OUT)
+
+
+async def test_after_the_browser_disconnects_the_next_open_starts_a_fresh_session(opener, world, runtime):  # noqa: F811
+    tool, store = opener
+    await tool.run(url=OPEN)
+    (old,) = runtime._sessions.values()
+    world.browsers[0].connected = False
+    assert (await tool.run(url=OPEN)).success
+    (new,) = runtime._sessions.values()
+    assert new is not old and old.closed and len(world.launches) == 2
+    await tool.release_store(store)
+    assert not runtime._session_slot.locked()
+
+
+async def test_a_failed_launch_gives_the_unavailable_line_and_leaves_no_session_and_a_free_slot(opener, world, runtime):  # noqa: F811
+    world.launch_error = RuntimeError("boom")
+    tool, _ = opener
+    got = await tool.run(url=OPEN)
+    assert not got.success and "is not available on this machine" in got.error
+    assert not runtime._sessions and not runtime._session_slot.locked()
+
+
+def test_the_tools_timeout_exceeds_the_sum_of_the_bounds_inside_it():
+    assert BrowserOpenTool.timeout_s == 2 * NAV_TIMEOUT_S + 40
+    assert NAV_TIMEOUT_S + NAV_TIMEOUT_S + SNAPSHOT_S < BrowserOpenTool.timeout_s
