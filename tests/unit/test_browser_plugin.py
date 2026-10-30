@@ -1026,12 +1026,14 @@ def test_the_manifest_is_every_field_of_the_declaration_and_frozen():
         setup_action="Download Playwright's headless Chromium now? About 100 MB from Playwright's CDN; "
                      "it runs as a program on this machine (sandboxed by default).",
         setup_help=m.setup_help, agent_prompt=BROWSER_AGENT_PROMPT,
-        next_steps="browser_fetch (pages that need JavaScript) works once Chromium is downloaded and "
+        next_steps="browser_fetch reads pages that need JavaScript, and browser_open, click, type and scroll "
+                   "let the web researcher click through them anonymously, once Chromium is downloaded and "
                    "`localharness doctor` shows every browser row passing; `localharness plugins enable "
                    "browser` does the download.")
     assert m.setup_help.startswith("Browser needs Playwright's") and "install --only-shell chromium" in m.setup_help
     assert BrowserPlugin.ConfigModel is BrowserConfig and m.setup == ()
-    assert plugin_summary(BrowserPlugin) == "reads JavaScript-rendered pages through a sandboxed headless Chromium"
+    assert plugin_summary(BrowserPlugin) == (
+        "reads JavaScript-rendered pages through a sandboxed headless Chromium and clicks through them anonymously")
     with pytest.raises(ValidationError):
         m.name = "other"
 

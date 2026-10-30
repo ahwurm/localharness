@@ -1,8 +1,8 @@
 # The browser plugin
 
-Turning it on costs about 100 MB on disk (Playwright's headless Chromium, kept in Playwright's cache, `~/.cache/ms-playwright` on Linux) and several hundred MB of RAM while a page loads (one measurement put the driver and the browser together at about 700 MB on a trivial page). The browser starts at the first `browser_fetch` and is closed after `browser.idle_close_s` seconds without one (120 by default) and when the session ends. On a machine whose GPU shares system memory, that RAM is memory the model's cache cannot use while the browser is up.
+Turning it on costs about 100 MB on disk (Playwright's headless Chromium, kept in Playwright's cache, `~/.cache/ms-playwright` on Linux) and several hundred MB of RAM while a page loads (one measurement put the driver and the browser together at about 700 MB on a trivial page). The browser starts at the first `browser_fetch` or `browser_open` and is closed when the session ends, or after `browser.idle_close_s` seconds (120 by default) with no page loading and no browser session open. A browser session is a third context beside the two `browser_fetch` pages, so it adds to that RAM. On a machine whose GPU shares system memory, that RAM is memory the model's cache cannot use while the browser is up.
 
-The `browser` plugin gives the web researcher and the search verifier `browser_fetch`: an https page opened in a real, sandboxed headless Chromium with its JavaScript run, its text returned the way `web_fetch` returns a page (a window of it, the full text kept for `web_page_query`, the next window one `start_index` away). They hold it after `web_search`, `web_fetch` and `web_page_query`. The root agent never holds it, because it reads untrusted pages; an agent you define gets it with `tools.add: [browser_fetch]`. Its description tells the model to call it once, with the same URL, when `web_fetch` answered "low extractable text", and otherwise to use `web_fetch`. It ships with LocalHarness, is off until you turn it on, and its code is [`browser_plugin.py`](../../src/localharness/tools/builtin/browser_plugin.py), [`browser_tool.py`](../../src/localharness/tools/builtin/browser_tool.py) and [`browser_proxy.py`](../../src/localharness/tools/builtin/browser_proxy.py).
+The `browser` plugin gives the web researcher and the search verifier `browser_fetch`: an https page opened in a real, sandboxed headless Chromium with its JavaScript run, its text returned the way `web_fetch` returns a page (a window of it, the full text kept for `web_page_query`, the next window one `start_index` away). They hold it after `web_search`, `web_fetch` and `web_page_query`. The plugin also gives them `browser_open`, `browser_click`, `browser_type` and `browser_scroll`, which click through a page anonymously on element refs from an accessibility snapshot. The root agent never holds them, because it reads untrusted pages; an agent you define gets them with `tools.add` (for example `tools.add: [browser_fetch, browser_open, browser_click, browser_type, browser_scroll]`). Its description tells the model to call it once, with the same URL, when `web_fetch` answered "low extractable text", and otherwise to use `web_fetch`. It ships with LocalHarness, is off until you turn it on, and its code is [`browser_plugin.py`](../../src/localharness/tools/builtin/browser_plugin.py), [`browser_tool.py`](../../src/localharness/tools/builtin/browser_tool.py) and [`browser_proxy.py`](../../src/localharness/tools/builtin/browser_proxy.py).
 
 ## Turn it on and off
 
@@ -32,13 +32,13 @@ A project cannot set the two machine-level ones: they choose the program the har
 
 ## What it does not do
 
-- No signed-in browsing: no cookies, profile or storage between calls. Each call gets a new browser context that is closed after it.
-- No clicking, typing, forms, downloads or uploads.
+- No signed-in browsing: no cookies or storage survive a browser session, and within one session cookies persist. Each `browser_fetch` still gets a fresh context that is closed after it.
+- Clicking and typing are in. Signing in (password fields are refused), posting forms (a POST navigation is refused and the page stays as it was), downloads and uploads are out.
 - No screenshots.
 - No plain-http pages: `browser_fetch` opens https only, and `web_fetch` reads http pages.
 - No browser-backed search.
 - No anti-bot stealth: its user agent is Chromium's own, which says HeadlessChrome, with LocalHarness and its version appended, so a site that refuses headless browsers refuses this one.
-- No driving your own app under test; a config child with `bash_exec` does that.
+- No `localhost`: a browser session reaches public https pages only. No driving your own app under test; a config child with `bash_exec` does that.
 - No reaching a private service (see the next section).
 
 ## What it reaches
@@ -47,7 +47,7 @@ Public addresses only, by the same rule as `web_fetch`, applied to every request
 
 Every launch checks this before any page: a navigation to a loopback port must be refused by the proxy while a listener on that port sees nothing, and Chromium's command line must carry the proxy and the flags. A launch that fails the check keeps `browser_fetch` off, with "reach check failed" in `doctor`.
 
-Images, media and fonts are not downloaded. A navigation waits for the page's `load` event and half a second more, at most 30 seconds. The page's text is cut inside the browser to 4,000,000 characters by default (`web_fetch`'s download budget, counted as the page's own string length counts characters) before it reaches the harness. At most two pages load at once and a third call waits.
+Images, media and fonts are not downloaded. A navigation waits for the page's `load` event and half a second more, at most 30 seconds. The page's text is cut inside the browser to 4,000,000 characters by default (`web_fetch`'s download budget, counted as the page's own string length counts characters) before it reaches the harness. At most two `browser_fetch` pages load at once (a third waits), plus one browser session at a time; a second agent that asks for a session is told to use `browser_fetch`. A session is released when its agent finishes, and one untouched for 600 seconds is closed (not a setting). Typed `text` is at most 256 characters and a `url` at most 2048.
 
 `org.web_fetch_allow_private` is `web_fetch`'s alone. One GET with no origin can reach a service you named, but a page has an origin and runs code, so honouring the allowlist would let a public page rebind its own name to that service after loading, read its answers as same-origin and send it POSTs. Reading a private service stays `web_fetch`'s job.
 
@@ -55,10 +55,10 @@ See [SECURITY.md, What a web fetch may reach](../../SECURITY.md#what-a-web-fetch
 
 ## Not there yet
 
-- The terminal prints `browser_fetch` as its own tool line rather than in the `web_search · web_fetch` counter, and in `--verbose` gives its result no "web results — UNTRUSTED" close note (the result still opens with the untrusted banner the model reads).
-- A `browser_fetch` result takes the context store's generic large-result path, which evicts later than the early web-result eviction at half the window.
+- The terminal prints `browser_fetch` and the four session tools as their own tool lines rather than in the `web_search · web_fetch` counter, and in `--verbose` gives its result no "web results — UNTRUSTED" close note (the result still opens with the untrusted banner the model reads).
+- A `browser_fetch` or session-tool result takes the context store's generic large-result path, which evicts later than the early web-result eviction at half the window.
 - The bench's ask-rate replay counts `browser_fetch` as an undeclared family.
-- A config child that names the prefixed `plugin:browser.browser_fetch` keeps a copy not bound to its own store, so name it `browser_fetch`.
+- A config child that names the prefixed `plugin:browser.browser_fetch` keeps a copy not bound to its own store, so name it `browser_fetch`; the prefixed `plugin:browser.browser_open` copy answers with a line that the session needs an agent of its own, so name it `browser_open`.
 
 ## More
 

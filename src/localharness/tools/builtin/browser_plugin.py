@@ -144,14 +144,15 @@ async def _launch_rows(cfg: BrowserConfig) -> list[Check]:
 
 
 class BrowserPlugin(Plugin):
-    """reads JavaScript-rendered pages through a sandboxed headless Chromium"""
+    """reads JavaScript-rendered pages through a sandboxed headless Chromium and clicks through them anonymously"""
 
     manifest = PluginManifest(
         name="browser", version="0.1.0", kind="tools", enabled_by_default=False, requires_extra="browser",
         setup_action="Download Playwright's headless Chromium now? About 100 MB from Playwright's CDN; "
                      "it runs as a program on this machine (sandboxed by default).",
         setup_help=setup_help(), agent_prompt=BROWSER_AGENT_PROMPT,
-        next_steps="browser_fetch (pages that need JavaScript) works once Chromium is downloaded and "
+        next_steps="browser_fetch reads pages that need JavaScript, and browser_open, click, type and scroll "
+                   "let the web researcher click through them anonymously, once Chromium is downloaded and "
                    "`localharness doctor` shows every browser row passing; `localharness plugins enable "
                    "browser` does the download.",
     )
