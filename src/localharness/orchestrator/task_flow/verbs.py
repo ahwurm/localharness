@@ -19,14 +19,27 @@ def _put(text: str, fields: dict[str, Any]) -> str:
     return _fill(text, fields)
 
 
+def _ranges(steps: tuple[int, ...]) -> str:
+    runs: list[list[int]] = []
+    for n in sorted(steps):
+        if runs and n == runs[-1][1] + 1:
+            runs[-1][1] = n
+        else:
+            runs.append([n, n])
+    return ("steps " if len(steps) > 1 else "step ") + ", ".join(f"{a}-{b}" if b > a else str(a) for a, b in runs)
+
+
 def render(key: str, levers: Levers, **fields: Any) -> str:
     """The `LINES` row as the finished line a channel prints, or empty for a row only the model reads."""
     line = LINES[key]
     if line.model and not line.commands:
         return ""
     fields = {"stop": levers[0], "cancel": levers[1], **fields}
-    return notice(fields.get("task", "task"), _put(line.state, fields),
-                  [_put(c, fields) for c in line.commands], _put(line.tail, fields))
+    state, commands = line.state, list(line.commands)
+    if key == "pass" and fields.get("stage") == "plan":
+        state += f", {_ranges(fields['reopened'])} reopened" if fields.get("reopened") else ""
+        commands += ["plan <change> (revises)", *(["accept decisions (unreviewed)"] * bool(fields.get("decisions_unreviewed")))]
+    return notice(fields.get("task", "task"), _put(state, fields), [_put(c, fields) for c in commands], _put(line.tail, fields))
 
 
 def bound(flow: Any, unit: Unit, sensed: tuple[str, ...] = ()) -> int:
