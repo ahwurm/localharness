@@ -7,10 +7,10 @@ from typing import Any
 
 from localharness.channels.base import notice, one_line, sanitize_for_display
 from localharness.core.caps import Caps
-from localharness.orchestrator.task_flow.filer import NO_REVIEW, Refused, _cut, digest, last_section, parse_plan, render_section, rerecord
+from localharness.orchestrator.task_flow.filer import NO_REVIEW, Refused, cut, digest, last_section, parse_plan, render_section, rerecord
 from localharness.orchestrator.task_flow.panel import turns_block, typed_turns
 from localharness.orchestrator.task_flow.record import (
-    DOC_NAME, DOCS, LINES, PLAN_KEY, STAGES, Need, Record, Row, Unit, _PASSED, _executed, _fill, _next_step, _sections, counts_of,
+    DOC_NAME, DOCS, LINES, PLAN_KEY, STAGES, Need, Record, Row, Unit, PASSED, executed, fill, next_step, sections, counts_of,
     file_doc, following, need, next_unit, pointed, precondition, printed_bound, reopen, review_of, set_stage, unit_minutes)
 from localharness.orchestrator.task_flow.runner import INTERVIEW_SENTENCE
 
@@ -24,7 +24,7 @@ def _put(text: str, fields: dict[str, Any]) -> str:
         text = text.replace("N/M", f"{n}/{m}").replace("step N", f"step {n}")
     if fields.get("n") == 1:
         text = text.replace("<n> blockers", "<n> blocker").replace("<n> turns", "<n> turn")
-    return _fill(text, fields)
+    return fill(text, fields)
 
 
 def _ranges(steps: tuple[int, ...]) -> str:
@@ -68,8 +68,8 @@ def progress(flow: Any, subject: str, state: str, commands: tuple[str, ...], tai
         if not armed and "cap" not in flow.said:
             spoken.append(f"cap {cap_minutes(flow)} min")
         flow.said |= {"cap"} if armed else {"typing", "cap"}
-    fill = {"stop": levers[0], "cancel": levers[1]}
-    return notice(subject, state, [_fill(c, fill) for c in commands], " · ".join(p for p in (*spoken, tail) if p))
+    shown = {"stop": levers[0], "cancel": levers[1]}
+    return notice(subject, state, [fill(c, shown) for c in commands], " · ".join(p for p in (*spoken, tail) if p))
 
 
 
@@ -171,7 +171,7 @@ def _page(head: str, body: str, findings: str, phone: bool) -> tuple[str, ...]:
     """The terminal prints the header, the doc, then the findings; the phone one notice with the findings first and the doc cut."""
     body, findings = sanitize_for_display(body), sanitize_for_display(findings)
     if phone:
-        return ("\n".join(p for p in (head, findings, _cut(body)[0]) if p),)
+        return ("\n".join(p for p in (head, findings, cut(body)[0]) if p),)
     return tuple(p for p in (head, body, findings) if p)
 
 
@@ -212,7 +212,7 @@ def _header(flow: Any, stem: str) -> str:
 def _show_open(flow: Any, stem: str, levers: Levers, phone: bool) -> tuple[str, ...]:
     record, docs, step = flow.record, flow.docs, _STEP.fullmatch(stem)
     name = f"{stem}.md"
-    stopped = step and (name, None) not in record.filed and record.stopped_log and int(step[1]) == _next_step(record)
+    stopped = step and (name, None) not in record.filed and record.stopped_log and int(step[1]) == next_step(record)
     if stopped and (log := docs.read(record.id, name)) is not None:
         return _page(f"{name} · stopped · not executed", log, "", phone)
     if line := _absent(flow, stem, levers):
@@ -258,7 +258,7 @@ def _status(flow: Any) -> tuple[str, dict[str, Any]]:
     fields: dict[str, Any] = {"task": f"t{record.id}"}
     if record.stage == "done":
         return "done", fields
-    steps, plan = _sections(record), record.filed[PLAN_KEY] if PLAN_KEY in record.filed else None
+    steps, plan = sections(record), record.filed[PLAN_KEY] if PLAN_KEY in record.filed else None
     if record.stage == "run" and steps and plan.verdict != "unreviewed":
         n = int(_STEP.fullmatch(pointed(record).removesuffix(".md"))[1])
         ran, verdict = (f"step-{n}.md", None) in record.filed, record.filed[("plan.md", f"step-{n}")].verdict
@@ -277,7 +277,7 @@ def _status(flow: Any) -> tuple[str, dict[str, Any]]:
     if row.verdict == "blocked":
         key = "review blocked" if task else "research blocked" if boundary == "research" else "blocked"
         return key, {**fields, "n": _blockers(flow, boundary)}
-    if row.verdict == "unreviewed" or (task and _next_step(record) is None):
+    if row.verdict == "unreviewed" or (task and next_step(record) is None):
         key = "review unreviewed" if task else "unreviewed" if boundary == "new" else f"{boundary} unreviewed"
         return key, {**fields, "next": STAGES[boundary].next, "bound": bound(flow, Unit("task" if task else boundary, "panel"))}
     command, minutes = _ahead(flow, boundary)
@@ -301,10 +301,10 @@ def _note(flow: Any, doc: str) -> None:
 def _accepted(flow: Any, levers: Levers, stem: str, header: tuple[str, ...]) -> Reply:
     """The row of what the person just accepted; an accepted plan with every step passed ends a task under review."""
     record, step = flow.record, _STEP.fullmatch(stem)
-    if stem == "plan" and record.stage == "task" and _next_step(record) is None:
+    if stem == "plan" and record.stage == "task" and next_step(record) is None:
         set_stage(record, "plan accepted")
     if step:
-        line = render("step accepted", levers, task=_label(record), step=(int(step[1]), len(_sections(record))), bound=_ahead(flow, "step")[1])
+        line = render("step accepted", levers, task=_label(record), step=(int(step[1]), len(sections(record))), bound=_ahead(flow, "step")[1])
     elif stem == "plan":
         line = status_row(flow, levers)
     else:
@@ -345,16 +345,16 @@ def _accept(flow: Any, arg: str, levers: Levers) -> Reply:
         return Reply((line,))
     head, name, key, step = _header(flow, stem), f"{stem}.md", _key_of(stem), _STEP.fullmatch(stem)
     text = docs.read(record.id, name) or ""
-    sections = parse_plan(text) if stem == "plan" else []
-    if isinstance(sections, str):
-        return Reply((head, notice(_label(record), sections, [])))
+    parsed = parse_plan(text) if stem == "plan" else []
+    if isinstance(parsed, str):
+        return Reply((head, notice(_label(record), parsed, [])))
     _note(flow, name)
     if step:
         record.filed[(name, None)] = Row(digest(text))
         record.filed[key].verdict = "accepted"
     else:
         if stem == "plan":
-            record.reopened = tuple(rerecord(record, sections))
+            record.reopened = tuple(rerecord(record, parsed))
         record.filed[key] = Row(digest(text), "accepted", record.filed[key].counts)
     return _accepted(flow, levers, stem, (head,))
 
@@ -484,7 +484,7 @@ def wake_line(docs: Any) -> str | None:
 
 
 def _newest(record: Record) -> str | None:
-    names = ["decisions", "research", "plan", *(f"step-{n}" for n in sorted(_executed(record))), "review"]
+    names = ["decisions", "research", "plan", *(f"step-{n}" for n in sorted(executed(record))), "review"]
     return next((n for n in reversed(names) if (f"{n}.md", None) in record.filed), None)
 
 
@@ -512,7 +512,7 @@ def _reopen(flow: Any, boundary: str, arg: str, levers: Levers) -> list[str] | N
     if row.verdict == "blocked":
         reopen(record, boundary, counts_of(record, boundary).blockers)
         return []
-    if row.verdict in _PASSED and boundary == "plan" and not arg and not _typed_since_filing(flow, boundary):
+    if row.verdict in PASSED and boundary == "plan" and not arg and not _typed_since_filing(flow, boundary):
         return None
     record.flags[boundary] = True
     return [render("reopened", levers, task=_label(record), stage=boundary)]
@@ -526,9 +526,9 @@ def _steer(flow: Any, verb: str, boundary: str, arg: str, levers: Levers) -> Rep
     if boundary == "step":
         unit = next_unit(record, "step", None, flow.limits)
         if isinstance(unit, Need):
-            n = _next_step(record)
+            n = next_step(record)
             blocked = unit.reason == "person decides" and n
-            return Reply((render("step blocked", levers, task=label, step=(n, len(_sections(record))),
+            return Reply((render("step blocked", levers, task=label, step=(n, len(sections(record))),
                                  n=counts_of(record, "step", n).blockers) if blocked else _refusal(record, unit),))
     elif (reopened := _reopen(flow, boundary, arg, levers)) is None:
         return Reply((render("nothing to revise", levers, task=label),))

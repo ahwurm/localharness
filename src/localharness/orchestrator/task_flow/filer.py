@@ -103,7 +103,7 @@ def _session(name: str) -> str:
     return name
 
 
-def _cut(text: str) -> tuple[str, bool]:
+def cut(text: str) -> tuple[str, bool]:
     raw = text.encode()
     return (text, False) if len(raw) <= Caps.DOC else (raw[: Caps.DOC].decode(errors="ignore") + TRUNCATION_MARKER, True)
 
@@ -376,10 +376,10 @@ class Docs:
         folder = _folder(task, name)
         if task not in self.adopted:
             raise Refused(f"{folder} was not made by this session; it is read-only")
-        cut, truncated = _cut(text)
+        kept, truncated = cut(text)
         with self._dir("tasks", folder, create=False) as fd:
-            atomic_write_text(name, cut, dir_fd=fd)
-        return digest(cut), truncated
+            atomic_write_text(name, kept, dir_fd=fd)
+        return digest(kept), truncated
 
     def read(self, task: int, name: str) -> str | None:
         folder = _folder(task, name)
@@ -398,7 +398,7 @@ class Docs:
 
     def write_session(self, name: str, text: str) -> None:
         with self._dir("sessions", create=True) as fd:
-            atomic_write_text(_session(name), _cut(text)[0], dir_fd=fd)
+            atomic_write_text(_session(name), cut(text)[0], dir_fd=fd)
 
     def reset_sessions(self) -> None:
         for name in SESSION_DOCS:
