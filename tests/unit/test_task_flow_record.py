@@ -1254,6 +1254,34 @@ async def test_executor_receives_the_step_as_written_with_its_indented_code(tmp_
     assert code in script.named("executor")[0].task
 
 
+async def test_a_multibyte_final_answer_is_cut_by_bytes_so_the_runtime_section_survives(tmp_path):
+    answers = {"executor": DelegationResult(text="x", raw="\u3042" * 3000, artifacts=["src/x1.py"])}
+    flow, _, _, _ = await planned(tmp_path, answers)
+    text = await flow.run("step")
+    doc = flow.docs.read(1, "step-1.md")
+    assert len(doc.encode()) <= Caps.DOC and "[truncated]" not in doc and "## runtime" in doc and "truncated" not in text
+    assert len(doc.split("## final answer\n")[1].split("\n## runtime")[0].encode()) <= Caps.BLOCK
+
+
+async def test_a_multibyte_research_answer_is_cut_by_bytes_and_the_newest_answer_is_kept(tmp_path):
+    flow, _, _, _ = make_flow(tmp_path, {"explorer": "\u3042" * 900})
+    flow.open("fix login", 1)
+    await flow.run("new", "Objective: fix login")
+    for q in range(1, 7):
+        text = await flow.run("research", f"where is login {q}")
+    doc = flow.docs.read(1, "research.md")
+    assert len(doc.encode()) <= Caps.DOC and "[truncated]" not in doc and "## q6 " in doc and "truncated" not in text
+
+
+@pytest.mark.parametrize("stage", ["research", "step"])
+async def test_a_cut_doc_is_named_in_the_manifest_after_an_explorer_or_executor_run(tmp_path, monkeypatch, stage):
+    flow, _, _, _ = await planned(tmp_path)
+    real = flow.docs.write
+    monkeypatch.setattr(flow.docs, "write", lambda *a: (real(*a)[0], True))
+    text = await (flow.run("research", "where is login") if stage == "research" else flow.run("step"))
+    assert "note: truncated at the doc cap" in text
+
+
 async def test_executor_brief_carries_the_verified_depends_on_docs(tmp_path):
     answers = {"executor": [DelegationResult(text="x", raw="ONE-DONE"), DelegationResult(text="x", raw="TWO-DONE")]}
     flow, script, _, _ = await planned(tmp_path, answers)
