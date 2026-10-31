@@ -143,16 +143,14 @@ def one_line(text: str) -> str:
 
 
 def notice(subject: str, state: str, commands: Sequence[str], tail: str = "") -> str:
-    """One harness line: `◆ subject state · command · … · tail clause · …`, cut to `Caps.LINE`.
-
-    Commands go first from the right (never the first), then tail clauses from the right, then the
-    parenthetical of the one command left; the head is never cut. The result is final: running it
-    through `sanitize_for_display` again would neutralise its own mark.
-    """
+    """One harness line `◆ subject state · command · … · tail`, trimmed from the right toward `Caps.LINE` (the head is never cut); the result is final, `sanitize_for_display` would neutralise its mark."""
     head = " ".join(p for p in (NOTICE_MARK, one_line(subject), one_line(state)) if p)
     cmds = [c for c in map(one_line, commands) if c]
     clauses = [c for c in one_line(tail).split(" · ") if c]
-    line = lambda: " · ".join([head, *cmds, *clauses])  # noqa: E731
+
+    def line() -> str:
+        return " · ".join([head, *cmds, *clauses])
+
     while len(line()) > Caps.LINE and len(cmds) > 1:
         cmds.pop()
     while len(line()) > Caps.LINE and clauses:
