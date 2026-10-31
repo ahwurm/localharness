@@ -5,7 +5,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from localharness.channels.base import notice
-from localharness.orchestrator.task_flow.record import LINES, Unit, _fill, printed_bound, unit_minutes
+from localharness.orchestrator.task_flow.filer import Refused
+from localharness.orchestrator.task_flow.panel import turns_block, typed_turns
+from localharness.orchestrator.task_flow.record import (
+    DOCS, LINES, Need, Record, Unit, _executed, _fill, file_doc, precondition, printed_bound, unit_minutes)
+from localharness.orchestrator.task_flow.runner import INTERVIEW_SENTENCE
 
 Levers = tuple[str, str]
 
@@ -16,7 +20,7 @@ def _put(text: str, fields: dict[str, Any]) -> str:
         n, m = step if isinstance(step, tuple) else (step, "")
         text = text.replace("N/M", f"{n}/{m}").replace("step N", f"step {n}")
     if fields.get("n") == 1:
-        text = text.replace("<n> blockers", "<n> blocker")
+        text = text.replace("<n> blockers", "<n> blocker").replace("<n> turns", "<n> turn")
     return _fill(text, fields)
 
 
@@ -65,11 +69,101 @@ def progress(flow: Any, subject: str, state: str, commands: tuple[str, ...], tai
     return notice(subject, state, [_fill(c, fill) for c in commands], " · ".join(p for p in (*spoken, tail) if p))
 
 
+
+DECISIONS = ("decisions.md", None)
+USAGE = "usage: /task new [objective] · research · plan [change] · run · show [doc] · accept [doc] · stop · clear"
+BOUNDARIES = {"new": "new", "research": "research", "plan": "plan", "run": "step"}
+SENTENCES = {
+    "research": ('Call task(stage="research", question=...) once per question the plan needs answered from the '
+                 'repository, then task(stage="research") to review the answers.'),
+    "new unfiled": INTERVIEW_SENTENCE,
+    "new blocked": 'Call task(stage="new") to read the findings, then call it again with doc= your revised decisions.',
+    "new unreviewed": 'Call task(stage="new").',
+    "new reopened": ('Call task(stage="new") to read the decisions, then call it again with doc= the decisions '
+                     "revised as the person's messages since they were filed ask."),
+    "plan unfiled": ('Call task(stage="plan") to read the decisions and the plan\'s shape, '
+                     'then call it again with doc= your plan.'),
+    "plan unreviewed": 'Call task(stage="plan").',
+    "plan blocked": 'Call task(stage="plan") to read the findings, then call it again with doc= your revised plan.',
+    "plan reopened": ('Call task(stage="plan") to read the plan, then call it again with doc= the plan revised '
+                      "as the person's messages since it was filed ask."),
+    "run": 'Call task(stage="run") and call it again after each result until it says done, blocked or halted.',
+}
+
+
 @dataclass(frozen=True)
 class Reply:
+    """Finished lines to print and the follow-up turn as (text, subtype), or none."""
+
     lines: tuple[str, ...] = ()
     turn: tuple[str, str] | None = None
 
 
+def sentence(boundary: str, record: Record) -> str:
+    """The stage sentence a verb-started turn carries, chosen from the record."""
+    if boundary in ("research", "step"):
+        return SENTENCES["research" if boundary == "research" else "run"]
+    row = record.filed.get((DOCS[boundary], None))
+    state = "unfiled" if row is None else row.verdict if row.verdict in ("blocked", "unreviewed") else "reopened"
+    return SENTENCES[f"{boundary} {state}"]
+
+
+def skip_interview(flow: Any) -> int:
+    """Files decisions.md from the objective and the person's turns since the task opened; no panel runs. Returns the turns used."""
+    record = flow.record
+    turns = [(n, t) for n, t in typed_turns(flow.messages()) if n >= record.turn and t != record.objective]
+    text = "\n".join(filter(None, (f"{record.objective} (turn {record.turn})", turns_block(turns))))
+    file_doc(record, "new", DECISIONS, flow.docs.write(record.id, "decisions.md", text)[0])
+    record.filed_turn["new"] = flow.turn()
+    return len(turns) + 1
+
+
+def _label(record: Record | None) -> str:
+    return f"t{record.id}" if record else "task"
+
+
+def _refusal(record: Record | None, refused: Need, levers: Levers) -> str:
+    return notice(_label(record), refused.reason, list(refused.commands))
+
+
+def _newest(record: Record) -> str | None:
+    names = ["decisions", "research", "plan", *(f"step-{n}" for n in sorted(_executed(record))), "review"]
+    return next((n for n in reversed(names) if (f"{n}.md", None) in record.filed), None)
+
+
+def _open(flow: Any, objective: str, turn: int, levers: Levers) -> Reply:
+    old, lines = flow.record, []
+    if old and old.stage != "done":
+        doc = _newest(old)
+        lines.append(render("closed", levers, task=_label(old), doc=doc) if doc
+                     else notice(_label(old), "closed", [], LINES["closed"].tail))
+    record = flow.open(objective, turn)
+    return Reply((*lines, render("interview open", levers, task=_label(record))), (objective, "typed"))
+
+
+def _steer(flow: Any, verb: str, boundary: str, levers: Levers) -> Reply:
+    record, lines = flow.record, []
+    if boundary in ("research", "plan") and record.stage == "new" and DECISIONS not in record.filed:
+        lines.append(render("decisions filed", levers, task=_label(record), n=skip_interview(flow)))
+    record.paused, flow.armed = False, boundary
+    flow.said.add("cap")
+    lines.append(render("armed", levers, task=_label(record), verb=verb, n=cap_minutes(flow)))
+    return Reply(tuple(lines), (sentence(boundary, record), "request"))
+
+
 def task_command(flow: Any, args: str, *, turn: int, running: bool, levers: Levers, phone: bool = False) -> Reply:
-    return Reply()
+    """The person's /task verb as finished lines and the follow-up turn; synchronous, so no call lands between a check and a set."""
+    parts = args.split(maxsplit=1) or [""]
+    verb, arg = parts[0].lower(), "".join(parts[1:]).strip()
+    boundary, record = BOUNDARIES.get(verb), flow.record
+    if boundary is None:
+        return Reply((USAGE,))
+    try:
+        if verb == "new" and arg:
+            return _open(flow, arg, turn, levers)
+        refused = precondition(boundary, record, "person", None)
+        if refused:
+            return Reply((_refusal(record, refused, levers),))
+        return _steer(flow, verb, boundary, levers)
+    except Refused as e:
+        return Reply((notice(_label(record), str(e)),))
