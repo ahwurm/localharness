@@ -1081,6 +1081,7 @@ class TerminalChannel(ChannelAdapter):
     """
 
     channel_id = "terminal"
+    stop_word = "Ctrl+C"
 
     has_review_surface = True
     """PRD §3.1 choice 2: the terminal shows the diff after the fact, so an in-workspace edit is
@@ -1345,6 +1346,10 @@ class TerminalChannel(ChannelAdapter):
                 self._console.print(_colorize_rate_notes(content))
             else:
                 self._console.print(escape(content))
+
+    async def panel_started(self, line: str) -> None:
+        if not (self._box_app is not None and self._box_active):
+            await self.send_message(line)
 
     async def send_renderable(
         self,
@@ -1994,6 +1999,12 @@ class TerminalChannel(ChannelAdapter):
             # first, ahead of every other branch: while the server is gone the turn is still
             # "working", and that state would otherwise hide the only sentence that says why
             return [("class:hint", f"  {glyph} {self._provider_lost_text} ")]
+        snap = self._progress_snap()
+        if snap and snap.get("text"):
+            if self._burst is not None and snap.get("prefix"):
+                activity = f"{snap['prefix']} · {' · '.join(self._burst.tools)} · {self._burst.done}/{self._burst.calls}"
+                return [("class:hint", f"  {glyph} {activity} "), *self._tps_frag()]
+            return [("class:hint", f"  {glyph} {snap['text']}"), *(self._clock_frag(snap) if "phase" in snap else []), ("class:hint", " ")]
         show_tps = False  # only turn activity shows the rate — never a swap-load or dreaming line
         if self._burst is not None:
             activity = f"{' · '.join(self._burst.tools)} · {self._burst.done}/{self._burst.calls}"
@@ -2019,12 +2030,7 @@ class TerminalChannel(ChannelAdapter):
         call 120`, or `… waiting` before the first delta. Fragment 2, dim: elapsed time,
         which turns into a red `silent 14s` when no delta has arrived for a while
         mid-stream. Without a supplier (or between requests): the plain "working"."""
-        snap = None
-        if self.progress_source is not None:
-            try:
-                snap = self.progress_source()
-            except Exception:
-                snap = None
+        snap = self._progress_snap()
         if snap is None:
             return [("class:hint", "working")]
         phase = snap.get("phase") or "waiting"
@@ -2036,13 +2042,23 @@ class TerminalChannel(ChannelAdapter):
         head = f"{_PHASE_ICONS.get(phase, '')} {_PHASE_LABELS.get(phase, phase)}".strip()
         if tally:
             head += f" {_fmt_tokens(tally)}"
-        frags = [(f"class:phase-{phase}", head)]
+        return [(f"class:phase-{phase}", head), *self._clock_frag(snap)]
+
+    def _progress_snap(self) -> dict | None:
+        if self.progress_source is None:
+            return None
+        try:
+            return self.progress_source()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _clock_frag(snap: dict) -> list[tuple[str, str]]:
+        """`silent Ns` past the silence threshold mid-stream, else the elapsed time."""
         silent = float(snap.get("silent") or 0.0)
-        if phase != "waiting" and silent >= _SILENCE_NOTE_SECONDS:
-            frags.append(("class:phase-silent", f" · silent {_fmt_elapsed(silent)}"))
-        else:
-            frags.append(("class:hint", f" · {_fmt_elapsed(float(snap.get('elapsed') or 0.0))}"))
-        return frags
+        if (snap.get("phase") or "waiting") != "waiting" and silent >= _SILENCE_NOTE_SECONDS:
+            return [("class:phase-silent", f" · silent {_fmt_elapsed(silent)}")]
+        return [("class:hint", f" · {_fmt_elapsed(float(snap.get('elapsed') or 0.0))}")]
 
     def _tps_frag(self) -> list[tuple[str, str]]:
         """Colored tok/s segment for the status row; [] when nothing is known. A live rate
