@@ -871,3 +871,22 @@ def test_component_mutated_accepts_the_channel_actor_and_still_rejects_others():
         ComponentMutated(path="p", before_value=1, after_value=2, layer="user", actor=actor)
     with pytest.raises(ValidationError):
         ComponentMutated(path="p", before_value=1, after_value=2, layer="user", actor="bogus")
+
+
+def test_task_complete_carries_the_reply_panel_verdict_and_round_trips():
+    from pydantic import ValidationError
+    base = dict(agent_id=AgentID("a"), session_id=SessionID("s"), success=True, summary="ok", duration_seconds=1.0, iterations=1)
+    plain = TaskComplete(**base)
+    assert (plain.verdict, plain.stage, plain.step, plain.finding) == (None, None, None, "")
+    ev = TaskComplete(**base, verdict="blocked", finding="x")
+    restored = deserialize_event(ev.model_dump_json())
+    assert isinstance(restored, TaskComplete) and (restored.verdict, restored.finding) == ("blocked", "x")
+    with pytest.raises(ValidationError):
+        TaskComplete(**base, verdict="maybe")
+
+
+def test_status_tick_text_round_trips():
+    from localharness.channels.mobile.protocol import StatusTick
+    text = "checking 1/2 · answer · up to 4 min"
+    assert StatusTick().text is None
+    assert StatusTick.model_validate_json(StatusTick(text=text).model_dump_json()).text == text

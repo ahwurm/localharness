@@ -10,6 +10,7 @@ import hashlib
 import inspect
 import json
 import logging
+import math
 import re
 import time
 import uuid
@@ -36,7 +37,7 @@ from localharness.core.types import (
     is_harness_message,
     provider_messages,
 )
-from localharness.core.content import redact_images, text_part
+from localharness.core.content import redact_images, text_of, text_part
 from localharness.core.fence import fence_project_text
 from localharness.agent.context import (
     APPROX_CHARS_PER_TOKEN, fixed_tokens, floor_schemas, harness_floor, response_reserve)
@@ -50,6 +51,7 @@ if TYPE_CHECKING:
     from localharness.agent.affordance import Affordances
     from localharness.config.models import ChildBudget
     from localharness.config.project_records import ProjectInstructions
+    from localharness.orchestrator.task_flow.panel import Panel
     from localharness.provider.lifecycle import ServerRecovery
 
 log = logging.getLogger("localharness.agent.loop")
@@ -1264,9 +1266,11 @@ class AgentLoop:
         affordances: Affordances | None = None,
         turn: int = 0,
         request_note: "Callable[[], str] | None" = None,
+        reply_panel: "Panel | None" = None,
     ) -> None:
         self._config = config
         self.turn = turn
+        self.reply_panel = reply_panel
         self._llm = llm
         # Share of the window held back for chat-template overhead (autosense.template_margin_ratio);
         # None keeps 1/64, the number this loop always used (_window_headroom).
@@ -2762,9 +2766,11 @@ class AgentLoop:
                     session.push(harness_message(_SENTINEL_REPROMPT_NUDGE, "sentinel_retry"))
                     continue
 
-                summary = _clean_summary(
-                    _format_completion_summary(session, content)
-                )
+                if self.reply_panel is None:
+                    summary = _clean_summary(_format_completion_summary(session, content))
+                    verdict, finding = None, ""
+                else:
+                    summary, verdict, finding = await self._review_reply(session, task, content)
                 if self._task_context is not None:
                     # The reply keeps the model's words; at most one evidence line is appended.
                     # History keeps the model's own message: the packet carries current facts.
@@ -2776,6 +2782,8 @@ class AgentLoop:
                     summary=summary,
                     duration_seconds=session.elapsed_seconds(),
                     iterations=session.iteration,
+                    verdict=verdict,
+                    finding=finding,
                 ))
                 session.terminated_reason = "complete"
                 self._conversation = _strip_sentinel_exchanges(session.messages)
@@ -3171,6 +3179,56 @@ class AgentLoop:
             ))
         except Exception:  # noqa: BLE001 - telling the person must never fail the wait
             log.debug("could not publish ProviderLost", exc_info=True)
+
+    def exclude(self, seconds: float) -> None:
+        """Take `seconds` out of the live turn's time budget; only a finite positive number counts."""
+        if self._live_turn is not None and math.isfinite(seconds) and seconds > 0:
+            self._live_turn[0].excluded_seconds += seconds
+
+    def _turn_evidence(self, session: Session) -> tuple[list[tuple[str, str | None]], list[str], list[str]]:
+        """This turn's tool calls as (name, origin), the paths its write and edit calls named, and its agent results put in the store as handles."""
+        from localharness.orchestrator.task_flow.panel import WRITE_TOOLS
+        messages = session.messages[session.turn_start_idx:]
+        bodies = {m.get("tool_call_id"): text_of(m.get("content")) for m in messages if m.get("role") == "tool"}
+        store = getattr(self._ctx, "_content_store", None)
+        calls: list[tuple[str, str | None]] = []
+        written: list[str] = []
+        handles: list[str] = []
+        for m in messages:
+            for call in m.get("tool_calls") or ():
+                function = call.get("function") or {}
+                name = function.get("name") or ""
+                origin = self._tools.result_origin(name) if self._tools is not None else None
+                calls.append((name, origin))
+                if name in WRITE_TOOLS:
+                    try:
+                        arguments = json.loads(function.get("arguments") or "{}")
+                    except ValueError:
+                        arguments = {}
+                    path = arguments.get("path") if isinstance(arguments, dict) else None
+                    if isinstance(path, str):
+                        written.append(path)
+                elif name == "agent" and store is not None and call.get("id") in bodies:
+                    handles.append(store.put(bodies[call["id"]], origin or "untrusted"))
+        return calls, written, handles
+
+    async def _review_reply(self, session: Session, task: str, content: str | None) -> tuple[str, str, str]:
+        """The reply panel's judgment of the draft the person would receive: (the summary to deliver, the verdict, the finding)."""
+        from localharness.orchestrator.task_flow.panel import PanelInputs, reply_brief, sense, typed_turns
+        from localharness.orchestrator.task_flow.record import Unit
+        panel = self.reply_panel
+        draft = _format_completion_summary(session, content)
+        calls, written, handles = self._turn_evidence(session)
+        inputs = PanelInputs(
+            brief=reply_brief(task, written, handles), draft=draft, turns=tuple(typed_turns(session.messages)),
+            handles=tuple(handles), critics=sense(calls, panel.jtbd_stood, panel.limits),
+        )
+        started = time.monotonic()
+        try:
+            result = await panel.run(Unit("reply", "panel"), inputs, None)
+        finally:
+            self.exclude(time.monotonic() - started)
+        return _clean_summary(result.draft), result.verdict, result.finding
 
     async def _build_request(self, messages: list[Message], tools: list | None):
         # Re-snapshot and re-declare the active task's references (files may have changed; the

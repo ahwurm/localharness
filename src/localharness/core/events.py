@@ -195,6 +195,16 @@ class TaskComplete(BaseEvent):
     summary: str
     duration_seconds: float
     iterations: int
+    verdict: Optional[Literal["pass", "blocked", "unreviewed"]] = Field(
+        default=None, description="The reply panel's verdict on this reply; None when no panel ran."
+    )
+    stage: Optional[str] = Field(default=None, description="The task stage a verdict belongs to; None at the reply seam.")
+    step: Optional[int] = Field(default=None, description="The task step a verdict belongs to; None at the reply seam.")
+    finding: str = Field(
+        default="",
+        description="The first blocker when blocked; why the reply went unchecked when unreviewed, empty when "
+                    "the person's own stop caused it; one line, a leading ◆ neutralised, at most Caps.FINDING characters.",
+    )
 
 
 class Action(BaseEvent):
