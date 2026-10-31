@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import shutil
 import tempfile
 import time
@@ -289,7 +290,7 @@ async def execute_one_run(
         loop = await _build_agent_loop(bus=bus, llm_client=llm_client, scenario=scen, session_id=session_id, agent_config=agent_config, base_registry=base_registry)
         try:
             await asyncio.wait_for(
-                _run_loop(loop, _render_prompt(scen.prompt), _on_token),
+                _run_prompt(loop, _render_prompt(scen.prompt), _on_token),
                 timeout=scen.limits.max_latency_s,
             )
         except asyncio.TimeoutError:
@@ -302,6 +303,7 @@ async def execute_one_run(
     finally:
         # vars(), not getattr: a test's stub loop (MagicMock) would answer any getattr with a mock.
         _own = getattr(loop, "__dict__", {})
+        task_docs_missing = _task_docs_missing(_own.get("_flow"), scen.task_docs)
         await _stop_bench_memory(_own.get("_plugin_result"), _own.get("_plugin_tmp"))
         if _own.get("_flow_dir") is not None:
             shutil.rmtree(_own["_flow_dir"], ignore_errors=True)
@@ -317,6 +319,7 @@ async def execute_one_run(
         "deny_events": acc.deny_events,
         "compaction_triggered": acc.compaction_triggered,
         "critic_children": acc.critic_children,
+        "task_docs_missing": task_docs_missing,
     }
     success = False if timed_out else scen.success_criteria.evaluate(acc.final_message, counts=counts)
 
@@ -647,7 +650,12 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
             exclude=lambda seconds: loop.exclude(seconds),
             docs=Docs(flow_dir, False, agent_config.name),
             config=agent_config, root_tools=scenario.tools_allowed, llm=llm_client,
-            token_counter=token_counter, bus=bus)
+            token_counter=token_counter, bus=bus,
+            messages=lambda: loop.messages(), turn=lambda: loop.turn)
+        if flow is not None and "task" in scenario.tools_allowed:
+            from localharness.tools.builtin.task_tool import TaskTool
+            tool_registry._tools["global"]["task"] = TaskTool(flow)
+            tool_registry._schemas["task"] = tool_registry._tools["global"]["task"].info()
         try:
             loop = AgentLoop(
                 config=agent_config,
@@ -681,7 +689,7 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
     if plugin_result is not None:  # execute_one_run's finally stops these (#43: no hung aiosqlite)
         loop._plugin_result, loop._plugin_tmp = plugin_result, plugin_tmp
     if flow_dir is not None:
-        loop._flow_dir = flow_dir
+        loop._flow_dir, loop._flow = flow_dir, flow
     return loop
 
 
@@ -718,6 +726,36 @@ async def _run_loop(loop: Any, prompt: str, on_token: Callable) -> None:
         await loop(prompt)
     else:
         raise RuntimeError(f"AgentLoop {loop!r} exposes no run_turn() entry point.")
+
+
+async def _run_prompt(loop: Any, prompt: str, on_token: Callable) -> None:
+    """A task-flow scenario whose prompt lines open with `/task` runs each as the person's verb; any other prompt is one request turn."""
+    from localharness.orchestrator.task_flow.verbs import task_command, turn_end
+
+    flow = getattr(loop, "__dict__", {}).get("_flow")
+    lines = [ln.strip() for ln in prompt.splitlines() if ln.strip()]
+    if flow is None or not lines or not lines[0].startswith("/task"):
+        return await _run_loop(loop, prompt, on_token)
+    for line in lines:
+        reply = task_command(flow, line[len("/task"):], turn=loop.turn + 1, running=False, levers=("", ""))
+        for text in reply.lines:
+            log.info("bench flow: %s", text)
+        if reply.turn:
+            text, subtype = reply.turn
+            await loop.run_turn(task=text, on_token=on_token, subtype=subtype)
+        for text in turn_end(flow, ("", ""), cancelled=False):
+            log.info("bench flow: %s", text)
+
+
+def _task_docs_missing(flow: Any, docs: dict[str, str]) -> int:
+    """How many named docs are not filed, no longer verified, or do not match their pattern."""
+    record = getattr(flow, "record", None)
+
+    def present(name: str, pattern: str) -> bool:
+        return bool(record and (name, None) in record.filed and flow.docs.verified(record, (name, None))
+                    and re.search(pattern, flow.docs.read(record.id, name) or ""))
+
+    return sum(not present(name, pattern) for name, pattern in docs.items())
 
 
 # -------------------------------------------------------------------------

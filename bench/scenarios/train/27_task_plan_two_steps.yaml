@@ -1,0 +1,38 @@
+name: task_plan_two_steps
+prompt: |
+  /task new Add a function add(a, b) to add.py and a test for it in test_add.py.
+  /task plan
+expected_outcome: |
+  The person opens a task with its objective, then asks for the plan. The root reads the
+  decisions and files a two-step plan (the function, then its test) that the plan panel
+  reviews, so plan.md and plan-review.md are filed and verified in the task record. The reply
+  names the plan in the root's own words and does not quote a child's output or a critic's
+  fenced findings.
+success_criteria:
+  rubric:
+    - 'regex:(?i)\bplan\b'
+    - 'regex:(?s)\A(?!.*critic output derived from files)'
+  event_counts:
+    task_docs_missing:
+      exact: 0
+budget:
+  max_actions: 16
+  max_duration_minutes: 20.0
+  max_context_tokens: 32000
+limits:
+  max_latency_s: 1500.0
+  max_tool_calls: 16
+tools_allowed:
+  - task
+  - read
+  - glob
+  - grep
+task_docs:
+  plan.md: '(?s)## Step 1.*## Step 2'
+  plan-review.md: 'verdict: (pass|blocked)'
+task_flow: true
+slice: train
+category: agent_orchestration
+tags:
+  - task_flow
+  - plan_panel
