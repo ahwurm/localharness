@@ -1191,11 +1191,14 @@ TASK_RUN_NEEDLES = (
     ("## Files the harness writes",
      "A wake begins with no task: the sleep file carries no task record, and an unfinished task folder is named, never resumed"),
     ("## Human approval gate",
-     "The session's state folder, a project's `.localharness/` when it has one, is on that list from start"))
+     "The session's state folder, a project's `.localharness/` when it has one, is on that list from start"),
+    ("## Threat model: prompt injection", "No person's go-ahead stands between a plan and its steps"),
+    ("## Threat model: prompt injection", "so an executor's ordinary repository writes and commands run unasked"),
+    ("## Threat model: prompt injection", "The root already held the same tools, so no capability is new"))
 
 
 def check_task_run_doc(security_text: str) -> list[str]:
-    """SECURITY.md says, each in its section, what the task pipeline adds: the tool's label, the docs and summarizer paths, a wake with no task, and the state folder on the gate's list."""
+    """SECURITY.md says, each in its section, what the task pipeline adds and leaves to the person: the label, the paths, the gone go-ahead, a wake with no task, and the gate's list."""
     bodies = {h: " ".join((section(security_text, h) or "").split()) for h, _ in TASK_RUN_NEEDLES}
     return [f"SECURITY.md's {h} section does not say {n}" for h, n in TASK_RUN_NEEDLES if n not in bodies[h]]
 

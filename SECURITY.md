@@ -1287,6 +1287,15 @@ written by the model and by child agents from repository files.
 
 A delegating model may narrow a specialist to a subset of its own tools for one call; narrowing only removes tools, and the grant gate and the floors judge the narrowed set.
 
+No person's go-ahead stands between a plan and its steps. Once you open a task with
+`/task new <objective>`, the root runs every stage itself, and an executor holding the root's
+tools, `bash_exec` and `write` among them, carries out each step of a plan the model wrote. What
+checks each step is the approval gate on every executor write and shell call (in `auto` it asks
+only for the named dangerous operations, so an executor's ordinary repository writes and commands
+run unasked), the executor's budget, each `task` call counting as one of the root's actions, the
+flow cap, `/task stop`, and the critics, which check quality, not safety. The root already held the
+same tools, so no capability is new; what is gone is a person's go-ahead before the steps run.
+
 **A residual that is now closed.** Tool classification used to read tool names. A plugin tool that
 reached an agent through the inherited global scope therefore needed a separate per-tool tag before
 the checks knew what it was. Now every tool carries its own declarations, the three readers above
