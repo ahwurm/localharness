@@ -457,6 +457,7 @@ async def test_a_cancel_the_person_did_not_make_during_a_critic_cancels_the_turn
     task.cancel()
     await asyncio.wait({task})
     assert task.cancelled() and not events(bus, TaskComplete)
+    assert [a.content for a in tool_less(bus)] == ["Hello there."]
 
 
 async def test_a_timeout_during_a_critic_raises_timeout(bus):
@@ -523,6 +524,21 @@ async def test_cancel_a_second_cancel_while_the_action_publishes_still_lands_it_
         await asyncio.sleep(0)
     assert task.cancelled() and not events(bus, TaskComplete)
     assert [a.content for a in tool_less(bus)] == ["Hello there."]
+
+
+async def test_an_exception_before_the_panel_starts_still_publishes_the_held_action_and_delivers_unreviewed(bus, monkeypatch):
+    loop = loop_of(Llm(["Hello there."]), bus, panel_of())
+
+    def broken(session):
+        raise RuntimeError("no evidence")
+
+    monkeypatch.setattr(loop, "_turn_evidence", broken)
+    _, summary = await turn(loop)
+    assert summary == "Hello there."
+    (done,) = events(bus, TaskComplete)
+    assert done.verdict == "unreviewed"
+    (action,) = tool_less(bus)
+    assert action.content == "Hello there." and action.seq < done.seq
 
 
 async def test_the_panel_that_cannot_finish_says_why_with_the_first_note(bus):
