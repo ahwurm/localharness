@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import shutil
 import stat
 from pathlib import Path
 
@@ -752,3 +753,78 @@ def test_names_of_a_folder_that_is_not_a_task_number_is_refused(tmp_path):
     for task in (-1, "1/../2", 1.5):
         with pytest.raises(Refused):
             docs.names(task)  # type: ignore[arg-type]
+
+
+def made(tmp_path: Path) -> tuple[Docs, Path]:
+    docs = Docs(state(tmp_path), True, "a")
+    docs.new_task()
+    for name in ("decisions.md", "plan.md", "plan-review.md"):
+        docs.write(1, name, "x")
+    return docs, docs.state_dir / "agents" / "a"
+
+
+def test_remove_deletes_the_adopted_folder_with_its_docs_and_forgets_it(tmp_path):
+    docs, agent = made(tmp_path)
+    assert docs.remove(1) == ["decisions.md", "plan-review.md", "plan.md"]
+    assert not (agent / "tasks" / "t1").exists() and docs.adopted == set() and (agent / "tasks").is_dir()
+    assert docs.new_task() == 1
+
+
+def test_remove_refuses_a_folder_this_session_did_not_make(tmp_path):
+    docs, agent = made(tmp_path)
+    (agent / "tasks" / "t7").mkdir()
+    (agent / "tasks" / "t7" / "plan.md").write_text("theirs")
+    with pytest.raises(Refused):
+        docs.remove(7)
+    assert (agent / "tasks" / "t7" / "plan.md").read_text() == "theirs" and docs.adopted == {1}
+
+
+def test_remove_of_a_folder_swapped_for_a_link_removes_nothing_outside_the_tasks_folder(tmp_path):
+    docs, agent = made(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.md").write_text("mine")
+    (agent / "tasks" / "t1").rename(tmp_path / "moved")
+    os.symlink(outside, agent / "tasks" / "t1")
+    with pytest.raises(Refused):
+        docs.remove(1)
+    assert (outside / "keep.md").read_text() == "mine" and (tmp_path / "moved" / "plan.md").exists()
+    assert docs.adopted == {1}
+
+
+def test_remove_of_a_linked_tasks_folder_is_refused(tmp_path):
+    docs, agent = made(tmp_path)
+    (agent / "tasks").rename(tmp_path / "moved")
+    os.symlink(tmp_path / "moved", agent / "tasks")
+    with pytest.raises(Refused):
+        docs.remove(1)
+    assert (tmp_path / "moved" / "t1" / "plan.md").exists()
+
+
+def test_remove_of_a_folder_deleted_by_hand_is_nothing_removed_and_forgotten(tmp_path):
+    docs, agent = made(tmp_path)
+    shutil.rmtree(agent / "tasks" / "t1")
+    assert docs.remove(1) == [] and docs.adopted == set()
+
+
+def test_old_record_is_a_task_json_in_the_agent_folder_and_drop_unlinks_it(tmp_path):
+    docs, agent = made(tmp_path)
+    assert docs.old_record() is False and docs.drop_old_record() is False
+    (agent / "task.json").write_text("{}")
+    assert docs.old_record() is True and docs.drop_old_record() is True
+    assert not (agent / "task.json").exists() and docs.old_record() is False
+
+
+def test_drop_old_record_unlinks_a_link_and_never_its_target_and_ignores_a_folder_of_that_name(tmp_path):
+    docs, agent = made(tmp_path)
+    target = tmp_path / "target.json"
+    target.write_text("keep")
+    os.symlink(target, agent / "task.json")
+    assert docs.drop_old_record() is True and target.read_text() == "keep" and not (agent / "task.json").is_symlink()
+    (agent / "task.json").mkdir()
+    assert docs.old_record() is False and docs.drop_old_record() is False and (agent / "task.json").is_dir()
+
+
+def test_old_record_of_an_agent_with_no_folder_is_false(tmp_path):
+    docs = Docs(state(tmp_path), True, "a")
+    assert docs.old_record() is False and docs.drop_old_record() is False

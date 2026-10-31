@@ -1136,6 +1136,30 @@ def test_typed_turn_doc_bites():
     assert len(check_typed_turn_doc("## Nothing\n")) == len(TYPED_TURN_NEEDLES)
 
 
+TASK_DOCS_NEEDLES = (
+    "`/task show` prints a task doc only after its digest matches what was filed",
+    "A folder this session did not make is shown read-only, headed `not adopted · not made by this session`",
+    "The header `/task accept` prints first is display, not a confirmation",
+    "`/task clear` removes only the open task's folder and an old `task.json`")
+
+
+def check_task_docs_doc(security_text: str) -> list[str]:
+    """SECURITY.md's file-writes section says how `/task show`, `/task accept` and `/task clear` treat a task doc and a folder."""
+    body = " ".join((section(security_text, "## Files the harness writes") or "").split())
+    return [f"SECURITY.md's file-writes section does not say {n}" for n in TASK_DOCS_NEEDLES if n not in body]
+
+
+def test_task_docs_doc_live():
+    assert check_task_docs_doc(_read("SECURITY.md")) == []
+
+
+def test_task_docs_doc_bites():
+    text = _read("SECURITY.md")
+    for needle in TASK_DOCS_NEEDLES:
+        assert check_task_docs_doc(_swap(text, needle, "x")) == [f"SECURITY.md's file-writes section does not say {needle}"]
+    assert len(check_task_docs_doc("## Nothing\n")) == len(TASK_DOCS_NEEDLES)
+
+
 _ROOT_PARAGRAPH = (
     "Answer ordinary questions directly, and make a single edit or lookup directly: read first, then change. "
     "When the work is bigger than that, run it through the task: write what you need to know and what you will read "

@@ -688,14 +688,14 @@ FINDING = Finding("BLOCKER", "step 2 is vague", "", False, "big-picture")
 FOREIGN = "not adopted · not made by this session"
 
 
-def shelf(tmp_path, verdict="blocked", blockers=2, stage="plan"):
+def shelf(tmp_path, verdict="blocked", blockers=2, stage="plan", plan=PLAN_TWO):
     """A flow with decisions and a two-step plan filed, the plan's review doc holding one round."""
     flow, *_ = make_flow(tmp_path)
     flow.open("fix login", 1)
     record, docs = flow.record, flow.docs
     file_doc(record, "new", DECISIONS, docs.write(1, "decisions.md", "turn 1")[0])
-    file_doc(record, "plan", PLAN_FILED, docs.write(1, "plan.md", PLAN_TWO)[0])
-    rerecord(record, parse_plan(PLAN_TWO))
+    file_doc(record, "plan", PLAN_FILED, docs.write(1, "plan.md", plan)[0])
+    rerecord(record, parse_plan(plan))
     set_verdict(record, DECISIONS, "pass")
     set_verdict(record, PLAN_FILED, verdict)
     record.counts["plan"].blockers, record.stage = blockers, stage
@@ -1088,3 +1088,149 @@ def test_accept_review_is_the_bare_accept_of_a_blocked_task_review_and_nothing_b
     flow = shelf(tmp_path / "again")
     assert accept(flow, "review").lines == ("◆ t1 nothing blocked · /task show",)
     assert flow.record.filed[PLAN_FILED].verdict == "blocked"
+
+
+FIVE = "\n\n".join(f"## Step {n}: change {n}\nfiles: src/x{n}.py\ndepends_on: none\ndone: x{n} changed" for n in range(1, 6))
+
+
+def bare(flow, args="", levers=BOX):
+    return verbs.task_command(flow, args, turn=2, running=False, levers=levers).lines
+
+
+def test_status_a_step_blocked_prints_the_status_line_then_the_steps_blocked_row(tmp_path):
+    flow = shelf(tmp_path, "pass", plan=FIVE)
+    executed(flow, 1, "pass")
+    executed(flow, 2, "blocked", 2)
+    assert bare(flow) == ("t1 · fix login · step 2/5 blocked",
+                          "◆ t1 step 2/5 blocked · /task run (retries) · show · accept · 2 blockers")
+
+
+def test_status_the_objective_is_cut_to_half_a_line_on_one_line_and_never_forges_a_mark(tmp_path):
+    flow = shelf(tmp_path)
+    flow.record.objective = "◆ " + "long\n" + "x" * 100
+    head = bare(flow)[0]
+    assert head.startswith("t1 · ") and "\n" not in head and len(head.split(" · ")[1]) == Caps.LINE // 2
+    assert head.endswith(" · plan blocked")
+
+
+def test_status_paused_ends_the_line_with_paused_and_the_second_row_names_the_command_and_clear(tmp_path):
+    flow = shelf(tmp_path, "pass", plan=FIVE)
+    executed(flow, 1, "pass")
+    executed(flow, 2, "blocked", 2)
+    flow.record.paused = True
+    assert bare(flow) == ("t1 · fix login · step 2/5 blocked · paused",
+                          "◆ t1 paused · /task run (retries) · clear (deletes the folder)")
+
+
+def test_status_with_no_task_is_the_no_task_row_and_an_unadopted_folder_and_an_old_record_add_one_line_each(tmp_path):
+    flow, *_ = make_flow(tmp_path)
+    assert bare(flow) == NO_TASK.lines
+    foreign_folder(flow, 5, plan_md="old", decisions_md="d")
+    (flow.docs.state_dir / "agents" / "a" / "task.json").write_text("{}")
+    assert bare(flow) == (*NO_TASK.lines, "◆ t5 not adopted · /task show t5/plan", "◆ task old task.json · /task clear (removes it)")
+    flow.open("fix login", 1)
+    assert bare(flow)[0] == "t1 · fix login · interview open" and bare(flow)[-2:] == bare(flow)[2:4]
+
+
+@pytest.mark.parametrize(("stage", "verdict", "row"), [
+    ("new", None, "◆ t1 interview open · /task plan (skips the questions)"),
+    ("plan", "pass", "◆ t1 plan pass · /task run · plan <change> (revises) · up to 25 min"),
+    ("plan", "unreviewed", "◆ t1 plan unreviewed · /task plan (re-panels) · up to 13 min"),
+    ("plan", "blocked", "◆ t1 plan blocked · /task plan (reopens) · show plan · accept · 2 blockers"),
+    ("task", "blocked", "◆ t1 review blocked · /task plan · show review · accept (ends t1) · 2 blockers"),
+    ("task", "pass", "◆ t1 review unreviewed · /task run (re-runs the task panel) · up to 7 min"),
+    ("done", "pass", "◆ t1 done · /task show review"),
+])
+def test_status_names_where_the_task_stands_and_the_command_to_type_next(tmp_path, stage, verdict, row):
+    flow = shelf(tmp_path, verdict or "pass", stage=stage)
+    if verdict is None:
+        flow.record.filed.clear()
+    if stage == "task":
+        for n in (1, 2):
+            flow.record.filed[("plan.md", f"step-{n}")].verdict = "pass"
+    assert bare(flow)[1] == row
+
+
+def test_status_a_stopped_step_and_a_step_not_yet_executed_say_so(tmp_path):
+    flow = shelf(tmp_path, "pass")
+    flow.record.stage = "run"
+    assert bare(flow)[1] == "◆ t1 step 1 not executed · /task run"
+    flow.record.stopped_log = "write"
+    assert bare(flow)[1] == "◆ t1 step 1/2 stopped, files half-edited · /task run (re-runs) · up to 25 min"
+
+
+def test_status_a_research_blocked_names_the_blockers_from_its_review(tmp_path):
+    flow = shelf(tmp_path)
+    flow.record.stage = "research"
+    flow.record.filed[("research.md", None)] = Row("d", "blocked")
+    flow.docs.write(1, "research-review.md", "## round 1 · blockers 2\n- [BLOCKER] a\n- [BLOCKER] b\nverdict: blocked\n")
+    assert bare(flow)[1] == "◆ t1 research blocked · /task plan (plans anyway) · show research · 2 blockers"
+
+
+def test_clear_removes_the_open_tasks_folder_through_the_walk_and_prints_what_it_removed(tmp_path):
+    flow = shelf(tmp_path)
+    folder = flow.docs.state_dir / "agents" / "a" / "tasks" / "t1"
+    docs = len(list(folder.iterdir()))
+    assert bare(flow, "clear") == (f"◆ task cleared · t1 ({docs} docs)",)
+    assert not folder.exists() and flow.record is None and flow.docs.adopted == set()
+    assert bare(flow, "clear") == ("◆ task nothing to remove",)
+
+
+def test_clear_also_removes_an_old_task_json_and_says_so(tmp_path):
+    flow = shelf(tmp_path)
+    old = flow.docs.state_dir / "agents" / "a" / "task.json"
+    old.write_text("{}")
+    docs = len(list((flow.docs.state_dir / "agents" / "a" / "tasks" / "t1").iterdir()))
+    assert bare(flow, "clear") == (f"◆ task cleared · t1 ({docs} docs) · task.json",)
+    assert not old.exists()
+    old.write_text("{}")
+    assert bare(flow, "clear") == ("◆ task cleared · task.json",) and not old.exists()
+
+
+def test_clear_never_removes_a_folder_this_session_did_not_make(tmp_path):
+    flow, *_ = make_flow(tmp_path)
+    folder = foreign_folder(flow, 5, plan_md="theirs")
+    assert bare(flow, "clear") == ("◆ task nothing to remove",)
+    assert (folder / "plan.md").read_text() == "theirs"
+    flow.open("fix login", 1)
+    bare(flow, "clear")
+    assert (folder / "plan.md").read_text() == "theirs"
+
+
+def test_clear_on_a_folder_the_session_lost_is_a_line_not_a_crash(tmp_path):
+    flow = shelf(tmp_path)
+    flow.docs.adopted.clear()
+    assert bare(flow, "clear")[0].startswith("◆ t1 t1 was not made by this session") and flow.record is not None
+
+
+def wake(tmp_path, **folders):
+    flow, *_ = make_flow(tmp_path)
+    for n, docs in folders.items():
+        foreign_folder(flow, int(n[1:]), **docs)
+    return verbs.wake_line(flow.docs)
+
+
+def test_wake_line_names_the_highest_folder_as_an_integer_and_its_newest_doc(tmp_path):
+    line = wake(tmp_path, t9={"plan_md": "p", "review_md": "## round 1\nverdict: pass\n"}, t10={"plan_md": "p", "step_2_md": "s", "plan_review_md": "r"})
+    assert line == "◆ Awake again · t10 not carried over · /task show t10/step-2 · new <objective>"
+
+
+@pytest.mark.parametrize("verdict", ("pass", "accepted"))
+def test_wake_line_is_none_when_the_highest_folders_review_ends_pass_or_accepted(tmp_path, verdict):
+    assert wake(tmp_path, t3={"plan_md": "p", "review_md": f"## round 1 · blockers 0\nverdict: {verdict}\n"}) is None
+
+
+def test_wake_line_stays_for_a_review_that_blocked_and_for_a_folder_with_no_docs(tmp_path):
+    assert "t3 not carried over · /task show t3/review" in wake(tmp_path, t3={"review_md": "verdict: blocked\n"})
+    assert wake(tmp_path / "b", t3={"notes_md": "x"}) == "◆ Awake again · t3 not carried over · new <objective>"
+
+
+def test_wake_line_is_none_with_no_tasks_folder_or_a_linked_one(tmp_path):
+    flow, *_ = make_flow(tmp_path)
+    assert verbs.wake_line(flow.docs) is None
+    outside = tmp_path / "outside"
+    (outside / "t4").mkdir(parents=True)
+    agent = flow.docs.state_dir / "agents" / "a"
+    agent.mkdir(parents=True)
+    (agent / "tasks").symlink_to(outside)
+    assert verbs.wake_line(flow.docs) is None
