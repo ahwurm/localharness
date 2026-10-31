@@ -71,7 +71,7 @@ def _verdict(record: Record) -> str:
 
 
 def root_note(flow: TaskFlow) -> str:
-    """The root's request note: one pointer line, the interview sentence while `new` has no doc, the pending revision block."""
+    """The root's request note: one pointer line, and the interview sentence while `new` has no doc."""
     record = flow.record
     if record is None or record.paused:
         return ""
@@ -79,7 +79,7 @@ def root_note(flow: TaskFlow) -> str:
     head = " ".join(p for p in (record.stage, _verdict(record)) if p)
     pointer = one_line(f"t{record.id} \u00b7 {head} \u00b7 {next_line(record, boundary, flow.limits)}")[:Caps.LINE]
     interview = INTERVIEW_SENTENCE if record.stage == "new" and ("decisions.md", None) not in record.filed else ""
-    return "\n".join(p for p in (pointer, interview, flow.revision_block[:Caps.BLOCK]) if p)
+    return "\n".join(p for p in (pointer, interview) if p)
 
 
 def _exclude(flow: TaskFlow, seconds: float) -> None:
@@ -168,7 +168,7 @@ async def _panel(flow: TaskFlow, unit: Unit) -> PanelResult:
             if settled:
                 note_run(record, unit.boundary, run.blockers, unit.step)
         if run.verdict == "pass" and "jtbd" in STAGES[unit.boundary].floor:
-            flow.jtbd_stood = True
+            flow.reply_panel.jtbd_stood = True
 
     _running(flow, f"{_label(unit)} panel", printed_bound(unit_minutes(unit, flow.limits), flow.cap.remaining()))
     inputs = PanelInputs(_brief(flow, unit), turns=tuple(typed_turns(flow.messages())), on_run=report)
