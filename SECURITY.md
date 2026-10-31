@@ -1294,7 +1294,9 @@ read, counts as untrusted. Output an attacker can still influence through a trus
 reading a file from a cloned repository, a delegated agent relaying a web summary) can delay the
 nudge. That case is bounded by the per-turn ceiling on identical calls
 (`stuck_detector.call_only_multiplier` times `escalation_threshold`, whatever the results are) and by
-you.
+you. The `task` tool's results are declared untrusted, so its manifest counts as progress only through
+its last line, which the harness computes from the task record; repeated `task` calls are bounded by
+the flow cap, `/task stop` and the action budget rather than by the identical-call ceiling.
 
 **What this does NOT cover.** A declaration is believed. A tool that declares `ingest: none` while
 it actually fetches attacker-controlled text is treated as it says, and turning on a plugin you
