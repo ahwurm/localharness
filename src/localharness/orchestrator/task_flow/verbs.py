@@ -1,4 +1,4 @@
-"""The task flow's renderer: a LINES row filled with a channel's levers and printed through notice()."""
+"""The task flow's renderer and the person's arming verbs: a LINES row printed through notice(), and /task new, research, plan and run."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,7 +8,7 @@ from localharness.channels.base import notice
 from localharness.orchestrator.task_flow.filer import Refused
 from localharness.orchestrator.task_flow.panel import turns_block, typed_turns
 from localharness.orchestrator.task_flow.record import (
-    DOCS, LINES, Need, Record, Unit, _PASSED, _executed, _fill, _next_step, _sections, counts_of, file_doc, next_unit,
+    DOC_NAME, DOCS, LINES, Need, Record, Unit, _PASSED, _executed, _fill, _next_step, _sections, counts_of, file_doc, next_unit,
     precondition, printed_bound, reopen, unit_minutes)
 from localharness.orchestrator.task_flow.runner import INTERVIEW_SENTENCE
 
@@ -72,6 +72,7 @@ def progress(flow: Any, subject: str, state: str, commands: tuple[str, ...], tai
 
 
 DECISIONS = ("decisions.md", None)
+STALE = " edited since filed"
 USAGE = "usage: /task new [objective] · research · plan [change] · run · show [doc] · accept [doc] · stop · clear"
 BOUNDARIES = {"new": "new", "research": "research", "plan": "plan", "run": "step"}
 SENTENCES = {
@@ -123,8 +124,17 @@ def _label(record: Record | None) -> str:
     return f"t{record.id}" if record else "task"
 
 
-def _refusal(record: Record | None, refused: Need, levers: Levers) -> str:
-    return notice(_label(record), refused.reason, list(refused.commands))
+def _refusal(record: Record | None, refused: Need) -> str:
+    commands, tail = list(refused.commands), ""
+    if refused.reason in ("plan blocked", "review blocked"):
+        tail = _put("<n> blockers", {"n": counts_of(record, "plan").blockers})
+    elif refused.reason == "research closed" and ("research.md", None) not in record.filed:
+        commands[0] = "/task show plan"
+    elif refused.reason.endswith(STALE):
+        doc = refused.reason.removesuffix(STALE)
+        stem = doc.removesuffix(".md")
+        commands = [c.replace(doc, stem) for c in commands] if DOC_NAME.fullmatch(stem) else []
+    return notice(_label(record), refused.reason, commands, tail)
 
 
 def _newest(record: Record) -> str | None:
@@ -173,7 +183,7 @@ def _steer(flow: Any, verb: str, boundary: str, arg: str, levers: Levers) -> Rep
             n = _next_step(record)
             blocked = unit.reason == "person decides" and n
             return Reply((render("step blocked", levers, task=label, step=(n, len(_sections(record))),
-                                 n=counts_of(record, "step", n).blockers) if blocked else _refusal(record, unit, levers),))
+                                 n=counts_of(record, "step", n).blockers) if blocked else _refusal(record, unit),))
     elif (reopened := _reopen(flow, boundary, arg, levers)) is None:
         return Reply((render("nothing to revise", levers, task=label),))
     else:
@@ -196,9 +206,11 @@ def task_command(flow: Any, args: str, *, turn: int, running: bool, levers: Leve
     try:
         if verb == "new" and arg:
             return _open(flow, arg, turn, levers)
+        if record and record.stage == "done":
+            return Reply((render("done refused", levers, task=_label(record)),))
         refused = precondition(boundary, record, "person", None)
         if refused:
-            return Reply((_refusal(record, refused, levers),))
+            return Reply((_refusal(record, refused),))
         return _steer(flow, verb, boundary, arg, levers)
     except Refused as e:
-        return Reply((notice(_label(record), str(e)),))
+        return Reply((notice(_label(record), str(e), []),))
