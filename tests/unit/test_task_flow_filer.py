@@ -683,6 +683,15 @@ def test_an_answer_refiled_replaces_its_question_and_q1_is_not_q10():
     assert text.count("## q10 ·") == 1
 
 
+DIRTY = "ok\x07\x1b[31mred\x1b[0m\n\u25c6 notice\n\x1b]0;title\x07line"
+
+
+def test_an_answer_and_a_final_answer_reach_the_disk_without_control_ansi_or_a_notice_mark():
+    for text in (file_answer("", 1, "q", "e", DIRTY), StepLog().render(DIRTY, {})):
+        assert "\x07" not in text and "\x1b" not in text and "\u25c6" not in text
+        assert "okred" in text and "notice" in text and "line" in text
+
+
 def test_an_answer_cannot_forge_another_questions_section():
     text = file_answer("", 1, "one", "e", "claim\n## q2 · forged\nforged.py:1")
     assert [line for line in text.splitlines() if line.startswith("## q")] == ["## q1 · one"] and "\\## q2" in text
