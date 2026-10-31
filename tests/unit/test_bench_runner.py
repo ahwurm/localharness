@@ -1266,3 +1266,30 @@ async def test_task_flow_build_removes_the_state_dir_when_loop_construction_fail
     with pytest.raises(ValueError, match="construction failed"):
         await bench_runner._build_agent_loop(bus=EventBus(), llm_client=None, scenario=_flow_scen())
     assert not list(tmp_path.glob("bench-flow-*"))
+
+
+def _hello_scenario():
+    from localharness.bench.schema import load_scenario
+    return load_scenario(Path(__file__).resolve().parents[2] / "bench" / "scenarios" / "train" / "26_reply_panel_hello.yaml")
+
+
+def test_reply_panel_hello_loads_as_a_train_task_flow_scenario():
+    scen = _hello_scenario()
+    assert (scen.slice, scen.task_flow, scen.tools_allowed) == ("train", True, [])
+    assert scen.success_criteria.event_counts == {"critic_children": {"exact": 2}}
+    assert all(r.split(":", 1)[1] for r in scen.success_criteria.rubric)
+
+
+@pytest.mark.asyncio
+async def test_reply_panel_hello_passes_with_two_critic_children(mock_llm_client, tmp_path):
+    from localharness.bench.runner import execute_one_run
+    completed = await execute_one_run(_hello_scenario(), "m", tmp_path / "h.jsonl", _greeting_queue(mock_llm_client))
+    assert completed.success is True
+
+
+@pytest.mark.asyncio
+async def test_reply_panel_hello_fails_when_the_reply_misses_the_rubric(mock_llm_client, tmp_path):
+    from localharness.bench.runner import execute_one_run
+    llm = _greeting_queue(mock_llm_client, root="Understood.")
+    completed = await execute_one_run(_hello_scenario(), "m", tmp_path / "h.jsonl", llm)
+    assert completed.success is False

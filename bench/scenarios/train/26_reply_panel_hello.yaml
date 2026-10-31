@@ -1,0 +1,28 @@
+name: reply_panel_hello
+prompt: |
+  Hello! How are you today?
+expected_outcome: |
+  A greeting that needs no tools. The root answers in one reply, and the reply panel judges that
+  reply with its two floor critics, answer then jtbd, as two critic children. The bench has no
+  typed turn, so the verdict is `unreviewed` and that is expected; what the scenario pins is that
+  a hello pays exactly two critic children and still delivers its greeting.
+success_criteria:
+  rubric:
+    - 'regex:(?i)\b(hello|hi|hey|greetings)\b'
+  event_counts:
+    critic_children:
+      exact: 2
+budget:
+  max_actions: 1
+  max_duration_minutes: 5.0
+  max_context_tokens: 16000
+limits:
+  max_latency_s: 360.0
+  max_tool_calls: 0
+tools_allowed: []
+task_flow: true
+slice: train
+category: agent_orchestration
+tags:
+  - reply_panel
+  - critic_children
