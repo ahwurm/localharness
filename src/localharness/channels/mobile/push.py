@@ -51,6 +51,7 @@ MEASURED_LONG_TURN_S = 600.0
 """Ten minutes — the tail of the same measurement: 15.1% of real turns run past it."""
 
 TURN_PUSH_MIN_S = MEASURED_MEDIAN_TURN_S
+REPLY_TITLES = {"pass": "reply ready", "unreviewed": "reply ready (unchecked)", "blocked": "reply blocked"}
 """Below this, a finished turn is not worth a notification.
 
 A turn shorter than the median is one you could have stood and waited for; buzzing for it is how
@@ -363,6 +364,7 @@ class PushPolicy:
     def turn_finished(
         self, session_id: Optional[str], *, clients_attached: int, now: Optional[float] = None,
         summary: str = "", duration: Optional[float] = None,
+        verdict: Optional[str] = None, finding: str = "",
     ) -> Optional[Push]:
         """A push, or None — and None is the common answer.
 
@@ -379,7 +381,7 @@ class PushPolicy:
         """
         state = self._state(session_id)
         started, state.turn_started_at = state.turn_started_at, None
-        if clients_attached > 0:
+        if clients_attached > 0 or (verdict == "unreviewed" and not finding):
             return None
         moment = time.monotonic() if now is None else now
         elapsed = duration if duration is not None else (
@@ -387,8 +389,8 @@ class PushPolicy:
         if elapsed is None or elapsed < TURN_PUSH_MIN_S:
             return None
         return Push(
-            title="turn finished",
-            body=summary or f"{int(elapsed)}s of work is waiting for you.",
+            title=REPLY_TITLES.get(verdict, "turn finished"),
+            body=(finding if verdict == "blocked" and finding else summary) or f"{int(elapsed)}s of work is waiting for you.",
             tag=f"{CLASS_TURN_FINISHED}:{session_id or ''}",
             badge=len(state.outstanding),
             data={
