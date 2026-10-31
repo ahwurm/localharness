@@ -1,6 +1,7 @@
 """The critics: loading, the one parser, the data fence and the reply panel's sensing."""
 from __future__ import annotations
 
+import logging
 import math
 import re
 from contextlib import suppress
@@ -21,6 +22,8 @@ from localharness.orchestrator.task_flow.record import (LIMITS, SENSED, Limits, 
 
 if TYPE_CHECKING:
     from localharness.orchestrator.task_flow.filer import Docs
+
+log = logging.getLogger(__name__)
 
 CRITIC_TOOLS = ("read", "glob", "grep", "git_read", "tool_result_get")
 FENCE = "```"
@@ -275,13 +278,13 @@ def _verdict(parsed: list[Parsed], finished: bool) -> str:
     return "pass" if parsed and all(p.readable for p in parsed) else "unreviewed"
 
 
-def _progress(phase: str, tally: str, name: str, bound: str) -> str:
-    """The status text, cut to `Caps.LINE` by dropping the critic's name, then the tally (which carries its own separator), then the bound."""
+def _progress(phase: str, tally: str, name: str, bound: str, tail: str = "") -> str:
+    """The status text, cut to `Caps.LINE` by dropping the critic's name, then the tally (which carries its own separator), then the bound; the tail is never cut."""
     for parts in ((phase + tally, name, bound), (phase + tally, bound), (phase, bound), (phase,)):
-        text = " · ".join(p for p in parts if p)
+        text = " · ".join(p for p in (*parts, tail) if p)
         if len(text) <= Caps.LINE:
             return text
-    return text[:Caps.LINE]
+    return " · ".join(p for p in (phase[:max(0, Caps.LINE - len(tail) - 3)], tail) if p) if tail else text[:Caps.LINE]
 
 
 class Panel:
@@ -290,14 +293,24 @@ class Panel:
     def __init__(self, run_child: Callable[..., Awaitable[Any]], limits: Limits, cap: FlowCap | None = None,
                  docs: Docs | None = None) -> None:
         self._child, self.limits, self.cap, self.docs = run_child, limits, cap, docs
-        self._text: str | None = None
+        self._parts: tuple[str, str, str, str] | None = None
         self._phase: str | None = None
+        self._reply = False
+        self.stop = ""
+        self.announce: Callable[[str], Awaitable[None]] | None = None
+
+    def _tail(self) -> str:
+        return f"{self.stop} delivers it unchecked" if self._reply and self.stop else ""
 
     def status_text(self) -> str | None:
-        return self._text or self._phase
+        return _progress(*self._parts, self._tail()) if self._parts else self._phase
 
     def set_phase(self, text: str | None) -> None:
         self._phase = text
+
+    def burst_prefix(self) -> str | None:
+        """The runner phase's first clause while no critic runs."""
+        return self._phase.split(" · ")[0] if self._phase and not self._parts else None
 
     @staticmethod
     def _bound(minutes: float, cap: FlowCap | None) -> str:
@@ -328,7 +341,7 @@ class Panel:
             for i, name in enumerate(names, 1):
                 budget = self.limits.critic(name)
                 minutes = sum(self.limits.critic(n).minutes for n in names[i - 1:]) + later * panel_minutes(names, self.limits)
-                self._text = _progress(phase, f" {i}/{len(names)}", one_line(name), self._bound(minutes, cap))
+                self._parts = (phase, f" {i}/{len(names)}", one_line(name), self._bound(minutes, cap))
                 if name == "jtbd" and not inputs.turns:
                     parsed.append(_NO_TURN)
                     continue
@@ -358,10 +371,17 @@ class Panel:
     def _settle(self, inputs: PanelInputs, parsed: list[Parsed], finished: bool) -> PanelRun:
         findings = tuple(f for p in parsed for f in p.findings)
         run = PanelRun(sum(f.tag == "BLOCKER" for f in findings), findings, _verdict(parsed, finished), finished)
-        self._text = None
+        self._parts = None
         if inputs.on_run:
             inputs.on_run(run)
         return run
+
+    async def _announce(self, names: tuple[str, ...], limit: int) -> None:
+        bound = printed_bound((1 + limit) * panel_minutes(names, self.limits))
+        try:
+            await self.announce(_progress("checking reply", "", f"{len(names)} critics", f"up to {bound} min", self._tail()))
+        except Exception:
+            log.warning("the reply panel's start announcement failed", exc_info=True)
 
     async def run(self, unit: Unit, inputs: PanelInputs,
                   revise: Callable[[str, tuple[Finding, ...]], Awaitable[str | None]] | None = None) -> PanelResult:
@@ -370,11 +390,14 @@ class Panel:
         cap = self.cap if unit.boundary != "reply" else None
         limit = self.limits.revisions["reply"] if revise and unit.boundary == "reply" else 0
         draft, used, previous, verdict = inputs.draft, 0, None, None
+        self._reply = unit.boundary == "reply"
         try:
+            if self.announce and self._reply:
+                await self._announce(names, limit)
             run, job = await self._once(inputs, names, "checking", limit, cap)
             while revise and run.finished and continue_revising(run.blockers, used, limit, previous):
-                self._text = _progress("revising", f" · {run.blockers} blocker{'s' * (run.blockers != 1)}", "",
-                                       self._bound((limit - used) * panel_minutes(names, self.limits), cap))
+                self._parts = ("revising", f" · {run.blockers} blocker{'s' * (run.blockers != 1)}", "",
+                               self._bound((limit - used) * panel_minutes(names, self.limits), cap))
                 try:
                     revised = await revise(draft, run.findings)
                 except Exception:
@@ -386,7 +409,7 @@ class Panel:
                 run, more = await self._once(replace(inputs, draft=draft), names, "rechecking", limit - used, cap)
                 job = more or job
         finally:
-            self._text = None
+            self._parts, self._reply = None, False
         verdict = verdict or run.verdict
         first = next((f for f in run.findings if f.tag == "BLOCKER"), None)
         return PanelResult(verdict, run.findings, run.blockers, run.finished, draft,
