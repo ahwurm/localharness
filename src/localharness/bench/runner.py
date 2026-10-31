@@ -648,35 +648,36 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
             docs=Docs(flow_dir, False, agent_config.name),
             config=agent_config, root_tools=scenario.tools_allowed, llm=llm_client,
             token_counter=token_counter, bus=bus)
-        loop = AgentLoop(
-            config=agent_config,
-            llm=llm_client,
-            bus=bus,
-            context_manager=ctx_manager,
-            tool_registry=tool_registry,
-            permission_evaluator=perm_evaluator,
-            gate=bench_gate,
-            memory_slot=plugin_result.slot if plugin_result is not None else None,
-            kill_file_path=None,
-            compact_md_path=COMPACT_DISABLED,  # no prior-session context; see the pipeline above
-            # Without this the loop's per-turn session setter would overwrite the manager's
-            # stable run id with a fresh per-turn uuid.
-            session_id=session_id,
-            reply_panel=None if flow is None else flow.reply_panel,
-        )
-    except BaseException as e:
+        try:
+            loop = AgentLoop(
+                config=agent_config,
+                llm=llm_client,
+                bus=bus,
+                context_manager=ctx_manager,
+                tool_registry=tool_registry,
+                permission_evaluator=perm_evaluator,
+                gate=bench_gate,
+                memory_slot=plugin_result.slot if plugin_result is not None else None,
+                kill_file_path=None,
+                compact_md_path=COMPACT_DISABLED,  # no prior-session context; see the pipeline above
+                # Without this the loop's per-turn session setter would overwrite the manager's
+                # stable run id with a fresh per-turn uuid.
+                session_id=session_id,
+                reply_panel=None if flow is None else flow.reply_panel,
+            )
+        except TypeError as e:
+            raise RuntimeError(
+                f"AgentLoop construction failed in bench runner. "
+                f"The current AgentLoop signature in src/localharness/agent/loop.py has changed — "
+                f"update _build_agent_loop to match. Required positional args: "
+                f"(config, llm, bus, context_manager, tool_registry, permission_evaluator). "
+                f"Original error: {e!r}"
+            ) from e
+    except BaseException:
         await _stop_bench_memory(plugin_result, plugin_tmp)
         if flow_dir is not None:
             shutil.rmtree(flow_dir, ignore_errors=True)
-        if not isinstance(e, TypeError):
-            raise
-        raise RuntimeError(
-            f"AgentLoop construction failed in bench runner. "
-            f"The current AgentLoop signature in src/localharness/agent/loop.py has changed — "
-            f"update _build_agent_loop to match. Required positional args: "
-            f"(config, llm, bus, context_manager, tool_registry, permission_evaluator). "
-            f"Original error: {e!r}"
-        ) from e
+        raise
     if plugin_result is not None:  # execute_one_run's finally stops these (#43: no hung aiosqlite)
         loop._plugin_result, loop._plugin_tmp = plugin_result, plugin_tmp
     if flow_dir is not None:

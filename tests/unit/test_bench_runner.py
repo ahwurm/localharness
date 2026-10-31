@@ -1284,6 +1284,39 @@ async def test_task_flow_build_removes_the_state_dir_when_the_agent_runner_build
     assert not list(tmp_path.glob("bench-flow-*"))
 
 
+@pytest.mark.asyncio
+async def test_a_type_error_from_the_agent_runner_build_is_not_reported_as_loop_drift(monkeypatch, tmp_path):
+    import tempfile
+    from localharness.bench import runner as bench_runner
+    from localharness.core.bus import EventBus
+
+    def _broken(**kw):
+        raise TypeError("runner got an unexpected keyword")
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr("localharness.agent.subagent.make_explore_agent_runner", _broken)
+    with pytest.raises(TypeError, match="runner got an unexpected keyword"):
+        await bench_runner._build_agent_loop(bus=EventBus(), llm_client=None, scenario=_flow_scen())
+    assert not list(tmp_path.glob("bench-flow-*"))
+
+
+@pytest.mark.asyncio
+async def test_a_type_error_from_the_loop_constructor_is_reported_as_loop_drift(monkeypatch, tmp_path):
+    import tempfile
+    from localharness.bench import runner as bench_runner
+    from localharness.core.bus import EventBus
+
+    class _Drifted:
+        def __init__(self, **kw):
+            raise TypeError("unexpected keyword")
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr("localharness.agent.loop.AgentLoop", _Drifted)
+    with pytest.raises(RuntimeError, match="AgentLoop construction failed"):
+        await bench_runner._build_agent_loop(bus=EventBus(), llm_client=None, scenario=_flow_scen())
+    assert not list(tmp_path.glob("bench-flow-*"))
+
+
 def _hello_scenario():
     from localharness.bench.schema import load_scenario
     return load_scenario(Path(__file__).resolve().parents[2] / "bench" / "scenarios" / "train" / "26_reply_panel_hello.yaml")
