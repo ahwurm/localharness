@@ -160,6 +160,19 @@ def notice(subject: str, state: str, commands: Sequence[str], tail: str = "") ->
     return line()
 
 
+def reply_line(event: Any) -> str | None:
+    """The line after a root reply the panel blocked, or left unreviewed with a reason; None otherwise, and for a child or the person's own stop."""
+    verdict = event.verdict
+    if getattr(event, "parent_id", None) or not (verdict == "blocked" or (verdict == "unreviewed" and event.finding)):
+        return None
+    commands = ("/task show reply",)
+    room = Caps.LINE - len(notice("reply", verdict, commands, "x")) + 1
+    finding = one_line(event.finding)
+    if len(finding) > room:
+        finding = finding[:max(room - 1, 0)] + "…"
+    return notice("reply", verdict, commands, finding)
+
+
 def permission_denied_reason(error: str | None) -> str | None:
     """The reason out of a denied observation's error text, or None if it is an ordinary error.
 
@@ -565,6 +578,8 @@ class ChannelAdapter(ABC):
             content=event.summary,
             agent_id=event.agent_id,
         )
+        if line := reply_line(event):
+            await self.send_notice(line)
 
     async def on_turn_failed(self, event: TurnFailed) -> None:
         """Default handler for TurnFailed events. A failed turn must never die silently.

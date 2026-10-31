@@ -59,6 +59,22 @@ def _wire_reply_panel(channel: Any, llm: Any, panel: Any) -> None:
         channel.progress_source = with_status_text(llm.stream_snapshot, panel)
 
 
+def _task_sink(channel: Any, flow: Any) -> Callable[[str, str, tuple, str], None]:
+    """The flow's line sink: each row as a finished notice through the channel, a running row left to the status row where there is one."""
+    from localharness.orchestrator.task_flow.verbs import progress
+    pending: set[asyncio.Task] = set()
+
+    def emit(subject: str, state: str, commands: tuple, tail: str) -> None:
+        if "<stop>" in commands and channel.has_status_row():
+            return
+        sent = asyncio.get_running_loop().create_task(
+            channel.send_notice(progress(flow, subject, state, commands, tail, channel.levers())))
+        pending.add(sent)
+        sent.add_done_callback(pending.discard)
+
+    return emit
+
+
 def _gguf(runtime: object) -> bool:
     row = row_of(runtime)
     return row is not None and row.gguf
@@ -3156,7 +3172,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         )
         await tool_registry.register(agent_tool, scope="global")
         from localharness.orchestrator.task_flow import TaskFlow
-        from localharness.orchestrator.task_flow.filer import Docs
+        from localharness.orchestrator.task_flow.filer import Docs, Refused
+        from localharness.orchestrator.task_flow.panel import critic_names
+        from localharness.orchestrator.task_flow.record import limited
         from localharness.tools.builtin.task_tool import TaskTool
         flow_sink: list = []  # the channel fills it once it exists
         flow = TaskFlow(
@@ -3168,6 +3186,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             messages=lambda: agent_loop.messages(), turn=lambda: agent_loop.turn,
         )
         await tool_registry.register(TaskTool(flow), scope="global")
+        warnings.extend(limited(agent_config.task_flow, known=critic_names())[1])
         from localharness.tools.builtin.skill_tool import SkillTool
         if skill_set.skills:
             await tool_registry.register(
@@ -3347,6 +3366,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             from localharness.cli.model_switch import short_label
             channel.model_source = lambda: short_label(llm.config.model)  # footer model chip, swap-safe
         _wire_reply_panel(channel, llm, agent_loop.reply_panel)
+        flow_sink.append(_task_sink(channel, flow))
+        if resume is None:
+            try:
+                flow.docs.reset_sessions()
+            except Refused as exc:
+                log.warning("the session docs were not emptied: %s", exc)
 
         # --- Startup summary line ---
         # Entity-typed per the localharness.dev architecture plates (cli/theme.py): the

@@ -3602,3 +3602,83 @@ async def test_state_dirs_a_write_into_the_session_docs_is_denied_by_the_start_g
         got = evaluate("write", {"path": str(target), "content": "x"}, ToolMeta(destructive=True, group="fs.write"),
                        gate.context(), GateSettings())
         assert got.verdict is Verdict.DENY
+
+
+class _SinkChannel:
+    def __init__(self, status_row=False):
+        self.status_row, self.sent = status_row, []
+
+    def levers(self):
+        return ("Ctrl+C (now)", "Ctrl+C (now)")
+
+    def has_status_row(self):
+        return self.status_row
+
+    async def send_notice(self, line):
+        self.sent.append(line)
+
+
+def _sink_of(tmp_path, status_row=False):
+    from localharness.cli.start_cmd import _task_sink
+    from tests.unit.test_task_flow_record import make_flow
+
+    channel = _SinkChannel(status_row)
+    return _task_sink(channel, make_flow(tmp_path)[0]), channel
+
+
+async def test_sink_prints_a_running_row_as_one_cut_line_on_the_classic_path(tmp_path):
+    from localharness.core.caps import Caps
+
+    emit, channel = _sink_of(tmp_path)
+    emit("t1", "plan panel running", ("<stop>",), "up to 13 min")
+    await asyncio.sleep(0)
+    assert channel.sent == ["◆ t1 plan panel running · Ctrl+C (now) · typing waits · cap 180 min"]
+    assert len(channel.sent[0]) <= Caps.LINE
+
+
+async def test_sink_skips_a_running_row_on_the_box_but_prints_the_job_line(tmp_path):
+    emit, channel = _sink_of(tmp_path, status_row=True)
+    emit("t1", "plan panel running", ("<stop>",), "up to 13 min")
+    emit("job", "now: fix the login", (), "turn 2")
+    await asyncio.sleep(0)
+    assert channel.sent == ["◆ job now: fix the login · turn 2"]
+
+
+async def test_sink_sends_in_the_order_the_rows_came_and_drops_none(tmp_path):
+    emit, channel = _sink_of(tmp_path)
+    rows = [("t1", f"step {n}/3 executing", ("<stop>",), "up to 25 min") for n in (1, 2, 3)]
+    for row in rows:
+        emit(*row)
+    await asyncio.sleep(0)
+    assert [line.split(" · ")[0] for line in channel.sent] == [f"◆ t1 step {n}/3 executing" for n in (1, 2, 3)]
+
+
+def _jtbd(tmp_path):
+    return tmp_path / "agents" / "orchestrator" / "sessions"
+
+
+async def test_session_docs_a_fresh_start_empties_them_and_a_rebuild_keeps_their_text(tmp_path, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    sessions = _jtbd(tmp_path)
+    sessions.mkdir(parents=True)
+    for name in ("jtbd.md", "reply-review.md"):
+        (sessions / name).write_text("old text")
+    await _start_async(None, False, False, str(tmp_path), resume=_resume_of(("enable", "x")))
+    assert [(sessions / n).read_text() for n in ("jtbd.md", "reply-review.md")] == ["old text", "old text"]
+    await _start_async(None, False, False, str(tmp_path))
+    assert [(sessions / n).read_text() for n in ("jtbd.md", "reply-review.md")] == ["", ""]
+
+
+async def test_clamp_a_task_flow_value_out_of_range_prints_one_line_naming_the_clamp(tmp_path, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    (tmp_path / "agents").mkdir()
+    (tmp_path / "agents" / "orchestrator.yaml").write_text(yaml.dump(
+        {"name": "orchestrator", "role": "r", "model": "inherit", "task_flow": {"flow_cap_minutes": 999}}))
+    printed = _capture_start_console(monkeypatch)
+    await _start_async(None, False, False, str(tmp_path))
+    named = [line for line in printed if "task_flow.flow_cap_minutes" in line]
+    assert len(named) == 1 and "using 360" in named[0]
