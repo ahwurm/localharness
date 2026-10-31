@@ -73,11 +73,7 @@ ALL = {"skill", "agent", "task"}
 FULL = """## Where things are
 Project: '/home/u/proj'.
 Skills: listed above. New ones go in '.localharness/skills' under the project root; also read: '.agents/skills' under it, and '/home/u/.localharness/skills'. `/help` lists them as `/<name>` rows; `localharness skills` also shows any skipped.
-Agents: listed in the agent tool. A delegated agent never has skill or task; `/agents` lists them for the person.
-Work: A skill loaded during a live task can be one of its 4 references, and stays in view; otherwise only for the current step. While a task is live, each agent call is a delegation it records; integrate it before closing."""
-SKILL_CLAUSE = ("A skill loaded during a live task can be one of its 4 references, and stays in view; "
-                "otherwise only for the current step.")
-AGENT_CLAUSE = "While a task is live, each agent call is a delegation it records; integrate it before closing."
+Agents: listed in the agent tool. A delegated agent never has skill or task; `/agents` lists them for the person."""
 
 
 def _index(root=PROJ, machine=HOME, held=ALL, flag=False, slash=True):
@@ -99,9 +95,7 @@ def test_each_line_follows_the_tool_it_needs(held):
     assert lines[0] == "## Where things are" and lines[1].startswith("Project: ")
     assert (_line(text, "Skills: ") is not None) == ("skill" in held)
     assert (_line(text, "Agents: ") is not None) == ("agent" in held)
-    assert (SKILL_CLAUSE in text) == ({"task", "skill"} <= held)
-    assert (AGENT_CLAUSE in text) == ({"task", "agent"} <= held)
-    assert (_line(text, "Work: ") is not None) == ("task" in held and bool(held & {"skill", "agent"}))
+    assert _line(text, "Work: ") is None
 
 
 def test_without_slash_no_slash_command_is_named_and_the_skills_pointer_stays():
@@ -146,7 +140,7 @@ async def test_no_delegated_agent_holds_skill_or_task(tmp_path):
 def test_a_newline_and_an_escape_in_a_path_stay_on_one_quoted_line():
     text = _index(root=Path("/tmp/a\nb\x1b[2Jc"), machine=Path("/tmp/m\nn\x1b[31mo"))
     lines = text.split("\n")
-    assert len(lines) == 5 and "\x1b" not in text
+    assert len(lines) == 4 and "\x1b" not in text
     assert lines[1] == "Project: '/tmp/a bc'."
     assert "'/tmp/m no/skills'" in _line(text, "Skills: ")
 
@@ -171,13 +165,11 @@ def test_a_path_the_sanitiser_would_alter_gets_no_config_dir_pointer(raw):
     assert "--config-dir" not in text and "localharness skills" not in text and "\x1b" not in text
 
 
-def test_the_reference_limit_and_the_directories_are_derived(monkeypatch):
+def test_the_directories_are_derived(monkeypatch):
     assert "assets/skills" not in _index()
-    monkeypatch.setattr("localharness.agent.loop.MAX_ACTIVE_REFERENCES", 7)
     monkeypatch.setattr("localharness.config.skills.ORIGINS",
                         (("project", "p/one"), ("project", "p/two"), ("machine", "mine"), ("bundled", "b/x")))
     text = _index()
-    assert "one of its 7 references" in text
     assert "'p/one' under the project root; also read: 'p/two' under it, and '/home/u/.localharness/mine'" in text
 
 
@@ -413,10 +405,8 @@ async def test_a_floor_schemas_that_raises_keeps_every_line_the_root_registered(
     assert _line(index, "Agents: ") is not None
     if skill:
         assert _line(index, "Skills: ") is not None and "- notes: Use notes when asked." in loop._skills
-        assert _line(index, "Work: ") == f"Work: {SKILL_CLAUSE} {AGENT_CLAUSE}"
     else:
         assert _line(index, "Skills: ") is None
-        assert _line(index, "Work: ") == "Work: " + AGENT_CLAUSE
 
 
 # --- the embedder seam ----------------------------------------------------------------------------
