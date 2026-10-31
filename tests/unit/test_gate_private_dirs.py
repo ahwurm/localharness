@@ -91,6 +91,8 @@ DENIED = (
     "ln {c}/agents/{n}/tasks/t1/plan.md /tmp/y",
     "rm -rf {c}/agents/{n}",
     "mv {c}/agents/{n} {c}/agents/other",
+    "rm -rf {c}/agents",
+    "mv {c}/agents {c}/agents.bak",
 )
 
 
@@ -143,10 +145,19 @@ def test_nothing_above_the_two_folders_is_denied(ws, config, path):
     assert not is_private(write(make_ctx(ws), config / path))
 
 
-@pytest.mark.parametrize("command", ("rm -rf {c}/agents", "rm -rf {ws}", "rm {c}/agents/a/config.yaml", "cp /tmp/x {c}/agents/a",
+@pytest.mark.parametrize("command", ("rm -rf {ws}", "rm {c}/agents/a/config.yaml", "cp /tmp/x {c}/agents/a",
                                      "rm {c}/agents/a.yaml", "mv {c}/agents/a.yaml {c}/agents/b.yaml"))
 def test_a_removal_or_write_above_the_two_folders_is_not_denied(ws, config, command):
     assert not is_private(shell(make_ctx(ws), command.format(c=config, ws=ws)))
+
+
+@pytest.mark.parametrize("mode", SHELL_MODES)
+@pytest.mark.parametrize("command", ("rm -rf {c}/agents/v1.2", "mv {c}/agents/v1.2 {c}/agents/old"))
+def test_a_dotted_agent_folder_is_denied_by_type_and_a_dotted_file_is_not(ws, config, mode, command):
+    (config / "agents" / "v1.2").mkdir(parents=True)
+    (config / "agents" / "a.yaml").write_text("x")
+    assert is_private(shell(make_ctx(ws, mode=mode), command.format(c=config)))
+    assert not is_private(shell(make_ctx(ws, mode=mode), f"rm {config}/agents/a.yaml"))
 
 
 @pytest.mark.parametrize("command", (
