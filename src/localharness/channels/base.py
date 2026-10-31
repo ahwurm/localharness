@@ -161,16 +161,20 @@ def notice(subject: str, state: str, commands: Sequence[str], tail: str = "") ->
 
 
 def reply_line(event: Any) -> str | None:
-    """The line after a root reply the panel blocked, or left unreviewed with a reason; None otherwise, and for a child or the person's own stop."""
+    """The line after a root reply the panel judged: the verdict, how many blockers or notes, and the command that shows them; None for a child, a reply no panel read, or the person's own stop."""
     verdict = event.verdict
-    if getattr(event, "parent_id", None) or not (verdict == "blocked" or (verdict == "unreviewed" and event.finding)):
+    if getattr(event, "parent_id", None) or verdict is None or (verdict == "unreviewed" and not event.finding):
         return None
     commands = ("/task show reply",)
+    if verdict == "blocked":
+        return notice("reply", f"blocked · {event.blockers} blocker{'s' * (event.blockers != 1)}", commands, "")
+    if verdict == "pass":
+        return notice("reply", f"pass · {event.notes} note{'s' * (event.notes != 1)}" if event.notes else "pass", commands, "")
     room = Caps.LINE - len(notice("reply", verdict, commands, "x")) + 1
-    finding = one_line(event.finding)
-    if len(finding) > room:
-        finding = finding[:max(room - 1, 0)] + "…"
-    return notice("reply", verdict, commands, finding)
+    tail = one_line(event.finding)
+    if len(tail) > room:
+        tail = tail[:max(room - 1, 0)] + "…"
+    return notice("reply", verdict, commands, tail)
 
 
 def permission_denied_reason(error: str | None) -> str | None:

@@ -1,6 +1,6 @@
 {
   "_note": "Regenerate ONLY together with a PROTOCOL_VERSION bump, or for a prose-only correction to a description — which moves a digest without moving the wire, and is said so in the commit. One more exception: additive OPTIONAL fields the phone page does not read re-record without a bump (cb96515 reasoning_cut; 499c6df Action gained model, prompt_tokens, completion_tokens, latency_ms). See test_mobile_protocol.py and the PROTOCOL_VERSION log in channels/mobile/protocol.py.",
-  "protocol_version": 11,
+  "protocol_version": 12,
   "types": {
     "Action": "e048a7657afae88e",
     "Activity": "85576967aed2ef65",
@@ -21,7 +21,7 @@
     "ExpectationAttached": "c8bda93795dffae6",
     "GapDetected": "c84722ab0154d63d",
     "Heartbeat": "4e43c5fa407474a2",
-    "Hello": "e48de66947836f1e",
+    "Hello": "b63d66b98f10e7c4",
     "InputRouted": "c506d2b31b0dc06c",
     "InstructionsChanged": "46492190ef133334",
     "Lagged": "7a6c3216423b1834",
@@ -45,7 +45,7 @@
     "StuckRecovered": "e95d2550e5ef66bc",
     "SurpriseScored": "3836a523233126e6",
     "SystemReady": "63f9d2514f4ac6cb",
-    "TaskComplete": "d78d18277704299d",
+    "TaskComplete": "79b4def90359bac5",
     "TaskRequest": "84ba2cdc78815421",
     "TokenDelta": "06abb2d928d0a93b",
     "TurnCancelled": "d08a7905e7e25858",

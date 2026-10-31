@@ -81,11 +81,21 @@ def completed(**kw):
                         duration_seconds=0.1, iterations=1, **kw)
 
 
-def test_reply_line_of_a_blocked_root_reply_names_the_show_command_and_the_finding():
+def test_reply_line_of_a_blocked_root_reply_names_the_show_command_and_the_blocker_count_not_the_finding():
     from localharness.channels.base import reply_line
 
-    assert reply_line(completed(verdict="blocked", finding="README.md:41 does not say that")) == \
-        "◆ reply blocked · /task show reply · README.md:41 does not say that"
+    assert reply_line(completed(verdict="blocked", finding="README.md:41 does not say that", blockers=3)) == \
+        "◆ reply blocked · 3 blockers · /task show reply"
+    assert reply_line(completed(verdict="blocked", finding="x", blockers=1)) == "◆ reply blocked · 1 blocker · /task show reply"
+
+
+def test_reply_line_of_a_passed_reply_counts_its_notes_and_a_reply_no_panel_read_prints_nothing():
+    from localharness.channels.base import reply_line
+
+    assert reply_line(completed(verdict="pass", notes=2)) == "◆ reply pass · 2 notes · /task show reply"
+    assert reply_line(completed(verdict="pass", notes=1)) == "◆ reply pass · 1 note · /task show reply"
+    assert reply_line(completed(verdict="pass")) == "◆ reply pass · /task show reply"
+    assert reply_line(completed(verdict=None)) is None
 
 
 def test_reply_line_of_an_unreviewed_reply_needs_a_reason_and_a_cut_finding_fits_the_line():
@@ -94,10 +104,10 @@ def test_reply_line_of_an_unreviewed_reply_needs_a_reason_and_a_cut_finding_fits
 
     assert reply_line(completed(verdict="unreviewed", finding="the critic ran out of time")) == \
         "◆ reply unreviewed · /task show reply · the critic ran out of time"
-    for event in (completed(verdict="unreviewed", finding=""), completed(verdict="pass", finding="x"), completed()):
+    for event in (completed(verdict="unreviewed", finding=""), completed()):
         assert reply_line(event) is None
-    long = reply_line(completed(verdict="blocked", finding="w" * 300))
-    assert long.startswith("◆ reply blocked · /task show reply · www") and len(long) == Caps.LINE
+    long = reply_line(completed(verdict="unreviewed", finding="w" * 300))
+    assert long.startswith("◆ reply unreviewed · /task show reply · www") and len(long) == Caps.LINE
 
 
 def test_reply_line_of_a_childs_completion_is_none():
@@ -110,7 +120,7 @@ def test_reply_line_of_a_childs_completion_is_none():
 async def test_reply_line_follows_the_reply_on_the_terminal_with_its_mark():
     out = StringIO()
     channel = make_terminal_channel(out, force_terminal=False)
-    await channel.on_task_complete(completed(verdict="blocked", finding="README.md:41 does not say that"))
+    await channel.on_task_complete(completed(verdict="blocked", finding="README.md:41 does not say that", blockers=2))
     lines = [line.strip() for line in out.getvalue().splitlines() if line.strip()]
-    assert lines[-1] == "◆ reply blocked · /task show reply · README.md:41 does not say that"
+    assert lines[-1] == "◆ reply blocked · 2 blockers · /task show reply"
     assert any("the answer" in line for line in lines[:-1])

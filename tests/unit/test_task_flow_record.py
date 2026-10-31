@@ -87,8 +87,8 @@ def test_new_boundary_opens_files_and_passes_without_using_a_revision():
     assert review_of(record, "decisions.md") == "decisions-review.md"
 
 
-def test_new_panel_is_one_critic_at_the_floor_budget():
-    assert panel_minutes(STAGES["new"].floor) == 1
+def test_new_panel_is_one_critic_with_a_full_turn():
+    assert panel_minutes(STAGES["new"].floor) == LIMITS["critic"].default.minutes
 
 
 def within(low, value, high) -> bool:
@@ -111,10 +111,9 @@ def test_revisions_limit_rows_derive_from_the_stage_table_with_the_reply_ceiling
 def test_limit_budgets_are_the_shipped_numbers():
     limits, _ = limited()
     assert (LIMITS["critic"].floor.actions, LIMITS["critic"].floor.minutes) == (3, 1)
-    assert (LIMITS["critic"].ceiling.actions, LIMITS["critic"].ceiling.minutes) == (12, 6)
-    assert CRITICS_AT_FLOOR == {"jtbd", "answer"}
-    assert (limits.critic("jtbd").actions, limits.critic("answer").minutes) == (3, 1)
-    assert (limits.critic("factual").actions, limits.critic("factual").minutes) == (12, 6)
+    assert (LIMITS["critic"].default, LIMITS["critic"].ceiling) == (ChildBudget(actions=24, minutes=10),) * 2
+    assert CRITICS_AT_FLOOR == frozenset()
+    assert all(limits.critic(n) == LIMITS["critic"].default for n in ("jtbd", "answer", "factual"))
     assert (limits.executor.actions, limits.executor.minutes) == (24, 25)
     assert (limits.explorer.actions, limits.explorer.minutes) == (12, 6)
     assert (LIMITS["executor"].ceiling.actions, LIMITS["executor"].ceiling.minutes) == (48, 40)
@@ -125,22 +124,24 @@ def test_limit_budgets_are_the_shipped_numbers():
 def test_bound_of_every_unit_at_the_defaults_is_computed_from_the_table():
     limits, _ = limited()
     minutes = lambda *unit, sensed=(): unit_minutes(Unit(*unit), limits, sensed)  # noqa: E731
-    assert minutes("new", "panel") == minutes("new", "file") == 1
-    assert minutes("plan", "panel") == minutes("plan", "file") == 13
-    assert minutes("research", "explore") == 6
-    assert minutes("research", "panel") == 7
-    assert minutes("step", "execute", 1) == minutes("step", "revise", 1) == 25
-    assert minutes("step", "panel", 1) == 6
-    assert minutes("task", "panel") == 7
-    assert minutes("reply", "panel", sensed=("factual", "recency")) == 28
+    critic, executor, explorer = (limits.critic("jtbd").minutes, limits.executor.minutes, limits.explorer.minutes)
+    assert minutes("new", "panel") == minutes("new", "file") == critic
+    assert minutes("plan", "panel") == minutes("plan", "file") == len(STAGES["plan"].floor) * critic
+    assert minutes("research", "explore") == explorer
+    assert minutes("research", "panel") == len(STAGES["research"].floor) * critic
+    assert minutes("step", "execute", 1) == minutes("step", "revise", 1) == executor
+    assert minutes("step", "panel", 1) == len(STAGES["step"].floor) * critic
+    assert minutes("task", "panel") == len(STAGES["task"].floor) * critic
+    assert minutes("reply", "panel", sensed=("factual", "recency")) == (len(STAGES["reply"].floor) + 2) * 2 * critic
 
 
-def test_bound_of_a_three_step_task_sums_to_114_minutes():
+def test_bound_of_a_three_step_task_sums_the_units_the_table_names():
     limits, _ = limited()
-    step = unit_minutes(Unit("step", "execute", 1), limits) + unit_minutes(Unit("step", "panel", 1), limits)
-    total = (unit_minutes(Unit("new", "panel"), limits) + unit_minutes(Unit("plan", "panel"), limits)
-             + 3 * step + unit_minutes(Unit("task", "panel"), limits))
-    assert total == 114
+    bound = lambda *unit: unit_minutes(Unit(*unit), limits)  # noqa: E731
+    step = bound("step", "execute", 1) + bound("step", "panel", 1)
+    total = bound("new", "panel") + bound("plan", "panel") + 3 * step + bound("task", "panel")
+    panels = sum(len(STAGES[b].floor) for b in ("new", "plan", "task")) + 3 * len(STAGES["step"].floor)
+    assert total == panels * limits.critic("jtbd").minutes + 3 * limits.executor.minutes
 
 
 def test_printed_bound_rounds_down_and_never_promises_more_than_the_remainder():
@@ -152,10 +153,9 @@ def test_printed_bound_rounds_down_and_never_promises_more_than_the_remainder():
     assert isinstance(printed_bound(25, 600), int)
 
 
-def test_reserve_and_flow_cap_hold_one_turns_children_to_276_and_456_minutes():
-    assert REPLY_RESERVE_MINUTES == 96
-    assert LIMITS["flow_cap_minutes"].default + REPLY_RESERVE_MINUTES == 276
-    assert LIMITS["flow_cap_minutes"].ceiling + REPLY_RESERVE_MINUTES == 456
+def test_reserve_holds_the_widest_reply_panel_through_its_revision():
+    widest = len(STAGES["reply"].floor) + len(SENSED) + LIMITS["additions"].ceiling
+    assert REPLY_RESERVE_MINUTES == widest * (LIMITS["revisions.reply"].ceiling + 1) * LIMITS["critic"].ceiling.minutes
     assert SENSED == ("factual", "recency", "spec-compliance")
 
 
@@ -1118,7 +1118,7 @@ async def test_flow_tracer_one_new_call_files_decisions_reviews_it_and_names_the
     assert flow.record.filed[("decisions.md", None)].verdict == "pass"
     assert flow.record.counts["new"].blockers == 0
     assert text.splitlines()[-1] == "next: plan · file"
-    assert [row[1] for row in rows] == ["new panel running"]
+    assert [row[:2] for row in rows] == [("t1", "new panel running"), ("jtbd", "pass")]
     assert len(excluded) == 1 and excluded[0] >= 0.0
     assert [c.name for c in script.calls] == ["jtbd"]
 
@@ -1188,7 +1188,9 @@ async def test_run_unit_plan_files_the_doc_rerecords_sets_the_stage_and_runs_the
         ("step-1", "unreviewed"), ("step-2", "unreviewed")]
     assert flow.record.filed[("plan.md", None)].verdict == "pass"
     assert [c.name for c in script.calls[1:]] == ["jtbd", "big-picture", "parsimony"]
-    assert rows[-1][1] == "plan panel running" and last(text) == "next: run · step 1"
+    assert [row[:2] for row in rows[-4:]] == [
+        ("t1", "plan panel running"), ("jtbd", "pass"), ("big-picture", "pass"), ("parsimony", "pass")]
+    assert last(text) == "next: run · step 1"
     assert "## round 1" in flow.docs.read(1, "plan-review.md")
 
 
@@ -1617,7 +1619,8 @@ async def test_review_after_the_last_step_the_task_panel_runs_and_a_clean_review
     text = await flow.run("task")
     assert [c.name for c in script.calls[before:]] == ["jtbd", "big-picture"]
     assert flow.record.stage == "done" and last(text) == "next: done" and flow.reply_panel.jtbd_stood is True
-    assert flow.record.filed[PLAN_ROW].verdict == "pass" and rows[-1][1] == "task panel running"
+    assert flow.record.filed[PLAN_ROW].verdict == "pass"
+    assert [row[:2] for row in rows[-3:]] == [("t1", "task panel running"), ("jtbd", "pass"), ("big-picture", "pass")]
     assert flow.docs.read(1, "review.md").strip().endswith("verdict: pass")
     assert "done" in await flow.run("task")
 

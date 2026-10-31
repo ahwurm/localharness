@@ -45,12 +45,12 @@ class Limit(NamedTuple):
 
 
 SENSED = ("factual", "recency", "spec-compliance")
-CRITICS_AT_FLOOR = frozenset({"jtbd", "answer"})
-_CEILING = ChildBudget(actions=12, minutes=6)
+CRITICS_AT_FLOOR: frozenset[str] = frozenset()
+_CRITIC = ChildBudget(actions=24, minutes=10)
 _FLOOR = ChildBudget(actions=3, minutes=1)
 
 LIMITS: dict[str, Limit] = {
-    "critic": Limit(_FLOOR, _CEILING, _CEILING),
+    "critic": Limit(_FLOOR, _CRITIC, _CRITIC),
     "executor": Limit(_FLOOR, ChildBudget(actions=24, minutes=25), ChildBudget(actions=48, minutes=40)),
     "explorer": Limit(_FLOOR, ChildBudget(actions=12, minutes=6), ChildBudget(actions=24, minutes=10)),
     "additions": Limit(0, 0, 3),

@@ -1653,21 +1653,23 @@ async def test_serve_takes_the_flow():
 async def test_reply_line_follows_a_blocked_reply_whether_or_not_the_answer_streamed(tmp_path):
     from localharness.channels.base import reply_line
 
-    blocked = _complete("The answer is 42.", verdict="blocked", finding="the cache never invalidates")
+    blocked = _complete("The answer is 42.", verdict="blocked", finding="the cache never invalidates", blockers=2)
     ch = _speaking(tmp_path)
     await ch.on_task_complete(blocked)
     assert ch._conn.texts == ["The answer is 42.", reply_line(blocked)]
-    assert reply_line(blocked).startswith("◆ reply blocked · /task show reply · the cache")
+    assert reply_line(blocked) == "◆ reply blocked · 2 blockers · /task show reply"
     ch = _speaking(tmp_path)
     await ch._on_token("The answer is 42.")
     await ch.on_task_complete(blocked)
     assert ch._conn.texts == ["The answer is 42.", reply_line(blocked)]
 
 
-async def test_reply_line_is_silent_for_a_child_an_empty_finding_and_a_pass(tmp_path):
+async def test_reply_line_is_silent_for_a_child_an_empty_finding_and_a_reply_no_panel_read(tmp_path):
     ch = _speaking(tmp_path)
     await ch._on_token("x")
     for quiet in (_complete("s", verdict="blocked", finding="f", parent_id="child"),
-                  _complete("s", verdict="unreviewed", finding=""), _complete("s", verdict="pass"), _complete("s")):
+                  _complete("s", verdict="unreviewed", finding=""), _complete("s")):
         await ch.on_task_complete(quiet)
     assert ch._conn.texts == ["x"]
+    await ch.on_task_complete(_complete("s", verdict="pass", notes=2))
+    assert ch._conn.texts[-1] == "◆ reply pass · 2 notes · /task show reply"
