@@ -837,20 +837,9 @@ def builtin_toolset(name: str, base: Any) -> list[str] | None:
     return [*WEB_TOOLS, *added]
 
 
-def _resolve_target_toolset(name: str, load_agent: Callable[[str], Any] | None, base: Any) -> list[str]:
-    """Best-effort resolve a delegation target's toolset for the grant-target safety gate. Builtins
-    use `builtin_toolset`; a config child uses its yaml allowlist. Unknown → [] (dispatch then
-    raises its own clear unknown-agent error). Conservative by omission is safe here: the gate only
-    REFUSES on a positive host-dangerous match, and an unknown name can't be granted to anyway."""
-    if (toolset := builtin_toolset(name, base)) is not None:
-        return toolset
-    # Phase 33.1: the root agent is 'orchestrator' — never loadable as a delegation child
-    if load_agent is not None and name != "orchestrator":
-        try:
-            return _config_child_allowed(load_agent(name))
-        except Exception:
-            return []
-    return []
+def _resolve_target_toolset(name: str, base: Any) -> list[str]:
+    """A built-in delegation target's toolset for the grant-target safety gate; unknown is [] (dispatch raises its own error)."""
+    return builtin_toolset(name, base) or []
 
 
 def _validated_narrowing(name: str, tools: list[str], base: Any, config: Any, has_agent: bool) -> list[str]:
@@ -2209,7 +2198,7 @@ def make_explore_agent_runner(
                 # child's allowlist (bare, mcp:TOOL, plugin:PLUGIN.TOOL). A name the base registry
                 # cannot resolve is skipped: from_allowed skips it too, so the child cannot hold it.
                 assert_grant_target_safe(
-                    [s for n in _resolve_target_toolset(name, load_agent, reg)
+                    [s for n in _resolve_target_toolset(name, reg)
                      if (s := reg.schema_of(n)) is not None],
                     agent_id=name,
                 )

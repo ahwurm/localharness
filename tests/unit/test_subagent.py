@@ -465,22 +465,11 @@ async def test_runner_without_loader_keeps_old_refusal():
         await runner("youtube-summarizer", "x")
 
 
-async def test_resolve_target_toolset_never_loads_root():
-    """Phase 33.1: the grant-target-safety toolset resolver (subagent.py:309) must never
-    call load_agent for the root name 'orchestrator' — the root is not a delegation child.
-    Returns [] (unknown-to-the-gate) AND the loader is provably never invoked."""
+async def test_resolve_target_toolset_is_empty_for_the_root():
     from localharness.agent.subagent import _resolve_target_toolset
     from tests.unit.test_capabilities import _builtin_registry
 
-    base = await _builtin_registry()
-    loaded: list[str] = []
-
-    def _spy_load(name: str):  # pragma: no cover - asserted never called
-        loaded.append(name)
-        raise AssertionError("load_agent must not be called for the root name")
-
-    assert _resolve_target_toolset("orchestrator", _spy_load, base) == []
-    assert loaded == []
+    assert _resolve_target_toolset("orchestrator", await _builtin_registry()) == []
 
 
 STATIC_ROLES = {"explore": ["read", "glob", "grep"], "cruncher": ["tool_result_get", "chunk"]}
@@ -605,8 +594,8 @@ async def test_the_grant_target_gate_resolves_a_bundled_web_tool_for_a_web_role(
     from tests.unit.test_capabilities import _FakeWebTool
 
     base = await _web_base(monkeypatch, _FakeWebTool(), source_plugin="fakeweb")
-    assert _resolve_target_toolset("search-verifier", None, base) == [*THREE, "fake_web"]
-    assert _resolve_target_toolset("explore", None, base) == STATIC_ROLES["explore"]
+    assert _resolve_target_toolset("search-verifier", base) == [*THREE, "fake_web"]
+    assert _resolve_target_toolset("explore", base) == STATIC_ROLES["explore"]
 
 
 def test_prepend_toolset_states_capabilities():
