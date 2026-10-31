@@ -1110,6 +1110,32 @@ def test_sleep_file_doc_bites():
     assert len(check_sleep_file_doc("## Nothing\n")) == len(SLEEP_FILE_NEEDLES)
 
 
+TYPED_TURN_NEEDLES = (
+    "Four places mark a turn as the person's `typed` words",
+    "a line typed at the terminal or sent from the phone",
+    "an ACP prompt that is not a command",
+    "the objective of `/task new <objective>` and the change of `/task plan <change>`",
+    "a missed caller demotes a turn rather than promotes it",
+    "Only the person's `/task new` and `/task plan` give the model one more call on their stage")
+
+
+def check_typed_turn_doc(security_text: str) -> list[str]:
+    """SECURITY.md's prompt-injection section names the four places a turn is the person's `typed` words, says a missed caller demotes, and says which verbs give the model one more call."""
+    body = " ".join((section(security_text, "## Threat model: prompt injection") or "").split())
+    return [f"SECURITY.md's prompt-injection section does not say {n}" for n in TYPED_TURN_NEEDLES if n not in body]
+
+
+def test_typed_turn_doc_live():
+    assert check_typed_turn_doc(_read("SECURITY.md")) == []
+
+
+def test_typed_turn_doc_bites():
+    text = _read("SECURITY.md")
+    for needle in TYPED_TURN_NEEDLES:
+        assert check_typed_turn_doc(_swap(text, needle, "x")) == [f"SECURITY.md's prompt-injection section does not say {needle}"]
+    assert len(check_typed_turn_doc("## Nothing\n")) == len(TYPED_TURN_NEEDLES)
+
+
 _ROOT_PARAGRAPH = (
     "Answer ordinary questions directly, and make a single edit or lookup directly: read first, then change. "
     "When the work is bigger than that, run it through the task: write what you need to know and what you will read "

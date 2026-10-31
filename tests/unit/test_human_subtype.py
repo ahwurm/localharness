@@ -264,7 +264,7 @@ async def test_acp_prompt_runs_typed_and_an_idle_approve_follow_up_runs_request(
     assert channel._agent_loop.subtypes == ["typed", "request"]
 
 
-def test_typed_is_spelled_at_the_repl_input_path_and_the_acp_prompt_only():
+def test_typed_is_spelled_at_the_repl_input_path_the_acp_prompt_and_the_dispatchers_new_and_plan():
     assert _count_in_source('"typed"') == {"cli/repl.py": 1, "channels/acp.py": 1, "orchestrator/task_flow/verbs.py": 2}
 
 
