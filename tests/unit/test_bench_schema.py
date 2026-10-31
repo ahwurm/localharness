@@ -291,3 +291,8 @@ def test_corpus_loads_all_fixtures():
         pytest.skip("bench/scenarios/ is empty")
     for path in fixtures:
         load_scenario(path)   # raises ValidationError on bad input
+
+
+def test_task_docs_defaults_to_empty():
+    from localharness.bench.schema import ScenarioSpec
+    assert ScenarioSpec.model_fields["task_docs"].default_factory() == {}

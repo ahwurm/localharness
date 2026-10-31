@@ -201,6 +201,10 @@ class ScenarioSpec(BaseModel):
         default=False,
         description="Run with a task flow: a per-run state dir on the gate and the reply panel at the loop's acceptance seam.",
     )
+    task_docs: dict[str, str] = Field(
+        default_factory=dict,
+        description="Task docs the run must leave filed and verified in the record: doc name -> regex its text must match.",
+    )
     tolerance: float = 0.10
     min_runs: int = 3
     max_runs: int = 20
