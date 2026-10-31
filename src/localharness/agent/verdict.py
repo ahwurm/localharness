@@ -1103,7 +1103,7 @@ def _private_parts(path: Path, ctx: GateContext) -> Optional[tuple[str, ...]]:
 
 
 def _private_reason(path: Path, ctx: GateContext, removal: bool) -> Optional[str]:
-    """Why ``path`` is harness state the agent may not touch: an agent's tasks or sessions folder, or (for a removal) the agent itself."""
+    """Why ``path`` is harness state: an agent's tasks or sessions folder, or for a removal its folder (``a.yaml`` is a definition file, not a folder)."""
     parts = _private_parts(path, ctx)
     if parts is None:
         return None
@@ -1114,7 +1114,7 @@ def _private_reason(path: Path, ctx: GateContext, removal: bool) -> Optional[str
                 return PRIVATE_PLAN_REASON
             return PRIVATE_DOC_REASON.format(doc=Path(parts[4]).stem)
         return PRIVATE_STATE_REASON
-    if removal and len(low) == 2 and low[0] == "agents":
+    if removal and len(low) == 2 and low[0] == "agents" and "." not in low[1]:
         return PRIVATE_STATE_REASON
     return None
 
@@ -1129,6 +1129,20 @@ def _private_deny(
             if reason is not None:
                 return VerdictResult(Verdict.DENY, reason)
     return None
+
+
+def _private_shell_targets(segments) -> Iterable[tuple[str, bool]]:
+    """Every static target the segments write, delete or link, in segment order; a link's source is one too."""
+    for segment in segments:
+        if not segment.unresolvable_write:
+            yield from ((target, False) for target in segment.write_targets)
+        yield from ((target, False) for target in segment.destructive_targets)
+        if not segment.unresolvable_removal:
+            yield from ((target, True) for target in segment.removal_targets)
+        if segment.argv and Path(segment.argv[0]).name.casefold() == "ln":
+            from localharness.agent.shell_classify import copy_operands
+
+            yield from ((source, False) for source in copy_operands(segment.argv[1:]).sources)
 
 
 def _evaluate_write(
@@ -1298,6 +1312,9 @@ def _evaluate_shell(
     non_read_only = tuple(s for s in classified.segments if not s.read_only)
 
     anchor = _shell_anchor(tool_name, params, ctx)
+    denied = _private_deny(_private_shell_targets(classified.segments), anchor, ctx)
+    if denied is not None:
+        return denied
 
     asks: list[_Ask] = []
     destructive = {s.signature for s in classified.segments if s.destructive}
