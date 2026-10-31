@@ -246,7 +246,7 @@ def apply_jtbd(parsed: Parsed, tail: str, shown: set[int], docs: Docs | None) ->
     kept = tuple(f for f in parsed.findings
                  if not f.rule.startswith(_CHANGED) or cited & set(_TURN.findall(f"{f.rule} {f.evidence}")))
     parsed = replace(parsed, findings=kept)
-    new = tail.strip()
+    new = sanitize_for_display(tail).strip()
     if not (parsed.readable and docs and new and new != _UNCHANGED and len(new.encode()) <= Caps.DOC // 4):
         return parsed, ""
     old = docs.read_session("jtbd.md").strip()

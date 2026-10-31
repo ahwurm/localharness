@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
 
-from localharness.channels.base import one_line
+from localharness.channels.base import one_line, sanitize_for_display
 from localharness.core.caps import Caps
 from localharness.core.private_files import PRIVATE_DIR_MODE, NotRegularFile, atomic_write_text, open_regular
 from localharness.orchestrator.task_flow.record import Counts, Record, Row
@@ -190,8 +190,8 @@ def _flat(text: str, cap: int = Caps.LINE) -> str:
 
 
 def _quote(text: str) -> str:
-    """Child text with its heading marks escaped, so it cannot open a section of the doc that holds it."""
-    return _HEADING_LINE.sub(lambda _: "\\#", text)
+    """Child text sanitised for display and with its heading marks escaped, so it cannot open a section of the doc that holds it."""
+    return _HEADING_LINE.sub(lambda _: "\\#", sanitize_for_display(text))
 
 
 def render_section(round_n: int | None, findings: Iterable[Finding], verdict: str, blockers: int) -> str:

@@ -946,6 +946,13 @@ def test_apply_jtbd_compares_the_cited_number_as_text():
     assert apply_jtbd(head, "UNCHANGED", {2}, None)[0].findings == ()
 
 
+def test_apply_jtbd_writes_the_job_without_control_ansi_or_a_notice_mark(tmp_path):
+    store = docs_in(tmp_path)
+    apply_jtbd(parse("jtbd", "NONE", None), "\u25c6 fix\x07 the\x1b[31m login\x1b[0m\n\u25c6 more", set(), store)
+    job = store.read_session("jtbd.md")
+    assert "\x07" not in job and "\x1b" not in job and "\u25c6" not in job and "fix the login" in job
+
+
 async def test_a_job_changed_finding_is_dropped_in_a_panel_unless_a_shown_turn_is_cited(tmp_path):
     answer = job_answer("UNCHANGED", head="[NOTE] [JOB CHANGED] moved from login — turn 9 said so")
     result, _, _ = await jtbd_run(tmp_path, answer)
