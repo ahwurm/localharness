@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from localharness.agent.context import (
     COMPACT_DISABLED, CompactionPipeline, TokenCounter, make_compaction_summarize_fn, summarizer_input_chars)
-from localharness.agent.subagent import EXPLORE_TOOLS
+from localharness.agent.subagent import EXPLORE_TOOLS, _config_child_allowed
 from localharness.channels.base import one_line
 from localharness.config.models import AgentConfig, BudgetConfig, PermissionConfig, ToolConfig
 from localharness.core.caps import Caps
@@ -19,9 +19,9 @@ from localharness.orchestrator.task_flow.filer import (
     Refused, StepLog, answered, file_answer, last_section, manifest, parse_plan, render_section, rerecord)
 from localharness.orchestrator.task_flow.panel import Finding, PanelInputs, PanelResult, PanelRun, fence, typed_turns, unit_floor
 from localharness.orchestrator.task_flow.record import (
-    DOCS, LIMITS, LINES, PLAN_KEY, STAGES, Need, Row, Unit, can_revise, consume_flag, file_doc, following, need,
-    next_line, next_unit, note_run, precondition, printed_bound, reopen, review_of, set_stage, set_verdict, stop_step,
-    unit_minutes, valid_question)
+    DOCS, LIMITS, LINES, PLAN_KEY, STAGES, Need, Record, Row, Unit, boundary_of, can_revise, consume_flag, file_doc, following,
+    need, next_line, next_unit, note_run, pointed, precondition, printed_bound, reopen, review_of, set_stage,
+    set_verdict, stop_step, unit_minutes, valid_question)
 
 if TYPE_CHECKING:
     from localharness.orchestrator.task_flow import TaskFlow
@@ -53,12 +53,32 @@ def build_executor_config(flow: TaskFlow):
         llm_summarize_fn=make_compaction_summarize_fn(flow.llm, summarizer_input_chars(flow.config.context.max_context_tokens)),
         compact_md_path=COMPACT_DISABLED)
     config = _config("executor", EXECUTOR_ROLE, ToolConfig(add=list(flow.root_tools), deny=["tool_result_get"]))
+    config.tools.add = _config_child_allowed(config)
     return config, pipeline, ("task_flow.executor", flow.limits.executor)
 
 
 def executor_note(header: str) -> Callable[[], str]:
     text = f"{CHILD_SENTENCE}\n{one_line(header)[:Caps.LINE]}"
     return lambda: text
+
+
+def _verdict(record: Record) -> str:
+    doc = pointed(record)
+    key = ("plan.md", doc.removesuffix(".md")) if doc.startswith("step-") else ("plan.md" if doc == "review.md" else doc, None)
+    row = record.filed.get(key)
+    return (row.verdict or "") if row else ""
+
+
+def root_note(flow: TaskFlow) -> str:
+    """The root's request note: one pointer line, the interview sentence while `new` has no doc, the pending revision block."""
+    record = flow.record
+    if record is None or record.paused:
+        return ""
+    boundary = boundary_of("run", record) if record.stage == "run" else "task" if record.stage == "done" else record.stage
+    head = " ".join(p for p in (record.stage, _verdict(record)) if p)
+    pointer = one_line(f"t{record.id} \u00b7 {head} \u00b7 {next_line(record, boundary, flow.limits)}")[:Caps.LINE]
+    interview = INTERVIEW_SENTENCE if record.stage == "new" and ("decisions.md", None) not in record.filed else ""
+    return "\n".join(p for p in (pointer, interview, flow.revision_block[:Caps.BLOCK]) if p)
 
 
 def _exclude(flow: TaskFlow, seconds: float) -> None:

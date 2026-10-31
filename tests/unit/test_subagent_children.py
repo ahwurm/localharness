@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import inspect
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,7 +12,12 @@ from localharness.agent.context import COMPACT_DISABLED, CompactionPipeline, Con
 from localharness.agent.loop import AgentLoop, BudgetLabels, BudgetTracker, Session
 from localharness.agent.permissions import PermissionEvaluator
 from localharness.agent.subagent import DelegationResult, make_explore_agent_runner
-from localharness.config.models import AgentConfig, BudgetConfig, ChildBudget, PermissionConfig, ToolConfig
+from localharness.config.models import AgentConfig, BudgetConfig, ChildBudget, PermissionConfig, TaskFlowConfig, ToolConfig
+from localharness.orchestrator.task_flow import TaskFlow, runner as task_runner
+from localharness.orchestrator.task_flow.filer import Docs
+from localharness.orchestrator.task_flow.panel import CRITIC_TOOLS, load_critic
+from localharness.orchestrator.task_flow.record import limited
+from localharness.orchestrator.task_flow.runner import CHILD_SENTENCE, build_executor_config, executor_note, explorer_config
 from localharness.tools.capabilities import GrantTargetError
 from localharness.tools.builtin.agent_tool import DelegationArgError
 from tests.unit.test_capabilities import _builtin_registry
@@ -402,3 +408,86 @@ async def test_the_note_provider_is_called_once_per_request():
     packed, _ = await loop._build_request([{"role": "user", "content": "hi"}], None)
     assert len(calls) == 1
     assert [m["content"] for m in packed] == ["hi"], "a note that cannot fit is dropped, the turn is not blocked"
+
+
+def executor_flow(root_tools=("read", "write", "edit", "bash_exec", "tool_result_get", "agent", "task", "skill")):
+    config = AgentConfig(name="root", role="r")
+    return SimpleNamespace(token_counter=None, llm=None, config=config, root_tools=list(root_tools),
+                           limits=limited(config.task_flow)[0])
+
+
+async def test_executor_runs_through_the_real_child_with_its_row_pipeline_note_and_root_less_toolset(base, loops):
+    flow = executor_flow()
+    config, pipeline, budget = build_executor_config(flow)
+    runner = make_runner(base)
+    result = await runner.run_config_child(
+        config, "brief", budget=budget, request_note=executor_note("step 1/2 · x"),
+        compact_md_path=COMPACT_DISABLED, pipeline=pipeline)
+    loop = loops[0]
+    assert loop.kw["compact_md_path"] is COMPACT_DISABLED
+    assert loop.context_manager._pipeline is pipeline and isinstance(pipeline, CompactionPipeline)
+    assert loop.kw["budget_labels"] == BudgetLabels("task_flow.executor", "task_flow.executor", None)
+    assert loop.kw["request_note"]().startswith(CHILD_SENTENCE) and "step 1/2" in loop.kw["request_note"]()
+    assert loop.held == {"read", "write", "edit", "bash_exec"} and result.tools is None
+    assert (loop.kw["config"].permissions.budget.max_actions, loop.kw["config"].permissions.budget.max_duration_minutes) == (24, 25)
+
+
+def test_executor_config_denies_tool_result_get_and_the_strip_set_removes_the_control_tools():
+    config, pipeline, (row, budget) = build_executor_config(executor_flow())
+    assert config.tools.deny == ["tool_result_get"] and config.tools.add == ["read", "write", "edit", "bash_exec"]
+    assert subagent._config_child_allowed(config) == ["read", "write", "edit", "bash_exec"]
+    assert "tool_result_get" in build_executor_config(executor_flow(("read", "tool_result_get")))[0].tools.deny
+    assert (row, budget) == ("task_flow.executor", ChildBudget(actions=24, minutes=25))
+    assert pipeline._llm_stages[0].compact_md_path is COMPACT_DISABLED
+
+
+async def test_executor_holding_a_handle_is_refused_when_the_host_set_is_dangerous(base, loops):
+    config, pipeline, budget = build_executor_config(executor_flow(("read", "bash_exec")))
+    runner = make_runner(base, parent_store=ContentStore())
+    with pytest.raises(GrantTargetError, match="bash_exec"):
+        await runner.run_config_child(config, "brief", budget=budget, grant_handles=["h"])
+    assert loops == []
+
+
+async def test_explorer_holds_exactly_read_glob_and_grep_with_its_row(base, loops):
+    runner = make_runner(base)
+    await runner.run_config_child(explorer_config(), "q", budget=("task_flow.explorer", ChildBudget(actions=12, minutes=6.0)))
+    loop = loops[0]
+    assert loop.held == {"read", "glob", "grep"}
+    assert loop.kw["budget_labels"] == BudgetLabels("task_flow.explorer", "task_flow.explorer", None)
+
+
+async def test_critic_factual_is_granted_a_handle_because_its_toolset_is_host_safe(base, loops):
+    parent = ContentStore()
+    handle = parent.put("granted body")
+    runner = make_runner(base, parent_store=parent)
+    await runner.run_config_child(load_critic("factual"), "t", grant_handles=[handle],
+                                  budget=("task_flow.critic", ChildBudget(actions=12, minutes=6.0)))
+    loop = loops[0]
+    assert {"read", "glob", "grep", "tool_result_get"} <= loop.held <= set(CRITIC_TOOLS)
+    assert loop.context_manager._content_store.get(handle) == "granted body"
+
+
+async def test_a_critic_config_with_a_dangerous_tool_and_tool_result_get_is_refused_with_a_handle(base, loops):
+    runner = make_runner(base, parent_store=ContentStore())
+    with pytest.raises(GrantTargetError):
+        await runner.run_config_child(config_child(add=(*CRITIC_TOOLS, "bash_exec")), "t", grant_handles=["h"])
+    assert loops == []
+
+
+async def test_exclude_through_a_real_session_is_clamped_to_one_flow_cap_per_turn(tmp_path, monkeypatch):
+    session = aged(3000)
+    root = tmp_path / ".localharness"
+    root.mkdir()
+    flow = TaskFlow(
+        run_config_child=None, emit=lambda *row: None, docs=Docs(root, True, "a"),
+        exclude=lambda s: setattr(session, "excluded_seconds", session.excluded_seconds + s),
+        config=AgentConfig(name="root", role="r", task_flow=TaskFlowConfig(flow_cap_minutes=10.0)), root_tools=[])
+    flow.open("fix login", 1)
+    ticks = iter([0.0, 400.0, 0.0, 400.0, 0.0, 400.0])
+    monkeypatch.setattr(task_runner, "monotonic", lambda: next(ticks))
+    for _ in range(3):
+        await flow.run("task")
+    assert session.excluded_seconds == 600.0
+    assert session.budget_minutes() == pytest.approx(session.elapsed_minutes() - 10.0, abs=0.01)
+    assert session.elapsed_minutes() == pytest.approx(50.0, abs=0.05)
