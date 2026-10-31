@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from localharness.agent.context import ContextManager
+from localharness.agent.context import ActiveReferenceOverflow, ContextManager
 from localharness.agent.loop import AgentLoop, Session
 from localharness.agent.permissions import PermissionEvaluator
 from localharness.agent.subagent import DelegationResult
@@ -14,7 +14,7 @@ from localharness.channels.base import ChannelAdapter
 from localharness.config.models import AgentConfig
 from localharness.core.caps import Caps
 from localharness.core.events import Action, TaskComplete
-from localharness.orchestrator.task_flow.panel import Panel
+from localharness.orchestrator.task_flow.panel import FENCE_CLOSE, FENCE_LABEL, Panel
 from localharness.orchestrator.task_flow.record import limited
 from tests.unit.test_subagent_children import FakeLoop, config_child, make_runner
 from tests.unit.test_capabilities import _builtin_registry
@@ -222,3 +222,127 @@ async def test_a_config_child_and_an_explore_child_get_no_reply_panel(loops):
     await runner("explore", "t")
     assert len(loops) == 2
     assert all(loop.kw.get("reply_panel") is None for loop in loops)
+
+
+def note_messages(messages):
+    return [m for m in messages if isinstance(m.get("_lh"), dict) and m["_lh"].get("subtype") == "request_note"]
+
+
+def blocked_then(*after, llm_replies=("Draft reply.", "Fixed reply.")):
+    return panel_of({"answer": [answered(BLOCKER), *after]}), Llm(llm_replies)
+
+
+async def test_revision_is_one_tool_less_request_with_the_fenced_block_in_place_of_the_draft(bus):
+    panel, llm = blocked_then(NONE)
+    session, summary = await turn(loop_of(llm, bus, panel))
+    first, revision = llm.requests
+    assert revision["tools"] is None and revision["on_token"] is None
+    assert len(llm.requests) == 2
+    (note,) = note_messages(revision["messages"])
+    assert revision["messages"][-1] is note
+    assert FENCE_LABEL in note["content"] and "Draft reply." in note["content"]
+    assert note["content"].rstrip().endswith(FENCE_CLOSE) and "README.md:41" in note["content"]
+    assert not any(m["role"] == "assistant" and "Draft reply." in str(m["content"]) for m in revision["messages"][:-1])
+    assert (session.messages[-1]["role"], session.messages[-1]["content"]) == ("assistant", "Fixed reply.")
+    (done,) = events(bus, TaskComplete)
+    assert (done.verdict, done.finding, summary) == ("pass", "", "Fixed reply.")
+    assert done.summary == "Fixed reply."
+
+
+async def test_revision_block_is_cleared_when_the_attempt_returns(bus):
+    panel, llm = blocked_then(NONE, llm_replies=("Draft reply.", "Fixed reply.", "Next reply."))
+    loop = loop_of(llm, bus, panel)
+    session, _ = await turn(loop)
+    assert note_messages(session.messages) == []
+    assert not any(FENCE_CLOSE in str(m.get("content")) for m in session.messages)
+    await loop._execute_loop(session, "and again", None, subtype="typed")
+    assert note_messages(llm.requests[-1]["messages"]) == []
+    assert "Fixed reply." in str(llm.requests[-1]["messages"])
+
+
+class Stub:
+    def __init__(self):
+        self.llm_runs = 0
+
+    async def run_deterministic(self, messages, budget):
+        return messages, False
+
+    async def run_llm(self, messages, budget):
+        self.llm_runs += 1
+        return messages, False
+
+
+async def test_revision_runs_no_summary_compaction_on_a_session_over_the_trigger(bus):
+    stub = Stub()
+    panel, llm = blocked_then(NONE)
+    loop = AgentLoop(
+        config=AgentConfig.model_validate({"name": "reply-agent", "role": "Test agent."}), llm=llm, bus=bus,
+        context_manager=ContextManager(max_context_tokens=1400, pipeline=stub), tool_registry=None,
+        permission_evaluator=PermissionEvaluator(), reply_panel=panel,
+    )
+    session, summary = await turn(loop, task="word " * 700)
+    assert stub.llm_runs == 1 and summary == "Fixed reply." and len(llm.requests) == 2
+
+
+async def test_revision_that_does_not_fit_the_window_is_never_sent(bus):
+    panel, llm = blocked_then(NONE)
+    loop = loop_of(llm, bus, panel)
+    real = loop._pack_request
+
+    async def refusing(messages, tools, note, *, compact=True):
+        if not compact:
+            raise ActiveReferenceOverflow("no room")
+        return await real(messages, tools, note)
+
+    loop._pack_request = refusing
+    session, summary = await turn(loop)
+    assert len(llm.requests) == 1 and summary == "Draft reply."
+    assert session.messages[-1]["content"] == "Draft reply."
+    assert events(bus, TaskComplete)[0].verdict == "unreviewed"
+
+
+def test_revision_without_compaction_raises_where_the_floor_would_truncate():
+    cm = ContextManager(max_context_tokens=200)
+    big = [{"role": "user", "content": "x" * 5000}]
+    with pytest.raises(ActiveReferenceOverflow, match="compaction off"):
+        asyncio.run(cm.build_messages(big, None, compact=False))
+    packed, _ = asyncio.run(cm.build_messages(big, None))
+    assert packed
+
+
+@pytest.mark.parametrize("second", ["  \n ", RuntimeError("boom")], ids=["whitespace", "raises"])
+async def test_revision_that_comes_back_empty_or_raises_delivers_the_draft_unreviewed(bus, second):
+    panel, llm = blocked_then(llm_replies=("Draft reply.", second))
+    session, summary = await turn(loop_of(llm, bus, panel))
+    assert len(llm.requests) == 2 and summary == "Draft reply."
+    assert session.messages[-1]["content"] == "Draft reply."
+    assert events(bus, TaskComplete)[0].verdict == "unreviewed"
+
+
+async def test_revision_in_xml_mode_is_delivered_as_prose_and_never_run(bus):
+    panel, llm = blocked_then(NONE, llm_replies=(
+        "Draft reply.", 'Revised. <tool_call>{"name": "glob", "arguments": {"pattern": "*"}}</tool_call>'))
+    llm.config.tool_call_mode = "xml"
+    session, summary = await turn(loop_of(llm, bus, panel))
+    assert summary == "Revised." and len(llm.requests) == 2
+    assert llm.requests[-1]["tools"] is None
+    assert [a for a in events(bus, Action) if a.action_type == "tool_call"] == []
+    assert events(bus, TaskComplete)[0].verdict == "pass"
+
+
+async def test_revision_then_a_second_blocker_delivers_the_revised_reply_blocked(bus):
+    panel, llm = blocked_then(answered(BLOCKER))
+    _, summary = await turn(loop_of(llm, bus, panel))
+    (done,) = events(bus, TaskComplete)
+    assert summary == "Fixed reply." and done.verdict == "blocked"
+    assert done.finding == "the reply cites a real line — README.md:41 does not say that"
+    assert len(llm.requests) == 2
+
+
+async def test_revision_note_joins_the_providers_note_before_the_block(bus):
+    panel, llm = blocked_then(NONE)
+    loop = loop_of(llm, bus, panel)
+    loop._request_note = lambda: "provider note"
+    await turn(loop)
+    (note,) = note_messages(llm.requests[1]["messages"])
+    assert note["content"].startswith("provider note") and FENCE_LABEL in note["content"]

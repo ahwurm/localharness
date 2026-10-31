@@ -908,6 +908,20 @@ def _budget_note(session: Session, budget: BudgetTracker) -> str:
     return note
 
 
+_REVISION_NO_FIT = "the revision did not fit the window"
+_REVISION_FAILED = "the revision failed"
+_REVISION_EMPTY = "the revision came back empty"
+
+
+@dataclass
+class _Revision:
+    """What the reply seam keeps across a panel run: the latest good draft, why a revision could not help, the revision's tokens."""
+    draft: str
+    reason: str = ""
+    prompt: int = 0
+    completion: int = 0
+
+
 def _clean_summary(text: str) -> str:
     """Remove XML tool call remnants and thinking tags from summary text."""
     import re
@@ -3223,12 +3237,44 @@ class AgentLoop:
             brief=reply_brief(task, written, handles), draft=draft, turns=tuple(typed_turns(session.messages)),
             handles=tuple(handles), critics=sense(calls, panel.jtbd_stood, panel.limits),
         )
+        kept = _Revision(draft)
+
+        async def revise(shown: str, findings: tuple) -> str | None:
+            return await self._revise_reply(session, kept, shown, findings)
+
         started = time.monotonic()
         try:
-            result = await panel.run(Unit("reply", "panel"), inputs, None)
+            result = await panel.run(Unit("reply", "panel"), inputs, revise if content and not _is_confirmation(content) else None)
         finally:
             self.exclude(time.monotonic() - started)
         return _clean_summary(result.draft), result.verdict, result.finding
+
+    async def _revise_reply(self, session: Session, kept: "_Revision", draft: str, findings: tuple) -> str | None:
+        """One tool-less, no-retry rewrite of the last assistant message; None, with the reason kept, when it cannot help."""
+        from localharness.orchestrator.task_flow.panel import revision_block
+        from localharness.provider.fn_call import strip_thinking_tags
+        note = "\n\n".join(part for part in (self._current_note(), revision_block(draft, findings)) if part)
+        try:
+            request, _ = await self._pack_request(session.messages[:-1], None, note, compact=False)
+            response, usage = await self._llm.stream_complete(request, tools=None, on_token=None)
+        except ActiveReferenceOverflow:
+            kept.reason = _REVISION_NO_FIT
+            return None
+        except Exception:  # noqa: BLE001 - a failed revision delivers the draft unreviewed
+            log.warning("the reply revision failed", exc_info=True)
+            kept.reason = _REVISION_FAILED
+            return None
+        if usage is not None:
+            kept.prompt += getattr(usage, "prompt_tokens", 0) or 0
+            kept.completion += getattr(usage, "completion_tokens", 0) or 0
+            session.input_tokens += getattr(usage, "prompt_tokens", 0) or 0
+            session.output_tokens += getattr(usage, "completion_tokens", 0) or 0
+        text = strip_thinking_tags(getattr(response, "content", None) or "").strip()
+        if not _clean_summary(text):
+            kept.reason = _REVISION_EMPTY
+            return None
+        session.messages[-1]["content"] = kept.draft = text
+        return text
 
     async def _build_request(self, messages: list[Message], tools: list | None):
         # Re-snapshot and re-declare the active task's references (files may have changed; the
@@ -3269,8 +3315,8 @@ class AgentLoop:
             log.warning("request_note failed; sending the request without it", exc_info=True)
             return ""
 
-    async def _pack_request(self, messages: list[Message], tools: list | None, note: str):
-        packed, budget = await self._ctx.build_messages(messages, tools)
+    async def _pack_request(self, messages: list[Message], tools: list | None, note: str, *, compact: bool = True):
+        packed, budget = await self._ctx.build_messages(messages, tools, **({} if compact else {"compact": False}))
         # An empty packet (a TaskState with no active record) is an ordinary request.
         packet = self._task_context.packet() if self._task_context is not None else ""
         if packet:
