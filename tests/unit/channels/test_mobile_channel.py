@@ -508,7 +508,7 @@ async def test_the_flags_are_the_locked_ones(tmp_path):
 async def test_the_repl_installable_resolvers_are_declared(tmp_path):
     """The REPL installs each handle ONLY if the channel already declares it as None. A channel
     that does not declare one is skipped with NO error — which fails silently, at a tap, later."""
-    for name in ("_pending_resolver", "_nudge_resolver", "_cancel_resolver", "_model_list_resolver"):
+    for name in ("_pending_resolver", "_nudge_resolver", "_cancel_resolver", "_queued_resolver", "_model_list_resolver"):
         assert getattr(MobileChannel, name, "absent") is None, name
 
 
@@ -706,3 +706,169 @@ async def test_a_subagents_turn_end_must_not_stop_the_root_ticker(tmp_path):
     assert channel._turn_running is True, "a child's completion stopped the root's instruments"
     assert channel._status_task is not None and not channel._status_task.done()
     await channel.stop()
+
+
+# ------------------------------------------------------------------ the /task verbs, heard and queued, the reply line
+
+async def _phone_repl(flow, body=None):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from localharness.cli.repl import OrchestratorREPL
+    from localharness.orchestrator.cards import AgentCardRegistry
+    from localharness.orchestrator.router import AgentCreationFlow
+    from tests.unit.test_repl_task import FlowAgent
+
+    async def idle(task):
+        pass
+
+    bus = AsyncMock()
+    bus.subscribe = MagicMock()
+    channel, agent = await _channel(), FlowAgent(body or idle)
+    repl = OrchestratorREPL(orchestrator=AgentCreationFlow(AgentCardRegistry()), agent_loop=agent, channel=channel,
+                            bus=bus, task_flow=flow)
+    repl._subscribe_pending()
+    return repl, channel, agent, channel.attach_client()
+
+
+def _notices(client):
+    return [r[2]["text"] for r in _drain(client) if r[0] == "Notice"]
+
+
+async def _planned(tmp_path):
+    from tests.unit.test_task_flow_record import planned
+
+    flow, *_ = await planned(tmp_path)
+    flow.end_turn()
+    return flow
+
+
+async def test_a_task_new_from_the_phone_goes_through_the_inbound_queue_and_runs_a_typed_turn(tmp_path):
+    from tests.unit.test_task_flow_record import make_flow
+
+    flow, *_ = make_flow(tmp_path)
+    repl, channel, agent, client = await _phone_repl(flow)
+    channel.submit("/task new add a cache")
+    turn = await repl._dispatch_input(await channel.read_input())
+    await turn
+    assert flow.record.id == 1 and flow.record.objective == "add a cache"
+    assert agent.calls == [("add a cache", "typed")]
+    assert _notices(client)[0].startswith("◆ t1 interview open")
+
+
+async def test_a_task_show_from_the_phone_is_one_notice_in_the_phone_order(tmp_path):
+    from localharness.orchestrator.task_flow import verbs
+
+    flow = await _planned(tmp_path)
+    repl, channel, agent, client = await _phone_repl(flow)
+    channel.submit("/task show plan")
+    assert await repl._dispatch_input(await channel.read_input()) is None
+    phone = verbs.task_command(flow, "show plan", turn=1, running=False, levers=channel.levers(), phone=True).lines
+    assert _notices(client) == list(phone) and len(phone) == 1
+
+
+async def test_a_phones_nudge_says_heard_and_a_message_queued_mid_turn_says_what_waits(tmp_path):
+    flow = await _planned(tmp_path)
+    repl, channel, agent, client = await _phone_repl(flow)
+    repl._turn_task, channel._turn_running = asyncio.ensure_future(asyncio.sleep(30)), True
+    assert await channel.nudge("try the cache first") and agent.nudges == ["try the cache first"]
+    channel.submit("also log it")
+    channel.submit("/task run")
+    await asyncio.sleep(0.05)
+    assert _notices(client) == [
+        "◆ t1 heard · stop (now) · after this unit",
+        "◆ t1 queued · stop (now) · after this turn",
+        "◆ t1 queued · stop (now) · after this turn · a command waits",
+    ]
+    repl._turn_task.cancel()
+
+
+async def test_a_phone_with_no_open_task_hears_and_queues_in_silence(tmp_path):
+    from tests.unit.test_task_flow_record import make_flow
+
+    flow, *_ = make_flow(tmp_path)
+    repl, channel, agent, client = await _phone_repl(flow)
+    repl._turn_task, channel._turn_running = asyncio.ensure_future(asyncio.sleep(30)), True
+    await channel.nudge("try it")
+    channel.submit("later")
+    await asyncio.sleep(0.05)
+    assert _notices(client) == []
+    repl._turn_task.cancel()
+
+
+async def test_the_queued_hook_is_declared_installed_and_forgotten_with_the_session(tmp_path):
+    from tests.unit.test_task_flow_record import make_flow
+
+    assert MobileChannel._queued_resolver is None
+    flow, *_ = make_flow(tmp_path)
+    repl, channel, agent, client = await _phone_repl(flow)
+    assert channel._queued_resolver == repl._queued_from_channel
+    channel.reset_session()
+    assert channel._queued_resolver is None
+
+
+async def test_status_tick_text_carries_the_panels_text_and_typing_waits_while_a_call_holds_the_root(tmp_path):
+    from localharness.channels.base import with_status_text
+    from tests.unit.test_task_flow_record import make_flow
+
+    flow, *_ = make_flow(tmp_path)
+    channel = await _channel()
+    channel.progress_source = with_status_text(lambda: {"phase": "writing"}, flow.reply_panel)
+    assert channel.status_frame().text is None
+    flow.reply_panel.set_phase("step 2/5 executing · up to 25 min")
+    text = channel.status_frame().text
+    assert text == "step 2/5 executing · up to 25 min · typing waits" and channel.status_frame().phase == "writing"
+    flow.reply_panel._reply, flow.reply_panel.stop = True, "stop"
+    assert channel.status_frame().text.endswith("stop delivers it unchecked")
+
+
+async def test_reply_line_a_blocked_or_unreviewed_reply_pushes_its_line_after_the_reply_frame(tmp_path):
+    from localharness.channels.base import reply_line
+    from localharness.core.events import TaskComplete
+
+    bus = EventBus()
+    channel = await _channel(bus)
+    client = channel.attach_client()
+
+    def done(**kw):
+        return TaskComplete(agent_id="a", session_id="s", success=True, summary="ok", duration_seconds=0.1,
+                            iterations=1, **kw)
+
+    blocked = done(verdict="blocked", finding="the cache never invalidates")
+    await bus.publish(blocked)
+    rows = _drain(client)
+    assert [r[0] for r in rows] == ["TaskComplete", "Notice"]
+    assert rows[1][2]["text"] == reply_line(blocked) and rows[1][2]["text"].startswith("◆ reply blocked")
+    await bus.publish(done(verdict="unreviewed", finding="the critics ran out of time"))
+    assert _notices(client) == [reply_line(done(verdict="unreviewed", finding="the critics ran out of time"))]
+    for quiet in (done(verdict="unreviewed", finding=""), done(verdict="pass"), done(),
+                  done(verdict="blocked", finding="x", parent_id="child")):
+        await bus.publish(quiet)
+    assert _notices(client) == []
+
+
+async def test_a_phones_task_stop_during_an_execution_prints_the_stopped_row_and_keeps_the_session(tmp_path):
+    from localharness.orchestrator.task_flow import verbs
+
+    flow = await _planned(tmp_path)
+    started = asyncio.Event()
+
+    async def body(task):
+        flow.busy, flow.unit, flow.record.halted = True, ("step 1/2 executing", 25), "stopped"
+        started.set()
+        await asyncio.Event().wait()
+
+    repl, channel, agent, client = await _phone_repl(flow, body)
+    agent.stop_turn = lambda task: task.cancel()
+    session = asyncio.ensure_future(repl._run_classic())
+    channel.submit("/task run")
+    await asyncio.wait_for(started.wait(), 5)
+    channel._turn_running = True
+    assert await channel.cancel_turn() is True
+    await asyncio.sleep(0.1)
+    assert not session.done()
+    shown = _notices(client)
+    assert verbs.render("step stopped", channel.levers(), task="t1", step=(1, 2), bound=25) in shown
+    assert not any("Turn cancelled" in t for t in shown)
+    assert flow.record.halted is None and not flow.busy
+    channel.request_sleep(now=True)
+    await asyncio.wait_for(session, 5)
