@@ -3297,9 +3297,9 @@ class AgentLoop:
         from localharness.orchestrator.task_flow.panel import PanelInputs, finding_text, reply_brief, sense, typed_turns
         from localharness.orchestrator.task_flow.record import Unit
         panel = self.reply_panel
-        draft = _format_completion_summary(session, content)
+        draft = _clean_summary(_format_completion_summary(session, content))
         kept = _Revision(draft)
-        summary = _clean_summary(draft)
+        summary = draft
 
         async def revise(shown: str, findings: tuple) -> str | None:
             return await self._revise_reply(session, kept, shown, findings)
