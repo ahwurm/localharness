@@ -416,7 +416,9 @@ exception to the shipped-default rule, as their entries say. These are all of th
 
 - `org.children_budget.<name>.actions` and `.minutes`, for each built-in child agent and for
   `default` (the ceiling of an agent you define): the most tool calls a child may dispatch (checked
-  before each of its model calls) and the wall-clock minutes it may spend
+  before each of its model calls) and the wall-clock minutes it may spend. The task pipeline's
+  critics, explorers and executors do not take their budgets from it: those come from `task_flow.*`
+  alone, which a project cannot set.
 - `org.children_budget.lookup_share` and `org.children_budget.review_share`: the part of a parent's
   remaining budget a delegated child receives
 - `permissions.budget.max_actions` and `permissions.budget.max_duration_minutes`, in a project agent
@@ -1287,6 +1289,12 @@ written by the model and by child agents from repository files.
 
 A delegating model may narrow a specialist to a subset of its own tools for one call; narrowing only removes tools, and the grant gate and the floors judge the narrowed set.
 
+A critic is a child agent that holds `read`, `glob`, `grep`, `git_read` and `tool_result_get` and
+nothing else, fixed in code, and its role is read from the package's own critic files, never from
+your config, a project or an overlay; your machine-level `task_flow` may add a packaged critic to a
+stage's panel or set its budget within limits fixed in code, and nothing more. A critic never sees
+the assistant's side of the conversation.
+
 No person's go-ahead stands between a plan and its steps. Once you open a task with
 `/task new <objective>`, the root runs every stage itself, and an executor holding the root's
 tools, `bash_exec` and `write` among them, carries out each step of a plan the model wrote. What
@@ -1365,7 +1373,11 @@ A finding's rule and evidence are as attacker-influenced as the files they cite,
 the laundered influence above, which gains this path: the fence lowers their force without
 removing it, a revised reply carries them into the conversation, and the first blocking finding
 reaches a paired phone's lock screen as the push body, one line, cut to 120 characters and
-encrypted to the device. The revision itself is
+encrypted to the device. In a task the same fenced findings reach the root in each `task` result
+while it holds `write`, and the brief of an executor revising a step while it holds `bash_exec`, for
+which the closing sentence is the only bound. The first blocking finding is carried as
+`TaskComplete.finding`, sanitised, made one line and cut where it is set, so the reply line printed
+after a blocked reply and the phone's push both get the cleaned text. The revision itself is
 one generation with no tools offered, no retry and no compaction; an answer shaped like a tool call
 is delivered as text and never run.
 
