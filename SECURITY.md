@@ -1344,6 +1344,13 @@ encrypted to the device. The revision itself is
 one generation with no tools offered, no retry and no compaction; an answer shaped like a tool call
 is delivered as text and never run.
 
+**The person's words are a subtype the model cannot write.** Four places mark a turn as the person's
+`typed` words, which the critics read as the job: a line typed at the terminal or sent from the phone,
+an ACP prompt that is not a command, the objective of `/task new <objective>` and the change of
+`/task plan <change>`. Every other turn is an ordinary request, and the model writes no subtype, so
+a missed caller demotes a turn rather than promotes it. Only the person's `/task new` and `/task plan`
+give the model one more call on their stage.
+
 **Not a current vector: memory.** Tool output is written to per-agent history, not to
 the queryable facts memory, and no code path promotes tool output into the facts an
 agent recalls. If that changes, this section changes with it.

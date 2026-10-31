@@ -663,7 +663,7 @@ def test_task_command_stale_plan_names_the_file_and_the_accept_name(tmp_path):
 
 def test_task_command_stale_doc_with_a_name_accept_cannot_take_suggests_no_accept(tmp_path):
     flow = staged(tmp_path, decisions="pass", plan="pass")
-    line = verbs._refusal(flow.record, need("edited since filed", doc="odd name.md"), BOX)
+    line = verbs._refusal(flow.record, need("edited since filed", doc="odd name.md"))
     assert line == "◆ t1 odd name.md edited since filed"
 
 
