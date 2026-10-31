@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
 
+from localharness.channels.base import one_line
 from localharness.core.caps import Caps
 from localharness.core.private_files import PRIVATE_DIR_MODE, NotRegularFile, atomic_write_text, open_regular
 from localharness.orchestrator.task_flow.record import Counts, Record, Row
@@ -32,6 +33,9 @@ _FIELD = re.compile(r"(?:[-*] )?(files|depends_on|done):(.*)")
 _SPLIT = re.compile(r"(?m)^(?=##(?!#))")
 _STEP_KEY = re.compile(r"step-([1-9][0-9]*)")
 _REVIEW_DOC = re.compile(r"(?:[a-z0-9-]+-)?review\.md")
+_HEADING_LINE = re.compile(r"(?m)^#")
+VERDICTS = ("pass", "blocked", "accepted", "unreviewed")
+UNANSWERED = "unanswered"
 
 
 class Refused(Exception):
@@ -161,8 +165,7 @@ def parse_plan(text: str) -> list[Section] | str:
 
 
 def rerecord(record: Record, sections: list[Section]) -> list[int]:
-    """A row per section: kept with its verdict and counts while its digest and every dependency are kept, else
-    reset and its step doc's row cleared; a dropped section's rows go. Returns the steps whose executed work is void."""
+    """A row per section, kept while its digest and every dependency are; returns the steps whose executed work is void."""
     kept: set[int] = set()
     reopened: list[int] = []
     for s in sections:
@@ -182,22 +185,84 @@ def rerecord(record: Record, sections: list[Section]) -> list[int]:
     return reopened
 
 
+def _flat(text: str, cap: int = Caps.LINE) -> str:
+    return one_line(text)[:cap]
+
+
+def _quote(text: str) -> str:
+    """Child text with its heading marks escaped, so it cannot open a section of the doc that holds it."""
+    return _HEADING_LINE.sub(lambda _: "\\#", text)
+
+
 def render_section(round_n: int | None, findings: Iterable[Finding], verdict: str, blockers: int) -> str:
+    if verdict not in VERDICTS:
+        raise ValueError(f"{verdict!r} is not a review verdict")
     head = "## accepted by the person" if round_n is None else f"## round {round_n} · blockers {blockers}"
-    return "\n".join([head, *(f"- [{f.tag}] {f.rule} — {f.evidence} ({f.critic})" for f in findings), f"verdict: {verdict}"])
+    rows = (f"- [{f.tag}] {_flat(' — '.join(p for p in (f.rule, f.evidence) if p), Caps.FINDING)}"
+            + (f" ({_flat(f.critic)})" if f.critic else "") for f in findings)
+    return "\n".join([head, *rows, f"verdict: {verdict}"])
+
+
+def _sections(text: str) -> list[str]:
+    return [p for p in _SPLIT.split(text) if p.startswith("##")]
 
 
 def last_section(text: str) -> str:
-    parts = [p for p in _SPLIT.split(text) if p.startswith("##")]
+    parts = _sections(text)
     return parts[-1].strip() if parts else NO_REVIEW
+
+
+def _newest(sections: list[str]) -> str:
+    """The sections joined, the oldest dropped until they fit a doc, so the latest verdict is never the cut."""
+    while len("".join(sections).encode()) > Caps.DOC and len(sections) > 1:
+        sections = sections[1:]
+    return "".join(sections)
+
+
+class StepLog:
+    """One line per tool event, kept in memory until the executor returns or is cancelled."""
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def add(self, line: str) -> None:
+        self.lines.append(_flat(line))
+
+    def render(self, final: str, runtime: dict, stopped: bool = False) -> str:
+        files, tools = [_flat(str(f)) for f in runtime.get("files", ())], runtime.get("tools", {})
+        called = ", ".join(f"{_flat(str(k))} x{v}" for k, v in tools.items())
+        tail = "\n".join([
+            *(["## stopped", f"stopped at {self.lines[-1] if self.lines else 'the start'}"] if stopped else []),
+            *(["## final answer", _quote(final.strip()[:Caps.BLOCK])] if final.strip() else []),
+            "## runtime",
+            f"files written: {len(files)}" + (f": {', '.join(files)[:Caps.BLOCK // 4]}" if files else ""),
+            f"tools called: {called[:Caps.BLOCK // 4] or 'none'}",
+            f"compactions: {int(runtime.get('compactions', 0))}"])
+        kept = self.lines
+        while kept and len("\n".join(["## log", *kept, tail]).encode()) > Caps.DOC:
+            kept = kept[1:]
+        dropped = len(self.lines) - len(kept)
+        return "\n".join(["## log", *([f"[{dropped} earlier events dropped]"] if dropped else []), *kept, tail])
+
+
+def file_answer(text: str, n: int, question: str, explorer: str, answer: str) -> str:
+    """`research.md` with question `n`'s section written or replaced; `none`, `blocked` and empty leave it unanswered."""
+    claim = answer.strip()
+    body = UNANSWERED if claim.lower() in ("", "none", "blocked") else _quote(claim[:Caps.BLOCK // 4])
+    section = "\n".join([f"## q{n} · {_flat(question)}", body, f"explorer: {_flat(explorer)}"])
+    parts = [p.strip() for p in _SPLIT.split(text) if p.strip()]
+    out = [section if p.startswith(f"## q{n} ·") else p for p in parts]
+    return "\n\n".join(out if section in out else [*out, section]) + "\n"
 
 
 def manifest(filed: Iterable[str], child: str = "", verdict: str = "", doc: str = "", findings: str = "",
              notes: Iterable[str] = (), next_line: str = "") -> str:
     """What the root reads from a unit: filed names, counts, verdicts and fenced findings, never a child's output."""
     names = ", ".join(filed)
-    return "\n".join(p for p in (f"filed: {names}" if names else "", child, verdict, doc, findings,
-                                 *(f"note: {n}" for n in notes), next_line) if p)
+    parts = (f"filed: {names}" if names else "", _flat(child, Caps.FINDING), _flat(verdict, Caps.FINDING),
+             f"doc:\n{doc.strip()[:Caps.DOC]}" if doc.strip() else "", findings,
+             *(f"note: {_flat(n, Caps.FINDING)}" for n in notes), next_line)
+    return "\n".join(p for p in parts if p)
 
 
 @dataclass
@@ -270,8 +335,12 @@ class Docs:
     def append_section(self, task: int, doc: str, section: str) -> str:
         if not _REVIEW_DOC.fullmatch(doc):
             raise Refused(f"{doc} is not a review doc")
-        old = (self.read(task, doc) or "").strip()
-        return self.write(task, doc, "\n\n".join(p for p in (old, section) if p) + "\n")[0]
+        text = "\n\n".join(p for p in ((self.read(task, doc) or "").strip(), section.strip()) if p)
+        body = _newest([f"{p.strip()}\n\n" for p in _SPLIT.split(text) if p.strip()])
+        return self.write(task, doc, body.rstrip() + "\n")[0]
+
+    def write_step(self, task: int, n: int, log: StepLog, final: str, runtime: dict, stopped: bool = False) -> tuple[str, bool]:
+        return self.write(task, f"step-{n}.md", log.render(final, runtime, stopped))
 
     def verified(self, record: Record, key: tuple[str, str | None]) -> bool:
         """A doc's, or a plan section's, current text still has the digest it was filed with."""
