@@ -729,12 +729,12 @@ async def _run_loop(loop: Any, prompt: str, on_token: Callable) -> None:
 
 
 async def _run_prompt(loop: Any, prompt: str, on_token: Callable) -> None:
-    """A task-flow scenario whose prompt lines open with `/task` runs each as the person's verb; any other prompt is one request turn."""
+    """A task-flow scenario whose every prompt line opens with `/task` runs each as the person's verb; any other prompt is one request turn."""
     from localharness.orchestrator.task_flow.verbs import task_command, turn_end
 
     flow = getattr(loop, "__dict__", {}).get("_flow")
     lines = [ln.strip() for ln in prompt.splitlines() if ln.strip()]
-    if flow is None or not lines or not lines[0].startswith("/task"):
+    if flow is None or not lines or not all(ln.startswith("/task") for ln in lines):
         return await _run_loop(loop, prompt, on_token)
     for line in lines:
         reply = task_command(flow, line[len("/task"):], turn=loop.turn + 1, running=False, levers=("", ""))
