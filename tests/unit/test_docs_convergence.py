@@ -377,6 +377,29 @@ def test_model_switch_doc_bites():
     assert check_model_switch_doc("## Nothing\n") == empty
 
 
+DENY_CLASS_NEEDLES = (
+    "except each agent's `tasks/` and `sessions/` folders", "never asked, in every mode",
+    "lands under `agents/<name>/tasks/` or `agents/<name>/sessions/`", "the delete or move of `agents/<name>` itself",
+    "Nothing above those folders is refused", "not a barrier")
+
+
+def check_deny_class_doc(security_text: str) -> list[str]:
+    """SECURITY.md's approval-gate section states the deny class on an agent's task and session folders, what it leaves alone, and that it is not a barrier."""
+    gate = " ".join((section(security_text, "## Human approval gate") or "").split())
+    return [f"SECURITY.md's approval gate does not say {n}" for n in DENY_CLASS_NEEDLES if n not in gate]
+
+
+def test_deny_class_doc_live():
+    assert check_deny_class_doc(_read("SECURITY.md")) == []
+
+
+def test_deny_class_doc_bites():
+    text = _read("SECURITY.md")
+    for needle in DENY_CLASS_NEEDLES:
+        assert check_deny_class_doc(_swap(text, needle, "x")) == [f"SECURITY.md's approval gate does not say {needle}"]
+    assert len(check_deny_class_doc("## Nothing\n")) == len(DENY_CLASS_NEEDLES)
+
+
 MOBILE_DOC_NEEDLES = ("cannot be cancelled", "two requests for the server", "`active`", "`launches`")
 
 

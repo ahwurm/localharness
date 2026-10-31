@@ -993,6 +993,7 @@ user drops in), ``memory.db`` and the session, history and bus-event stores, ``a
 them. That is the inversion this constant is: the old rule protected the whole tree and
 hand-listed five runtime files as exemptions, which made 14 of the 20 prompts a replay of the
 owner's real corpus raised in ``auto`` be the orchestrator creating agents and tool scripts.
+Each agent's ``tasks/`` and ``sessions/`` are the exception, refused by the verdict's deny class, not by this list.
 
 What an agent yaml may do is decided at start, not here. A config written before the
 ``write(*/agents/*.yaml)`` deny left the shipped defaults still carries it (a DENY, a tier above

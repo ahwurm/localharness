@@ -545,7 +545,8 @@ read and argue with. Each step below says what it does in `auto`.
      replaces that list; for `.agents/skills/` it takes away only the removal ask, and a write there
      still asks. Everything else under one (agents,
      divisions, tools, session state, memory, history, the audit log, the kill file) is the harness
-     being *used* and is not protected; naming what is protected rather than what is exempt also
+     being *used* and is not protected, except each agent's `tasks/` and `sessions/` folders, which the
+     deny class below refuses; naming what is protected rather than what is exempt also
      means a new kind of runtime state added there is allowed by default rather than becoming a
      prompt nobody wanted. Two of those entries, `config.yaml` and `overrides.yaml`, never reach
      this step from the agent's write and edit tools or from a shell write the gate can read: those
@@ -553,6 +554,17 @@ read and argue with. Each step below says what it does in `auto`.
      own setup, below). An entry kept elsewhere through a symlink, as a dotfiles setup does, is
      judged by where it points and is not protected there — except those two, whose refusal also
      matches the entry by its name.
+
+     A second class sits beside the protected entries and is refused outright, never asked, in every mode:
+     a write, delete, move or link the gate can read whose target, or a link's or move's source, lands under
+     `agents/<name>/tasks/` or `agents/<name>/sessions/` of a config directory the session uses, and the
+     delete or move of `agents/<name>` itself. The refusal says how to change the document instead:
+     `/task plan` for a task's plan, or ask the person to edit it and then `/task accept` for any other task
+     document. The target is judged as the entry it names and by where a symlink points. Nothing above those
+     folders is refused: an agent's own `config.yaml` and `memory.db` and the `agents/` folder itself are the
+     harness being used. This is defence in depth, not a barrier: a write by `python_exec`, an inline
+     interpreter or a script file, a path held in a variable or a glob or reached after a `cd` the gate
+     cannot follow, and a link an interpreter creates after the check, are not covered.
    - **A system directory.** `/etc`, `/usr`, `/bin`, `/sbin`, `/lib` (and `/lib64`), `/boot`,
      `/var` except `/var/tmp`, `/opt`, `/root`, `/srv`, macOS `/System`, `/Library` and
      `/Applications`, Windows `C:\Windows`, `C:\Program Files*` and `C:\ProgramData`.
@@ -1172,8 +1184,9 @@ the same no-follow writer (see [Autostart](#autostart-the-harnesss-own-user-unit
 
 The phone session's `sessions/asleep.json` carries the sleeping conversation — text at the trust
 level of the session log beside it — and never authority: the permission mode it records is applied
-on wake only when it is no looser than the configured one (the folder is one a cloned repo can ship
-and the agent's own `write` tool can reach), typed-ahead lines are never read from it, and a thread
+on wake only when it is no looser than the configured one (the folder is one a cloned repo can ship;
+the agent's own write tools and the shell writes the gate can read are refused there, so only what the
+deny class does not cover can still reach it), typed-ahead lines are never read from it, and a thread
 wakes only in the folder it slept in.
 
 **What this does NOT cover.** Pictures the image plugin generates are written at your umask. In a
