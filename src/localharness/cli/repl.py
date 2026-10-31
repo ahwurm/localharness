@@ -1144,6 +1144,7 @@ class OrchestratorREPL:
 
     async def _await_turn_with_sigint(self, turn_task: asyncio.Task) -> None:
         """Await one turn so a mid-turn Ctrl-C cancels the turn, not the session."""
+        self._cancelled_by_user = False
         async with sigint_cancels(turn_task, cancel=lambda: self._agent.stop_turn(turn_task)) as cancelled:
             try:
                 await turn_task
@@ -1155,6 +1156,7 @@ class OrchestratorREPL:
                     await self._channel.send_message(
                         "Turn cancelled.", metadata={"style": "system.info"}
                     )
+            finally:
                 self._stop_row = self._cancelled_by_user = False
 
     async def _handle_reasoning_cmd(self, arg: str) -> None:
