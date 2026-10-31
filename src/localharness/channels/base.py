@@ -92,11 +92,25 @@ honours 8-bit controls reads U+009B as CSI and U+009D as OSC: the same sequences
 INVISIBLE_CHARS_RE = re.compile(
     "["
     + "".join(
-        map(chr, (*range(0x200B, 0x2010), *range(0x202A, 0x202F), 0x2060, *range(0x2066, 0x206A), 0xFEFF, 0x061C))
+        map(
+            chr,
+            (
+                *range(0x200B, 0x2010),
+                *range(0x202A, 0x202F),
+                *range(0x2060, 0x2065),
+                *range(0x2066, 0x2070),
+                *range(0xE0000, 0xE0080),
+                0xFEFF,
+                0x061C,
+                0x180E,
+            ),
+        )
     )
     + "]"
 )
-"""Zero-width, bidi-override and bidi-isolate characters: they reorder or hide what the person reads."""
+"""Zero-width, bidi, invisible-operator and Unicode tag characters: they reorder or hide what the person reads.
+
+The soft hyphen and the variation selectors stay: emoji and hyphenation rendering need them."""
 
 NOTICE_MARK = "◆"
 NEUTRAL_MARK = "◇"
