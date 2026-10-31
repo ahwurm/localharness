@@ -1,11 +1,14 @@
 """The `task` tool over a TaskFlow: the stage whitelist, the bounded arguments, the run mapping."""
+import asyncio
+
 import pytest
 
 from localharness.agent.subagent import _config_child_allowed
 from localharness.core.caps import Caps
 from localharness.orchestrator.task_flow.record import STAGES, TOOL_STAGES
 from localharness.tools.builtin.task_tool import TaskTool
-from tests.unit.test_task_flow_record import make_flow
+from localharness.tools import base
+from tests.unit.test_task_flow_record import make_flow, planned
 
 NO_TASK = "no task is open; the person opens one with /task new"
 
@@ -169,3 +172,35 @@ def test_config_child_allowed_still_strips_task(tmp_path):
 
     cfg = AgentConfig(name="c", role="r", tools=ToolConfig(add=["task", "read"]))
     assert _config_child_allowed(cfg) == ["read"]
+
+
+@pytest.mark.parametrize("cap", [None, 1.0, 360.0])
+async def test_the_registry_deadline_is_the_flow_cap_so_no_unit_is_cut_first(tmp_path, monkeypatch, cap):
+    flow = opened(tmp_path, cap=cap)
+    tool = TaskTool(flow)
+    assert tool.timeout_s == flow.limits.flow_cap_minutes * 60
+    spied(flow)
+    bounds, real = [], asyncio.wait_for
+
+    async def watch(aw, timeout=None):
+        bounds.append(timeout)
+        return await real(aw, timeout)
+
+    monkeypatch.setattr(base.asyncio, "wait_for", watch)
+    assert (await tool.run(stage="run")).output == "ran"
+    assert bounds and bounds[0] > flow.limits.flow_cap_minutes * 60
+
+
+async def test_a_unit_the_registry_cuts_still_settles_its_reservation_and_leaves_the_flow_idle(tmp_path):
+    started = asyncio.Event()
+
+    async def hang(config, task):
+        started.set()
+        await asyncio.sleep(3600)
+
+    flow = (await planned(tmp_path, {"executor": [hang]}))[0]
+    tool, cap = TaskTool(flow), flow.cap.remaining()
+    tool.timeout_s = 0.05
+    result = await tool.run(stage="run")
+    assert started.is_set() and result.error_type == "timeout_error"
+    assert flow.busy is False and flow.cap.unspent() == pytest.approx(cap, abs=1.0)
