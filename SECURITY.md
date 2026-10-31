@@ -570,10 +570,10 @@ read and argue with. Each step below says what it does in `auto`.
      a write, delete, move or link the gate can read whose target, or a link's or move's source, lands under
      `agents/<name>/tasks/` or `agents/<name>/sessions/` of a config directory the session uses, and the
      delete or move of `agents/<name>` itself (a name with a dot only when it is a folder, so `agents/a.yaml` stays
-     a file) and of the `agents` folder, which holds every one of them. The refusal says how to change the document instead:
+     a file). The refusal says how to change the document instead:
      `/task plan` for a task's plan, or ask the person to edit it and then `/task accept` for any other task
      document. The target is judged as the entry it names and by where a symlink points. Nothing above those
-     folders is refused but that removal: an agent's own `config.yaml` and `memory.db` and a write into `agents/`
+     folders is refused: an agent's own `config.yaml` and `memory.db` and the `agents/` folder itself
      are the harness being used. This is defence in depth, not a barrier: a write by `python_exec`, an inline
      interpreter or a script file, a path held in a variable or a glob (`rm -r agents/*/tasks`) or reached
      after a `cd` the gate cannot follow, and a link an interpreter creates after the check, are not covered,

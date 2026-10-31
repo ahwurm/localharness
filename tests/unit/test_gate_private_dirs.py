@@ -91,8 +91,6 @@ DENIED = (
     "ln {c}/agents/{n}/tasks/t1/plan.md /tmp/y",
     "rm -rf {c}/agents/{n}",
     "mv {c}/agents/{n} {c}/agents/other",
-    "rm -rf {c}/agents",
-    "mv {c}/agents {c}/agents.bak",
 )
 
 
@@ -145,7 +143,7 @@ def test_nothing_above_the_two_folders_is_denied(ws, config, path):
     assert not is_private(write(make_ctx(ws), config / path))
 
 
-@pytest.mark.parametrize("command", ("rm -rf {ws}", "rm {c}/agents/a/config.yaml", "cp /tmp/x {c}/agents/a",
+@pytest.mark.parametrize("command", ("rm -rf {c}/agents", "mv {c}/agents {c}/agents.bak", "rm -rf {ws}", "rm {c}/agents/a/config.yaml", "cp /tmp/x {c}/agents/a",
                                      "rm {c}/agents/a.yaml", "mv {c}/agents/a.yaml {c}/agents/b.yaml"))
 def test_a_removal_or_write_above_the_two_folders_is_not_denied(ws, config, command):
     assert not is_private(shell(make_ctx(ws), command.format(c=config, ws=ws)))
