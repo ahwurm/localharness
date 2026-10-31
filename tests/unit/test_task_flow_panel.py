@@ -14,8 +14,8 @@ from localharness.config.models import ChildBudget
 from localharness.core.caps import Caps
 from localharness.core.types import harness_message, human_message
 from localharness.orchestrator.task_flow import panel
-from localharness.orchestrator.task_flow.panel import FENCE_CLOSE, FENCE_LABEL, fence, run_critic
-from localharness.orchestrator.task_flow.record import limited
+from localharness.orchestrator.task_flow.panel import FENCE_CLOSE, FENCE_LABEL, Panel, PanelInputs, fence, run_critic
+from localharness.orchestrator.task_flow.record import Unit, limited
 
 
 def scripted(answers: dict[str, DelegationResult]):
@@ -374,3 +374,54 @@ def test_the_class_tables_are_disjoint_code_constants():
     tables = [panel.READ_TOOLS, panel.WEB_TOOLS, panel.WRITE_TOOLS, panel.CLASSLESS_TOOLS]
     assert sum(map(len, tables)) == len(frozenset().union(*tables))
     assert panel.CLASSLESS_TOOLS == {"task", "skill"} and panel.WRITE_TOOLS == {"write", "edit"}
+
+
+PLAN = Unit("plan", "panel")
+JOB = ((1, "fix the login bug"),)
+NONE = answered("NONE")
+
+
+def watching(answers, seen):
+    async def child(config, task, **kw):
+        seen.append((config.name, subject.status_text(), kw["budget"]))
+        return answers[config.name]
+
+    subject = Panel(child, limited(None)[0])
+    return subject
+
+
+async def test_panel_run_plan_panel_blocks_on_one_blocker_and_reports_once():
+    seen, runs = [], []
+    subject = watching({"jtbd": NONE, "big-picture": answered(BLOCKER), "parsimony": NONE}, seen)
+    result = await subject.run(PLAN, PanelInputs("the plan", turns=JOB, on_run=runs.append))
+    assert (result.verdict, result.blockers, result.finished) == ("blocked", 1, True)
+    (run,) = runs
+    assert (run.blockers, run.finished, run.verdict) == (1, True, "blocked")
+    assert [f.tag for f in run.findings] == ["BLOCKER"] and run.findings[0].critic == "big-picture"
+    assert subject.status_text() is None
+
+
+async def test_status_text_names_each_critic_with_its_computed_bound():
+    seen = []
+    subject = watching({"jtbd": NONE, "big-picture": NONE, "parsimony": NONE}, seen)
+    await subject.run(PLAN, PanelInputs("the plan", turns=JOB))
+    assert [s[1] for s in seen] == ["checking 1/3 · jtbd · up to 13 min", "checking 2/3 · big-picture · up to 12 min",
+                                    "checking 3/3 · parsimony · up to 6 min"]
+    assert subject.status_text() is None
+
+
+async def test_panel_run_gives_each_critic_the_tables_budget_on_the_critic_row():
+    seen = []
+    subject = watching({"jtbd": NONE, "big-picture": NONE, "parsimony": NONE}, seen)
+    await subject.run(PLAN, PanelInputs("the plan", turns=JOB))
+    assert [(n, b) for n, _, b in seen] == [
+        ("jtbd", ("task_flow.critic", ChildBudget(actions=3, minutes=1))),
+        ("big-picture", ("task_flow.critic", ChildBudget(actions=12, minutes=6))),
+        ("parsimony", ("task_flow.critic", ChildBudget(actions=12, minutes=6)))]
+
+
+async def test_panel_run_passes_a_clean_readable_panel():
+    seen = []
+    subject = watching({"jtbd": NONE, "big-picture": NONE, "parsimony": NONE}, seen)
+    result = await subject.run(PLAN, PanelInputs("the plan", draft="d", turns=JOB))
+    assert (result.verdict, result.blockers, result.finding, result.draft) == ("pass", 0, "", "d")
