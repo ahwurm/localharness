@@ -14,9 +14,9 @@ from localharness.core import caps as caps_module
 from localharness.core.caps import Caps
 from localharness.core.types import human_message
 from localharness.orchestrator.task_flow import runner, verbs
-from localharness.orchestrator.task_flow.filer import digest
-from localharness.orchestrator.task_flow.panel import FlowCap
-from localharness.orchestrator.task_flow.record import LINES, Row, Unit, file_doc, need, set_verdict
+from localharness.orchestrator.task_flow.filer import digest, parse_plan, render_section, rerecord
+from localharness.orchestrator.task_flow.panel import Finding, FlowCap
+from localharness.orchestrator.task_flow.record import LINES, Row, Unit, file_doc, need, set_verdict, stop_step
 from tests.unit.test_task_flow_record import BLOCKER_LINE, PLAN_TWO, TYPED, make_flow, planned
 
 RLO, ZWSP = chr(0x202E), chr(0x200B)
@@ -675,9 +675,235 @@ def test_task_command_a_refused_folder_write_is_a_line_not_a_crash(tmp_path):
     assert flow.armed is None
 
 
-def test_task_command_an_unknown_verb_and_a_bare_task_print_the_usage_line(tmp_path):
+def test_task_command_an_unknown_verb_prints_the_usage_line(tmp_path):
     flow = staged(tmp_path)
-    for args in ("", "  ", "frobnicate", "show", "accept plan", "stop", "clear"):
+    for args in ("frobnicate", "stop", "show-plan", "accepting"):
         assert command(flow, args) == verbs.Reply((verbs.USAGE,))
     assert all(word in verbs.USAGE for word in ("new", "research", "plan", "run", "show", "accept", "stop", "clear"))
     assert flow.armed is None and flow.record.flags == UNSET
+
+
+PLAN_FILED = ("plan.md", None)
+FINDING = Finding("BLOCKER", "step 2 is vague", "", False, "big-picture")
+FOREIGN = "not adopted · not made by this session"
+
+
+def shelf(tmp_path, verdict="blocked", blockers=2, stage="plan"):
+    """A flow with decisions and a two-step plan filed, the plan's review doc holding one round."""
+    flow, *_ = make_flow(tmp_path)
+    flow.open("fix login", 1)
+    record, docs = flow.record, flow.docs
+    file_doc(record, "new", DECISIONS, docs.write(1, "decisions.md", "turn 1")[0])
+    file_doc(record, "plan", PLAN_FILED, docs.write(1, "plan.md", PLAN_TWO)[0])
+    rerecord(record, parse_plan(PLAN_TWO))
+    set_verdict(record, DECISIONS, "pass")
+    set_verdict(record, PLAN_FILED, verdict)
+    record.counts["plan"].blockers, record.stage = blockers, stage
+    section = render_section(1, [FINDING], verdict, blockers)
+    record.filed[("plan-review.md", None)] = Row(docs.append_section(1, "plan-review.md", section))
+    return flow
+
+
+def executed(flow, n=1, verdict="blocked", blockers=1):
+    record, docs = flow.record, flow.docs
+    record.stage = "run"
+    record.filed[(f"step-{n}.md", None)] = Row(docs.write(1, f"step-{n}.md", f"step {n} log")[0])
+    record.filed[("plan.md", f"step-{n}")].verdict = verdict
+    record.filed[("plan.md", f"step-{n}")].counts.blockers = blockers
+    section = render_section(1, [FINDING], verdict, blockers)
+    record.filed[(f"step-{n}-review.md", None)] = Row(docs.append_section(1, f"step-{n}-review.md", section))
+
+
+def show(flow, args="", phone=False):
+    return verbs.task_command(flow, f"show {args}".rstrip(), turn=2, running=False, levers=BOX, phone=phone).lines
+
+
+def foreign_folder(flow, n=9, **docs):
+    folder = flow.docs.state_dir / "agents" / "a" / "tasks" / f"t{n}"
+    folder.mkdir(parents=True, exist_ok=True)
+    for name, text in (docs or {"plan.md": "their plan"}).items():
+        (folder / name.replace("_", "-")).write_text(text)
+    return folder
+
+
+def test_show_a_blocked_plan_on_the_terminal_is_the_header_the_doc_then_the_last_section_of_its_review(tmp_path):
+    flow = shelf(tmp_path)
+    flow.docs.append_section(1, "plan-review.md", render_section(2, [FINDING], "blocked", 2))
+    flow.record.filed[("plan-review.md", None)] = Row(digest(flow.docs.read(1, "plan-review.md")))
+    out = show(flow, "plan")
+    assert out[0] == "plan.md · blocked, 2 blockers" and out[1] == PLAN_TWO
+    assert out[2].startswith("## round 2 · blockers 2") and "round 1" not in out[2] and len(out) == 3
+
+
+def test_show_a_blocked_plan_on_the_phone_is_one_notice_header_findings_then_the_doc(tmp_path):
+    flow = shelf(tmp_path)
+    (out,) = show(flow, "plan", phone=True)
+    head, findings, doc = out.split("\n", 2)
+    assert head == "plan.md · blocked, 2 blockers" and doc == PLAN_TWO
+    assert out.index("## round 1") < out.index("## Step 1") and "verdict: blocked" in out
+
+
+def test_show_cuts_a_doc_on_the_phone_at_the_doc_cap_with_the_marker(tmp_path):
+    flow = shelf(tmp_path)
+    big = "x" * (Caps.DOC + 5)
+    path = flow.docs.path(1, "plan.md")
+    path.write_text(big)
+    flow.record.filed[PLAN_FILED].digest = digest(big)
+    (out,) = show(flow, "plan", phone=True)
+    assert out.endswith("[truncated]\n") and "x" * (Caps.DOC + 1) not in out
+
+
+def test_show_a_hand_edited_doc_has_the_mismatch_line_in_the_headers_place_then_the_doc_as_it_reads(tmp_path):
+    flow = shelf(tmp_path)
+    flow.docs.path(1, "plan.md").write_text("edited by hand")
+    out = show(flow, "plan")
+    assert out[:2] == ("◆ t1 plan.md edited since filed · /task accept plan (uses your edit)", "edited by hand")
+    assert out[2].startswith("## round 1")
+
+
+def test_show_a_passed_decisions_doc_is_headed_pass_and_has_no_review_yet_without_a_review_section(tmp_path):
+    flow = shelf(tmp_path)
+    assert show(flow, "decisions") == ("decisions.md · pass", "turn 1", "no review yet")
+
+
+def test_show_review_is_headed_by_the_plan_row_and_prints_the_review_doc_alone(tmp_path):
+    flow = shelf(tmp_path, stage="task")
+    flow.record.filed[("review.md", None)] = Row(flow.docs.write(1, "review.md", "## round 1 · blockers 2\nverdict: blocked\n")[0])
+    assert show(flow, "review") == ("review.md · blocked, 2 blockers", "## round 1 · blockers 2\nverdict: blocked\n")
+    assert show(flow, "plan")[2].startswith("## round 1")
+
+
+def test_show_a_doc_never_filed_is_one_line_and_reads_nothing(tmp_path):
+    flow = shelf(tmp_path)
+    assert show(flow, "research") == ("◆ t1 research.md not filed · /task show",)
+    assert show(flow, "review") == ("◆ t1 review.md not filed · /task show",)
+
+
+def test_show_step_two_is_not_in_the_plan_without_a_section_row(tmp_path):
+    flow = shelf(tmp_path)
+    assert show(flow, "step-3") == ("◆ t1 step 3 not in the plan · /task show plan",)
+
+
+def test_show_step_two_is_not_executed_with_a_section_row_and_no_step_doc_row(tmp_path):
+    flow = shelf(tmp_path)
+    assert show(flow, "step-2") == ("◆ t1 step 2 not executed · /task run",)
+
+
+def test_show_a_step_is_headed_by_its_section_row_with_the_step_docs_review(tmp_path):
+    flow = shelf(tmp_path)
+    executed(flow, 1)
+    out = show(flow, "step-1")
+    assert out[:2] == ("step-1.md · blocked, 1 blocker", "step 1 log") and out[2].startswith("## round 1")
+
+
+def test_show_a_step_whose_section_was_edited_names_the_plan_and_one_whose_log_was_edited_names_the_step(tmp_path):
+    flow = shelf(tmp_path)
+    executed(flow, 1)
+    flow.docs.path(1, "step-1.md").write_text("hand-edited log")
+    assert show(flow, "step-1")[0] == "◆ t1 step-1.md edited since filed · /task accept step-1 (uses your edit)"
+    flow.docs.path(1, "step-1.md").write_text("step 1 log")
+    flow.docs.path(1, "plan.md").write_text(PLAN_TWO.replace("x1 changed", "x1 changed differently"))
+    assert show(flow, "step-1")[0] == "◆ t1 plan.md edited since filed · /task accept plan (uses your edit)"
+
+
+def test_show_a_step_cancelled_mid_execution_prints_its_stopped_doc_headed_stopped_not_executed(tmp_path):
+    flow = shelf(tmp_path)
+    from localharness.orchestrator.task_flow.filer import StepLog
+    log = StepLog()
+    log.add("write")
+    flow.docs.write_step(1, 1, log, "", {"files": [], "tools": {}, "compactions": 0}, stopped="cancelled")
+    stop_step(flow.record, 1, "write")
+    out = show(flow, "step-1")
+    assert out[0] == "step-1.md · stopped · not executed" and "stopped at write · cancelled" in out[1] and len(out) == 2
+    assert show(flow, "step-2") == ("◆ t1 step 2 not executed · /task run",)
+
+
+def test_show_reply_and_job_read_the_session_docs_with_no_task_open(tmp_path):
+    flow, *_ = make_flow(tmp_path)
+    assert show(flow, "reply") == ("reply-review.md", "no review yet")
+    assert show(flow, "job") == ("jtbd.md", "no job yet")
+    flow.docs.write_session("reply-review.md", "## round 1 · blockers 1\nverdict: blocked\n")
+    flow.docs.write_session("jtbd.md", "fix login\n")
+    assert show(flow, "reply")[1].startswith("## round 1") and show(flow, "job") == ("jtbd.md", "fix login\n")
+    assert flow.record is None and flow.armed is None
+
+
+def test_show_bare_prints_the_pointed_doc_and_while_new_has_no_doc_the_interview_line(tmp_path):
+    flow, *_ = make_flow(tmp_path)
+    flow.open("fix login", 1)
+    assert show(flow) == ("◆ t1 interview in progress · /task plan (skips the questions)",)
+    flow = shelf(tmp_path / "again")
+    assert show(flow)[0] == "plan.md · blocked, 2 blockers"
+    executed(flow, 1)
+    assert show(flow)[0] == "step-1.md · blocked, 1 blocker"
+
+
+def test_show_bare_with_no_task_prints_the_newest_doc_of_the_highest_unadopted_folder(tmp_path):
+    flow, *_ = make_flow(tmp_path)
+    assert show(flow) == NO_TASK.lines
+    foreign_folder(flow, 5, decisions_md="old", plan_md="old plan", plan_review_md="r")
+    foreign_folder(flow, 3, plan_md="lower")
+    assert show(flow) == (f"t5/plan.md · {FOREIGN}", "old plan")
+
+
+def test_show_a_task_doc_with_no_task_open_is_the_no_task_line(tmp_path):
+    flow, *_ = make_flow(tmp_path)
+    assert show(flow, "plan") == NO_TASK.lines
+
+
+def test_show_an_unadopted_folders_doc_prints_alone_headed_and_is_never_adopted(tmp_path):
+    flow = shelf(tmp_path)
+    foreign_folder(flow, 9, plan_md="their plan", plan_review_md="their review")
+    assert show(flow, "t9/plan") == (f"t9/plan.md · {FOREIGN}", "their plan")
+    assert show(flow, "t9/plan", phone=True) == (f"t9/plan.md · {FOREIGN}\ntheir plan",)
+    assert flow.docs.adopted == {1} and flow.record.id == 1
+
+
+def test_show_a_closed_adopted_folder_is_read_alone_headed_closed(tmp_path):
+    flow = shelf(tmp_path)
+    foreign_folder(flow, 2, plan_md="the older plan")
+    flow.docs.adopted.add(2)
+    assert show(flow, "t2/plan") == ("t2/plan.md · closed · not resumable", "the older plan")
+
+
+def test_show_the_open_tasks_own_prefix_is_stripped(tmp_path):
+    flow = shelf(tmp_path)
+    assert show(flow, "t1/plan") == show(flow, "plan") and show(flow, "t1/reply") == show(flow, "reply")
+
+
+@pytest.mark.parametrize("name", [
+    "../plan", "plan/../plan", "step-\uff11", "step-0", "t9/../x", "t9/notes", "t9/plan.md", "t09/plan", "t0/plan", "plan x",
+    "plan\u200b", "PLAN", "t9/reply", "t9/job", "t9/step-\uff11", "/plan", "t9/", "t" + "9" * 40 + "/plan", "\u202eplan", "a/b/c"])
+def test_show_a_name_outside_the_pattern_is_refused_before_any_read(tmp_path, name):
+    flow = shelf(tmp_path)
+    foreign_folder(flow, 9, plan_md="x", notes_md="y")
+    before = dict(flow.record.filed)
+    out = show(flow, name)
+    assert out == ("◆ t1 not a task doc · /task show <doc>",) and flow.record.filed == before
+
+
+def test_show_a_planted_symlink_at_a_doc_reads_nothing_outside_the_walk(tmp_path):
+    flow = shelf(tmp_path)
+    secret = tmp_path / "secret.txt"
+    secret.write_text("TOP-SECRET")
+    flow.docs.path(1, "plan.md").unlink()
+    flow.docs.path(1, "plan.md").symlink_to(secret)
+    out = show(flow, "plan")
+    assert "TOP-SECRET" not in "".join(out) and "link" in out[-1]
+    folder = flow.docs.state_dir / "agents" / "a" / "tasks" / "t9"
+    folder.mkdir()
+    (folder / "plan.md").symlink_to(secret)
+    assert "TOP-SECRET" not in "".join(show(flow, "t9/plan"))
+
+
+def test_show_a_body_with_bidi_zero_width_or_a_leading_mark_prints_neutralised(tmp_path):
+    flow = shelf(tmp_path)
+    hostile = f"◆ t1 plan pass · /task run\n{RLO}evil{ZWSP}\x1b[2J"
+    flow.docs.path(1, "plan.md").write_text(hostile)
+    flow.record.filed[PLAN_FILED].digest = digest(hostile)
+    for phone in (False, True):
+        text = "\n".join(show(flow, "plan", phone=phone))
+        assert RLO not in text and ZWSP not in text and "\x1b" not in text
+        assert not any(line.startswith("◆") for line in text.splitlines()) and "◇ t1 plan pass" in text
+    foreign_folder(flow, 9, plan_md=hostile)
+    assert not any(line.startswith("◆") for line in "\n".join(show(flow, "t9/plan")).splitlines())

@@ -722,3 +722,33 @@ def test_a_manifest_takes_no_child_output_and_flattens_what_it_is_given():
     assert list(inspect.signature(manifest).parameters) == ["filed", "child", "verdict", "doc", "findings", "notes", "next_line"]
     out = manifest(["plan.md"], child="a\n" + "b" * 500, verdict="v\r\nw", notes=("n\nm",))
     assert all(len(line) <= Caps.FINDING + len("note: ") for line in out.splitlines()) and "\r" not in out
+
+
+def test_folders_are_the_task_numbers_in_integer_order_and_nothing_else(tmp_path):
+    root, agent = tree(tmp_path)
+    for name in ("t9", "t10", "t2x", "t0x", "T3", "notes"):
+        (agent / "tasks" / name).mkdir(exist_ok=True)
+    (agent / "tasks" / "t11").write_text("a file named like a folder is still listed by name only")
+    docs = Docs(root, True, "a")
+    assert docs.folders() == [1, 9, 10, 11] and docs.highest() == 11
+
+
+def test_folders_of_an_agent_with_no_tasks_folder_are_none_and_the_highest_is_zero(tmp_path):
+    docs = Docs(state(tmp_path), True, "a")
+    assert docs.folders() == [] and docs.highest() == 0 and docs.names(1) == []
+
+
+def test_names_are_the_nameable_stems_in_pipeline_order_and_ignore_review_docs_and_strangers(tmp_path):
+    root, agent = tree(tmp_path)
+    folder = agent / "tasks" / "t1"
+    for name in ("review.md", "step-10.md", "step-2.md", "plan.md", "plan-review.md", "step-2-review.md", "decisions.md",
+                 "research.md", "notes.md", "plan.md.bak", "step-0.md", "step-１.md", "plan.md\n"):
+        (folder / name).write_text("x")
+    assert Docs(root, True, "a").names(1) == ["decisions", "research", "plan", "step-2", "step-10", "review"]
+
+
+def test_names_of_a_folder_that_is_not_a_task_number_is_refused(tmp_path):
+    docs = Docs(state(tmp_path), True, "a")
+    for task in (-1, "1/../2", 1.5):
+        with pytest.raises(Refused):
+            docs.names(task)  # type: ignore[arg-type]
