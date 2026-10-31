@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, NamedTuple
 
+from localharness.channels.base import CONTROL_CHARS_RE, INVISIBLE_CHARS_RE
 from localharness.config.models import ChildBudget
 from localharness.core.caps import Caps
 
@@ -297,7 +298,7 @@ def clear_turn(record: Record) -> None:
 def pointed(record: Record) -> str:
     if record.stage != "run":
         return POINTS[record.stage]
-    steps = sorted(int(k[1].removeprefix("step-")) for k in record.filed if k[0] == "plan.md" and k[1])
+    steps = _sections(record)
     if not steps:
         return "plan.md"
     pending = [n for n in steps if record.filed[("plan.md", f"step-{n}")].verdict not in ("pass", "accepted")]
@@ -402,13 +403,67 @@ def need(row: str, **fields: Any) -> Need:
     return Need(tuple(_fill(c, fields) for c in line.commands), _fill(line.state, fields), _fill(line.model, fields))
 
 
+_PASSED = ("pass", "accepted")
+_STEP_DOC = re.compile(r"step-([1-9][0-9]*)\.md")
+DOC_NAME = re.compile(r"(decisions|research|plan|review|reply|job|step-[1-9][0-9]*)")
+PLAN_KEY = ("plan.md", None)
+
+
+def _sections(record: Record) -> list[int]:
+    return sorted(int(k[1].removeprefix("step-")) for k in record.filed if k[0] == "plan.md" and k[1])
+
+
+def _executed(record: Record) -> set[int]:
+    return {int(m[1]) for k in record.filed if (m := _STEP_DOC.fullmatch(k[0]))}
+
+
+def _next_step(record: Record) -> int | None:
+    return next((n for n in _sections(record) if record.filed[("plan.md", f"step-{n}")].verdict not in _PASSED), None)
+
+
+def boundary_of(stage: str, record: Record | None) -> str:
+    if stage != "run":
+        return stage
+    rows = [record.filed.get(("plan.md", s)) for s in (None, *(f"step-{n}" for n in _sections(record)))] if record else []
+    return "task" if len(rows) > 1 and all(r and r.verdict in _PASSED for r in rows) else "step"
+
+
+def valid_question(q: object) -> bool:
+    return (isinstance(q, str) and 0 < len(q) <= Caps.LINE and not any(c in q for c in "\n\r\t")
+            and not CONTROL_CHARS_RE.search(q) and not INVISIBLE_CHARS_RE.search(q))
+
+
+def doc_key(name: str, record: Record) -> tuple[str, str | None] | None:
+    key = (f"{name}.md", None)
+    return key if DOC_NAME.fullmatch(name) and key in record.filed else None
+
+
 def precondition(boundary: str, record: Record | None, by: str, carried: str | None) -> Need | None:
     if record is None:
         return None if boundary == "new" and by == "person" and carried else need("no task")
     if record.stage == "done":
         return None
-    if boundary == "new" and by == "person" and carried is None and ("plan.md", None) in record.filed:
-        return need("open and not blocked", task=record.id)
+    filed = record.filed
+    if boundary == "new":
+        return need("open and not blocked", task=f"t{record.id}") if by == "person" and carried is None and PLAN_KEY in filed else None
+    if boundary in ("research", "plan"):
+        decisions = filed.get(("decisions.md", None))
+        if boundary == "research" and _executed(record):
+            return need("research closed", task=f"t{record.id}")
+        if decisions is None and by == "model":
+            return need("decisions unfiled")
+        if decisions and decisions.verdict == "blocked":
+            return need("decisions blocked")
+        if boundary == "research" and carried is not None and len(record.questions) >= Caps.QUESTIONS:
+            return need("research full")
+    if boundary in ("step", "task"):
+        plan = filed.get(PLAN_KEY)
+        if plan is None:
+            return need("run needs a plan")
+        if plan.verdict == "blocked":
+            return need("review blocked", task=f"t{record.id}") if record.stage == "task" else need("blocked", stage="plan", verb="plan", doc="plan")
+        if not _sections(record) or _executed(record) - set(_sections(record)):
+            return need("edited since filed", doc="plan.md")
     return None
 
 
@@ -418,13 +473,31 @@ def _file(record: Record, boundary: str, carried: str | None, limits: Limits) ->
                                         or can_revise(record, boundary, limits.revisions.get(boundary, 0)))
 
 
-def _panel(record: Record, boundary: str, carried: str | None, limits: Limits) -> bool:
-    row = record.filed.get(_row_key(boundary, None))
-    return bool(row and row.verdict == "unreviewed" and record.flags.get(boundary, True))
+def _explore(record: Record, boundary: str, carried: str | None, limits: Limits) -> bool:
+    return carried is not None
+
+
+def _execute(record: Record, boundary: str, carried: str | None, limits: Limits) -> int | None:
+    n = _next_step(record)
+    return n if n and (f"step-{n}.md", None) not in record.filed else None
+
+
+def _revise(record: Record, boundary: str, carried: str | None, limits: Limits) -> int | None:
+    n = _next_step(record)
+    return n if n and can_revise(record, "step", limits.revisions["step"], n) else None
+
+
+def _panel(record: Record, boundary: str, carried: str | None, limits: Limits) -> int | bool | None:
+    n = _next_step(record) if boundary == "step" else None
+    row = record.filed.get(_row_key(boundary, n))
+    return (n or True) if row and row.verdict == "unreviewed" and record.flags.get(boundary, True) else None
 
 
 PREDICATES: dict[str, Callable[[Record, str, str | None, Limits], int | bool | None]] = {
     "file": _file,
+    "explore": _explore,
+    "execute": _execute,
+    "revise": _revise,
     "panel": _panel,
 }
 
@@ -437,16 +510,38 @@ def _closed(record: Record) -> Need | None:
     return None
 
 
+def _decides(record: Record, boundary: str, limits: Limits, n: int | None = None) -> Need | None:
+    row, limit = record.filed.get(_row_key(boundary, n)), limits.revisions.get(boundary, 0)
+    if not (limit and row and row.verdict == "blocked") or can_revise(record, boundary, limit, n):
+        return None
+    counts = counts_of(record, boundary, n)
+    why = "revisions used up" if counts and counts.used >= limit else "blockers did not fall"
+    return need("person decides", doc=f"step-{n}.md" if n else DOCS[boundary], why=why)
+
+
 def next_unit(record: Record, boundary: str, carried: str | None = None, limits: Limits | None = None) -> Unit | Need | None:
     if closed := _closed(record):
         return closed
     limits = limits or limited()[0]
+    if boundary in ("step", "task"):
+        boundary, plan = boundary_of("run", record), record.filed.get(PLAN_KEY)
+        if boundary == "task":
+            return Unit("task", "panel")
+        if plan and plan.verdict == "unreviewed":
+            return Unit("plan", "panel")
+        if plan and plan.verdict == "blocked":
+            return _decides(record, "plan", limits) or Unit("plan", "file")
+    n = _next_step(record) if boundary == "step" else None
+    if decides := _decides(record, boundary, limits, n):
+        return decides
     for kind, predicate in PREDICATES.items():
         if kind in STAGES[boundary].units and (hit := predicate(record, boundary, carried, limits)):
             return Unit(boundary, kind, None if hit is True else hit)
+    row = record.filed.get(_row_key(boundary, n))
+    if boundary == "research":
+        return need("nothing to review")
     if carried is not None:
         return need("nothing to revise")
-    row = record.filed.get(_row_key(boundary, None))
     return need("unreviewed", stage=boundary, verb=boundary) if row and row.verdict == "unreviewed" else None
 
 

@@ -14,17 +14,21 @@ from localharness.orchestrator.task_flow.record import (
     LIMITS,
     LINES,
     REPLY_RESERVE_MINUTES,
+    PREDICATES,
     SENSED,
     STAGES,
     TOOL_STAGES,
+    DOC_NAME,
     Need,
     Row,
     Unit,
+    boundary_of,
     can_revise,
     clear_turn,
     consume_flag,
     continue_revising,
     counts_of,
+    doc_key,
     file_doc,
     limited,
     need,
@@ -43,6 +47,7 @@ from localharness.orchestrator.task_flow.record import (
     set_verdict,
     stop_step,
     unit_minutes,
+    valid_question,
 )
 
 
@@ -575,3 +580,362 @@ def test_next_line_after_a_new_pass_names_the_plan_file_unit():
     set_verdict(record, DECISIONS, "pass")
     note_run(record, "new", 0)
     assert next_line(record, "new") == "next: plan \u00b7 file"
+
+
+PLAN_ROW = ("plan.md", None)
+RESEARCH = ("research.md", None)
+LIMIT = {"new": 1, "plan": 3, "step": 1}
+
+
+def doc(record, boundary, key, verdict, blockers=None, used=0, previous=None):
+    file_doc(record, boundary, key, "d")
+    set_verdict(record, key, verdict)
+    counts = counts_of(record, boundary)
+    if blockers is not None and counts is not None:
+        counts.blockers, counts.used, counts.previous = blockers, used, previous
+
+
+def task(decisions=None, plan=None, research=None, steps=(), executed=(), stage="new"):
+    record = open_task(3, "fix login", 1)
+    record.stage = stage
+    for boundary, key, verdict in (("new", DECISIONS, decisions), ("research", RESEARCH, research), ("plan", PLAN_ROW, plan)):
+        if verdict:
+            doc(record, boundary, key, verdict)
+    for n, verdict in enumerate(steps, 1):
+        record.filed[("plan.md", f"step-{n}")] = Row(f"s{n}", verdict, Counts(blockers=2) if verdict == "blocked" else Counts())
+    for n in executed:
+        record.filed[(f"step-{n}.md", None)] = Row("x")
+    return record
+
+
+def reasons(*results):
+    return {r.reason for r in results if isinstance(r, Need)}
+
+
+def test_new_by_the_person_without_an_objective_is_admitted_until_a_plan_row_exists():
+    assert precondition("new", task(decisions="blocked"), "person", None) is None
+    refused = precondition("new", task(decisions="pass", plan="unreviewed"), "person", None)
+    assert refused.reason == "open and not blocked" and "new <objective> (closes t3)" in refused.commands
+
+
+def test_new_with_a_doc_on_a_blocked_row_that_can_revise_files():
+    record = task()
+    doc(record, "new", DECISIONS, "blocked", blockers=2)
+    assert next_unit(record, "new", "doc") == Unit("new", "file", None)
+
+
+@pytest.mark.parametrize(("used", "previous", "why"), [(1, None, "revisions used up"), (0, 2, "blockers did not fall")])
+@pytest.mark.parametrize("carried", ["doc", None])
+def test_new_past_its_limit_is_person_decides_with_or_without_a_doc(used, previous, why, carried):
+    record = task()
+    doc(record, "new", DECISIONS, "blocked", blockers=2, used=used, previous=previous)
+    refused = next_unit(record, "new", carried)
+    assert refused.reason == "person decides"
+    assert refused.model == f"decisions.md is blocked, {why}; the person decides"
+
+
+def test_new_doc_less_on_a_pass_row_is_none_and_a_doc_there_is_nothing_to_revise():
+    record = task(decisions="pass")
+    assert next_unit(record, "new") is None
+    assert next_unit(record, "new", "doc").reason == "nothing to revise"
+
+
+def test_new_flag_admits_a_refile_of_a_pass_row_and_a_panel_of_an_unreviewed_one():
+    record = task(decisions="pass")
+    record.flags["new"] = True
+    assert next_unit(record, "new", "doc") == Unit("new", "file", None)
+    assert next_unit(record, "new") is None
+    unreviewed = task(decisions="unreviewed")
+    unreviewed.flags["new"] = True
+    assert next_unit(unreviewed, "new") == Unit("new", "panel", None)
+
+
+@pytest.mark.parametrize("decisions", ["pass", "unreviewed", "accepted"])
+def test_research_is_admitted_with_decisions_filed_and_not_blocked(decisions):
+    assert precondition("research", task(decisions=decisions), "model", "where is login?") is None
+
+
+def test_research_is_refused_while_decisions_are_blocked():
+    assert precondition("research", task(decisions="blocked"), "person", None).reason == "decisions blocked"
+
+
+def test_research_decisions_unfiled_is_the_models_and_the_person_is_admitted():
+    refused = precondition("research", task(), "model", "where is login?")
+    assert refused.reason == "decisions unfiled" and refused.model == "the interview is open; ask, or file stage=new first"
+    assert precondition("research", task(), "person", None) is None
+
+
+@pytest.mark.parametrize("research", [None, "pass", "blocked", "unreviewed"])
+def test_research_question_is_an_explore_even_on_a_blocked_row(research):
+    assert next_unit(task(decisions="pass", research=research), "research", "where is login?") == Unit("research", "explore", None)
+
+
+def test_research_full_at_the_seventh_question_and_not_at_the_sixth():
+    record = task(decisions="pass")
+    record.questions = ["q"] * (Caps.QUESTIONS - 1)
+    assert precondition("research", record, "model", "q") is None
+    record.questions.append("q")
+    full = precondition("research", record, "model", "q")
+    assert full.reason == "research full" and str(Caps.QUESTIONS) in full.model
+    assert precondition("research", record, "model", None) is None
+
+
+@pytest.mark.parametrize("carried", [None, "where is login?"])
+def test_research_is_closed_once_a_step_has_executed(carried):
+    record = task(decisions="pass", plan="pass", steps=("pass",), executed=(1,), stage="run")
+    closed = precondition("research", record, "model", carried)
+    assert closed.reason == "research closed" and "new <objective> (closes t3)" in closed.commands
+
+
+def test_research_is_open_before_a_step_executes_even_with_a_plan_filed():
+    assert precondition("research", task(decisions="pass", plan="pass", steps=("unreviewed",), stage="plan"), "model", "q") is None
+
+
+def test_research_without_a_question_panels_an_unreviewed_answer():
+    assert next_unit(task(decisions="pass", research="unreviewed"), "research") == Unit("research", "panel", None)
+
+
+@pytest.mark.parametrize("research", [None, "pass", "blocked", "accepted"])
+def test_research_without_a_question_and_no_unreviewed_answer_is_nothing_to_review(research):
+    refused = next_unit(task(decisions="pass", research=research), "research")
+    assert refused.reason == "nothing to review" and refused.model == "no unreviewed answer; next: plan"
+
+
+def test_research_blocked_has_no_person_decides_and_plan_proceeds():
+    record = task(decisions="pass", research="blocked")
+    assert next_unit(record, "research").reason == "nothing to review"
+    assert precondition("plan", record, "model", "doc") is None
+    assert next_unit(record, "plan", "doc") == Unit("plan", "file", None)
+
+
+def test_plan_decisions_unfiled_is_the_models_and_blocked_is_everyones():
+    assert precondition("plan", task(), "model", "doc").reason == "decisions unfiled"
+    assert precondition("plan", task(), "person", None) is None
+    for by in ("person", "model"):
+        refused = precondition("plan", task(decisions="blocked"), by, "doc")
+        assert refused.reason == "decisions blocked" and refused.model == "decisions.md is blocked; the person reopens or accepts it"
+
+
+def test_plan_doc_with_no_plan_filed_is_a_file_unit():
+    assert next_unit(task(decisions="pass"), "plan", "doc") == Unit("plan", "file", None)
+
+
+def test_plan_doc_less_on_a_blocked_plan_is_none_while_it_can_revise():
+    record = task(decisions="pass")
+    doc(record, "plan", PLAN_ROW, "blocked", blockers=2)
+    assert next_unit(record, "plan") is None
+    assert next_unit(record, "plan", "doc") == Unit("plan", "file", None)
+
+
+def test_plan_blocked_past_its_limit_is_person_decides_for_the_plan():
+    record = task(decisions="pass")
+    doc(record, "plan", PLAN_ROW, "blocked", blockers=2, used=3)
+    assert next_unit(record, "plan").model == "plan.md is blocked, revisions used up; the person decides"
+
+
+def test_plan_unreviewed_panels_only_with_the_flag_else_the_unreviewed_need():
+    record = task(decisions="pass", plan="unreviewed")
+    refused = next_unit(record, "plan")
+    assert refused.reason == "plan unreviewed" and refused.model == "panel unfinished; the person re-runs it"
+    record.flags["plan"] = True
+    assert next_unit(record, "plan") == Unit("plan", "panel", None)
+
+
+def test_plan_doc_on_a_pass_plan_refiles_with_the_flag_and_is_nothing_to_revise_without():
+    record = task(decisions="pass", plan="pass", steps=("pass",))
+    assert next_unit(record, "plan", "doc").reason == "nothing to revise"
+    record.flags["plan"] = True
+    assert next_unit(record, "plan", "doc") == Unit("plan", "file", None)
+
+
+def test_the_new_flag_does_not_open_a_plan_refile():
+    record = task(decisions="pass", plan="pass")
+    record.flags["new"] = True
+    assert next_unit(record, "plan", "doc").reason == "nothing to revise"
+
+
+def test_step_with_no_plan_row_is_run_needs_a_plan():
+    for boundary in ("step", "task"):
+        refused = precondition(boundary, task(decisions="pass"), "model", None)
+        assert refused.reason == "run needs a plan"
+        assert refused.model == "run needs a passed or accepted plan; call stage=plan"
+
+
+def test_step_refused_on_a_blocked_plan_as_review_blocked_at_task_else_plan_blocked():
+    record = task(decisions="pass", steps=("pass",))
+    doc(record, "plan", PLAN_ROW, "blocked", blockers=2)
+    record.stage = "task"
+    assert precondition("step", record, "model", None).model.startswith("the task review blocked the plan")
+    record.stage = "plan"
+    assert precondition("step", record, "model", None).reason == "plan blocked"
+
+
+@pytest.mark.parametrize("plan", ["pass", "accepted", "unreviewed"])
+def test_step_is_admitted_on_a_plan_pass_accepted_or_unreviewed(plan):
+    assert precondition("step", task(decisions="pass", plan=plan, steps=("unreviewed",)), "model", None) is None
+
+
+def test_step_with_a_plan_row_and_no_section_row_is_the_mismatch_need():
+    refused = precondition("step", task(decisions="pass", plan="pass"), "model", None)
+    assert refused.reason == "plan.md edited since filed"
+    assert refused.model == "the doc changed after it was filed; the person accepts it"
+
+
+def test_step_with_a_step_doc_but_no_section_row_is_the_mismatch_need():
+    record = task(decisions="pass", plan="pass", steps=("pass",), executed=(1, 2), stage="run")
+    assert precondition("step", record, "model", None).reason == "plan.md edited since filed"
+
+
+def test_step_plan_unreviewed_runs_the_plan_panel_alone_first():
+    record = task(decisions="pass", plan="unreviewed", steps=("unreviewed", "unreviewed"))
+    assert next_unit(record, "step") == Unit("plan", "panel", None)
+
+
+def test_step_runs_the_first_section_in_file_order_not_the_order_rows_were_created():
+    record = open_task(3, "fix login", 1)
+    doc(record, "plan", PLAN_ROW, "pass")
+    for n in (3, 1, 2):
+        record.filed[("plan.md", f"step-{n}")] = Row(f"s{n}", "unreviewed", Counts())
+    assert next_unit(record, "step") == Unit("step", "execute", 1)
+
+
+def test_step_skips_pass_and_accepted_sections_to_the_first_not_passed():
+    record = task(decisions="pass", plan="pass", steps=("pass", "accepted", "unreviewed", "unreviewed"), executed=(1, 2))
+    assert next_unit(record, "step") == Unit("step", "execute", 3)
+
+
+def test_step_with_a_step_doc_and_an_unreviewed_row_is_a_panel():
+    record = task(decisions="pass", plan="pass", steps=("pass", "unreviewed"), executed=(1, 2), stage="run")
+    assert next_unit(record, "step") == Unit("step", "panel", 2)
+
+
+def test_step_blocked_with_room_is_a_revise_and_past_the_limit_person_decides():
+    record = task(decisions="pass", plan="pass", steps=("pass", "blocked"), executed=(1, 2), stage="run")
+    assert next_unit(record, "step") == Unit("step", "revise", 2)
+    record.filed[("plan.md", "step-2")].counts.used = 1
+    refused = next_unit(record, "step")
+    assert refused.reason == "person decides" and refused.model == "step-2.md is blocked, revisions used up; the person decides"
+
+
+def test_step_a_blocked_row_with_no_step_doc_executes_again():
+    record = task(decisions="pass", plan="pass", steps=("blocked",), executed=(), stage="run")
+    assert next_unit(record, "step") == Unit("step", "execute", 1)
+
+
+def test_the_run_stage_is_the_task_boundary_once_every_section_and_the_plan_row_pass():
+    record = task(decisions="pass", plan="pass", steps=("pass", "accepted"), executed=(1, 2), stage="run")
+    assert boundary_of("run", record) == "task"
+    assert next_unit(record, "task") == Unit("task", "panel", None)
+    assert next_unit(record, "step") == Unit("task", "panel", None)
+
+
+@pytest.mark.parametrize("record", [
+    task(decisions="pass", plan="pass", steps=("pass", "unreviewed")),
+    task(decisions="pass", plan="unreviewed", steps=("pass",)),
+    task(decisions="pass", plan="pass"),
+    task(decisions="pass"),
+    None,
+])
+def test_the_run_stage_is_the_step_boundary_otherwise(record):
+    assert boundary_of("run", record) == "step"
+
+
+@pytest.mark.parametrize("stage", ["new", "research", "plan"])
+def test_boundary_of_the_other_tool_stages_is_themselves(stage):
+    assert boundary_of(stage, None) == stage
+
+
+@pytest.mark.parametrize("boundary", ["new", "research", "plan", "step", "task"])
+def test_done_answers_every_boundary_with_the_done_need(boundary):
+    record = task(decisions="pass", plan="accepted", steps=("pass",), executed=(1,), stage="done")
+    refused = next_unit(record, boundary, "x")
+    assert refused.reason == "done" and refused.model == "the task is done; the person starts the next"
+    assert precondition(boundary, record, "model", "x") is None
+
+
+def test_done_still_admits_the_persons_next_objective_and_answers_a_bare_new_with_the_done_need():
+    record = task(decisions="pass", plan="accepted", steps=("pass",), stage="done")
+    assert precondition("new", record, "person", "next objective") is None
+    assert precondition("new", record, "person", None) is None
+    assert next_unit(record, "new").reason == "done"
+
+
+@pytest.mark.parametrize("q", [None, 3, "", "x" * (Caps.LINE + 1), "a\nb", "a\rb", "a\tb", "a\u202eb", "a\u200bb", "a\x1bb", "a\x9bb"])
+def test_valid_question_refuses(q):
+    assert not valid_question(q)
+
+
+@pytest.mark.parametrize("q", ["where is the login handler?", "x" * Caps.LINE, "\u00e9t\u00e9"])
+def test_valid_question_accepts(q):
+    assert valid_question(q)
+
+
+def test_doc_key_maps_a_name_to_its_filed_key_when_the_row_exists():
+    record = task(decisions="pass", plan="pass", steps=("pass", "pass"), executed=(1, 2), stage="run")
+    assert doc_key("decisions", record) == DECISIONS
+    assert doc_key("plan", record) == PLAN_ROW
+    assert doc_key("step-2", record) == ("step-2.md", None)
+
+
+@pytest.mark.parametrize("name", ["step-0", "step-\uff12", "../plan", "plan.md", "plan/x", "plan\n", "step-3", "research", "reply", "job", "Plan"])
+def test_doc_key_refuses_a_bad_name_or_one_with_no_row(name):
+    record = task(decisions="pass", plan="pass", steps=("pass", "pass"), executed=(1, 2), stage="run")
+    assert doc_key(name, record) is None
+
+
+def test_doc_name_is_ascii_digits_only():
+    assert DOC_NAME.fullmatch("step-12") and not DOC_NAME.fullmatch("step-\u0661")
+
+
+def test_predicates_are_tried_in_the_fixed_order():
+    assert list(PREDICATES) == ["file", "explore", "execute", "revise", "panel"]
+
+
+def matrix_states():
+    return [
+        task(), task(decisions="blocked"), task(decisions="pass"), task(decisions="unreviewed"),
+        task(decisions="pass", research="unreviewed"), task(decisions="pass", plan="blocked"),
+        task(decisions="pass", plan="unreviewed", steps=("unreviewed",)),
+        task(decisions="pass", plan="pass", steps=("pass", "unreviewed"), executed=(1, 2), stage="run"),
+        task(decisions="pass", plan="pass", steps=("blocked",), executed=(1,), stage="run"),
+        task(decisions="pass", plan="pass"), task(decisions="pass", plan="pass", steps=("pass",), executed=(1,), stage="done"),
+    ]
+
+
+def test_every_need_is_owned_by_one_of_the_two_functions_and_the_sets_are_disjoint():
+    owned_by_precondition = {"no task", "open and not blocked", "decisions unfiled", "decisions blocked", "research closed",
+                             "research full", "run needs a plan", "review blocked", "plan blocked",
+                             "plan.md edited since filed"}
+    owned_by_next_unit = {"done", "halted", "person decides", "nothing to revise", "plan unreviewed", "new unreviewed",
+                          "nothing to review"}
+    assert not owned_by_precondition & owned_by_next_unit
+    full = task(decisions="pass")
+    full.questions = ["q"] * Caps.QUESTIONS
+    halted = task(decisions="pass")
+    halted.halted = "stopped"
+    pre, nxt = set(), set()
+    for record in (*matrix_states(), full, halted):
+        for boundary in ("new", "research", "plan", "step", "task"):
+            for by in ("person", "model"):
+                for carried in (None, "x"):
+                    pre |= reasons(precondition(boundary, record, by, carried))
+                    nxt |= reasons(next_unit(record, boundary, carried))
+    pre |= reasons(precondition("new", None, "model", None))
+    for flagged in (True, False):
+        record = task(decisions="pass", plan="blocked")
+        record.stage = "task" if flagged else "plan"
+        pre |= reasons(precondition("step", record, "model", None))
+    assert pre == owned_by_precondition and nxt == owned_by_next_unit
+
+
+def test_precondition_reads_no_verdict_count():
+    def answers(record):
+        return [precondition(b, record, by, c) for b in ("new", "research", "plan", "step", "task")
+                for by in ("person", "model") for c in (None, "x")]
+
+    for record in matrix_states():
+        counted = answers(record)
+        for row in record.filed.values():
+            row.counts = None
+        record.counts = {}
+        assert answers(record) == counted
