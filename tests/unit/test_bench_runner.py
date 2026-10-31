@@ -1471,7 +1471,7 @@ async def test_task_plan_two_steps_removes_the_state_dir_on_a_run_and_on_an_erro
 
 
 @pytest.mark.asyncio
-async def test_task_prompt_runs_one_request_turn_unless_the_first_line_is_a_task_verb():
+async def test_task_prompt_runs_one_request_turn_unless_every_line_is_a_task_verb():
     from types import SimpleNamespace
     from localharness.bench.runner import _run_prompt
 
@@ -1483,6 +1483,9 @@ async def test_task_prompt_runs_one_request_turn_unless_the_first_line_is_a_task
     loop = SimpleNamespace(_flow=object(), turn=0, run_turn=run_turn)
     await _run_prompt(loop, "Hello\n/task plan", None)
     assert turns == [{"task": "Hello\n/task plan", "on_token": None}]
+    turns.clear()
+    await _run_prompt(loop, "/task new fix it\nAdd the test", None)
+    assert turns == [{"task": "/task new fix it\nAdd the test", "on_token": None}]
 
 
 def test_task_docs_missing_counts_every_doc_when_no_task_was_opened():
