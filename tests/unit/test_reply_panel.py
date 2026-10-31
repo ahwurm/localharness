@@ -474,6 +474,17 @@ async def test_a_cancel_the_person_did_not_make_during_a_critic_cancels_the_turn
     assert [a.content for a in tool_less(bus)] == ["Hello there."]
 
 
+async def test_a_stale_person_stop_does_not_make_the_next_turns_seam_swallow_a_bare_cancel(bus):
+    gate = Gate()
+    loop, _ = gated_loop(bus, gate)
+    loop._person_stop = True
+    task = asyncio.create_task(loop.run_turn("hello"))
+    await gate.started.wait()
+    task.cancel()
+    await asyncio.wait({task})
+    assert task.cancelled() and not events(bus, TaskComplete)
+
+
 async def test_a_timeout_during_a_critic_raises_timeout(bus):
     gate = Gate()
     loop, _ = gated_loop(bus, gate)
