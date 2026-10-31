@@ -948,6 +948,9 @@ def test_denylist_bites():
     assert check_denylist("SECURITY.md", "Set `org.memory_enabled` to turn memory off.\n")
     assert check_denylist("README.md", "SETUP-07 says so.\n")
     assert check_denylist("README.md", "SEAM-03 says so.\n")
+    for name in ("README.md", "CHANGELOG.md"):
+        for text in ("TASK-01 says", "REL-02 says", "FLOW-01", "PANEL-02", "threat T-46-03"):
+            assert check_denylist(name, text + "\n"), (name, text)
     assert check_denylist("CHANGELOG.md", "- Closes T-44-19.\n")
     assert check_denylist("README.md", "SEC-04 says so.\n")
     assert check_denylist("README.md", "as plan 53-02 did\n")
