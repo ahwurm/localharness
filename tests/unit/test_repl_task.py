@@ -1597,3 +1597,26 @@ async def test_repl_clear_while_a_turn_runs_pauses_nothing(tmp_path):
     assert channel.sent == ["A turn is running; send /clear when it ends."] and channel.notices == []
     assert flow.record.paused is False
     await end(repl)
+
+
+async def test_repl_nudge_from_channel_prints_heard_and_the_queued_hook_prints_what_waits(tmp_path):
+    flow = await planned_flow(tmp_path)
+    repl, channel, agent = flow_repl(flow)
+    repl._turn_task = asyncio.ensure_future(asyncio.sleep(30))
+    assert await repl._nudge_from_channel("try the cache first") and agent.nudges == ["try the cache first"]
+    repl._queued_from_channel("also log it")
+    repl._queued_from_channel("/task run")
+    await asyncio.sleep(0.01)
+    assert channel.notices == [verbs.render("heard", BOX, task="t1"), verbs.render("queued phone", BOX, task="t1"),
+                               verbs.render("queued slash", BOX, task="t1")]
+    repl._turn_task.cancel()
+
+
+async def test_repl_cancel_from_channel_is_the_persons_stop_so_the_loop_survives_it():
+    repl, channel, agent = flow_repl(None)
+    repl._turn_task = asyncio.ensure_future(asyncio.sleep(30))
+    waiting = asyncio.ensure_future(repl._await_turn_with_sigint(repl._turn_task))
+    await asyncio.sleep(0)
+    assert await repl._cancel_from_channel() is True
+    await waiting
+    assert channel.sent == ["Turn cancelled."] and repl._cancelled_by_user is False

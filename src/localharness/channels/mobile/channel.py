@@ -34,7 +34,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 import structlog
 
-from localharness.channels.base import ChannelAdapter, _call_receipt, sanitize_for_display
+from localharness.channels.base import ChannelAdapter, _call_receipt, reply_line, sanitize_for_display
 from localharness.channels.errors import NotInteractiveError
 from localharness.core.bus import EventBus
 from localharness.core.content import image_label
@@ -286,6 +286,7 @@ class MobileChannel(ChannelAdapter):
     _pending_resolver: Optional[Callable[[str, int], Awaitable[None]]] = None
     _nudge_resolver: Optional[Callable[[str, str], Awaitable[bool]]] = None
     _cancel_resolver: Optional[Callable[[], Awaitable[bool]]] = None
+    _queued_resolver: Optional[Callable[[str], None]] = None
     _model_list_resolver: Optional[Callable[[], Awaitable[dict]]] = None
 
     def __init__(self, bus: EventBus, config: dict[str, Any]) -> None:
@@ -469,7 +470,7 @@ class MobileChannel(ChannelAdapter):
         # nudge and approve taps to a REPL that is gone — and keep that REPL, its loop, the
         # registry, the memory tools and the embedding model alive with it (found by measuring
         # the sleeping server, 2026-10-04).
-        self._pending_resolver = self._nudge_resolver = self._cancel_resolver = None
+        self._pending_resolver = self._nudge_resolver = self._cancel_resolver = self._queued_resolver = None
         self._model_list_resolver = None
         self._memory_slot = MemorySlot()  # closes with the session — a dead store must not answer
         self._artifact_roots = {}  # the next session's plugins decide what is served
@@ -758,6 +759,8 @@ class MobileChannel(ChannelAdapter):
         elif isinstance(event, TaskComplete):
             if root:
                 self._reply_verdict = (event.verdict, event.finding)
+                if line := reply_line(event):
+                    self.push(Notice(session_id=self.session_id, text=line, style="system.info"))
         elif isinstance(event, PermissionStaged):
             # NOT gated on `root`: a subagent's parked call needs a human exactly as much as the
             # orchestrator's does, and 45% of real sessions delegate.
@@ -985,6 +988,8 @@ class MobileChannel(ChannelAdapter):
         """
         self._sleep_event.clear()  # a person spoke: whatever idle watch was about to sleep, this comes first
         self._inbound.put_nowait((text, list(parts or [])))
+        if self._turn_running and self._queued_resolver is not None:
+            self._queued_resolver(text)
 
     def request_sleep(self, *, now: bool = False) -> None:
         """End the session at its next idle moment, keeping the thread: the REPL's `read_input` reads

@@ -557,6 +557,8 @@ class OrchestratorREPL:
             self._channel._nudge_resolver = self._nudge_from_channel
         if getattr(self._channel, "_cancel_resolver", "absent") is None:
             self._channel._cancel_resolver = self._cancel_from_channel
+        if getattr(self._channel, "_queued_resolver", "absent") is None:
+            self._channel._queued_resolver = self._queued_from_channel
         if self._switch is not None and getattr(self._channel, "_model_list_resolver", "absent") is None:
             self._channel._model_list_resolver = lambda: self._switch.model_list(self._plan_model_entries, self._active_heavy)
 
@@ -571,7 +573,12 @@ class OrchestratorREPL:
         if not clean or not self._turn_running():
             return False
         self._agent.push_user_nudge(clean, "steering")
+        await self._mid_turn("heard")
         return True
+
+    def _queued_from_channel(self, text: str) -> None:
+        """A channel's message queued behind the running turn: says what waits, without holding the channel."""
+        asyncio.ensure_future(self._mid_turn("queued slash" if text.startswith("/") else "queued phone"))
 
     async def _cancel_from_channel(self) -> bool:
         """Cancel the in-flight turn from a channel's own surface.
@@ -583,6 +590,7 @@ class OrchestratorREPL:
         task = self._turn_task
         if task is None or task.done():
             return False
+        self._cancelled_by_user = True
         self._agent.stop_turn(task)
         return True
 
@@ -1140,14 +1148,14 @@ class OrchestratorREPL:
             try:
                 await turn_task
             except asyncio.CancelledError:
-                if not cancelled():
+                if not (cancelled() or self._cancelled_by_user):
                     turn_task.cancel()
                     raise
                 if not self._stop_row:
                     await self._channel.send_message(
                         "Turn cancelled.", metadata={"style": "system.info"}
                     )
-                self._stop_row = False
+                self._stop_row = self._cancelled_by_user = False
 
     async def _handle_reasoning_cmd(self, arg: str) -> None:
         """/reasoning [on|off] — toggle the live reasoning stream on a channel that has one.

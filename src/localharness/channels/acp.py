@@ -69,6 +69,7 @@ from localharness.channels.base import (
     ChannelAdapter,
     _call_receipt,
     provider_lost_line,
+    reply_line,
     sanitize_for_display,
 )
 from localharness.channels.errors import NotInteractiveError
@@ -1260,9 +1261,12 @@ class AcpChannel(ChannelAdapter):
         actually reached the user this turn. Child turns stay internal, as everywhere else
         (`channels/base.on_task_complete`): a subagent's summary belongs to its parent.
         """
-        if getattr(event, "parent_id", None) or self._streamed_this_turn:
+        if getattr(event, "parent_id", None):
             return
-        await self.send_message(event.summary)
+        if not self._streamed_this_turn:
+            await self.send_message(event.summary)
+        if line := reply_line(event):
+            await self.send_notice(line)
 
     async def send_wrapup_reply(self, event: TurnFailed, text: str | None = None) -> None:
         """A stuck or budget-stopped turn's wrap-up, on the same terms as `on_task_complete`: only
