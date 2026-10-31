@@ -1,4 +1,4 @@
-"""The task flow's renderer and the person's verbs: a LINES row printed through notice(), and /task new, research, plan, run, show, accept, clear and the status."""
+"""The task flow's renderer and the person's verbs: a LINES row printed through notice(), and /task new, research, plan, run, show, accept, stop, clear and the status."""
 from __future__ import annotations
 
 import re
@@ -381,6 +381,67 @@ def _bare(flow: Any, levers: Levers) -> tuple[str, ...]:
     return (head, row, *_unadopted(flow, levers))
 
 
+def _next(flow: Any) -> str:
+    """The command the open task's status row leads with, without its gloss."""
+    key, fields = _status(flow)
+    command = _put(LINES[key].commands[0], fields) if LINES[key].commands else "/task show"
+    return re.sub(r"\s*\([^)]*\)$", "", command)
+
+
+def pause(flow: Any, levers: Levers) -> str:
+    """Pauses an open task that is not done and returns its `paused` row, else empty."""
+    record = flow.record
+    if record is None or record.stage == "done":
+        return ""
+    record.paused = True
+    return render("paused", levers, task=_label(record), next=_next(flow))
+
+
+def _stop(flow: Any, levers: Levers) -> tuple[str, ...]:
+    """Halts the open task before anything else runs: the next `task` call is refused, the running unit finishes."""
+    record = flow.record
+    if record is None or record.stage == "done":
+        return _bare(flow, levers)
+    record.halted = "stopped"
+    key, fields = ("stopping", {"bound": flow.unit[1]}) if flow.busy else ("stopping idle", {})
+    return (render(key, levers, task=_label(record), **fields),)
+
+
+_EXECUTING = re.compile(r"step ([1-9][0-9]*)/([1-9][0-9]*) executing")
+_VERB = {boundary: verb for verb, boundary in BOUNDARIES.items()}
+
+
+def cancel_row(flow: Any, levers: Levers) -> str:
+    """The `step stopped` row for a cancel that came while an executor ran, else empty."""
+    hit = flow.busy and flow.unit and _EXECUTING.fullmatch(flow.unit[0])
+    return render("step stopped", levers, task=_label(flow.record), step=(int(hit[1]), int(hit[2])), bound=flow.unit[1]) if hit else ""
+
+
+def turn_end(flow: Any, levers: Levers, *, cancelled: bool) -> tuple[str, ...]:
+    """Reads what the turn left, clears it, and returns its one end line: stopped, halted, not started or the status."""
+    record, armed, called, unit = flow.record, flow.armed, set(flow.called), flow.unit
+    stopped = cancel_row(flow, levers) if cancelled else ""
+    halted = record.halted if record else None
+    flow.end_turn()
+    if record is None:
+        return ()
+    task = _label(record)
+    if stopped:
+        return (stopped,)
+    if halted and record.stage != "done":
+        fields = {"next": _next(flow), "unit": unit[0] if unit else "this turn", "n": printed_bound(flow.limits.flow_cap_minutes)}
+        return (render("halted" if halted == "stopped" else "halted cap", levers, task=task, **fields),)
+    if armed and not cancelled and not called & ({"step", "task"} if armed == "step" else {armed}):
+        return (render("not started", levers, task=task, stage=_VERB[armed], verb=_VERB[armed]),)
+    return (status_row(flow, levers),) if called else ()
+
+
+def mid_turn(flow: Any, levers: Levers, route: str) -> str:
+    """The `heard` or `queued` row for a message typed while a turn runs, empty with no open task."""
+    record = flow.record
+    return render(route, levers, task=_label(record)) if record and record.stage != "done" else ""
+
+
 def _clear(flow: Any) -> tuple[str, ...]:
     """Deletes the open task's folder and an old `task.json`, and says what went."""
     record, docs, gone = flow.record, flow.docs, []
@@ -470,7 +531,7 @@ def task_command(flow: Any, args: str, *, turn: int, running: bool, levers: Leve
     parts = args.split(maxsplit=1) or [""]
     verb, arg = parts[0].lower(), "".join(parts[1:]).strip()
     boundary, record = BOUNDARIES.get(verb), flow.record
-    if boundary is None and verb not in ("show", "accept", "", "clear"):
+    if boundary is None and verb not in ("show", "accept", "", "clear", "stop"):
         return Reply((USAGE,))
     try:
         if verb == "show":
@@ -481,6 +542,8 @@ def task_command(flow: Any, args: str, *, turn: int, running: bool, levers: Leve
             return Reply(_bare(flow, levers))
         if verb == "clear":
             return Reply(_clear(flow))
+        if verb == "stop":
+            return Reply(_stop(flow, levers) if running else _bare(flow, levers))
         if verb == "new" and arg:
             return _open(flow, arg, turn, levers)
         if record and record.stage == "done":

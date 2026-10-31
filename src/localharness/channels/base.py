@@ -242,6 +242,18 @@ class ChannelAdapter(ABC):
     stop_word = ""
     """What the person says to stop a turn here; a reply panel's status text ends `<word> delivers it unchecked`."""
 
+    def levers(self) -> tuple[str, str]:
+        """The words a notice names for stopping after the running unit and for stopping now."""
+        return (f"{self.stop_word} (now)",) * 2
+
+    def has_status_row(self) -> bool:
+        """Does this channel show a live status row, so a notice's running lines need no printed twin?"""
+        return False
+
+    async def send_notice(self, line: str) -> None:
+        """Prints a finished `notice()` line; a channel that sanitises its messages overrides this to keep the mark."""
+        await self.send_message(line, metadata={"style": "system.info"})
+
     async def panel_started(self, line: str) -> None:
         """The one line announcing a reply panel; a channel whose row or frame shows the status text keeps this no-op."""
 
