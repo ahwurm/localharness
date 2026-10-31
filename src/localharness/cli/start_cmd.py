@@ -3560,7 +3560,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # when the connection closes, and the ordered teardown in `finally` runs unchanged.
             await acp_channel.serve(
                 bus=bus, agent_loop=agent_loop, gate=gate, tool_registry=tool_registry,
-                instructions=instructions_handle,
+                instructions=instructions_handle, task_flow=flow,
             )
             return
 

@@ -87,6 +87,7 @@ from localharness.core.events import (
     TaskComplete,
     TurnFailed,
 )
+from localharness.orchestrator.task_flow.verbs import render, running_now, task_command, turn_end
 
 log = logging.getLogger(__name__)
 
@@ -453,6 +454,14 @@ def _instructions_command(text: str) -> str | None:
     return parts[1] if len(parts) > 1 else ""
 
 
+def _task_command(text: str) -> str | None:
+    """A prompt that is a whole-message `/task` -> its argument as typed ("" when bare); anything else -> None."""
+    parts = (text or "").strip().split(maxsplit=1)
+    if not parts or parts[0].lower() != "/task":
+        return None
+    return parts[1] if len(parts) > 1 else ""
+
+
 class AcpChannel(ChannelAdapter):
     """localharness as an ACP agent, and as the channel that renders its session (PRD §4).
 
@@ -504,6 +513,7 @@ class AcpChannel(ChannelAdapter):
         self._gate: Any = None
         self._registry: Any = None
         self._pending_mode: Optional[str] = None
+        self._flow: Any = None
         self._instructions: Any = None
         """The project-instructions handle `start` passed to :meth:`serve` (None: no file here).
         `/instructions` acts on this and nothing else."""
@@ -763,10 +773,16 @@ class AcpChannel(ChannelAdapter):
                 await self.send_message(f"Not sent: {exc}")
                 return PromptResponse(stop_reason="end_turn")
 
-        self._streamed_this_turn = False
-        task = asyncio.create_task(
-            self._agent_loop.run_turn(task=text, on_token=self._on_token, images=images,
-                                      subtype="request" if verb else "typed"))
+        task_arg = _task_command(text)
+        if task_arg is not None:
+            if self._turn_running():
+                await self.send_notice(running_now(self._flow, self.levers()))
+                return PromptResponse(stop_reason="end_turn")
+            return await self._await_turn(asyncio.create_task(self._task_verb(task_arg, images)))
+        return await self._await_turn(
+            asyncio.create_task(self._ended(self._turn(text, "request" if verb else "typed", images))))
+
+    async def _await_turn(self, task: asyncio.Task) -> PromptResponse:
         self._turn_task = task
         try:
             # `asyncio.wait` rather than `await task`: a cancelled turn must be reported as
@@ -784,6 +800,39 @@ class AcpChannel(ChannelAdapter):
             log.exception("acp turn raised", exc_info=exc)
             await self.send_message(BRINGUP_FAILED.format(error=exc))
         return PromptResponse(stop_reason="end_turn")
+
+    async def _turn(self, text: str, subtype: str, images: Any = None) -> None:
+        self._streamed_this_turn = False
+        await self._agent_loop.run_turn(task=text, on_token=self._on_token, images=images, subtype=subtype)
+
+    async def _ended(self, body: Any) -> None:
+        """Runs a turn so its flags and halt are cleared and its one end line sent on a finish, a cancel and an error."""
+        cancelled = False
+        try:
+            await body
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            if self._flow is not None:
+                await asyncio.shield(self._notices(*turn_end(self._flow, self.levers(), cancelled=cancelled)))
+
+    async def _notices(self, *lines: str) -> None:
+        for line in filter(None, lines):
+            await self.send_notice(line)
+
+    async def _task_verb(self, argument: str, images: Any = None) -> None:
+        await self._ended(self._verb(argument, images))
+
+    async def _verb(self, argument: str, images: Any) -> None:
+        if self._flow is None:
+            await self._notices(render("no task", self.levers()))
+            return
+        reply = task_command(self._flow, argument, turn=getattr(self._agent_loop, "turn", 0) + 1,
+                             running=False, levers=self.levers())
+        await self._notices(*reply.lines)
+        if reply.turn is not None:
+            await self._turn(*reply.turn, images)
 
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
         """`session/cancel` — the same path SIGINT takes in the REPL (PRD §4). A notification,
@@ -862,7 +911,8 @@ class AcpChannel(ChannelAdapter):
             self._ready.set()
 
     async def serve(
-        self, *, bus: Any, agent_loop: Any, gate: Any, tool_registry: Any, instructions: Any = None
+        self, *, bus: Any, agent_loop: Any, gate: Any, tool_registry: Any, instructions: Any = None,
+        task_flow: Any = None,
     ) -> None:
         """Run this channel in place of the REPL (called by `start_cmd`'s acp branch).
 
@@ -880,6 +930,7 @@ class AcpChannel(ChannelAdapter):
         self._gate = gate
         self._registry = tool_registry
         self._instructions = instructions
+        self._flow = task_flow
         self._wire_editor_file_io(tool_registry)
         refused: Optional[str] = None
         if self._pending_mode is not None:

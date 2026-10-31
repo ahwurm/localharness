@@ -1459,3 +1459,192 @@ async def test_a_childs_tool_call_generation_does_not_reset_the_streamed_flag(tm
     await ch.on_action(_generation(True, parent_id="child"))
     await ch.on_task_complete(_complete("The answer is 42."))
     assert ch._conn.texts == ["The answer is 42."]
+
+
+# ------------------------------------------------------------------ the /task verbs and the reply line
+
+ACP_LEVERS = ("cancel (now)", "cancel (now)")
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("/task run", "run"), ("/task accept plan", "accept plan"), ("/task new add a cache", "new add a cache"),
+    ("/task", ""), ("/TASK run", "run"), ("/task new Fix Ü", "new Fix Ü"),
+    ("", None), ("   ", None), ("/taskrun", None), ("please /task run", None), ("what does /task do", None),
+])
+async def test_task_command_reads_a_whole_message_and_keeps_the_argument_as_typed(text, expected):
+    from localharness.channels.acp import _task_command
+
+    assert _task_command(text) == expected
+
+
+class TaskLoop:
+    turn = 0
+    _config = type("C", (), {"context": type("X", (), {"max_image_tokens": 1})()})()
+
+    def __init__(self, body=None):
+        self.calls, self.body = [], body
+
+    async def run_turn(self, task, on_token=None, images=None, subtype="request"):
+        self.calls.append((task, subtype))
+        if self.body:
+            await self.body(task)
+
+    def stop_turn(self, task):
+        task.cancel()
+
+
+def _task_channel(tmp_path, flow, body=None):
+    from tests.unit.test_instructions_channels import _prompt_channel
+
+    channel, conn = _prompt_channel(tmp_path, None)
+    channel._agent_loop, channel._flow = TaskLoop(body), flow
+    return channel, conn
+
+
+async def _planned_flow(tmp_path):
+    from tests.unit.test_task_flow_record import planned
+
+    flow, *_ = await planned(tmp_path)
+    flow.end_turn()
+    return flow
+
+
+def _words(text):
+    from tests.unit.test_instructions_channels import _block
+
+    return _block(text)
+
+
+async def test_task_verb_new_opens_t1_and_runs_the_objective_as_a_typed_turn(tmp_path):
+    from localharness.orchestrator.task_flow import verbs
+    from tests.unit.test_task_flow_record import make_flow
+
+    flow, *_ = make_flow(tmp_path)
+    channel, conn = _task_channel(tmp_path, flow)
+    response = await channel.prompt("sess", _words("/task new add a cache"))
+    assert response.stop_reason == "end_turn"
+    assert channel._agent_loop.calls == [("add a cache", "typed")]
+    assert flow.record.id == 1 and flow.record.objective == "add a cache"
+    assert conn.texts()[0].startswith("◆ t1 interview open")
+    assert len(conn.texts()) == 1
+
+
+async def test_task_verb_run_prints_the_armed_row_and_runs_the_run_sentence_as_a_request(tmp_path):
+    from localharness.orchestrator.task_flow import verbs
+
+    flow = await _planned_flow(tmp_path)
+    channel, conn = _task_channel(tmp_path, flow)
+    await channel.prompt("sess", _words("/task run"))
+    assert conn.texts()[0] == verbs.render("armed", ACP_LEVERS, task="t1", verb="run", n=verbs.cap_minutes(flow))
+    assert "cancel (now)" in conn.texts()[0]
+    assert channel._agent_loop.calls == [(verbs.SENTENCES["run"], "request")]
+    assert flow.armed is None and flow.said == set()
+
+
+async def test_task_verb_with_no_flow_answers_the_no_task_line_and_runs_nothing(tmp_path):
+    from localharness.orchestrator.task_flow import verbs
+
+    channel, conn = _task_channel(tmp_path, None)
+    response = await channel.prompt("sess", _words("/task run"))
+    assert response.stop_reason == "end_turn" and channel._agent_loop.calls == []
+    assert conn.texts() == [verbs.render("no task", ACP_LEVERS)]
+
+
+async def test_a_mid_message_task_is_a_plain_prompt(tmp_path):
+    flow = await _planned_flow(tmp_path)
+    channel, conn = _task_channel(tmp_path, flow)
+    await channel.prompt("sess", _words("please /task run"))
+    assert channel._agent_loop.calls == [("please /task run", "typed")] and flow.armed is None
+
+
+async def test_running_line_a_verb_mid_turn_names_the_unit_and_starts_nothing(tmp_path):
+    from localharness.orchestrator.task_flow import verbs
+    from localharness.orchestrator.task_flow.record import Unit
+
+    flow = await _planned_flow(tmp_path)
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def body(task):
+        started.set()
+        await release.wait()
+
+    channel, conn = _task_channel(tmp_path, flow, body)
+    first = asyncio.create_task(channel.prompt("sess", _words("hello")))
+    await started.wait()
+    assert (await channel.prompt("sess", _words("/task run"))).stop_reason == "end_turn"
+    flow.busy, flow.unit = True, ("step 2/5 executing", 25)
+    await channel.prompt("sess", _words("/task show"))
+    flow.busy, flow.unit = False, None
+    flow.reply_panel.set_phase("checking reply")
+    await channel.prompt("sess", _words("/task stop"))
+    flow.reply_panel._parts = ("checking reply", " 1/3", "parsimony", "up to 7 min")
+    await channel.prompt("sess", _words("/task clear"))
+    assert conn.texts() == [
+        f"◆ t1 turn running · cancel (now) · up to {verbs.cap_minutes(flow)} min",
+        "◆ t1 step 2/5 executing · cancel (now) · up to 25 min",
+        f"◆ t1 reply panel running · cancel (now) · up to {verbs.bound(flow, Unit('reply', 'panel'))} min",
+        "◆ t1 reply panel running · cancel (now) · up to 7 min",
+    ]
+    release.set()
+    await first
+    assert channel._agent_loop.calls == [("hello", "typed")] and flow.armed is None
+
+
+async def test_check_and_set_two_prompts_scheduled_together_start_one_verb(tmp_path):
+    flow = await _planned_flow(tmp_path)
+    release = asyncio.Event()
+
+    async def body(task):
+        await release.wait()
+
+    channel, conn = _task_channel(tmp_path, flow, body)
+    first = asyncio.create_task(channel.prompt("sess", _words("/task run")))
+    second = asyncio.create_task(channel.prompt("sess", _words("/task run")))
+    assert (await asyncio.wait_for(second, 5)).stop_reason == "end_turn" and not first.done()
+    assert [t.split(" · ")[0] for t in conn.texts()] == ["◆ t1 turn running", "◆ t1 run armed"]
+    release.set()
+    await first
+    assert len(channel._agent_loop.calls) == 1
+
+
+async def test_a_cancel_during_an_executor_prints_the_stopped_row_and_clears_the_flags(tmp_path):
+    from localharness.orchestrator.task_flow import verbs
+
+    flow = await _planned_flow(tmp_path)
+    started = asyncio.Event()
+
+    async def body(task):
+        flow.busy, flow.unit = True, ("step 1/2 executing", 25)
+        flow.record.halted = "stopped"
+        started.set()
+        await asyncio.Event().wait()
+
+    channel, conn = _task_channel(tmp_path, flow, body)
+    pending = asyncio.create_task(channel.prompt("sess", _words("/task run")))
+    await started.wait()
+    await channel.cancel("sess")
+    assert (await pending).stop_reason == "cancelled"
+    assert conn.texts()[-1] == verbs.render("step stopped", ACP_LEVERS, task="t1", step=(1, 2), bound=25)
+    assert "files half-edited" in conn.texts()[-1]
+    assert not any(flow.record.flags.values()) and flow.record.halted is None and flow.armed is None and not flow.busy
+
+
+async def test_an_ordinary_turn_ends_through_the_turn_end_on_an_error_too(tmp_path):
+    flow = await _planned_flow(tmp_path)
+
+    async def body(task):
+        flow.record.halted = "stopped"
+        raise RuntimeError("boom")
+
+    channel, conn = _task_channel(tmp_path, flow, body)
+    response = await channel.prompt("sess", _words("go on"))
+    assert response.stop_reason == "end_turn" and flow.record.halted is None
+    assert any("halted" in t for t in conn.texts())
+
+
+async def test_serve_takes_the_flow():
+    import inspect
+
+    from localharness.channels.acp import AcpChannel
+
+    assert "task_flow" in inspect.signature(AcpChannel.serve).parameters

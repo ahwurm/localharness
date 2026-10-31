@@ -436,6 +436,22 @@ def turn_end(flow: Any, levers: Levers, *, cancelled: bool) -> tuple[str, ...]:
     return (status_row(flow, levers),) if called else ()
 
 
+def running_now(flow: Any, levers: Levers) -> str:
+    """The `running` row a verb typed mid-turn answers: the unit holding the root, else the reply panel, else the turn."""
+    if flow is None:
+        return render("no task", levers)
+    text = flow.reply_panel.status_text()
+    if flow.busy and flow.unit:
+        state, minutes = flow.unit
+    elif text:
+        shown = re.search(r"up to ([0-9]+) min", text)
+        state, minutes = "reply panel running", int(shown[1]) if shown else bound(flow, Unit("reply", "panel"))
+    else:
+        state, minutes = "turn running", cap_minutes(flow)
+    line, fields = LINES["running"], {"stop": levers[0], "cancel": levers[1], "bound": minutes}
+    return notice(_label(flow.record), state, [_put(c, fields) for c in line.commands], _put(line.tail, fields))
+
+
 def mid_turn(flow: Any, levers: Levers, route: str) -> str:
     """The `heard` or `queued` row for a message typed while a turn runs, empty with no open task."""
     record = flow.record
