@@ -677,7 +677,7 @@ def test_task_command_a_refused_folder_write_is_a_line_not_a_crash(tmp_path):
 
 def test_task_command_an_unknown_verb_prints_the_usage_line(tmp_path):
     flow = staged(tmp_path)
-    for args in ("frobnicate", "stop", "show-plan", "accepting"):
+    for args in ("frobnicate", "stopping", "show-plan", "accepting"):
         assert command(flow, args) == verbs.Reply((verbs.USAGE,))
     assert all(word in verbs.USAGE for word in ("new", "research", "plan", "run", "show", "accept", "stop", "clear"))
     assert flow.armed is None and flow.record.flags == UNSET
@@ -1235,3 +1235,238 @@ def test_wake_line_is_none_with_no_tasks_folder_or_a_linked_one(tmp_path):
     agent.mkdir(parents=True)
     (agent / "tasks").symlink_to(outside)
     assert verbs.wake_line(flow.docs) is None
+
+
+class FlowChannel:
+    channel_id = "terminal"
+
+    def __init__(self, levers=BOX):
+        self.notices, self.sent, self.echoed, self._levers = [], [], [], levers
+
+    def levers(self):
+        return self._levers
+
+    async def send_notice(self, line):
+        self.notices.append(line)
+
+    async def send_message(self, text, agent_id=None, metadata=None):
+        self.sent.append(text)
+
+    def box_set_queued(self, n):
+        pass
+
+    async def box_echo_prompt(self, text, annotation=""):
+        self.echoed.append((text, annotation))
+
+    def box_flash_decision(self, text):
+        pass
+
+
+class FlowAgent:
+    turn = 1
+    current_session_id = "s1"
+    _config = type("Config", (), {"name": "root", "context": type("Context", (), {"max_image_tokens": 100})()})()
+
+    def __init__(self, body):
+        self.body, self.calls, self.nudges = body, [], []
+
+    async def run_turn(self, task, on_token=None, subtype="request", **kw):
+        self.calls.append((task, subtype))
+        await self.body(task)
+
+    def stop_turn(self, task):
+        task.cancel()
+
+    def push_user_nudge(self, text, subtype="request"):
+        self.nudges.append(text)
+
+
+def flow_repl(flow, body=None, levers=BOX):
+    from unittest.mock import AsyncMock
+
+    from localharness.cli.repl import OrchestratorREPL
+    from localharness.orchestrator.cards import AgentCardRegistry
+    from localharness.orchestrator.router import AgentCreationFlow
+
+    async def idle(task):
+        pass
+
+    channel, agent = FlowChannel(levers), FlowAgent(body or idle)
+    repl = OrchestratorREPL(orchestrator=AgentCreationFlow(AgentCardRegistry()), agent_loop=agent, channel=channel,
+                            bus=AsyncMock(), task_flow=flow)
+    return repl, channel, agent
+
+
+async def planned_flow(tmp_path):
+    flow, script, *_ = await planned(tmp_path)
+    flow.end_turn()
+    return flow
+
+
+async def test_repl_armed_run_starts_one_turn_and_an_unanswered_turn_prints_not_started(tmp_path):
+    flow = await planned_flow(tmp_path)
+    repl, channel, agent = flow_repl(flow)
+    task = await repl._dispatch_input("/task run")
+    assert channel.notices == [ARMED.format("run")] and flow.armed == "step"
+    await task
+    assert agent.calls == [(SENTENCE_FOR["run"], "request")]
+    assert channel.notices[1:] == ["◆ t1 run not started · /task run · the model answered instead"]
+    assert flow.armed is None and flow.said == set()
+
+
+async def test_repl_turn_end_prints_the_status_row_after_a_task_call(tmp_path):
+    flow = await planned_flow(tmp_path)
+
+    async def call(task):
+        await flow.run("step", None, by="model")
+
+    repl, channel, agent = flow_repl(flow, call)
+    await (await repl._dispatch_input("/task run"))
+    assert channel.notices[1:] == [verbs.status_row(flow, BOX)]
+    assert channel.notices[-1].startswith("◆ t1 step 1/2") and flow.called == set()
+
+
+async def test_repl_turn_end_after_a_halt_prints_the_halted_row_once_and_clears_it(tmp_path):
+    flow = await planned_flow(tmp_path)
+
+    async def stopped(task):
+        flow.record.halted, flow.unit = "stopped", ("step 1/2 checking", 5)
+        flow.called.add("step")
+
+    repl, channel, agent = flow_repl(flow, stopped)
+    await (await repl._dispatch_input("/task run"))
+    assert channel.notices[1:] == ["◆ t1 halted · /task run (continues) · after step 1/2 checking · clean"]
+    assert flow.record.halted is None and flow.unit is None
+
+
+async def test_repl_turn_end_at_done_prints_no_halted_row(tmp_path):
+    flow = await planned_flow(tmp_path)
+
+    async def finished(task):
+        flow.record.halted, flow.record.stage = "stopped", "done"
+        flow.called.add("step")
+
+    repl, channel, agent = flow_repl(flow, finished)
+    await (await repl._dispatch_input("/task run"))
+    assert channel.notices[1:] == [verbs.status_row(flow, BOX)] and "halted" not in channel.notices[1]
+
+
+async def test_repl_error_turn_clears_the_flags_and_the_halt(tmp_path):
+    flow = await planned_flow(tmp_path)
+
+    async def broken(task):
+        flow.record.flags["plan"], flow.record.halted = True, "stopped"
+        raise RuntimeError("boom")
+
+    repl, channel, agent = flow_repl(flow, broken)
+    task = await repl._dispatch_input("/task run")
+    with pytest.raises(RuntimeError):
+        await task
+    assert flow.record.flags == UNSET and flow.record.halted is None and flow.armed is None
+
+
+def executing(flow):
+    async def body(task):
+        flow.unit, flow.busy = ("step 1/2 executing", 25), True
+        flow.called.add("step")
+        await asyncio.Event().wait()
+    return body
+
+
+async def test_repl_cancel_during_an_execution_prints_the_stopped_row_and_no_turn_cancelled_on_the_box(tmp_path):
+    flow = await planned_flow(tmp_path)
+    repl, channel, agent = flow_repl(flow, executing(flow))
+    task = await repl._dispatch_input("/task run")
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    repl._cancelled_by_user = True
+    agent.stop_turn(task)
+    await repl._finish_turn(task)
+    assert channel.notices[1:] == ["◆ t1 step 1/2 stopped, files half-edited · /task run (re-runs) · up to 25 min"]
+    assert channel.sent == [] and repl._stop_row is False and flow.busy is False
+
+
+async def test_repl_cancel_during_an_execution_prints_no_turn_cancelled_on_the_classic_path(tmp_path):
+    flow = await planned_flow(tmp_path)
+    repl, channel, agent = flow_repl(flow, executing(flow))
+    task = await repl._dispatch_input("/task run")
+    loop, captured = asyncio.get_running_loop(), {}
+    loop.add_signal_handler = lambda sig, cb, *a: captured.__setitem__("cb", cb)
+    loop.remove_signal_handler = lambda sig: None
+    handler = asyncio.ensure_future(repl._await_turn_with_sigint(task))
+    await asyncio.sleep(0.01)
+    captured["cb"]()
+    await asyncio.wait_for(handler, 2)
+    assert channel.notices[1].startswith("◆ t1 step 1/2 stopped, files half-edited") and channel.sent == []
+
+
+async def test_repl_cancel_outside_an_execution_still_says_turn_cancelled(tmp_path):
+    flow = await planned_flow(tmp_path)
+
+    async def checking(task):
+        flow.unit, flow.busy = ("step 1/2 checking", 5), True
+        flow.called.add("step")
+        await asyncio.Event().wait()
+
+    repl, channel, agent = flow_repl(flow, checking)
+    task = await repl._dispatch_input("/task run")
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    repl._cancelled_by_user = True
+    agent.stop_turn(task)
+    await repl._finish_turn(task)
+    assert channel.sent == ["Turn cancelled."]
+
+
+async def test_repl_plan_change_followup_is_the_typed_turn(tmp_path):
+    flow = await planned_flow(tmp_path)
+    repl, channel, agent = flow_repl(flow)
+    assert await repl._handle_slash("/task plan add a retry step")
+    assert repl._slash_followup == ("add a retry step", "typed")
+    await (await repl._dispatch_input("/task plan add a retry step"))
+    assert agent.calls == [("add a retry step", "typed")]
+
+
+async def test_repl_followup_that_starts_no_turn_leaves_no_flag_set(tmp_path, monkeypatch):
+    from localharness.cli import repl as repl_module
+    from localharness.core.content import ImageError
+
+    flow = await planned_flow(tmp_path)
+    repl, channel, agent = flow_repl(flow)
+    channel.take_images = lambda: [object()]
+    monkeypatch.setattr(repl_module, "fit_all", lambda *a, **k: (_ for _ in ()).throw(ImageError("too big")))
+    assert await repl._dispatch_input("/task plan add a retry step") is None
+    assert flow.record.flags == UNSET and flow.armed is None and flow.sentence == ""
+    assert channel.sent == ["Not sent: too big"] and agent.calls == []
+
+
+async def test_repl_without_a_flow_says_no_task(tmp_path):
+    from unittest.mock import AsyncMock
+
+    from localharness.cli.repl import OrchestratorREPL
+    from localharness.orchestrator.cards import AgentCardRegistry
+    from localharness.orchestrator.router import AgentCreationFlow
+
+    channel = FlowChannel()
+    repl = OrchestratorREPL(orchestrator=AgentCreationFlow(AgentCardRegistry()), agent_loop=FlowAgent(None),
+                            channel=channel, bus=AsyncMock())
+    await repl._handle_slash("/task run")
+    assert channel.notices == ["◆ task no task · /task new <objective>"] and repl._slash_followup is None
+
+
+def test_channel_adapter_levers_come_from_the_stop_word_and_notice_falls_back_to_send_message():
+    from localharness.channels.base import ChannelAdapter
+
+    sent = []
+
+    class Stop(ChannelAdapter):
+        channel_id, stop_word = "x", "stop"
+        start = stop = send_streaming = send_tool_call = send_tool_result = send_error = read_input = None
+
+        async def send_message(self, content, agent_id=None, metadata=None):
+            sent.append((content, metadata))
+
+    adapter = Stop.__new__(Stop)
+    assert adapter.levers() == ("stop (now)", "stop (now)") and adapter.has_status_row() is False
+    asyncio.run(adapter.send_notice("◆ t1 done"))
+    assert sent == [("◆ t1 done", {"style": "system.info"})]

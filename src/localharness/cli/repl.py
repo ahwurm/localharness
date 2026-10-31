@@ -42,6 +42,7 @@ from localharness.core.events import (
     UserMessage,
 )
 from localharness.core.interrupt import sigint_cancels
+from localharness.orchestrator.task_flow.verbs import cancel_row, mid_turn, pause, render, task_command, turn_end
 from localharness.provider.runtimes import RUNTIMES, row_of
 
 log = logging.getLogger(__name__)
@@ -313,6 +314,8 @@ class OrchestratorREPL:
     """
     _skills: SkillSession | None = None
     _switch: ModelSwitch | None = None
+    _flow: Any = None
+    _stop_row = False
 
     def __init__(
         self,
@@ -333,8 +336,10 @@ class OrchestratorREPL:
         serving_heavy: tuple[Any, str] | None = None,
         unit_state: Any = None,
         skills: SkillSession | None = None,
+        task_flow: Any = None,
     ) -> None:
         from localharness.cli.workspace import MachineTrust
+        self._flow = task_flow
         self._orchestrator = orchestrator
         self._agent = agent_loop
         # The session's PermissionGate (PRD §3.4) — what `/mode` switches. Defaults to the
@@ -750,6 +755,8 @@ class OrchestratorREPL:
             try:
                 images += fit_all(carried, self._agent._config.context.max_image_tokens)
             except ImageError as exc:
+                if self._flow is not None:
+                    self._flow.end_turn()
                 await self._channel.send_message(f"Not sent: {exc}", metadata={"style": "system.error"})
                 return None
         await self._bus.publish(
@@ -770,7 +777,32 @@ class OrchestratorREPL:
         # `images=` only when there are any: every agent-loop stand-in that takes (task, on_token)
         # keeps working, and a text-only line is the call it always was.
         extra = {"images": images} if images else {}
-        return asyncio.ensure_future(self._agent.run_turn(task=text, on_token=on_token, subtype=subtype, **extra))
+        turn = self._agent.run_turn(task=text, on_token=on_token, subtype=subtype, **extra)
+        return asyncio.ensure_future(turn if self._flow is None else self._flow_turn(turn))
+
+    def _levers(self) -> tuple[str, str]:
+        return getattr(self._channel, "levers", lambda: ("", ""))()
+
+    async def _notice(self, *lines: str) -> None:
+        send = getattr(self._channel, "send_notice", None)
+        for line in filter(None, lines):
+            if send is not None:
+                await send(line)
+            else:
+                await self._channel.send_message(line, metadata={"style": "system.info"})
+
+    async def _flow_turn(self, turn: Any) -> Any:
+        """Runs a turn so its flags and halt are cleared and its one end line printed on a finish, a cancel, an error and a kill."""
+        cancelled = False
+        try:
+            return await turn
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            levers = self._levers()
+            self._stop_row = cancelled and bool(cancel_row(self._flow, levers))
+            await asyncio.shield(self._notice(*turn_end(self._flow, levers, cancelled=cancelled)))
 
     # ------------------------------------------------------------------ #
     # Persistent type-anytime input box coordinator (box mode)
@@ -937,6 +969,9 @@ class OrchestratorREPL:
             await self._deliver_route(
                 clean, input_router.Decision(input_router.Route.QUEUE, "tier1", "image-attached"))
             return
+        if not forced and clean.lower().split() == ["/task", "stop"]:
+            await self._slash_task(" stop", " stop")
+            return
         # Slash commands mid-turn are session-level actions — queue them deterministically
         # (run between turns), never spend an LLM classification call on a command.
         if not forced and clean.startswith("/"):
@@ -975,6 +1010,7 @@ class OrchestratorREPL:
             self._agent.push_user_nudge(clean, "steering")
             await self._channel.box_echo_prompt(clean, annotation="→ nudge")
             self._channel.box_flash_decision("→ nudging current turn")
+            await self._mid_turn("heard")
         else:
             await self._queue_message(clean, publish=False)
 
@@ -984,6 +1020,11 @@ class OrchestratorREPL:
         self._channel.box_set_queued(len(self._fifo))
         await self._channel.box_echo_prompt(clean, annotation=f"queued ({len(self._fifo)})")
         self._channel.box_flash_decision(f"queued ({len(self._fifo)})")
+        await self._mid_turn("queued slash" if clean.startswith("/") else "queued")
+
+    async def _mid_turn(self, route: str) -> None:
+        if self._flow is not None:
+            await self._notice(mid_turn(self._flow, self._levers(), route))
 
     async def _tier2_classify_bg(self, clean: str, complete_fn) -> None:
         """#92c: run the tier-2 classify OFF the coordinator, then post the verdict back through
@@ -1051,14 +1092,14 @@ class OrchestratorREPL:
         try:
             await task
         except asyncio.CancelledError:
-            if self._cancelled_by_user:
+            if self._cancelled_by_user and not self._stop_row:
                 await self._channel.send_message(
                     "Turn cancelled.", metadata={"style": "system.info"}
                 )
         except Exception:  # noqa: BLE001 — run_turn owns its errors (TurnFailed → channel);
             log.warning("box turn task raised", exc_info=True)  # a stray one must not kill the REPL
         finally:
-            self._cancelled_by_user = False
+            self._cancelled_by_user = self._stop_row = False
 
     def _turn_context(self) -> str:
         """Compact running-turn summary for tier-2: current request + latest step/tool."""
@@ -1102,9 +1143,11 @@ class OrchestratorREPL:
                 if not cancelled():
                     turn_task.cancel()
                     raise
-                await self._channel.send_message(
-                    "Turn cancelled.", metadata={"style": "system.info"}
-                )
+                if not self._stop_row:
+                    await self._channel.send_message(
+                        "Turn cancelled.", metadata={"style": "system.info"}
+                    )
+                self._stop_row = False
 
     async def _handle_reasoning_cmd(self, arg: str) -> None:
         """/reasoning [on|off] — toggle the live reasoning stream on a channel that has one.
@@ -1736,18 +1779,19 @@ class OrchestratorREPL:
                 await self._bus.publish(ConversationCleared(agent_id=self._agent._config.name, session_id=sid))
             text = CLEAR_DROPPED.format(n=dropped) if dropped else CLEAR_DONE
         await self._channel.send_message(text, metadata={"style": "system.info"})
+        if self._flow is not None and not self._turn_running():
+            await self._notice(pause(self._flow, self._levers()))
 
     async def _slash_task(self, args: str, args_lower: str) -> None:
-        from localharness.agent.task_record import TaskState
-        state = getattr(self._agent, "_task_context", None)
-        if not isinstance(state, TaskState):
-            text = "No task record."
-        elif args_lower.strip() == "clear":
-            state.clear()
-            text = "Task record cleared; task.json deleted."
-        else:
-            text = state.show()
-        await self._channel.send_message(text, metadata={"style": "system.info"})
+        levers = self._levers()
+        if self._flow is None:
+            await self._notice(render("no task", levers))
+            return
+        reply = task_command(
+            self._flow, args, turn=getattr(self._agent, "turn", 0) + 1, running=self._turn_running(),
+            levers=levers, phone=getattr(self._channel, "channel_id", "") == "mobile")
+        await self._notice(*reply.lines)
+        self._slash_followup = reply.turn
 
     async def _slash_instructions(self, args: str, args_lower: str) -> None:
         """`/instructions off | on | show` — the one shared handler's text, verbatim (D-59, D-60)."""
