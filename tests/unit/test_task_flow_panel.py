@@ -513,6 +513,17 @@ async def test_a_second_blocker_after_the_one_revision_is_blocked_with_the_revis
     assert result.finding.startswith("the reply cites a real line") and len(seen) == 1 and len(child.calls) == 2
 
 
+async def test_each_reply_panel_rewrites_reply_review_with_its_verdict_and_first_finding(tmp_path):
+    store = docs_in(tmp_path)
+    child = sequenced({"answer": [answered(BLOCKER), NONE]})
+    subject = Panel(child, LIMITS, docs=store)
+    await subject.run(REPLY, draft_inputs())
+    text = store.read_session("reply-review.md")
+    assert text.startswith("## round 1 · blockers 1\n- [BLOCKER] the reply cites a real line") and text.endswith("verdict: blocked\n")
+    await subject.run(REPLY, draft_inputs())
+    assert store.read_session("reply-review.md") == "## round 1 · blockers 0\nverdict: pass\n"
+
+
 async def test_a_reply_limit_of_zero_never_revises():
     limits, _ = limited(TaskFlowConfig(revisions={"reply": 0}))
     child, seen = sequenced({"answer": [answered(BLOCKER)]}), []
