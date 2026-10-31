@@ -32,7 +32,9 @@ from localharness.config.models import TaskFlowConfig
 from localharness.config.plugin_sections import CORE_HARNESS_KEYS, global_only_paths
 from localharness.config.skills import MAX_ENTRIES, ORIGINS
 from localharness.config.trust import LAUNCH_KEYS, LAUNCH_MODEL_KEYS, LAUNCH_MODEL_KIND
+from localharness.core.caps import Caps
 from localharness.core.content import MAX_REFERENCE_BYTES
+from localharness.orchestrator.task_flow.record import CRITICS_AT_FLOOR, LIMITS, STAGES, panel_minutes, printed_bound
 from localharness.plugins.api import Plugin, plugin_summary
 from localharness.plugins.builtin import BUILTIN_PLUGINS
 from localharness.tools.base import ToolSchema
@@ -1324,15 +1326,65 @@ _VERBS = "src/localharness/orchestrator/task_flow/verbs.py"
 TASK_VERBS = tuple(part.split()[0] for part in _source_constant(_VERBS, "USAGE").removeprefix("usage: /task ").split(" · "))
 CRITIC_NAMES = tuple(sorted(p.stem for p in (SRC / "assets" / "critics").glob("*.yaml")))
 METAHARNESS_NEEDLES = (
-    *(f"`/task {verb}" for verb in TASK_VERBS), *(f"`{name}`" for name in CRITIC_NAMES),
-    *(f"`{field}`" for field in TaskFlowConfig.model_fields),
     "a quality signal, never a security one", "not a barrier", "global files only", "begins with no task")
+_ONE_TO_TEN = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten")
+_REVISIONS = {b: LIMITS[f"revisions.{b}"] for b in STAGES if f"revisions.{b}" in LIMITS}
+_REVISION_ORDER = [*(b for b in _REVISIONS if b != "reply"), "reply"]
+
+
+def _budget(b) -> str:
+    return f"{b.actions} actions, {b.minutes:g} minute{'s' * (b.minutes != 1)}"
+
+
+def _table(page: str, heading: str) -> list[list[str]]:
+    """The body rows of the tables under `heading`, each row's cells stripped."""
+    rows = [[c.strip() for c in line.strip().strip("|").split("|")]
+            for line in (section(page, heading) or "").splitlines() if line.lstrip().startswith("|")]
+    return [r for r in rows[2:] if not set(r[0]) <= set("-")]
+
+
+def _metaharness_settings() -> dict[str, tuple[str, str, str]]:
+    critic, flow = LIMITS["critic"], LIMITS["flow_cap_minutes"]
+    low = " and ".join(f"`{n}`" for n in sorted(CRITICS_AT_FLOOR))
+    plus = next(LIMITS[f"revisions.{b}"].ceiling - LIMITS[f"revisions.{b}"].default for b in _REVISION_ORDER[:-1])
+    return {
+        "`panels`": ("none added", "none", f"{LIMITS['additions'].ceiling} added"),
+        "`revisions`": (str(_REVISIONS["plan"].floor),
+                        ", ".join(f"`{b}` {_REVISIONS[b].default}" for b in _REVISION_ORDER),
+                        f"the default plus {plus}; `reply` {_REVISIONS['reply'].ceiling}"),
+        "`critics`": (_budget(critic.floor),
+                      f"{_budget(critic.default)}; {low} {critic.floor.actions} and {critic.floor.minutes:g}", _budget(critic.ceiling)),
+        **{f"`{k}`": (_budget(LIMITS[k].floor), _budget(LIMITS[k].default), _budget(LIMITS[k].ceiling)) for k in ("executor", "explorer")},
+        "`flow_cap_minutes`": (f"{flow.floor:g}", f"{flow.default:g}", f"{flow.ceiling:g}"),
+    }
 
 
 def check_metaharness_doc(page: str) -> list[str]:
-    """docs/metaharness.md names every `/task` verb, critic and `task_flow` key the code has, and keeps four honesty phrases."""
+    """docs/metaharness.md keeps its honesty phrases; each verb, critic and `task_flow` key is a row of its table; its numbers are the constants'."""
     flat = " ".join(page.split())
-    return [f"docs/metaharness.md does not say {n}" for n in METAHARNESS_NEEDLES if n not in flat]
+    out = [f"docs/metaharness.md does not say {n}" for n in METAHARNESS_NEEDLES if n not in flat]
+    for heading, names, mark in (("## The eight verbs", TASK_VERBS, "`/task "), ("## Which critics run", CRITIC_NAMES, "`")):
+        cells = [r[0] for r in _table(page, heading)]
+        out += [f"docs/metaharness.md {heading} has no row for {n}" for n in names
+                if not any(c.startswith(f"{mark}{n}") and (mark != "`" or c == f"`{n}`") for c in cells)]
+    rows = {r[0]: r[2:5] for r in _table(page, "## Settings")}
+    for key, want in _metaharness_settings().items():
+        out += [f"docs/metaharness.md Settings row {key} does not say {w}" for w, got in zip(want, rows.get(key, ["", "", ""])) if got != w]
+    stages = dict(zip([*list(STAGES)[1:], "reply"], _table(page, "## The task pipeline")))
+    for boundary, row in STAGES.items():
+        cells = stages.get(boundary, ["", "", "", ""])
+        out += [f"docs/metaharness.md stage row {boundary} does not say `{c}`" for c in row.floor if f"`{c}`" not in cells[2]]
+        out += [] if cells[3].split()[:1] == [str(row.revisions)] else [f"docs/metaharness.md stage row {boundary} does not say {row.revisions} revisions"]
+    default, flow = LIMITS["executor"].default, LIMITS["flow_cap_minutes"]
+    plan_bound = printed_bound(panel_minutes(STAGES["plan"].floor))
+    for heading, want in (
+            ("## The task pipeline", (f"a plan panel is up to {plan_bound} minutes and an executor up to {default.minutes:g}",
+                                      f"default {flow.default:g} minutes, ceiling {flow.ceiling:g}",
+                                      f"at most {_ONE_TO_TEN[Caps.QUESTIONS]} questions")),
+            ("## In a normal session", (f"({_budget(LIMITS['critic'].floor)})",))):
+        body = " ".join((section(page, heading) or "").split())
+        out += [f"docs/metaharness.md {heading} does not say {w}" for w in want if w not in body]
+    return out
 
 
 def test_metaharness_doc_live():
@@ -1343,8 +1395,18 @@ def test_metaharness_doc_bites():
     page = _read("docs/metaharness.md")
     for needle in METAHARNESS_NEEDLES:
         assert check_metaharness_doc(_swap(page, needle, "x")) == [f"docs/metaharness.md does not say {needle}"]
-    assert len(check_metaharness_doc("")) == len(METAHARNESS_NEEDLES)
+    assert len(check_metaharness_doc("")) > len(METAHARNESS_NEEDLES) + len(TASK_VERBS) + len(CRITIC_NAMES)
     assert len(TASK_VERBS) == 8 and len(CRITIC_NAMES) == 9
+    assert set(_metaharness_settings()) == {f"`{f}`" for f in TaskFlowConfig.model_fields}
+    assert check_metaharness_doc(_swap(page, "## The eight verbs", "## Verbs")) == [
+        f"docs/metaharness.md ## The eight verbs has no row for {v}" for v in TASK_VERBS]
+    assert check_metaharness_doc(_swap(page, "## Which critics run", "## Critics")) == [
+        f"docs/metaharness.md ## Which critics run has no row for {n}" for n in CRITIC_NAMES]
+    for old, new in (("| 180 | 360 |", "| 181 | 360 |"), ("| 3 added |", "| 4 added |"), ("| 24 actions, 25 minutes |", "| 24 actions, 26 minutes |"),
+                     ("| `jtbd`, `big-picture`, `parsimony` | 3 |", "| `jtbd`, `big-picture`, `parsimony` | 4 |"),
+                     ("an executor up to 25", "an executor up to 26"), ("at most six questions", "at most seven questions"),
+                     ("(3 actions, 1 minute)", "(3 actions, 2 minutes)")):
+        assert len(check_metaharness_doc(_swap(page, old, new))) == 1, old
 
 
 CHANNEL_DOC_NEEDLES = (
