@@ -630,3 +630,168 @@ def test_a_config_that_holds_the_agents_yaml_deny_keeps_it(tmp_path):
     new_deny = _deny(cfg)
     assert new_deny[: len(OLD_7)] == OLD_7, "kept, in place"
     assert new_deny.count(AGENTS_YAML_DENY) == 1
+
+
+# --------------------------------------------------------------------------- #
+# `agent.self_check` left the config (`AgentConfig` forbids unknown keys): migrate drops it from the
+# global agent files and the global overrides' `agent:` section, and says so only when it was on.
+# --------------------------------------------------------------------------- #
+
+
+def _current_config(tmp_path: Path) -> Path:
+    from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
+
+    cfg = _write_config(tmp_path, PermissionConfig().deny_patterns)
+    data = yaml.safe_load(cfg.read_text())
+    data["org"]["permissions"]["defaults_revision"] = CURRENT_DEFAULTS_REVISION
+    data["org"]["permissions"]["init_nulls_revision"] = CURRENT_INIT_NULLS_REVISION
+    cfg.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    return cfg
+
+
+def _agent_with_self_check(config_dir: Path, name: str, self_check) -> Path:
+    path = config_dir / "agents" / f"{name}.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump({"name": name, "role": f"{name} agent.", "self_check": self_check}, sort_keys=False),
+        encoding="utf-8")
+    return path
+
+
+def _overrides_with_self_check(config_dir: Path, self_check) -> Path:
+    path = config_dir / "overrides.yaml"
+    path.write_text(
+        yaml.safe_dump({"agent": {"self_check": self_check, "recovery_injection": {"enabled": True}}},
+                       sort_keys=False), encoding="utf-8")
+    return path
+
+
+def _start_receipt(cfg: Path) -> str:
+    import io
+    from contextlib import redirect_stdout
+
+    from localharness.cli.start_cmd import _auto_migrate_deny_defaults
+
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        _auto_migrate_deny_defaults(cfg)
+    return " ".join(buffer.getvalue().split())
+
+
+def test_self_check_enabled_in_an_agent_file_is_dropped_and_said_once(tmp_path):
+    from localharness.config.migrate import SELF_CHECK_DROPPED, load_plan
+
+    cfg = _current_config(tmp_path)
+    agent = _agent_with_self_check(tmp_path, "scout", {"enabled": True})
+
+    _original, p = load_plan(cfg)
+    assert p is not None and [s.path for s in p.sidecars] == [agent]
+    assert p.sidecars[0].self_check is True and "self_check" not in p.sidecars[0].updated
+
+    out = _start_receipt(cfg)
+    assert out.count(SELF_CHECK_DROPPED) == 1
+    assert "self_check" not in yaml.safe_load(agent.read_text())
+    assert len(list((tmp_path / "agents").glob("scout.yaml.bak-*"))) == 1
+    assert list(tmp_path.glob("config.yaml.bak-*")) == []
+
+
+def test_self_check_disabled_is_dropped_without_the_line(tmp_path):
+    from localharness.config.migrate import SELF_CHECK_DROPPED
+
+    cfg = _current_config(tmp_path)
+    off = _agent_with_self_check(tmp_path, "off", {"enabled": False})
+    bare = _agent_with_self_check(tmp_path, "bare", {})
+
+    out = _start_receipt(cfg)
+    assert SELF_CHECK_DROPPED not in out
+    for path in (off, bare):
+        assert "self_check" not in yaml.safe_load(path.read_text())
+        assert len(list(path.parent.glob(f"{path.name}.bak-*"))) == 1
+
+
+def test_self_check_enabled_in_two_files_is_said_once(tmp_path):
+    from localharness.config.migrate import SELF_CHECK_DROPPED
+
+    cfg = _current_config(tmp_path)
+    agent = _agent_with_self_check(tmp_path, "scout", {"enabled": True})
+    overrides = _overrides_with_self_check(tmp_path, {"enabled": True})
+
+    assert _start_receipt(cfg).count(SELF_CHECK_DROPPED) == 1
+    assert "self_check" not in yaml.safe_load(agent.read_text())
+    assert yaml.safe_load(overrides.read_text()) == {"agent": {"recovery_injection": {"enabled": True}}}
+
+
+def test_self_check_in_overrides_alone_rewrites_only_that_file(tmp_path):
+    from localharness.config.migrate import SELF_CHECK_DROPPED, load_plan
+
+    cfg = _current_config(tmp_path)
+    overrides = _overrides_with_self_check(tmp_path, {"enabled": True})
+    before = cfg.read_bytes()
+
+    _original, p = load_plan(cfg)
+    assert p is not None and p.config_unchanged and [s.path for s in p.sidecars] == [overrides]
+
+    assert SELF_CHECK_DROPPED in _start_receipt(cfg)
+    assert cfg.read_bytes() == before
+    assert "self_check" not in yaml.safe_load(overrides.read_text())["agent"]
+    assert len(list(tmp_path.glob("overrides.yaml.bak-*"))) == 1
+    assert load_plan(cfg)[1] is None
+
+
+def test_self_check_absent_leaves_every_file_alone(tmp_path):
+    from localharness.config.migrate import load_plan
+
+    cfg = _current_config(tmp_path)
+    agent = _write_agent_file(tmp_path, "scout", allow_patterns=_ABSENT)
+    overrides = tmp_path / "overrides.yaml"
+    overrides.write_text(yaml.safe_dump({"agent": {"recovery_injection": {"enabled": True}}}), encoding="utf-8")
+    before = (agent.read_bytes(), overrides.read_bytes())
+
+    assert load_plan(cfg)[1] is None
+    assert _start_receipt(cfg) == ""
+    assert (agent.read_bytes(), overrides.read_bytes()) == before
+
+
+def test_self_check_is_dropped_even_while_the_init_nulls_step_is_held_back(tmp_path):
+    import os
+
+    import pytest
+
+    from localharness.config import migrate
+
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root writes a read-only file")
+    cfg = _write_config(tmp_path, PermissionConfig().deny_patterns)
+    agent = _agent_with_self_check(tmp_path, "scout", {"enabled": True})
+    data = yaml.safe_load(agent.read_text())
+    data["permissions"] = {"budget": {"max_actions": 100}}
+    agent.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    cfg.chmod(0o444)
+    try:
+        original, p = migrate.load_plan(cfg)
+        assert p is not None and p.init_nulls_due
+        try:
+            migrate.apply(cfg, original, p)
+        except migrate.PartialMigrationError as exc:
+            assert exc.nulls_held
+    finally:
+        cfg.chmod(0o644)
+    on_disk = yaml.safe_load(agent.read_text())
+    assert "self_check" not in on_disk
+    assert on_disk["permissions"]["budget"]["max_actions"] == 100, "init's value waits for the stamp"
+
+
+def test_self_check_dry_run_lists_the_drop_and_writes_nothing(tmp_path):
+    from localharness.config.migrate import SELF_CHECK_DROPPED
+
+    _current_config(tmp_path)
+    agent = _agent_with_self_check(tmp_path, "scout", {"enabled": True})
+    before = agent.read_bytes()
+
+    result = _run(tmp_path, "--dry-run")
+    assert result.exit_code == 0, result.output
+    assert " ".join(_plain(result.output).split()).count(SELF_CHECK_DROPPED) == 1
+    assert agent.read_bytes() == before and list(tmp_path.glob("**/*.bak-*")) == []
+
+    _agent_with_self_check(tmp_path, "scout", {"enabled": False})
+    assert SELF_CHECK_DROPPED not in " ".join(_plain(_run(tmp_path, "--dry-run").output).split())

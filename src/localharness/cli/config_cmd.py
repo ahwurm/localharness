@@ -156,6 +156,9 @@ def migrate(
                 soft_wrap=True,
             )
 
+    if any(sidecar.self_check is True for sidecar in plan.sidecars):
+        console.print("  [red]-[/red] " + escape(_migrate.SELF_CHECK_DROPPED), soft_wrap=True)
+
     # init dumped three values as if they were chosen; they are cleared once, in config.yaml and in
     # each agent/division file that carries them, so the new defaults reach this install.
     for key in plan.nulled:
@@ -232,6 +235,8 @@ def migrate(
                 _migrate.init_nulls_clauses(sidecar.nulled)
                 + " (" + escape(_migrate.sidecar_label(sidecar.path)) + ")"
             )
+    if any(sidecar.self_check is True for sidecar in plan.sidecars):
+        removed_note += "; " + _migrate.SELF_CHECK_DROPPED
     if plan.bind_all_paths:
         removed_note += "; set " + escape(", ".join(f"{p}.bind_all: true" for p in plan.bind_all_paths))
     stamp_note = (
