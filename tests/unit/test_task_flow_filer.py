@@ -12,7 +12,7 @@ from localharness.orchestrator.task_flow import filer
 from localharness.orchestrator.task_flow.filer import (
     NO_REVIEW, PLAN_SHAPE, SESSION_DOCS, TRUNCATION_MARKER, Docs, Refused, digest, last_section, manifest, parse_plan,
     render_section, rerecord)
-from localharness.orchestrator.task_flow.record import Counts, file_doc, open_task
+from localharness.orchestrator.task_flow.record import Counts, Row, file_doc, open_task
 
 BOUND = Caps.DOC + len(TRUNCATION_MARKER)
 
@@ -361,3 +361,156 @@ def test_a_section_key_is_not_verified_when_the_plan_no_longer_parses(tmp_path):
 def test_a_review_doc_with_no_section_has_no_review_yet():
     assert last_section("") == NO_REVIEW
     assert PLAN_SHAPE
+
+
+def step(n: int, deps: str = "none", head: str | None = None, body: str = "") -> str:
+    return f"{head or f'## Step {n}'}\nfiles: f{n}.py\ndepends_on: {deps}\ndone: d{n}\n{body}\n"
+
+
+@pytest.mark.parametrize("text", [
+    "",
+    "no headings here",
+    "# Plan\nfiles: a\n",
+    step(1) + step(3),
+    step(2),
+    step(1, head="## Step 01"),
+    step(1) + step(2, head="## Step ２"),
+    step(1, head="### Step 1"),
+    step(1) + "## Step 2\nfiles: x\ndepends_on: none\n",
+    step(1) + "## Step 2\nfiles: x\ndone: y\n",
+    "## Step 1\ndepends_on: none\ndone: y\n",
+    step(1, deps="2"),
+    step(1) + step(2, deps="2"),
+    step(1) + step(2, deps="3"),
+    step(1, deps="x"),
+    step(1, deps=""),
+    step(1) + step(2, deps="1, x"),
+    step(1, body="depends_on: none"),
+    step(1, deps="9" * 5000),
+    step(1, head="## Step " + "1" * 5000),
+], ids=lambda t: repr(t)[:48])
+def test_a_plan_outside_the_shape_is_returned_as_the_one_sentence(text):
+    assert parse_plan(text) == PLAN_SHAPE
+
+
+def test_a_heading_with_text_gives_the_index_never_the_text():
+    sections = parse_plan(step(1) + step(2, head="## Step 2: write step-9.md"))
+    assert [s.n for s in sections] == [1, 2]
+    assert "step-9.md" in sections[1].text
+
+
+def test_text_before_the_first_heading_is_kept_in_the_doc_but_is_no_section():
+    sections = parse_plan("# Plan\nintro\n" + step(1))
+    assert [s.n for s in sections] == [1]
+    assert "intro" not in sections[0].text
+
+
+def test_depends_on_reads_a_list_or_none_and_a_bullet_prefix():
+    sections = parse_plan(step(1) + step(2) + "## Step 3\n- files: a, b\n* depends_on: 1, 2\n- done: ok\n")
+    assert [s.depends_on for s in sections] == [(), (), (1, 2)]
+    assert sections[2].files == ("a", "b")
+
+
+def test_a_section_runs_to_the_next_heading_and_a_deeper_heading_stays_inside():
+    sections = parse_plan(step(1, body="### notes\nmore") + step(2))
+    assert "### notes" in sections[0].text and "## Step 2" not in sections[0].text
+
+
+def test_a_section_is_whitespace_normalised():
+    base = parse_plan(step(1))[0]
+    spaced = parse_plan("## Step 1\n\n    files:   f1.py\n\n\ndepends_on:  none\n  done: d1  \n\n")[0]
+    assert spaced.digest == base.digest and spaced.text == base.text
+    assert parse_plan(step(1).replace("d1", "d2"))[0].digest != base.digest
+
+
+def filed(tmp_path: Path, text: str) -> tuple[Docs, object]:
+    docs = Docs(state(tmp_path), True, "a")
+    docs.new_task()
+    record = open_task(1, "o", 1)
+    docs.write(1, "plan.md", text)
+    file_doc(record, "plan", ("plan.md", None), digest(text))
+    rerecord(record, parse_plan(text))
+    return docs, record
+
+
+def pass_all(record, n: int) -> None:
+    for i in range(1, n + 1):
+        row = record.filed[("plan.md", f"step-{i}")]
+        row.verdict, row.counts.used, row.counts.blockers = "pass", 1, 0
+        record.filed[(f"step-{i}.md", None)] = Row("x" * 64)
+
+
+def refile(record, text: str) -> list[int]:
+    return rerecord(record, parse_plan(text))
+
+
+THREE = step(1) + step(2, "1") + step(3)
+
+
+def test_rerecord_keeps_an_unchanged_step_and_resets_a_changed_one_and_its_dependents():
+    record = open_task(1, "o", 1)
+    rerecord(record, parse_plan(THREE))
+    pass_all(record, 3)
+    reopened = refile(record, step(1).replace("d1", "changed") + step(2, "1") + step(3))
+    rows = {n: record.filed[("plan.md", f"step-{n}")] for n in (1, 2, 3)}
+    assert reopened == [1, 2]
+    assert [rows[n].verdict for n in (1, 2, 3)] == ["unreviewed", "unreviewed", "pass"]
+    assert rows[3].counts.used == 1 and rows[1].counts == Counts() and rows[2].counts == Counts()
+    assert [(f"step-{n}.md", None) in record.filed for n in (1, 2, 3)] == [False, False, True]
+
+
+def test_rerecord_follows_the_dependency_chain_transitively():
+    text = step(1) + step(2, "1") + step(3, "2")
+    record = open_task(1, "o", 1)
+    rerecord(record, parse_plan(text))
+    pass_all(record, 3)
+    assert refile(record, text.replace("d1", "x")) == [1, 2, 3]
+
+
+def test_a_hand_edit_of_step_two_alone_leaves_step_one_runnable_and_step_two_unreviewed():
+    record = open_task(1, "o", 1)
+    rerecord(record, parse_plan(step(1) + step(2)))
+    pass_all(record, 2)
+    assert refile(record, step(1) + step(2).replace("d2", "edited")) == [2]
+    assert [record.filed[("plan.md", f"step-{n}")].verdict for n in (1, 2)] == ["pass", "unreviewed"]
+    assert ("step-1.md", None) in record.filed and ("step-2.md", None) not in record.filed
+
+
+def test_rerecord_removes_a_dropped_section_and_its_step_doc_row():
+    record = open_task(1, "o", 1)
+    rerecord(record, parse_plan(THREE))
+    pass_all(record, 3)
+    assert refile(record, step(1) + step(2, "1")) == []
+    assert [k for k in record.filed if k[1]] == [("plan.md", "step-1"), ("plan.md", "step-2")]
+    assert ("step-3.md", None) not in record.filed and ("step-1.md", None) in record.filed
+
+
+def test_rerecord_creates_a_row_for_an_added_step_and_clears_the_stopped_log():
+    record = open_task(1, "o", 1)
+    rerecord(record, parse_plan(step(1)))
+    pass_all(record, 1)
+    record.stopped_log = "stopped at step 2"
+    assert refile(record, step(1) + step(2)) == []
+    assert record.stopped_log == ""
+    assert record.filed[("plan.md", "step-1")].verdict == "pass"
+    assert record.filed[("plan.md", "step-2")].verdict == "unreviewed"
+
+
+def test_a_kept_section_keeps_its_counts_and_a_reordered_dependency_resets_the_dependent():
+    record = open_task(1, "o", 1)
+    rerecord(record, parse_plan(step(1) + step(2, "1")))
+    pass_all(record, 2)
+    record.filed[("plan.md", "step-2")].counts.previous = 5
+    assert refile(record, step(1) + step(2, "1")) == []
+    assert record.filed[("plan.md", "step-2")].counts.previous == 5
+    assert refile(record, step(1) + step(2, "none")) == [2]
+    assert record.filed[("plan.md", "step-2")].counts == Counts()
+
+
+def test_a_hand_edit_of_the_plan_is_caught_per_section(tmp_path):
+    docs, record = filed(tmp_path, step(1) + step(2))
+    (docs.path(1, "plan.md")).write_text(step(1) + step(2).replace("d2", "edited"))
+    assert docs.verified(record, ("plan.md", "step-1"))
+    assert not docs.verified(record, ("plan.md", "step-2"))
+    (docs.path(1, "plan.md")).write_text(step(1) + step(2).replace("f2.py", "f2.py\n\n\n"))
+    assert docs.verified(record, ("plan.md", "step-2"))
