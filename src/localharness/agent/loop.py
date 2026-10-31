@@ -2502,7 +2502,7 @@ class AgentLoop:
             # Mode-correct: native reads response_message.tool_calls, xml/text parses content.
             tool_calls = _extract_tool_calls(response_message, tool_call_mode)
 
-            # 8. Publish Action event; with a reply panel a tool-less one is held until its exit.
+            # 8. Publish Action event
             reply_action = Action(
                 agent_id=session.agent_id,
                 session_id=session.session_id,
@@ -3291,9 +3291,7 @@ class AgentLoop:
     async def _review_reply(
         self, session: Session, task: str, content: str | None, held: "list[Action]",
     ) -> tuple[str, str, str]:
-        """The reply panel's judgment of the draft the person would receive: (the summary to deliver, the verdict, the finding).
-
-        The held Action is published after the verdict, shielded; the person's own stop during the panel is consumed once and delivers the latest good draft unreviewed."""
+        """The reply panel's judgment of the draft the person would receive: (the summary to deliver, the verdict, the finding)."""
         from localharness.orchestrator.task_flow.panel import PanelInputs, finding_text, reply_brief, sense, typed_turns
         from localharness.orchestrator.task_flow.record import Unit
         panel = self.reply_panel

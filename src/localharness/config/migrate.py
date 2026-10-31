@@ -367,8 +367,7 @@ class MigrationPlan:
 
 
 def _drop_self_check(section: object) -> tuple[object, Optional[bool]]:
-    """`section` without its `self_check` key, and whether that setting was enabled (None: it had
-    none, or `section` is no mapping). Pure."""
+    """`section` without its `self_check` key, and whether that setting was enabled (None: it had none)."""
     if not isinstance(section, dict) or "self_check" not in section:
         return section, None
     old = section["self_check"]
