@@ -2805,7 +2805,7 @@ class AgentLoop:
                     summary = _clean_summary(_format_completion_summary(session, content))
                     verdict, finding = None, ""
                 else:
-                    summary, verdict, finding = await self._review_reply(session, task, content, held.pop() if held else None)
+                    summary, verdict, finding = await self._review_reply(session, task, content, held)
                 if self._task_context is not None:
                     # The reply keeps the model's words; at most one evidence line is appended.
                     # History keeps the model's own message: the packet carries current facts.
@@ -3289,7 +3289,7 @@ class AgentLoop:
             await self._bus.publish(held.pop())
 
     async def _review_reply(
-        self, session: Session, task: str, content: str | None, action: "Action | None",
+        self, session: Session, task: str, content: str | None, held: "list[Action]",
     ) -> tuple[str, str, str]:
         """The reply panel's judgment of the draft the person would receive: (the summary to deliver, the verdict, the finding).
 
@@ -3298,12 +3298,8 @@ class AgentLoop:
         from localharness.orchestrator.task_flow.record import Unit
         panel = self.reply_panel
         draft = _format_completion_summary(session, content)
-        calls, written, handles = self._turn_evidence(session)
-        inputs = PanelInputs(
-            brief=reply_brief(task, written, handles), draft=draft, turns=tuple(typed_turns(session.messages)),
-            handles=tuple(handles), critics=sense(calls, panel.jtbd_stood, panel.limits),
-        )
         kept = _Revision(draft)
+        summary = _clean_summary(draft)
 
         async def revise(shown: str, findings: tuple) -> str | None:
             return await self._revise_reply(session, kept, shown, findings)
@@ -3311,6 +3307,11 @@ class AgentLoop:
         started = time.monotonic()
         try:
             try:
+                calls, written, handles = self._turn_evidence(session)
+                inputs = PanelInputs(
+                    brief=reply_brief(task, written, handles), draft=draft, turns=tuple(typed_turns(session.messages)),
+                    handles=tuple(handles), critics=sense(calls, panel.jtbd_stood, panel.limits),
+                )
                 result = await panel.run(Unit("reply", "panel"), inputs, revise if content and not _is_confirmation(content) else None)
                 verdict, finding, delivered = result.verdict, result.finding, result.draft
                 if verdict == "unreviewed":
@@ -3327,12 +3328,13 @@ class AgentLoop:
             summary = _clean_summary(delivered)
         finally:
             self.exclude(time.monotonic() - started)
-        if action is not None:
-            update: dict[str, Any] = {"content": summary}
-            if kept.prompt or kept.completion:
-                update["prompt_tokens"] = (action.prompt_tokens or 0) + kept.prompt
-                update["completion_tokens"] = (action.completion_tokens or 0) + kept.completion
-            await asyncio.shield(self._bus.publish(action.model_copy(update=update)))
+            if held:
+                action = held.pop()
+                update: dict[str, Any] = {"content": summary}
+                if kept.prompt or kept.completion:
+                    update["prompt_tokens"] = (action.prompt_tokens or 0) + kept.prompt
+                    update["completion_tokens"] = (action.completion_tokens or 0) + kept.completion
+                await asyncio.shield(self._bus.publish(action.model_copy(update=update)))
         return summary, verdict, finding
 
     async def _revise_reply(self, session: Session, kept: "_Revision", draft: str, findings: tuple) -> str | None:
