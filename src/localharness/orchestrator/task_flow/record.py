@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Any, NamedTuple
+from typing import Any, Callable, NamedTuple
 
 from localharness.config.models import ChildBudget
 from localharness.core.caps import Caps
@@ -400,3 +400,67 @@ def _fill(text: str, fields: dict[str, Any]) -> str:
 def need(row: str, **fields: Any) -> Need:
     line = LINES[row]
     return Need(tuple(_fill(c, fields) for c in line.commands), _fill(line.state, fields), _fill(line.model, fields))
+
+
+def precondition(boundary: str, record: Record | None, by: str, carried: str | None) -> Need | None:
+    if record is None:
+        return None if boundary == "new" and by == "person" and carried else need("no task")
+    if record.stage == "done":
+        return None
+    if boundary == "new" and by == "person" and carried is None and ("plan.md", None) in record.filed:
+        return need("open and not blocked", task=record.id)
+    return None
+
+
+def _file(record: Record, boundary: str, carried: str | None, limits: Limits) -> bool:
+    row = record.filed.get(_row_key(boundary, None))
+    return carried is not None and bool(row is None or record.flags.get(boundary)
+                                        or can_revise(record, boundary, limits.revisions.get(boundary, 0)))
+
+
+def _panel(record: Record, boundary: str, carried: str | None, limits: Limits) -> bool:
+    row = record.filed.get(_row_key(boundary, None))
+    return bool(row and row.verdict == "unreviewed" and record.flags.get(boundary, True))
+
+
+PREDICATES: dict[str, Callable[[Record, str, str | None, Limits], int | bool | None]] = {
+    "file": _file,
+    "panel": _panel,
+}
+
+
+def _closed(record: Record) -> Need | None:
+    if record.stage == "done":
+        return need("done refused")
+    if record.halted:
+        return need("halted" if record.halted == "stopped" else "halted cap")
+    return None
+
+
+def next_unit(record: Record, boundary: str, carried: str | None = None, limits: Limits | None = None) -> Unit | Need | None:
+    if closed := _closed(record):
+        return closed
+    limits = limits or limited()[0]
+    for kind, predicate in PREDICATES.items():
+        if kind in STAGES[boundary].units and (hit := predicate(record, boundary, carried, limits)):
+            return Unit(boundary, kind, None if hit is True else hit)
+    if carried is not None:
+        return need("nothing to revise")
+    row = record.filed.get(_row_key(boundary, None))
+    return need("unreviewed", stage=boundary, verb=boundary) if row and row.verdict == "unreviewed" else None
+
+
+def _words(unit: Unit) -> str:
+    if unit.kind == "explore":
+        return "question"
+    return unit.kind if unit.step is None else f"step {unit.step}" + ("" if unit.kind == "execute" else f" {unit.kind}")
+
+
+def next_line(record: Record, boundary: str, limits: Limits | None = None) -> str:
+    row = record.filed.get(_row_key(boundary, None))
+    if (out := _closed(record)) is None and row and row.verdict in ("pass", "accepted"):
+        out = Unit(STAGES[boundary].next, STAGES[STAGES[boundary].next].units[0])
+    out = out or next_unit(record, boundary, None, limits)
+    if isinstance(out, Need):
+        return f"next: {out.reason}" if out.reason in ("done", "halted") else out.model or out.reason
+    return f"next: {STAGES[out.boundary].stage or 'run'} · {_words(out)}"
