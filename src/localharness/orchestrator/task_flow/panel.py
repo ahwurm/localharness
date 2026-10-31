@@ -313,12 +313,17 @@ class Panel:
         self.jtbd_stood = False
         self.stop = ""
         self.announce: Callable[[str], Awaitable[None]] | None = None
+        self.emit: Callable[[str, str, tuple, str], None] | None = None
 
     def _tail(self) -> str:
-        return f"{self.stop} delivers it unchecked" if self._reply and self.stop else ""
+        if not self._reply:
+            return "typing waits"
+        return f"{self.stop} delivers it unchecked" if self.stop else ""
 
     def status_text(self) -> str | None:
-        return _progress(*self._parts, self._tail()) if self._parts else self._phase
+        if self._parts:
+            return _progress(*self._parts, self._tail())
+        return _progress(self._phase, "", "", "", self._tail()) if self._phase else None
 
     def set_phase(self, text: str | None) -> None:
         self._phase = text
@@ -425,6 +430,12 @@ class Panel:
                 job = more or job
         finally:
             self._parts, self._reply = None, False
+        if job and self.emit and unit.boundary == "reply" and inputs.turns:
+            tail = f"turn {inputs.turns[-1][0]}"
+            try:
+                self.emit("job", f"now: {job[:Caps.LINE - len(f'◆ job now:  · {tail}')]}", (), tail)
+            except Exception:
+                log.warning("the job line failed", exc_info=True)
         verdict = verdict or run.verdict
         first = next((f for f in run.findings if f.tag == "BLOCKER"), None)
         return PanelResult(verdict, run.findings, run.blockers, run.finished, draft,

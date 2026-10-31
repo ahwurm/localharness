@@ -209,6 +209,8 @@ class Record:
     stopped_log: str = ""
     questions: list[str] = field(default_factory=list)
     paused: bool = False
+    filed_turn: dict[str, int] = field(default_factory=dict)
+    reopened: tuple[int, ...] = ()
 
 
 POINTS = {"new": "decisions.md", "research": "research.md", "plan": "plan.md", "task": "plan.md", "done": "review.md"}

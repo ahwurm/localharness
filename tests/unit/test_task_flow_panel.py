@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import math
 import re
+import uuid
 from importlib import resources
 from types import SimpleNamespace
 
@@ -611,7 +612,7 @@ async def test_a_critic_name_in_the_status_text_is_cleaned_to_one_line():
 
     subject = Panel(child, LIMITS)
     await subject.run(PLAN, PanelInputs("p", turns=JOB, critics=("answer",)))
-    assert seen == ["checking 1/1 · answer · up to 1 min"]
+    assert seen == ["checking 1/1 · answer · up to 1 min · typing waits"]
 
 
 @pytest.mark.parametrize("answers, verdict", [
@@ -1177,7 +1178,7 @@ async def test_a_task_units_panel_never_carries_the_stop_clause():
     subject._child = watched(subject, seen)
     subject.stop = "Ctrl+C"
     await subject.run(PLAN, PanelInputs("p", turns=JOB, critics=("answer",)))
-    assert seen == ["checking 1/1 · answer · up to 1 min"]
+    assert seen == ["checking 1/1 · answer · up to 1 min · typing waits"]
 
 
 def announcing(subject):
@@ -1320,7 +1321,7 @@ def test_typing_waits_leaves_the_burst_prefix_the_phases_first_clause():
 
 
 async def emitting(tmp_path, answer, seed=None, turns=JOB, unit=REPLY):
-    store = docs_in(tmp_path)
+    store = docs_in(tmp_path / uuid.uuid4().hex)
     if seed is not None:
         store.write_session("jtbd.md", seed)
     rows = []
@@ -1345,7 +1346,7 @@ async def test_job_a_first_job_an_unchanged_job_and_unchanged_emit_nothing(tmp_p
 
 async def test_job_a_stage_panel_and_a_panel_with_no_sink_emit_nothing_and_do_not_fail(tmp_path):
     assert await emitting(tmp_path, job_answer("fix the login bug"), seed="write docs", unit=PLAN) == []
-    store = docs_in(tmp_path)
+    store = docs_in(tmp_path / "bare")
     store.write_session("jtbd.md", "write docs")
     result = await Panel(sequenced({"jtbd": [job_answer("fix the login bug")]}), LIMITS, docs=store).run(
         REPLY, PanelInputs("d", turns=JOB, critics=("jtbd",)))
