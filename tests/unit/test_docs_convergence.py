@@ -880,6 +880,7 @@ INTERNAL_IDS = (  # internal phase numbers, plan ids and requirement ids
     re.compile(r"\b(?:LIVE|NUDGE)-\d+\b|\bT-2\d-\d+\b"),  # live-gate and threat ids
     re.compile(r"\b2[12]-0\d\b"),  # plan ids of the browser milestone
     re.compile(r"\bSETUP-(?:0[5-9]|1[0-5])\b"),  # the setup-wizard rows; SETUP-01..04 are v1.0's
+    re.compile(r"\b(?:SEAM|FLOW|PANEL|TASK|REL)-\d\d\b|\bT-4\d-\d+\b"),  # the task pipeline's requirement and threat ids
 )
 
 
@@ -943,6 +944,8 @@ def test_denylist_bites():
     assert check_denylist("docs/task-context.md", "## Tracker (design, not built)\n`GuardrailTracker`.\n") == []
     assert check_denylist("SECURITY.md", "Set `org.memory_enabled` to turn memory off.\n")
     assert check_denylist("README.md", "SETUP-07 says so.\n")
+    assert check_denylist("README.md", "SEAM-03 says so.\n")
+    assert check_denylist("CHANGELOG.md", "- Closes T-44-19.\n")
     assert check_denylist("README.md", "SEC-04 says so.\n")
     assert check_denylist("README.md", "as plan 53-02 did\n")
     assert check_denylist("README.md", "**Requirements:** SETUP-01, SETUP-04\n") == []
@@ -1040,7 +1043,8 @@ def test_task_flow_doc_bites():
 
 FILER_WALK_NEEDLES = (
     "follows no link below `agents/`", "a machine config folder or `agents/` folder that is itself a link keeps working",
-    "A task folder is created fresh", "`sessions/jtbd.md`")
+    "A task folder is created fresh", "`sessions/jtbd.md`",
+    "each written through that no-follow walk and replaced atomically, never through a link")
 
 
 def check_filer_walk_doc(security_text: str) -> list[str]:
@@ -1069,11 +1073,13 @@ REPLY_PANEL_NEEDLES = (
     "the first blocking finding reaches a paired phone's lock screen as the push body",
     "cut to 120 characters and encrypted to the device",
     "one generation with no tools offered, no retry and no compaction",
-    "is delivered as text and never run")
+    "is delivered as text and never run",
+    "for which the closing sentence is the only bound",
+    "The first blocking finding is carried as `TaskComplete.finding`")
 
 
 def check_reply_panel_doc(security_text: str) -> list[str]:
-    """SECURITY.md's prompt-injection section says a clean panel is no security signal, names the fenced findings path with the shipped fence, and the tool-less revision."""
+    """SECURITY.md's prompt-injection section says a clean panel is no security signal, names the fenced findings paths with the shipped fence, `TaskComplete.finding` and the tool-less revision."""
     body = " ".join((section(security_text, "## Threat model: prompt injection") or "").split())
     return [f"SECURITY.md's prompt-injection section does not say {n}" for n in REPLY_PANEL_NEEDLES if n not in body]
 
@@ -1090,11 +1096,14 @@ def test_reply_panel_doc_bites():
     assert len(check_reply_panel_doc("## Nothing\n")) == len(REPLY_PANEL_NEEDLES)
 
 
-SLEEP_FILE_NEEDLES = ("restamped as an ordinary request", "a wake holds no trusted subtype")
+SLEEP_FILE_NEEDLES = (
+    "restamped as an ordinary request", "a wake holds no trusted subtype",
+    "the agent's own write tools and the shell writes the gate can read are refused there, "
+    "so only what the deny class does not cover can still reach it")
 
 
 def check_sleep_file_doc(security_text: str) -> list[str]:
-    """SECURITY.md says a slept conversation's human-origin messages are restamped as ordinary requests, so a wake holds no trusted subtype."""
+    """SECURITY.md says what can still reach the sleep file, and that a wake restamps human-origin messages so it holds no trusted subtype."""
     body = " ".join((section(security_text, "## Files the harness writes") or "").split())
     return [f"SECURITY.md's files section does not say {n}" for n in SLEEP_FILE_NEEDLES if n not in body]
 
@@ -1182,6 +1191,8 @@ def test_task_docs_doc_bites():
     assert len(check_task_docs_doc("## Nothing\n")) == len(TASK_DOCS_NEEDLES)
 
 
+_critic_tools = _source_constant(_PANEL, "CRITIC_TOOLS")
+_CRITIC_TOOLS = ", ".join(f"`{t}`" for t in _critic_tools[:-1]) + f" and `{_critic_tools[-1]}`"
 TASK_RUN_NEEDLES = (
     ("## Threat model: prompt injection", "The `task` tool declares its results untrusted, a label"),
     ("## Threat model: prompt injection",
@@ -1194,7 +1205,12 @@ TASK_RUN_NEEDLES = (
      "The session's state folder, a project's `.localharness/` when it has one, is on that list from start"),
     ("## Threat model: prompt injection", "No person's go-ahead stands between a plan and its steps"),
     ("## Threat model: prompt injection", "so an executor's ordinary repository writes and commands run unasked"),
-    ("## Threat model: prompt injection", "The root already held the same tools, so no capability is new"))
+    ("## Threat model: prompt injection", "The root already held the same tools, so no capability is new"),
+    ("## Threat model: prompt injection", f"holds {_CRITIC_TOOLS} and nothing else, fixed in code"),
+    ("## Threat model: prompt injection",
+     "its role is read from the package's own critic files, never from your config, a project or an overlay"),
+    ("### Settings a project may only lower",
+     "The task pipeline's critics, explorers and executors do not take their budgets from it"))
 
 
 def check_task_run_doc(security_text: str) -> list[str]:
