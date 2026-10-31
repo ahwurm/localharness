@@ -3199,8 +3199,9 @@ class AgentLoop:
         refresh = getattr(self._task_context, "refresh_references", None)
         if refresh is not None:
             refresh(getattr(self._ctx, "_content_store", None))
+        note = self._current_note()
         try:
-            return await self._pack_request(messages, tools)
+            return await self._pack_request(messages, tools, note)
         except ActiveReferenceOverflow:
             # Reported, not enforced: the task references are withdrawn for this request (the
             # packet marks them unprotected) and the request goes out; the model decides whether
@@ -3208,22 +3209,32 @@ class AgentLoop:
             # model's own tool_result_get declarations merged into the task step. With nothing to
             # withdraw (no task record, no references) the overflow propagates and blocks.
             withdraw = getattr(self._task_context, "withdraw_references", None)
-            if withdraw is None or not withdraw():
+            withdrawn = withdraw is not None and bool(withdraw())
+            if not withdrawn and not note:
                 raise
             # build_messages raises from inside (it runs the same fit check) or returns a base
             # that already carries restore pairs, so the whole pack runs again. A summary fired
             # by the first pass is already in `messages`; keep its commit for _absorb_commit.
+            # Nothing to withdraw: the request note is what is dropped, so it cannot block the turn.
             commit = self._ctx.last_commit
-            packed, budget = await self._pack_request(messages, tools)
+            packed, budget = await self._pack_request(messages, tools, note if withdrawn else "")
             if self._ctx.last_commit is None:
                 self._ctx.last_commit = commit
             return packed, budget
 
-    async def _pack_request(self, messages: list[Message], tools: list | None):
+    def _current_note(self) -> str:
+        if self._request_note is None:
+            return ""
+        try:
+            return self._request_note() or ""
+        except Exception:  # noqa: BLE001 - a note provider must never abort the request
+            log.warning("request_note failed; sending the request without it", exc_info=True)
+            return ""
+
+    async def _pack_request(self, messages: list[Message], tools: list | None, note: str):
         packed, budget = await self._ctx.build_messages(messages, tools)
         # An empty packet (a TaskState with no active record) is an ordinary request.
         packet = self._task_context.packet() if self._task_context is not None else ""
-        note = self._request_note() if self._request_note is not None else ""
         if packet:
             # Request-local, after every lossy transform: one current packet, no growing log.
             packed = [*packed, harness_message(packet, "active_task")]
