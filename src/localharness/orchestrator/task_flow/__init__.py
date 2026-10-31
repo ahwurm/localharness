@@ -20,7 +20,7 @@ class TaskFlow:
                  record: Record | None = None) -> None:
         self.run_config_child, self.emit, self.exclude, self.docs, self.config = run_config_child, emit, exclude, docs, config
         self.root_tools, self.llm, self.token_counter, self.messages, self.bus = list(root_tools), llm, token_counter, messages, bus
-        self.limits, self.notes = limited(config.task_flow, known=critic_names())
+        self.limits = limited(config.task_flow, known=critic_names())[0]
         self.cap = FlowCap(self.limits.flow_cap_minutes)
         self.reply_panel = Panel(run_config_child, self.limits, self.cap, docs)
         self.record, self.revision_block, self.jtbd_stood, self.excluded = record, "", False, 0.0
