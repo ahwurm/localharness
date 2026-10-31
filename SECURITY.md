@@ -1292,8 +1292,10 @@ A delegating model may narrow a specialist to a subset of its own tools for one 
 A critic is a child agent that holds `read`, `glob`, `grep`, `git_read` and `tool_result_get` and
 nothing else, fixed in code, and its role is read from the package's own critic files, never from
 your config, a project or an overlay; your machine-level `task_flow` may add a packaged critic to a
-stage's panel or set its budget within limits fixed in code, and nothing more. A critic never sees
-the assistant's side of the conversation.
+stage's panel or set its budget within limits fixed in code, and nothing more. A critic's brief
+carries the person's typed turns, the draft or document under review and the files it reads with its
+read-only tools, and nothing else of the conversation: no earlier assistant message, no reasoning, no
+tool transcript.
 
 No person's go-ahead stands between a plan and its steps. Once you open a task with
 `/task new <objective>`, the root runs every stage itself, and an executor holding the root's

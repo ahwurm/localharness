@@ -1210,6 +1210,8 @@ TASK_RUN_NEEDLES = (
     ("## Threat model: prompt injection", f"holds {_CRITIC_TOOLS} and nothing else, fixed in code"),
     ("## Threat model: prompt injection",
      "its role is read from the package's own critic files, never from your config, a project or an overlay"),
+    ("## Threat model: prompt injection",
+     "and nothing else of the conversation: no earlier assistant message, no reasoning, no tool transcript"),
     ("### Settings a project may only lower",
      "The task pipeline's critics, explorers and executors do not take their budgets from it"))
 
