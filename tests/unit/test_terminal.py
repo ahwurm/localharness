@@ -72,3 +72,45 @@ async def test_panel_started_prints_off_the_box_and_stays_quiet_on_it():
     out.seek(0), out.truncate()
     await on_the_box(channel).panel_started("panel line")
     assert out.getvalue() == ""
+
+
+def completed(**kw):
+    from localharness.core.events import TaskComplete
+
+    return TaskComplete(agent_id="orchestrator", session_id="s", success=True, summary="the answer",
+                        duration_seconds=0.1, iterations=1, **kw)
+
+
+def test_reply_line_of_a_blocked_root_reply_names_the_show_command_and_the_finding():
+    from localharness.channels.base import reply_line
+
+    assert reply_line(completed(verdict="blocked", finding="README.md:41 does not say that")) == \
+        "◆ reply blocked · /task show reply · README.md:41 does not say that"
+
+
+def test_reply_line_of_an_unreviewed_reply_needs_a_reason_and_a_cut_finding_fits_the_line():
+    from localharness.channels.base import reply_line
+    from localharness.core.caps import Caps
+
+    assert reply_line(completed(verdict="unreviewed", finding="the critic ran out of time")) == \
+        "◆ reply unreviewed · /task show reply · the critic ran out of time"
+    for event in (completed(verdict="unreviewed", finding=""), completed(verdict="pass", finding="x"), completed()):
+        assert reply_line(event) is None
+    long = reply_line(completed(verdict="blocked", finding="w" * 300))
+    assert long.startswith("◆ reply blocked · /task show reply · www") and len(long) == Caps.LINE
+
+
+def test_reply_line_of_a_childs_completion_is_none():
+    from localharness.channels.base import reply_line
+
+    assert reply_line(completed(verdict="blocked", finding="x").model_copy(update={"parent_id": "root-1"})) is None
+
+
+@pytest.mark.asyncio
+async def test_reply_line_follows_the_reply_on_the_terminal_with_its_mark():
+    out = StringIO()
+    channel = make_terminal_channel(out, force_terminal=False)
+    await channel.on_task_complete(completed(verdict="blocked", finding="README.md:41 does not say that"))
+    lines = [line.strip() for line in out.getvalue().splitlines() if line.strip()]
+    assert lines[-1] == "◆ reply blocked · /task show reply · README.md:41 does not say that"
+    assert any("the answer" in line for line in lines[:-1])
