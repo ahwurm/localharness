@@ -1508,6 +1508,8 @@ def _migration_clauses(plan: Any, config_file: Path,
                 _migrate.init_nulls_clauses(sidecar.nulled)
                 + " (" + escape(_migrate.sidecar_label(sidecar.path)) + ")"
             )
+    if any(sc.self_check is True and done(sc.path) for sc in plan.sidecars):
+        removed_note += "; " + _migrate.SELF_CHECK_DROPPED
     # A launched vLLM server that predates server.bind_all keeps listening on every interface, as
     # it did: written for the user once, said once, and doctor's row says how to undo it.
     if config_done and plan.bind_all_paths:

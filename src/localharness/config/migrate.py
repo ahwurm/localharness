@@ -157,6 +157,10 @@ the only writer allowed to delete a user's key, and the name it deletes should b
 the top of the file rather than quoted inline three times."""
 
 
+SELF_CHECK_DROPPED = "agent.self_check dropped from config; the critics replace it"
+"""The receipt line when a dropped `self_check` setting had `enabled: true`."""
+
+
 SIDECAR_DIRS: tuple[str, ...] = ("agents", "divisions")
 """The global config dir's per-agent and per-division files, which sit on the SAME permission
 cascade as `org.permissions` (`loader._global_layer_permission`) and were written by the same
@@ -303,14 +307,17 @@ class SidecarPlan:
     ONE plan, one write and one backup per file, because the backup name is stamped to the second
     and a second write would overwrite the first backup with already-rewritten bytes.
 
-    `stripped` is the mapping with the dead key removed and nothing else (None when the file has no
-    dead key): what is written when the init-nulls step is held back (SEC-01, :func:`apply`)."""
+    `stripped` is the mapping with the dead key and `self_check` removed and nothing else (None
+    when the file has neither): what is written when the init-nulls step is held back (SEC-01,
+    :func:`apply`). `self_check` is None when the file had no such setting, else whether it was
+    enabled."""
 
     path: Path
     removed: Optional[list]
     updated: dict
     nulled: tuple[str, ...] = ()
     stripped: Optional[dict] = None
+    self_check: Optional[bool] = None
 
 
 @dataclass(frozen=True)
@@ -359,6 +366,16 @@ class MigrationPlan:
         return self.defaults_unchanged and not self.bind_all_paths and not self.init_nulls_due
 
 
+def _drop_self_check(section: object) -> tuple[object, Optional[bool]]:
+    """`section` without its `self_check` key, and whether that setting was enabled (None: it had
+    none, or `section` is no mapping). Pure."""
+    if not isinstance(section, dict) or "self_check" not in section:
+        return section, None
+    old = section["self_check"]
+    kept = {k: v for k, v in section.items() if k != "self_check"}
+    return kept, isinstance(old, dict) and old.get("enabled") is True
+
+
 def scan_sidecars(config_dir: Path, *, init_nulls_due: bool = False,
                   init_nulls_owed: "tuple[str, ...]" = (),
                   init_nulls_since: int = 0) -> list[SidecarPlan]:
@@ -393,21 +410,25 @@ def scan_sidecars(config_dir: Path, *, init_nulls_due: bool = False,
                 dead = updated_perms.pop(DEAD_KEY)
                 updated["permissions"] = updated_perms
                 removed = list(dead) if isinstance(dead, list) else []
-            stripped = updated if removed is not None else None  # _init_nulls never mutates it
+            self_check = None
+            if name == "agents":
+                updated, self_check = _drop_self_check(updated)
+            stripped = updated if removed is not None or self_check is not None else None  # _init_nulls never mutates it
             nulled: tuple[str, ...] = ()
             if init_nulls_due or _sidecar_name(path) in init_nulls_owed:
                 owed_file = _sidecar_name(path) in init_nulls_owed
                 updated, nulled = _init_nulls(
                     updated, scope="sidecar", since=0 if owed_file else init_nulls_since)
-            if removed is None and not nulled:
+            if removed is None and not nulled and self_check is None:
                 continue
-            found.append(SidecarPlan(path, removed, updated, nulled, stripped))
+            found.append(SidecarPlan(path, removed, updated, nulled, stripped, self_check))
     return found
 
 
 def scan_overrides(config_dir: Path, *, since: int, owed: bool) -> Optional[SidecarPlan]:
     """The global `overrides.yaml` as a plan when its `org:` section carries revision 2's dumped
-    `default_temperature: 0.6`, else None (absent, unparsable, not a mapping, no such value).
+    `default_temperature: 0.6` or its `agent:` section carries `self_check`, else None (absent,
+    unparsable, not a mapping, neither).
 
     `since` is the revision config.yaml's stamp records; `owed` says the file is listed in
     :data:`INIT_NULLS_PENDING_FILE` (the stamp is current and a previous write failed), when it is
@@ -419,10 +440,13 @@ def scan_overrides(config_dir: Path, *, since: int, owed: bool) -> Optional[Side
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, yaml.YAMLError):
         return None
+    agent, self_check = _drop_self_check(data.get("agent") if isinstance(data, dict) else None)
+    if self_check is not None:
+        data = {**data, "agent": agent}
     updated, paths = null_overlay_org(data, since=0 if owed else since)
-    if not paths:
+    if not paths and self_check is None:
         return None
-    return SidecarPlan(path, None, updated, paths, None)
+    return SidecarPlan(path, None, updated, paths, data if self_check is not None else None, self_check)
 
 
 def null_overlay_org(data: object, *, since: int) -> tuple[object, tuple[str, ...]]:
@@ -624,8 +648,7 @@ def load_plan(config_file: Path) -> tuple[bytes, Optional[MigrationPlan]]:
     since = _init_nulls_stamp(data)
     sidecars = scan_sidecars(config_file.parent, init_nulls_due=due, init_nulls_owed=listed,
                              init_nulls_since=since)
-    overrides = scan_overrides(config_file.parent, since=since, owed=OVERRIDES_FILE in listed) \
-        if due or OVERRIDES_FILE in listed else None
+    overrides = scan_overrides(config_file.parent, since=since, owed=OVERRIDES_FILE in listed)
     if overrides is not None:
         sidecars.append(overrides)
     return original, plan(data, tuple(sidecars), init_nulls_owed=owed)
