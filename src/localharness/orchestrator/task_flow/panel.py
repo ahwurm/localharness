@@ -16,7 +16,7 @@ from localharness.channels.base import one_line, sanitize_for_display
 from localharness.config.models import CRITIC_NAME, AgentConfig, BudgetConfig, ChildBudget, PermissionConfig, ToolConfig
 from localharness.core.caps import Caps
 from localharness.core.content import text_of
-from localharness.orchestrator.task_flow.filer import FENCE_RUN, Refused, flat
+from localharness.orchestrator.task_flow.filer import FENCE_RUN, Refused, flat, render_section
 from localharness.orchestrator.task_flow.record import (LIMITS, SENSED, Limits, Unit, continue_revising, limited,
                                                         panel_critics, panel_minutes, printed_bound)
 
@@ -437,6 +437,9 @@ class Panel:
             except Exception:
                 log.warning("the job line failed", exc_info=True)
         verdict = verdict or run.verdict
+        if self.docs and unit.boundary == "reply":
+            with suppress(Refused, OSError):
+                self.docs.write_session("reply-review.md", render_section(used + 1, run.findings, verdict, run.blockers) + "\n")
         first = next((f for f in run.findings if f.tag == "BLOCKER"), None)
         return PanelResult(verdict, run.findings, run.blockers, run.finished, draft,
                            finding_text(first) if first and verdict == "blocked" else "", job)
