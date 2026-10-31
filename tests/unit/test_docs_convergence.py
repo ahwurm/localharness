@@ -189,6 +189,11 @@ def test_machine_only_list_bites():
         "machine-level only in code, not listed in SECURITY.md: server"]
     assert check_machine_only_list(good + "- `org`\n", code) == [
         "listed in SECURITY.md, not machine-level only in code: org"]
+    for name in ("task_flow.*", "stuck_detector.*"):
+        assert check_machine_only_list(good.replace(f"- `{name}`\n", ""), code) == [
+            f"machine-level only in code, not listed in SECURITY.md: {name}"]
+    assert check_machine_only_list(good + "- `memory.*`\n", code) == [
+        "listed in SECURITY.md, not machine-level only in code: memory.*"]
     assert check_machine_only_list("## Something else\n", code)
 
 
