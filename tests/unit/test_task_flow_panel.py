@@ -22,7 +22,7 @@ from localharness.orchestrator.task_flow.filer import Docs, Refused
 from localharness.orchestrator.task_flow.panel import (
     FENCE_CLOSE, FENCE_LABEL, FlowCap, Panel, PanelInputs, apply_jtbd, fence, parse, run_critic, unit_floor)
 from localharness.orchestrator.task_flow.record import (
-    REPLY_RESERVE_MINUTES, SENSED, Unit, limited, need, panel_critics)
+    LIMITS as TABLE, REPLY_RESERVE_MINUTES, SENSED, Unit, limited, need, panel_critics, panel_minutes, printed_bound)
 
 
 def scripted(answers: dict[str, DelegationResult]):
@@ -92,7 +92,36 @@ def test_load_critic_builds_the_config_with_the_fixed_toolset(name):
     assert config.name == name
     assert config.tools.add == list(panel.CRITIC_TOOLS)
     assert "\n" not in config.purpose.strip() and 0 < len(config.purpose) <= Caps.LINE
-    assert len(config.role.strip().splitlines()) <= 12
+    assert len(config.role.strip().splitlines()) <= 13
+
+
+@pytest.mark.parametrize("name", NINE)
+def test_load_critic_adds_the_web_pair_only_when_asked(name):
+    assert panel.WEB_CRITIC_TOOLS == (*panel.CRITIC_TOOLS, "web_search", "web_fetch")
+    assert panel.load_critic(name, web=True).tools.add == list(panel.WEB_CRITIC_TOOLS)
+    assert panel.load_critic(name).tools.add == list(panel.CRITIC_TOOLS)
+
+
+@pytest.mark.parametrize("unit, web", [("reply", {"factual", "recency"}), ("plan", set())])
+async def test_only_the_fact_critics_on_a_reply_panel_hold_the_web_pair(unit, web):
+    assert panel.WEB_CRITICS == {"factual", "recency"}
+    held = {}
+
+    async def child(config, task, **kw):
+        held[config.name] = config.tools.add
+        return NONE
+
+    critics = ("answer", "jtbd", "factual", "recency", "big-picture")
+    await Panel(child, LIMITS, cap=FlowCap(180)).run(Unit(unit, "panel"), PanelInputs("d", turns=JOB, critics=critics))
+    assert {n for n, tools in held.items() if tools == list(panel.WEB_CRITIC_TOOLS)} == web
+    assert all(tools in (list(panel.CRITIC_TOOLS), list(panel.WEB_CRITIC_TOOLS)) for tools in held.values())
+
+
+@pytest.mark.parametrize("name", NINE)
+def test_yaml_holds_a_blocker_only_for_what_the_critic_can_show(name):
+    role = panel.load_critic(name).role
+    assert "BLOCKER is only for what you can show is wrong or missing in what you read" in role
+    assert "your own lack of access is never the work's fault" in role
 
 
 @pytest.mark.parametrize("name", NINE)
@@ -232,10 +261,12 @@ def test_parse_a_note_naming_a_decision_is_marked():
 
 
 @pytest.mark.parametrize("reason", ["budget_actions", "error", "stuck", "kill_file"])
-def test_parse_an_unclean_termination_is_one_unreadable_note(reason):
-    p = parsed("NONE", reason)
-    assert (p.readable, p.clean) == (False, False)
-    assert [(f.tag, f.rule) for f in p.findings] == [("NOTE", "critic answer returned nothing readable")]
+def test_parse_an_unclean_termination_keeps_what_the_critic_wrote(reason):
+    p = parsed("[BLOCKER] r — e\n[Budget limit reached: 24 tool calls.]", reason)
+    assert tags(p) == ["BLOCKER"] and p.readable
+    assert parsed("NONE", reason).clean
+    q = parsed("", reason)
+    assert not q.readable and q.findings[0].rule == "critic answer returned nothing readable"
 
 
 @pytest.mark.parametrize("reason", [None, "complete"])
@@ -360,7 +391,7 @@ def calls(*names):
     return [(n, "trusted") for n in names]
 
 
-def test_sense_a_hello_runs_answer_and_jtbd():
+def test_sense_with_no_calls_is_answer_and_jtbd():
     assert panel.sense([]) == ("answer", "jtbd")
 
 
@@ -419,7 +450,7 @@ def watching(answers, seen):
         seen.append((config.name, subject.status_text(), kw["budget"]))
         return answers[config.name]
 
-    subject = Panel(child, limited(None)[0])
+    subject = task_panel(child)
     return subject
 
 
@@ -438,9 +469,9 @@ async def test_status_text_names_each_critic_with_its_computed_bound():
     seen = []
     subject = watching({"jtbd": NONE, "big-picture": NONE, "parsimony": NONE}, seen)
     await subject.run(PLAN, PanelInputs("the plan", turns=JOB))
-    assert [s[1] for s in seen] == ["checking 1/3 · jtbd · up to 13 min · typing waits",
-                                    "checking 2/3 · big-picture · up to 12 min · typing waits",
-                                    "checking 3/3 · parsimony · up to 6 min · typing waits"]
+    names = panel_critics("plan", LIMITS)
+    assert [s[1] for s in seen] == [f"checking {i}/3 · {n} · {up_to(*names[i - 1:])} · typing waits"
+                                    for i, n in enumerate(names, 1)]
     assert subject.status_text() is None
 
 
@@ -449,9 +480,7 @@ async def test_panel_run_gives_each_critic_the_tables_budget_on_the_critic_row()
     subject = watching({"jtbd": NONE, "big-picture": NONE, "parsimony": NONE}, seen)
     await subject.run(PLAN, PanelInputs("the plan", turns=JOB))
     assert [(n, b) for n, _, b in seen] == [
-        ("jtbd", ("task_flow.critic", ChildBudget(actions=3, minutes=1))),
-        ("big-picture", ("task_flow.critic", ChildBudget(actions=12, minutes=6))),
-        ("parsimony", ("task_flow.critic", ChildBudget(actions=12, minutes=6)))]
+        (n, ("task_flow.critic", TABLE["critic"].default)) for n in panel_critics("plan", LIMITS)]
 
 
 async def test_panel_run_passes_a_clean_readable_panel():
@@ -463,6 +492,14 @@ async def test_panel_run_passes_a_clean_readable_panel():
 
 REPLY = Unit("reply", "panel")
 LIMITS = limited(None)[0]
+
+
+def task_panel(child):
+    return Panel(child, LIMITS, cap=FlowCap(TABLE["flow_cap_minutes"].default))
+
+
+def up_to(*critics):
+    return f"up to {printed_bound(panel_minutes(critics, LIMITS))} min"
 
 
 def sequenced(answers):
@@ -585,11 +622,9 @@ async def test_status_text_through_a_four_critic_reply_panel_and_its_revision():
     critics = panel_critics("reply", LIMITS, ("factual", "recency"))
     result = await subject.run(REPLY, PanelInputs("d", draft="d", turns=JOB, critics=critics), revise)
     assert result.verdict == "pass"
-    assert seen == ["checking 1/4 · answer · up to 28 min", "checking 2/4 · jtbd · up to 27 min",
-                    "checking 3/4 · factual · up to 26 min", "checking 4/4 · recency · up to 20 min",
-                    "revising · 2 blockers · up to 14 min",
-                    "rechecking 1/4 · answer · up to 14 min", "rechecking 2/4 · jtbd · up to 13 min",
-                    "rechecking 3/4 · factual · up to 12 min", "rechecking 4/4 · recency · up to 6 min"]
+    assert seen == [
+        *(f"checking {i}/4 · {n}" for i, n in enumerate(critics, 1)), "revising · 2 blockers",
+        *(f"rechecking {i}/4 · {n}" for i, n in enumerate(critics, 1))]
     assert subject.status_text() is None
 
 
@@ -603,7 +638,7 @@ async def test_status_text_promises_no_recheck_without_a_revise_callback():
 
     subject = Panel(child, LIMITS)
     await subject.run(REPLY, PanelInputs("d", turns=JOB, critics=("answer", "jtbd")))
-    assert seen == ["checking 1/2 · answer · up to 2 min", "checking 2/2 · jtbd · up to 1 min"]
+    assert seen == ["checking 1/2 · answer", "checking 2/2 · jtbd"]
 
 
 def test_status_text_carries_the_runners_phase_verbatim_and_clears_it():
@@ -633,16 +668,18 @@ async def test_a_critic_name_in_the_status_text_is_cleaned_to_one_line():
         seen.append(subject.status_text())
         return await base(config, task, **kw)
 
-    subject = Panel(child, LIMITS)
+    subject = task_panel(child)
     await subject.run(PLAN, PanelInputs("p", turns=JOB, critics=("answer",)))
-    assert seen == ["checking 1/1 · answer · up to 1 min · typing waits"]
+    assert seen == [f"checking 1/1 · answer · {up_to('answer')} · typing waits"]
 
 
 @pytest.mark.parametrize("answers, verdict", [
     ({"answer": [NONE], "jtbd": [NONE]}, "pass"),
     ({"answer": [answered("what is this")], "jtbd": [NONE]}, "unreviewed"),
     ({"answer": [answered("")], "jtbd": [NONE]}, "unreviewed"),
-    ({"answer": [answered("NONE", "max_actions")], "jtbd": [NONE]}, "unreviewed"),
+    ({"answer": [answered("NONE", "max_actions")], "jtbd": [NONE]}, "pass"),
+    ({"answer": [answered(BLOCKER, "max_actions")], "jtbd": [NONE]}, "blocked"),
+    ({"answer": [answered("", "max_actions")], "jtbd": [NONE]}, "unreviewed"),
     ({"answer": [answered("what is this")], "jtbd": [answered(BLOCKER)]}, "blocked"),
     ({"answer": [answered(BLOCKER)], "jtbd": [answered("what is this")]}, "blocked"),
     ({"answer": [answered("[WARNING] a rule — an evidence")], "jtbd": [NONE]}, "pass"),
@@ -666,10 +703,10 @@ async def test_a_cancel_mid_panel_reports_the_unfinished_run_then_propagates():
             await gate.wait()
         return answered(BLOCKER) if config.name == "jtbd" else NONE
 
-    subject = Panel(child, LIMITS)
+    subject = task_panel(child)
     task = asyncio.create_task(subject.run(PLAN, PanelInputs("p", turns=JOB, on_run=runs.append)))
     await started.wait()
-    assert subject.status_text() == "checking 2/3 · big-picture · up to 12 min · typing waits"
+    assert subject.status_text() == f"checking 2/3 · big-picture · {up_to('big-picture', 'parsimony')} · typing waits"
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -714,12 +751,12 @@ async def test_a_fourth_addition_never_runs():
     assert [n for n, _ in child.calls] == ["jtbd", "big-picture", "parsimony", "security", "quality", "factual"]
 
 
-async def test_a_config_below_the_floor_runs_a_critic_at_the_floor_and_above_the_ceiling_at_the_ceiling():
+async def test_a_config_below_the_floor_is_clamped_to_the_floor_and_above_the_ceiling_to_the_ceiling():
     limits, _ = limited(TaskFlowConfig(critics={"answer": ChildBudget(actions=1, minutes=0.5),
                                                 "factual": ChildBudget(actions=100, minutes=100)}))
     child = sequenced({})
     await Panel(child, limits).run(REPLY, PanelInputs("d", turns=JOB, critics=("answer", "factual")))
-    assert child.calls == [("answer", ChildBudget(actions=3, minutes=1)), ("factual", ChildBudget(actions=12, minutes=6))]
+    assert child.calls == [("answer", TABLE["critic"].floor), ("factual", TABLE["critic"].ceiling)]
 
 
 async def test_the_finding_is_the_first_blocker_sanitised_and_cut():
@@ -823,7 +860,8 @@ def clocked(monkeypatch, answers=None):
 async def test_a_launched_panel_clamps_each_critic_to_the_remainder_less_the_later_floors(monkeypatch):
     subject, seen = clocked(monkeypatch)
     result = await subject.run(PLAN, PanelInputs("p", turns=JOB))
-    assert [(n, m) for n, m, _ in seen] == [("jtbd", 1), ("big-picture", 5.5), ("parsimony", 1)]
+    floor = TABLE["critic"].floor.minutes
+    assert [(n, m) for n, m, _ in seen] == [("jtbd", 7.5 - 2 * floor), ("big-picture", floor), ("parsimony", floor)]
     assert result.verdict == "pass" and subject.cap.remaining() == 0
 
 
@@ -831,9 +869,11 @@ async def test_a_task_panels_printed_bound_is_cut_to_the_cap_remainder(monkeypat
     subject, seen = clocked(monkeypatch)
     subject.cap = FlowCap(10)
     await subject.run(PLAN, PanelInputs("p", turns=JOB))
-    assert [s for _, _, s in seen] == ["checking 1/3 · jtbd · up to 10 min · typing waits",
-                                       "checking 2/3 · big-picture · up to 9 min · typing waits",
-                                       "checking 3/3 · parsimony · up to 3 min · typing waits"]
+    names, floor = panel_critics("plan", LIMITS), TABLE["critic"].floor.minutes
+    left = (10, 2 * floor, floor)
+    assert [s for _, _, s in seen] == [
+        f"checking {i}/3 · {n} · up to {printed_bound(min(panel_minutes(names[i - 1:], LIMITS), left[i - 1]))} min · typing waits"
+        for i, n in enumerate(names, 1)]
 
 
 async def test_a_critic_the_cap_cannot_fund_stops_the_panel_unreviewed_without_a_launch(monkeypatch):
@@ -865,7 +905,7 @@ async def test_a_cancelled_critic_settles_the_seconds_it_used(monkeypatch):
 
 async def test_a_reply_panel_of_eight_critics_at_ceiling_never_draws_from_the_cap():
     names = ("big-picture", "parsimony", "security")
-    ceiling = ChildBudget(actions=12, minutes=6)
+    ceiling = TABLE["critic"].ceiling
     limits, _ = limited(TaskFlowConfig(panels={"reply": list(names)}, critics={n: ceiling for n in
                                                                               ("answer", "jtbd", *SENSED, *names)}))
     cap = FlowCap(180)
@@ -965,9 +1005,8 @@ async def test_a_new_job_exactly_at_the_cap_is_written(tmp_path):
     assert store.read_session("jtbd.md") == "x" * (Caps.DOC // 4) + "\n"
 
 
-async def test_an_unreadable_head_or_an_unclean_end_leaves_the_file(tmp_path):
-    for answer in (job_answer("a new job", head="what is this"), answered("NONE\n---\na new job", "max_actions"),
-                   answered("---\na new job"), answered("NONE")):
+async def test_an_unreadable_head_leaves_the_file(tmp_path):
+    for answer in (job_answer("a new job", head="what is this"), answered("---\na new job"), answered("NONE")):
         result, store, _ = await jtbd_run(tmp_path / str(id(answer)), answer, seed="write docs")
         assert store.read_session("jtbd.md") == "write docs" and result.job == ""
 
@@ -1164,9 +1203,9 @@ async def test_stop_clause_ends_the_status_text_of_a_four_critic_reply_panel_thr
 
     critics = panel_critics("reply", LIMITS, ("factual", "recency"))
     await subject.run(REPLY, PanelInputs("d", draft="d", turns=JOB, critics=critics), revise)
-    assert seen[2] == f"checking 3/4 · factual · up to 26 min · {STOP}"
-    assert seen[4] == f"revising · 1 blocker · up to 14 min · {STOP}"
-    assert seen[8] == f"rechecking 4/4 · recency · up to 6 min · {STOP}"
+    assert seen[2] == f"checking 3/4 · factual · {STOP}"
+    assert seen[4] == f"revising · 1 blocker · {STOP}"
+    assert seen[8] == f"rechecking 4/4 · recency · {STOP}"
     assert all(s.endswith(STOP) for s in seen) and subject.status_text() is None
 
 
@@ -1185,23 +1224,23 @@ async def test_stop_clause_through_the_panel_status_text_cut():
     subject._child = watched(subject, seen)
     subject.stop = "x" * 30
     await subject.run(REPLY, PanelInputs("d", turns=JOB, critics=("answer", "jtbd")))
-    assert seen == [f"checking · up to 2 min · {subject.stop} delivers it unchecked",
-                    f"checking · up to 1 min · {subject.stop} delivers it unchecked"]
+    assert seen == [f"checking 1/2 · answer · {subject.stop} delivers it unchecked",
+                    f"checking 2/2 · jtbd · {subject.stop} delivers it unchecked"]
 
 
 async def test_without_a_stop_word_the_status_texts_are_unchanged():
     seen, subject = [], Panel(None, LIMITS)
     subject._child = watched(subject, seen)
     await subject.run(REPLY, PanelInputs("d", turns=JOB, critics=("answer", "jtbd")))
-    assert seen == ["checking 1/2 · answer · up to 2 min", "checking 2/2 · jtbd · up to 1 min"]
+    assert seen == ["checking 1/2 · answer", "checking 2/2 · jtbd"]
 
 
 async def test_a_task_units_panel_never_carries_the_stop_clause():
-    seen, subject = [], Panel(None, LIMITS)
+    seen, subject = [], task_panel(None)
     subject._child = watched(subject, seen)
     subject.stop = "Ctrl+C"
     await subject.run(PLAN, PanelInputs("p", turns=JOB, critics=("answer",)))
-    assert seen == ["checking 1/1 · answer · up to 1 min · typing waits"]
+    assert seen == [f"checking 1/1 · answer · {up_to('answer')} · typing waits"]
 
 
 def announcing(subject):
@@ -1224,7 +1263,7 @@ async def test_a_reply_run_announces_once_before_the_first_critic_with_the_units
 
     critics = panel_critics("reply", LIMITS, ("factual", "recency"))
     await subject.run(REPLY, PanelInputs("d", draft="d", turns=JOB, critics=critics), revise)
-    assert [t for t, _ in lines] == [f"checking reply · 4 critics · up to 28 min · {STOP}"] and not any(s is None for s in seen)
+    assert [t for t, _ in lines] == [f"checking reply · 4 critics · {STOP}"] and not any(s is None for s in seen)
     assert len(seen) == 4
 
 
@@ -1232,7 +1271,7 @@ async def test_the_announce_line_carries_no_stop_clause_without_a_stop_word_and_
     subject = Panel(sequenced({}), LIMITS)
     lines = announcing(subject)
     await subject.run(REPLY, PanelInputs("d", turns=JOB, critics=("answer", "jtbd")))
-    assert lines[0][0] == "checking reply · 2 critics · up to 2 min"
+    assert lines[0][0] == "checking reply · 2 critics"
     subject.stop = "x" * 30
     await subject.run(REPLY, PanelInputs("d", turns=JOB, critics=("answer", "jtbd")))
     assert lines[1][0] == f"checking reply · {'x' * 30} delivers it unchecked"
@@ -1322,10 +1361,10 @@ async def test_typing_waits_ends_a_stage_panels_status_text_and_no_reply_panels(
             seen.append(subject.status_text())
             return NONE
 
-        subject = Panel(child, LIMITS)
+        subject = task_panel(child)
         await subject.run(unit, PanelInputs("p", turns=JOB, critics=("jtbd",)))
         assert subject.status_text() is None
-    assert stage == ["checking 1/1 · jtbd · up to 1 min · typing waits"] and reply == ["checking 1/1 · jtbd · up to 1 min"]
+    assert stage == [f"checking 1/1 · jtbd · {up_to('jtbd')} · typing waits"] and reply == ["checking 1/1 · jtbd"]
 
 
 def test_typing_waits_follows_the_runner_phase_and_the_cut_keeps_it():
@@ -1354,21 +1393,24 @@ async def emitting(tmp_path, answer, seed=None, turns=JOB, unit=REPLY):
     return rows
 
 
+PASS = ("jtbd", "pass", (), "")
+
+
 async def test_job_a_changed_job_emits_its_line_once_with_the_latest_typed_turn(tmp_path):
     rows = await emitting(tmp_path, job_answer("fix the login bug\nand keep the tests"), seed="write docs",
                           turns=((2, "write docs"), (4, "fix the login bug")))
-    assert rows == [("job", "now: fix the login bug", (), "turn 4")]
-    assert notice(*rows[0]) == "◆ job now: fix the login bug · turn 4"
+    assert rows == [PASS, ("job", "now: fix the login bug", (), "turn 4")]
+    assert notice(*rows[1]) == "◆ job now: fix the login bug · turn 4"
 
 
-async def test_job_a_first_job_an_unchanged_job_and_unchanged_emit_nothing(tmp_path):
-    assert await emitting(tmp_path, job_answer("fix the login bug")) == []
-    assert await emitting(tmp_path, job_answer("fix the login bug"), seed="fix the login bug") == []
-    assert await emitting(tmp_path, job_answer("UNCHANGED"), seed="write docs") == []
+async def test_job_a_first_job_an_unchanged_job_and_unchanged_emit_no_job_line(tmp_path):
+    assert await emitting(tmp_path, job_answer("fix the login bug")) == [PASS]
+    assert await emitting(tmp_path, job_answer("fix the login bug"), seed="fix the login bug") == [PASS]
+    assert await emitting(tmp_path, job_answer("UNCHANGED"), seed="write docs") == [PASS]
 
 
-async def test_job_a_stage_panel_and_a_panel_with_no_sink_emit_nothing_and_do_not_fail(tmp_path):
-    assert await emitting(tmp_path, job_answer("fix the login bug"), seed="write docs", unit=PLAN) == []
+async def test_job_a_stage_panel_emits_no_job_line_and_a_panel_with_no_sink_does_not_fail(tmp_path):
+    assert await emitting(tmp_path, job_answer("fix the login bug"), seed="write docs", unit=PLAN) == [PASS]
     store = docs_in(tmp_path / "bare")
     store.write_session("jtbd.md", "write docs")
     result = await Panel(sequenced({"jtbd": [job_answer("fix the login bug")]}), LIMITS, docs=store).run(
@@ -1377,8 +1419,31 @@ async def test_job_a_stage_panel_and_a_panel_with_no_sink_emit_nothing_and_do_no
 
 
 async def test_job_the_line_fits_the_line_cap_with_its_turn(tmp_path):
-    (row,) = await emitting(tmp_path, job_answer("j" * 200), seed="write docs", turns=((14, "x"),))
+    _, row = await emitting(tmp_path, job_answer("j" * 200), seed="write docs", turns=((14, "x"),))
     assert len(notice(*row)) == Caps.LINE and row[3] == "turn 14"
+
+
+async def test_each_critics_findings_or_pass_print_as_they_land_then_the_revision_line():
+    rows = []
+    child = sequenced({"answer": [answered(BLOCKER + "\n[NOTE] a rule — seen"), NONE], "jtbd": [NONE]})
+    subject = Panel(child, LIMITS)
+    subject.emit = lambda *row: rows.append(row)
+
+    async def revise(draft, findings):
+        return "draft v2"
+
+    await subject.run(REPLY, PanelInputs("d", draft="d", turns=JOB, critics=("answer", "jtbd")), revise)
+    assert rows == [("answer", "blocker the reply cites a real line", (), "README.md:41 does not say that"),
+                    ("answer", "note a rule", (), "seen"), ("jtbd", "pass", (), ""),
+                    ("root", "revising", (), "1 blocker"), ("answer", "pass", (), ""), ("jtbd", "pass", (), "")]
+
+
+async def test_a_critic_that_stopped_on_its_budget_after_findings_still_prints_them():
+    rows = []
+    subject = Panel(sequenced({"answer": [answered(BLOCKER, "budget_actions")]}), LIMITS)
+    subject.emit = lambda *row: rows.append(row)
+    result = await subject.run(REPLY, draft_inputs())
+    assert result.verdict == "blocked" and [r[1] for r in rows] == ["blocker the reply cites a real line"]
 
 
 async def test_job_a_sink_that_raises_does_not_fail_the_panel(tmp_path):

@@ -34,7 +34,7 @@ from localharness.config.skills import MAX_ENTRIES, ORIGINS
 from localharness.config.trust import LAUNCH_KEYS, LAUNCH_MODEL_KEYS, LAUNCH_MODEL_KIND
 from localharness.core.caps import Caps
 from localharness.core.content import MAX_REFERENCE_BYTES
-from localharness.orchestrator.task_flow.record import CRITICS_AT_FLOOR, LIMITS, STAGES, panel_minutes, printed_bound
+from localharness.orchestrator.task_flow.record import LIMITS, STAGES, panel_minutes, printed_bound
 from localharness.plugins.api import Plugin, plugin_summary
 from localharness.plugins.builtin import BUILTIN_PLUGINS
 from localharness.tools.base import ToolSchema
@@ -1231,6 +1231,17 @@ def test_task_docs_doc_bites():
 
 _critic_tools = _source_constant(_PANEL, "CRITIC_TOOLS")
 _CRITIC_TOOLS = ", ".join(f"`{t}`" for t in _critic_tools[:-1]) + f" and `{_critic_tools[-1]}`"
+
+
+def _panel_assign(name: str):
+    return next(n.value for n in ast.parse(_read(_PANEL)).body
+                if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in n.targets))
+
+
+_web_pair = [e.value for e in _panel_assign("WEB_CRITIC_TOOLS").elts if isinstance(e, ast.Constant)]
+_fact_critics = sorted(ast.literal_eval(_panel_assign("WEB_CRITICS").args[0]))
+_WEB_PAIR = " and ".join(f"`{t}`" for t in _web_pair)
+_FACT_CRITICS = " and ".join(f"`{n}`" for n in _fact_critics)
 TASK_RUN_NEEDLES = (
     ("## Threat model: prompt injection", "The `task` tool declares its results untrusted, a label"),
     ("## Threat model: prompt injection",
@@ -1244,7 +1255,8 @@ TASK_RUN_NEEDLES = (
     ("## Threat model: prompt injection", "No person's go-ahead stands between a plan and its steps"),
     ("## Threat model: prompt injection", "so an executor's ordinary repository writes and commands run unasked"),
     ("## Threat model: prompt injection", "The root already held the same tools, so no capability is new"),
-    ("## Threat model: prompt injection", f"holds {_CRITIC_TOOLS} and nothing else, fixed in code"),
+    ("## Threat model: prompt injection", f"holds {_CRITIC_TOOLS}, a read-only set fixed in code"),
+    ("## Threat model: prompt injection", f"plus {_WEB_PAIR} for the {_FACT_CRITICS} critics on a reply only, and nothing else"),
     ("## Threat model: prompt injection",
      "its role is read from the package's own critic files, never from your config, a project or an overlay"),
     ("## Threat model: prompt injection",
@@ -1361,7 +1373,9 @@ _VERBS = "src/localharness/orchestrator/task_flow/verbs.py"
 TASK_VERBS = tuple(part.split()[0] for part in _source_constant(_VERBS, "USAGE").removeprefix("usage: /task ").split(" · "))
 CRITIC_NAMES = tuple(sorted(p.stem for p in (SRC / "assets" / "critics").glob("*.yaml")))
 METAHARNESS_NEEDLES = (
-    "a quality signal, never a security one", "not a barrier", "global files only", "begins with no task")
+    "a quality signal, never a security one", "not a barrier", "global files only", "begins with no task",
+    "A reply the model wrote without using a tool goes to you as written", "Each critic's findings print as they land",
+    "A reply panel prints no bound", f"{_FACT_CRITICS} also hold {_WEB_PAIR}")
 _ONE_TO_TEN = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten")
 _REVISIONS = {b: LIMITS[f"revisions.{b}"] for b in STAGES if f"revisions.{b}" in LIMITS}
 _REVISION_ORDER = [*(b for b in _REVISIONS if b != "reply"), "reply"]
@@ -1380,15 +1394,13 @@ def _table(page: str, heading: str) -> list[list[str]]:
 
 def _metaharness_settings() -> dict[str, tuple[str, str, str]]:
     critic, flow = LIMITS["critic"], LIMITS["flow_cap_minutes"]
-    low = " and ".join(f"`{n}`" for n in sorted(CRITICS_AT_FLOOR))
     plus = next(LIMITS[f"revisions.{b}"].ceiling - LIMITS[f"revisions.{b}"].default for b in _REVISION_ORDER[:-1])
     return {
         "`panels`": ("none added", "none", f"{LIMITS['additions'].ceiling} added"),
         "`revisions`": (str(_REVISIONS["plan"].floor),
                         ", ".join(f"`{b}` {_REVISIONS[b].default}" for b in _REVISION_ORDER),
                         f"the default plus {plus}; `reply` {_REVISIONS['reply'].ceiling}"),
-        "`critics`": (_budget(critic.floor),
-                      f"{_budget(critic.default)}; {low} {critic.floor.actions} and {critic.floor.minutes:g}", _budget(critic.ceiling)),
+        "`critics`": (_budget(critic.floor), _budget(critic.default), _budget(critic.ceiling)),
         **{f"`{k}`": (_budget(LIMITS[k].floor), _budget(LIMITS[k].default), _budget(LIMITS[k].ceiling)) for k in ("executor", "explorer")},
         "`flow_cap_minutes`": (f"{flow.floor:g}", f"{flow.default:g}", f"{flow.ceiling:g}"),
     }
@@ -1416,7 +1428,8 @@ def check_metaharness_doc(page: str) -> list[str]:
             ("## The task pipeline", (f"a plan panel is up to {plan_bound} minutes and an executor up to {default.minutes:g}",
                                       f"default {flow.default:g} minutes, ceiling {flow.ceiling:g}",
                                       f"at most {_ONE_TO_TEN[Caps.QUESTIONS]} questions")),
-            ("## In a normal session", (f"({_budget(LIMITS['critic'].floor)})",))):
+            ("## In a normal session", (f"({_budget(LIMITS['critic'].default)})", "`checking 3/4 · factual`",
+                                        "`checking reply · 4 critics · Ctrl+C delivers it unchecked`"))):
         body = " ".join((section(page, heading) or "").split())
         out += [f"docs/metaharness.md {heading} does not say {w}" for w in want if w not in body]
     return out
@@ -1440,7 +1453,10 @@ def test_metaharness_doc_bites():
     for old, new in (("| 180 | 360 |", "| 181 | 360 |"), ("| 3 added |", "| 4 added |"), ("| 24 actions, 25 minutes |", "| 24 actions, 26 minutes |"),
                      ("| `jtbd`, `big-picture`, `parsimony` | 3 |", "| `jtbd`, `big-picture`, `parsimony` | 4 |"),
                      ("an executor up to 25", "an executor up to 26"), ("at most six questions", "at most seven questions"),
-                     ("(3 actions, 1 minute)", "(3 actions, 2 minutes)")):
+                     ("(24 actions, 10 minutes)", "(24 actions, 11 minutes)"),
+                     ("| 3 actions, 1 minute | 24 actions, 10 minutes | 24 actions, 10 minutes |",
+                      "| 3 actions, 1 minute | 24 actions, 11 minutes | 24 actions, 10 minutes |"),
+                     ("`checking reply · 4 critics", "`checking reply · 5 critics"), ("`checking 3/4 · factual`", "`checking 3/4 · recency`")):
         assert len(check_metaharness_doc(_swap(page, old, new))) == 1, old
 
 

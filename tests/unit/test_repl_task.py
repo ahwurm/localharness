@@ -16,10 +16,15 @@ from localharness.core.types import human_message
 from localharness.orchestrator.task_flow import runner, verbs
 from localharness.orchestrator.task_flow.filer import PLAN_SHAPE, digest, parse_plan, render_section, rerecord
 from localharness.orchestrator.task_flow.panel import Finding, FlowCap
-from localharness.orchestrator.task_flow.record import LINES, Row, Unit, file_doc, need, set_verdict, stop_step
+from localharness.orchestrator.task_flow.record import (
+    LIMITS, LINES, STAGES, Row, Unit, file_doc, need, panel_minutes, printed_bound, set_verdict, stop_step)
 from tests.unit.test_task_flow_record import BLOCKER_LINE, PLAN_TWO, TYPED, make_flow, planned
 
 RLO, ZWSP = chr(0x202E), chr(0x200B)
+
+
+def up_to(boundary):
+    return f"up to {printed_bound(panel_minutes(STAGES[boundary].floor))} min"
 
 
 def test_caps_is_one_immutable_tuple_of_the_six_limits():
@@ -144,8 +149,8 @@ async def test_tracer_the_turns_first_running_row_says_typing_waits_and_the_cap_
     lines = sinking(flow, PHONE)
     await flow.run("new", "Objective: fix login", by="model")
     await flow.run("plan", PLAN_TWO, by="model")
-    assert lines == ["◆ t1 new panel running · stop (now) · typing waits · cap 180 min · up to 1 min",
-                     "◆ t1 plan panel running · stop (now) · up to 13 min"]
+    assert lines == [f"◆ t1 new panel running · stop (now) · typing waits · cap 180 min · {up_to('new')}",
+                     f"◆ t1 plan panel running · stop (now) · {up_to('plan')}"]
     flow.end_turn()
     await flow.run("step", by="model")
     assert lines[2] == "◆ t1 step 1/2 executing · stop (now) · typing waits · cap 180 min · up to 25 min"
@@ -169,11 +174,16 @@ async def test_tracer_each_units_running_state_names_the_unit_as_the_spec_does(t
     for _ in range(6):
         await flow.run("step")
     await flow.run("task")
-    assert [row[1] for row in rows] == [
-        "new panel running", "research q1 running", "research panel running", "plan panel running",
-        "step 1/2 executing", "step 1/2 checking", "step 1/2 executing", "step 1/2 checking",
-        "step 2/2 executing", "step 2/2 checking", "task panel running"]
-    assert {row[2] for row in rows} == {("<stop>",)}
+    assert [row[:2] for row in rows] == [
+        ("t1", "new panel running"), ("jtbd", "pass"),
+        ("t1", "research q1 running"), ("t1", "research panel running"), ("jtbd", "pass"), ("factual", "pass"),
+        ("t1", "plan panel running"), ("jtbd", "pass"), ("big-picture", "pass"), ("parsimony", "pass"),
+        ("t1", "step 1/2 executing"), ("t1", "step 1/2 checking"), ("spec-compliance", "blocker the step did the step"),
+        ("t1", "step 1/2 executing"), ("t1", "step 1/2 checking"), ("spec-compliance", "pass"),
+        ("t1", "step 2/2 executing"), ("t1", "step 2/2 checking"), ("spec-compliance", "pass"),
+        ("t1", "task panel running"), ("jtbd", "pass"), ("big-picture", "pass")]
+    assert {row[2] for row in rows if row[0] == "t1"} == {("<stop>",)}
+    assert {row[2] for row in rows if row[0] != "t1"} == {()}
 
 
 async def test_tracer_busy_runs_from_the_row_to_the_return_and_a_cancel_leaves_it_with_the_unit(tmp_path):
@@ -304,10 +314,13 @@ def test_an_armed_row_says_the_cap_so_the_next_running_row_does_not(tmp_path):
 
 def test_bound_at_the_defaults_is_the_units_computed_from_the_table(tmp_path):
     flow, *_ = make_flow(tmp_path)
-    units = {Unit("new", "panel"): 1, Unit("plan", "panel"): 13, Unit("research", "explore"): 6, Unit("research", "panel"): 7,
-             Unit("step", "execute", 1): 25, Unit("step", "panel", 1): 6, Unit("task", "panel"): 7}
+    critic, executor, explorer = (LIMITS[k].default.minutes for k in ("critic", "executor", "explorer"))
+    panel = lambda boundary: len(STAGES[boundary].floor) * critic  # noqa: E731
+    units = {Unit("new", "panel"): panel("new"), Unit("plan", "panel"): panel("plan"), Unit("research", "explore"): explorer,
+             Unit("research", "panel"): panel("research"), Unit("step", "execute", 1): executor,
+             Unit("step", "panel", 1): panel("step"), Unit("task", "panel"): panel("task")}
     assert {u: verbs.bound(flow, u) for u in units} == units
-    assert verbs.bound(flow, Unit("reply", "panel"), ("factual", "recency")) == 28
+    assert verbs.bound(flow, Unit("reply", "panel"), ("factual", "recency")) == (len(STAGES["reply"].floor) + 2) * 2 * critic
 
 
 @pytest.mark.parametrize(("seconds", "printed"), [(1500, 25), (1499, 24), (600, 10), (1501, 25), (59, 0)])
@@ -1024,7 +1037,7 @@ def test_accept_decisions_adopts_a_hand_edit_and_names_the_next_command(tmp_path
     row = flow.record.filed[DECISIONS]
     assert reply.lines[0] == "◆ t1 decisions.md edited since filed · /task accept decisions (uses your edit)"
     assert (row.digest, row.verdict) == (digest("my edit"), "accepted") and flow.docs.verified(flow.record, DECISIONS)
-    assert reply.lines[-1] == "◆ t1 new accepted · /task plan · up to 13 min"
+    assert reply.lines[-1] == f"◆ t1 new accepted · /task plan · {up_to('plan')}"
     assert review_text(flow, "decisions-review.md").rstrip().endswith("verdict: accepted")
 
 
@@ -1136,10 +1149,10 @@ def test_status_with_no_task_is_the_no_task_row_and_an_unadopted_folder_and_an_o
 @pytest.mark.parametrize(("stage", "verdict", "row"), [
     ("new", None, "◆ t1 interview open · /task plan (skips the questions)"),
     ("plan", "pass", "◆ t1 plan pass · /task run · plan <change> (revises) · up to 25 min"),
-    ("plan", "unreviewed", "◆ t1 plan unreviewed · /task plan (re-panels) · up to 13 min"),
+    ("plan", "unreviewed", f"◆ t1 plan unreviewed · /task plan (re-panels) · {up_to('plan')}"),
     ("plan", "blocked", "◆ t1 plan blocked · /task plan (reopens) · show plan · accept · 2 blockers"),
     ("task", "blocked", "◆ t1 review blocked · /task plan · show review · accept (ends t1) · 2 blockers"),
-    ("task", "pass", "◆ t1 review unreviewed · /task run (re-runs the task panel) · up to 7 min"),
+    ("task", "pass", f"◆ t1 review unreviewed · /task run (re-runs the task panel) · {up_to('task')}"),
     ("done", "pass", "◆ t1 done · /task show review"),
 ])
 def test_status_names_where_the_task_stands_and_the_command_to_type_next(tmp_path, stage, verdict, row):

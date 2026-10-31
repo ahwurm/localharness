@@ -1094,10 +1094,10 @@ def _flow_scen(task_flow=True, **kw):
         name=kw.pop("name", "flow_hello"),
         prompt="Hello! How are you today?",
         success_criteria=kw.pop("success_criteria", SuccessCriteria(
-            rubric=["regex:(?i)hello"], event_counts={"critic_children": {"exact": 2}})),
+            rubric=["regex:(?i)hello"], event_counts={"critic_children": {"exact": len(GLOB_PANEL)}})),
         budget=BudgetSpec(),
-        limits=LimitsSpec(max_tool_calls=0, **kw.pop("limits", {})),
-        tools_allowed=[],
+        limits=LimitsSpec(max_tool_calls=kw.pop("max_tool_calls", 1), **kw.pop("limits", {})),
+        tools_allowed=kw.pop("tools_allowed", ["glob"]),
         slice="train",
         category="agent_orchestration",
         task_flow=task_flow,
@@ -1105,9 +1105,19 @@ def _flow_scen(task_flow=True, **kw):
     )
 
 
+GLOB_PANEL = ("answer", "jtbd", "factual")
+
+
+def _glob_call(mock_llm_client):
+    import json
+    call = {"id": "g1", "type": "function", "function": {"name": "glob", "arguments": json.dumps({"pattern": "*.nothing"})}}
+    return mock_llm_client.Response(tool_calls=[call])
+
+
 def _greeting_queue(mock_llm_client, root="Hello! How can I help you today?"):
+    """A greeting after one glob call, then a NONE from each critic the glob call senses."""
     Response = mock_llm_client.Response
-    return mock_llm_client([Response(content=root), Response(content="NONE"), Response(content="NONE")])
+    return mock_llm_client([_glob_call(mock_llm_client), Response(content=root), *[Response(content="NONE") for _ in GLOB_PANEL]])
 
 
 def test_task_flow_defaults_to_false():
@@ -1135,7 +1145,7 @@ def test_critic_children_counts_only_children_that_are_critics():
 
 
 @pytest.mark.asyncio
-async def test_task_flow_run_pays_two_critic_children_and_delivers_unreviewed(mock_llm_client, tmp_path):
+async def test_task_flow_run_pays_a_critic_child_per_sensed_critic_and_delivers_unreviewed(mock_llm_client, tmp_path):
     from localharness.core.events import TaskComplete, TurnCompleted, deserialize_event
 
     run_path = tmp_path / "flow.jsonl"
@@ -1145,9 +1155,27 @@ async def test_task_flow_run_pays_two_critic_children_and_delivers_unreviewed(mo
     events = [deserialize_event(ln) for ln in run_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
     kids = [e for e in events if isinstance(e, TurnCompleted) and e.parent_id]
     done = [e for e in events if isinstance(e, TaskComplete) and not e.parent_id]
-    assert sorted(e.agent_id for e in kids) == ["answer", "jtbd"]
+    assert sorted(e.agent_id for e in kids) == sorted(GLOB_PANEL)
     assert [e.verdict for e in done] == ["unreviewed"]
     assert done[0].summary == "Hello! How can I help you today?"
+    assert completed.success is True
+
+
+@pytest.mark.asyncio
+async def test_task_flow_run_delivers_a_reply_written_with_no_tool_call_without_a_critic_child(mock_llm_client, tmp_path):
+    from localharness.bench.runner import execute_one_run
+    from localharness.bench.schema import SuccessCriteria
+    from localharness.core.events import TaskComplete, TurnCompleted
+
+    run_path = tmp_path / "hello.jsonl"
+    scen = _flow_scen(tools_allowed=[], max_tool_calls=0, success_criteria=SuccessCriteria(
+        rubric=["regex:(?i)hello"], event_counts={"critic_children": {"exact": 0}}))
+    llm = mock_llm_client([mock_llm_client.Response(content="Hello! How can I help you today?")])
+    completed = await execute_one_run(scen, "m", run_path, llm)
+    events = _events(run_path)
+    assert not [e for e in events if isinstance(e, TurnCompleted) and e.parent_id]
+    assert [(e.verdict, e.summary) for e in events if isinstance(e, TaskComplete) and not e.parent_id] == [
+        (None, "Hello! How can I help you today?")]
     assert completed.success is True
 
 
@@ -1156,7 +1184,7 @@ async def test_task_flow_run_fails_its_floor_when_a_critic_is_missing(mock_llm_c
     from localharness.bench.runner import execute_one_run
     from localharness.bench.schema import SuccessCriteria
 
-    scen = _flow_scen(success_criteria=SuccessCriteria(event_counts={"critic_children": {"exact": 3}}))
+    scen = _flow_scen(success_criteria=SuccessCriteria(event_counts={"critic_children": {"exact": len(GLOB_PANEL) + 1}}))
     completed = await execute_one_run(scen, "m", tmp_path / "f.jsonl", _greeting_queue(mock_llm_client))
     assert completed.success is False
 
@@ -1324,13 +1352,13 @@ def _hello_scenario():
 
 def test_reply_panel_hello_loads_as_a_train_task_flow_scenario():
     scen = _hello_scenario()
-    assert (scen.slice, scen.task_flow, scen.tools_allowed) == ("train", True, [])
-    assert scen.success_criteria.event_counts == {"critic_children": {"exact": 2}}
+    assert (scen.slice, scen.task_flow, scen.tools_allowed) == ("train", True, ["glob"])
+    assert scen.success_criteria.event_counts == {"critic_children": {"exact": len(GLOB_PANEL)}}
     assert all(r.split(":", 1)[1] for r in scen.success_criteria.rubric)
 
 
 @pytest.mark.asyncio
-async def test_reply_panel_hello_passes_with_two_critic_children(mock_llm_client, tmp_path):
+async def test_reply_panel_hello_passes_with_a_critic_child_per_sensed_critic(mock_llm_client, tmp_path):
     from localharness.bench.runner import execute_one_run
     completed = await execute_one_run(_hello_scenario(), "m", tmp_path / "h.jsonl", _greeting_queue(mock_llm_client))
     assert completed.success is True
@@ -1360,7 +1388,8 @@ def _say(mock_llm_client, text):
 
 
 def _opening(mock_llm_client, question="Which numeric types must add accept?"):
-    return [*_say(mock_llm_client, question), *_say(mock_llm_client, "NONE"), *_say(mock_llm_client, "NONE")]
+    """A question to the person written with no tool call: it goes as written, so no critic follows it."""
+    return _say(mock_llm_client, question)
 
 
 def _task_call(mock_llm_client, n, **arguments):
@@ -1418,12 +1447,14 @@ def _spy(llm):
 
 
 @pytest.mark.asyncio
-async def test_task_plan_two_steps_passes_with_six_critic_children_and_one_typed_turn(mock_llm_client, tmp_path):
+async def test_task_plan_two_steps_passes_with_the_plan_panels_critics_and_the_replys_answer_critic_and_one_typed_turn(mock_llm_client, tmp_path):
     from localharness.bench.runner import execute_one_run
+    from localharness.orchestrator.task_flow.record import STAGES
 
     llm = _task_plan_queue(mock_llm_client)
     seen = _spy(llm)
-    scen = _expecting(_train_scenario("27_task_plan_two_steps.yaml"), critic_children=6, task_docs_missing=0)
+    scen = _expecting(_train_scenario("27_task_plan_two_steps.yaml"), critic_children=len(STAGES["plan"].floor) + 1,
+                      task_docs_missing=0)
     completed = await execute_one_run(scen, "m", tmp_path / "t.jsonl", llm)
     assert completed.success is True
     root = next(m for m in reversed(seen) if "a critic" not in str(m[0]))
@@ -1524,12 +1555,14 @@ def test_claimed_without_work_loads_as_a_train_scenario_whose_executor_holds_no_
 
 
 @pytest.mark.asyncio
-async def test_claimed_without_work_blocks_the_step_with_seven_critic_children_and_no_stuck_recovery(mock_llm_client, tmp_path):
+async def test_claimed_without_work_blocks_the_step_with_a_critic_child_per_panel_critic_and_no_stuck_recovery(mock_llm_client, tmp_path):
     from localharness.bench.runner import execute_one_run
+    from localharness.orchestrator.task_flow.record import STAGES
     from localharness.core.events import TurnCompleted
 
     run_path = tmp_path / "c.jsonl"
-    scen = _expecting(_train_scenario("28_claimed_without_work.yaml"), critic_children=7, task_docs_missing=0, stuck_recoveries=0)
+    scen = _expecting(_train_scenario("28_claimed_without_work.yaml"), critic_children=len(STAGES["plan"].floor) + len(STAGES["step"].floor) + 1,
+                     task_docs_missing=0, stuck_recoveries=0)
     completed = await execute_one_run(scen, "m", run_path, _claimed_queue(mock_llm_client))
     assert completed.success is True
     children = [e.agent_id for e in _events(run_path) if isinstance(e, TurnCompleted) and e.parent_id]

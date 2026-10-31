@@ -2796,9 +2796,9 @@ class AgentLoop:
 
                 if self.reply_panel is None:
                     summary = _clean_summary(_format_completion_summary(session, content))
-                    verdict, finding = None, ""
+                    verdict, finding, blockers, notes = None, "", 0, 0
                 else:
-                    summary, verdict, finding = await self._review_reply(session, task, content, held)
+                    summary, verdict, finding, blockers, notes = await self._review_reply(session, task, content, held)
                 await self._bus.publish(TaskComplete(
                     agent_id=session.agent_id,
                     session_id=session.session_id,
@@ -2808,6 +2808,8 @@ class AgentLoop:
                     iterations=session.iteration,
                     verdict=verdict,
                     finding=finding,
+                    blockers=blockers,
+                    notes=notes,
                 ))
                 session.terminated_reason = "complete"
                 self._conversation = _strip_sentinel_exchanges(session.messages)
@@ -3240,8 +3242,8 @@ class AgentLoop:
 
     async def _review_reply(
         self, session: Session, task: str, content: str | None, held: "list[Action]",
-    ) -> tuple[str, str, str]:
-        """The reply panel's judgment of the draft the person would receive: (the summary to deliver, the verdict, the finding)."""
+    ) -> tuple[str, str | None, str, int, int]:
+        """The reply panel's judgment of a draft the turn's tool calls shaped: (the summary to deliver, the verdict, the finding); a draft written with no tool call goes as it is."""
         from localharness.orchestrator.task_flow.panel import PanelInputs, finding_text, reply_brief, sense, typed_turns
         from localharness.orchestrator.task_flow.record import Unit
         panel = self.reply_panel
@@ -3256,12 +3258,15 @@ class AgentLoop:
         try:
             try:
                 calls, written, handles = self._turn_evidence(session)
+                if not calls:
+                    return summary, None, "", 0, 0
                 inputs = PanelInputs(
                     brief=reply_brief(task, written, handles), draft=draft, turns=tuple(typed_turns(session.messages)),
                     handles=tuple(handles), critics=sense(calls, panel.jtbd_stood, panel.limits),
                 )
                 result = await panel.run(Unit("reply", "panel"), inputs, revise if content and not _is_confirmation(content) else None)
                 verdict, finding, delivered = result.verdict, result.finding, result.draft
+                blockers, notes = result.blockers, len(result.findings) - result.blockers
                 if verdict == "unreviewed":
                     finding = kept.reason or next((finding_text(f) for f in result.findings if f.tag == "NOTE"), "")
             except asyncio.CancelledError:
@@ -3269,10 +3274,10 @@ class AgentLoop:
                     raise
                 self._person_stop = False
                 asyncio.current_task().uncancel()
-                verdict, finding, delivered = "unreviewed", "", kept.draft
+                verdict, finding, delivered, blockers, notes = "unreviewed", "", kept.draft, 0, 0
             except Exception:  # noqa: BLE001 - a panel that breaks delivers the draft unreviewed
                 log.warning("the reply panel failed", exc_info=True)
-                verdict, finding, delivered = "unreviewed", _PANEL_FAILED, kept.draft
+                verdict, finding, delivered, blockers, notes = "unreviewed", _PANEL_FAILED, kept.draft, 0, 0
             summary = _clean_summary(delivered)
         finally:
             self.exclude(time.monotonic() - started)
@@ -3283,7 +3288,7 @@ class AgentLoop:
                     update["prompt_tokens"] = (action.prompt_tokens or 0) + kept.prompt
                     update["completion_tokens"] = (action.completion_tokens or 0) + kept.completion
                 await asyncio.shield(self._bus.publish(action.model_copy(update=update)))
-        return summary, verdict, finding
+        return summary, verdict, finding, blockers, notes
 
     async def _revise_reply(self, session: Session, kept: "_Revision", draft: str, findings: tuple) -> str | None:
         """One tool-less, no-retry rewrite of the last assistant message; None, with the reason kept, when it cannot help."""

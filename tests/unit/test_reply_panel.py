@@ -82,12 +82,19 @@ async def glob_registry():
     return ToolRegistry.from_allowed(["glob"], base_registry=full)
 
 
-def loop_of(llm, bus, panel=None, registry=None) -> AgentLoop:
-    return AgentLoop(
+USED_A_TOOL = ([("task", None)], [], [])
+
+
+def loop_of(llm, bus, panel=None, registry=None, evidence=USED_A_TOOL, context=None) -> AgentLoop:
+    """The loop under test; the turn reports `evidence` (a classless tool call by default) unless it is None, which reads the session."""
+    loop = AgentLoop(
         config=AgentConfig.model_validate({"name": "reply-agent", "role": "Test agent."}),
-        llm=llm, bus=bus, context_manager=ContextManager(), tool_registry=registry,
+        llm=llm, bus=bus, context_manager=context or ContextManager(), tool_registry=registry,
         permission_evaluator=PermissionEvaluator(), reply_panel=panel,
     )
+    if evidence is not None:
+        loop._turn_evidence = lambda session: evidence
+    return loop
 
 
 async def turn(loop, task="hello", subtype="typed"):
@@ -121,7 +128,7 @@ async def sentinel_turn(bus, panel):
     return llm, session, summary
 
 
-async def test_a_hello_passes_the_panel_and_the_verdict_rides_task_complete(bus):
+async def test_a_turn_that_used_a_tool_passes_the_panel_and_the_verdict_rides_task_complete(bus):
     panel = panel_of(delay=0.02)
     loop = loop_of(Llm(["Hello there."]), bus, panel)
     session, summary = await turn(loop)
@@ -134,11 +141,32 @@ async def test_a_hello_passes_the_panel_and_the_verdict_rides_task_complete(bus)
     assert session.excluded_seconds >= 0.04
 
 
+async def test_a_reply_written_with_no_tool_call_goes_as_written_without_the_panel(bus):
+    chan = Chan()
+    bus.subscribe(TaskComplete, chan.on_task_complete)
+    panel = panel_of()
+    session, summary = await turn(loop_of(Llm(["Hello there."]), bus, panel, evidence=None))
+    assert summary == "Hello there." and panel.calls == []
+    (done,) = events(bus, TaskComplete)
+    assert (done.verdict, done.finding, done.summary) == (None, "", "Hello there.") and done.success
+    assert (done.blockers, done.notes) == (0, 0)
+    assert session.excluded_seconds < 0.01 and chan.sent == ["Hello there."]
+    assert [a.content for a in tool_less(bus)] == ["Hello there."]
+
+
+async def test_a_turn_that_called_a_tool_runs_the_panel_with_the_critics_its_calls_sensed(bus):
+    panel = panel_of()
+    llm = Streaming([gen("Looking.", call=True), gen("Done.")])
+    _, summary = await turn(loop_of(llm, bus, panel, await glob_registry(), evidence=None))
+    assert summary == "Done." and panel.calls == ["answer", "jtbd", "factual"]
+    assert events(bus, TaskComplete)[0].verdict == "pass"
+
+
 async def test_pass_delivers_the_summary_as_the_one_message_a_channel_sends(bus):
     chan = Chan()
     bus.subscribe(TaskComplete, chan.on_task_complete)
     await turn(loop_of(Llm(["Hello there."]), bus, panel_of()))
-    assert chan.sent == ["Hello there."]
+    assert chan.sent == ["Hello there.", "◆ reply pass · /task show reply"]
 
 
 async def test_the_panel_judges_the_draft_the_person_would_receive(bus):
@@ -195,6 +223,14 @@ async def test_a_blocked_sentinel_completion_carries_the_first_blocker_as_the_fi
     (done,) = events(bus, TaskComplete)
     assert summary == "The answer is 42." and done.verdict == "blocked"
     assert done.finding == "the reply cites a real line — README.md:41 does not say that"
+    assert (done.blockers, done.notes) == (1, 0)
+
+
+async def test_a_passed_reply_carries_its_warnings_and_notes_as_one_count(bus):
+    panel = panel_of({"answer": [answered("[WARNING] a rule — seen\n[NOTE] another — seen")]})
+    await turn(loop_of(Llm(["Hello there."]), bus, panel))
+    (done,) = events(bus, TaskComplete)
+    assert (done.verdict, done.blockers, done.notes) == ("pass", 0, 2)
 
 
 async def test_a_hostile_finding_reaches_task_complete_neutralised_and_cut(bus):
@@ -295,11 +331,7 @@ class Stub:
 async def test_revision_runs_no_summary_compaction_on_a_session_over_the_trigger(bus):
     stub = Stub()
     panel, llm = blocked_then(NONE)
-    loop = AgentLoop(
-        config=AgentConfig.model_validate({"name": "reply-agent", "role": "Test agent."}), llm=llm, bus=bus,
-        context_manager=ContextManager(max_context_tokens=1400, pipeline=stub), tool_registry=None,
-        permission_evaluator=PermissionEvaluator(), reply_panel=panel,
-    )
+    loop = loop_of(llm, bus, panel, context=ContextManager(max_context_tokens=1400, pipeline=stub))
     session, summary = await turn(loop, task="word " * 700)
     assert stub.llm_runs == 1 and summary == "Fixed reply." and len(llm.requests) == 2
 
@@ -1045,7 +1077,7 @@ async def test_acp_line_is_announced_once_through_the_message_channel_with_the_c
     _wire_reply_panel(channel, SimpleNamespace(stream_snapshot=lambda: None), panel)
     assert not hasattr(channel, "progress_source") or channel.progress_source is None
     await panel.run(Unit("reply", "panel"), PanelInputs(brief="b", draft="Hello.", critics=("answer", "jtbd")))
-    assert sent == ["checking reply · 2 critics · up to 2 min · cancel delivers it unchecked"]
+    assert sent == ["checking reply · 2 critics · cancel delivers it unchecked"]
 
 
 async def finished_turn(tmp_path, verdict, finding="", *, child=False, summary="the reply text", fail=False):

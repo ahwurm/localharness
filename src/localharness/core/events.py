@@ -205,6 +205,8 @@ class TaskComplete(BaseEvent):
         description="The first blocker when blocked; why the reply went unchecked when unreviewed, empty when "
                     "the person's own stop caused it; one line, a leading ◆ neutralised, at most Caps.FINDING characters.",
     )
+    blockers: int = Field(default=0, description="Blockers the reply panel found; 0 at a task unit or with no panel.")
+    notes: int = Field(default=0, description="Warnings and notes the reply panel found; 0 at a task unit or with no panel.")
 
 
 class Action(BaseEvent):

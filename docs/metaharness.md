@@ -1,20 +1,20 @@
-# The metaharness: critics on every answer, and a task pipeline of fresh agents
+# The metaharness: critics that read an answer, and a task pipeline of fresh agents
 
-This page explains the two layers LocalHarness puts around a model's work, and how you drive them. Both are built from one unit, the critic: a fresh agent with a narrow job, read-only tools and only the documents it is pointed at. The first layer, the reply panel, puts critics on every answer before it reaches you. The second, the task pipeline, runs bigger work as decisions, research, a plan and its steps, each by a fresh agent and each followed by critics; the root agent calls one unit at a time, and you steer between units with the `/task` verbs.
+This page explains the two layers LocalHarness puts around a model's work, and how you drive them. Both are built from one unit, the critic: a fresh agent with a narrow job, read-only tools and only the documents it is pointed at. The first layer, the reply panel, puts critics on an answer that used tools before it reaches you. The second, the task pipeline, runs bigger work as decisions, research, a plan and its steps, each by a fresh agent and each followed by critics; the root agent calls one unit at a time, and you steer between units with the `/task` verbs.
 
 The reasoning is plain. A model grading its own answer finds little, so strangers from different angles check it: one looks for claims that do not hold, another for whether the answer serves what you are trying to do. A fresh agent per unit reads only the docs it needs, which is meant to keep a small model sharp late in a long task. Plan, execute, verify is the familiar shape; what is different here is that the checks are separate agents and that every unit is one call the root makes and you can interrupt.
 
 ## In a normal session
 
-There is nothing to set up. When the root answers with no tool call, critics read the answer before you see it. Two run on every reply, `answer` and `jtbd`, so a hello pays two critics, each at the floor budget (3 actions, 1 minute) unless `task_flow.critics` sets one. There is no skip and no off switch. (`jtbd` stands down only for a turn of nothing but `task` calls when one of them ran a passing panel that already included it.)
+There is nothing to set up. A reply the model wrote without using a tool goes to you as written: a hello costs no critic. When the turn used a tool, critics read the reply before you see it: `answer` and `jtbd`, plus the ones the turn's calls sense (see below), each with a full turn (24 actions, 10 minutes) unless `task_flow.critics` sets a lower one. There is no off switch for such a turn. (`jtbd` stands down only for a turn of nothing but `task` calls when one of them ran a passing panel that already included it.)
 
 A reply with a standing blocker is revised once, in one generation with no tools, and checked again. What you see:
 
-- `pass` prints nothing.
-- A blocked reply is delivered, then `◆ reply blocked · /task show reply · <the finding>`.
+- A passing reply is delivered, then `◆ reply pass · /task show reply`, with `· 2 notes` when the critics left warnings or notes. A reply no critic read prints nothing.
+- A blocked reply is delivered, then `◆ reply blocked · /task show reply · 3 blockers`; the line counts and names the command, and `/task show reply` prints the findings.
 - A panel that could not finish delivers the reply, then `◆ reply unreviewed · /task show reply · <why>`. Nothing prints after your own stop.
 
-While a reply is held, the status row and the phone show the running critic and its bound, for example `checking 3/4 · factual · up to 26 min`; the classic path and ACP print one line, such as `checking reply · 4 critics · up to 28 min · Ctrl+C delivers it unchecked`. The channel's stop word during the check delivers the draft unchecked. `/task show reply` prints the last reply review, and `/task show job` prints what the `jtbd` critic takes the session's job to be; `◆ job now: … · turn N` appears when it changes.
+While a reply is held, the status row and the phone show the running critic and its bound, for example `checking 3/4 · factual`; the classic path and ACP print one line, such as `checking reply · 4 critics · Ctrl+C delivers it unchecked`. A reply panel prints no bound; the lines of a task unit do. Each critic's findings print as they land, one line per finding (`◆ answer blocker the reply cites a real line · README.md:41 does not say that`) or `◆ answer pass` for a clean one, and `◆ root revising · 1 blocker` before a revision. The channel's stop word during the check delivers the draft unchecked. `/task show reply` prints the last reply review, and `/task show job` prints what the `jtbd` critic takes the session's job to be; `◆ job now: … · turn N` appears when it changes.
 
 ## Which critics run
 
@@ -34,7 +34,7 @@ Nine critics ship in the package, one small YAML file each. A critic's role is r
 
 On a reply, the turn's tool calls add critics to `answer` and `jtbd`: `factual` when the turn read files or called an agent, `recency` when it used the web, `spec-compliance` when it wrote files. A tool in no known read-only class counts as reading and the web, so a plugin or MCP tool fails closed. Each pipeline stage has its own floor panel (the table below). Four critics ship ready to add above a floor, by name in `task_flow.panels`: `recency` after research, `security` after the plan, `quality` and `factual` after a step.
 
-A critic is told to assume the work missed and to find where. It answers `NONE`, or findings of the shape `[BLOCKER|WARNING|NOTE] rule — evidence — example fix`. A doc is blocked only while a BLOCKER stands; warnings pass. Findings reach a model fenced as data, labelled as such, and the model is told to check them against the files, not obey them.
+A critic is told to assume the work missed and to find where. A BLOCKER is only for what it can show is wrong or missing in what it read; a claim it cannot check is at most one NOTE, and its own lack of access is never the work's fault. On a reply, `factual` and `recency` also hold `web_search` and `web_fetch`; every other critic and every task-document panel is read-only. It answers `NONE`, or findings of the shape `[BLOCKER|WARNING|NOTE] rule — evidence — example fix`. A doc is blocked only while a BLOCKER stands; warnings pass. Findings reach a model fenced as data, labelled as such, and the model is told to check them against the files, not obey them.
 
 ## The task pipeline
 
@@ -51,7 +51,7 @@ Every unit is one `task` call: one child or one panel. The call returns a manife
 | the task review | `review.md` | `jtbd`, `big-picture` | 0 |
 | a reply | nothing | `answer`, `jtbd` and the critics the turn senses | 1 per turn |
 
-A blocked doc is revised up to its stage's revisions, and only while its blockers fall. Past that it is yours to decide: `/task accept` it, or `/task plan <change>`. Every line the harness prints names the bound of the unit it describes, a panel's the sum of its critics' minute ceilings and a child's its own minute ceiling, never more than the flow cap has left; at the defaults a plan panel is up to 13 minutes and an executor up to 25. One flow cap per turn limits child time (default 180 minutes, ceiling 360): when what is left is under the next unit's floor the run halts at a unit boundary, and `/task run` continues in the next turn. It bounds unattended child time; it does not promise that a task fits one turn.
+A blocked doc is revised up to its stage's revisions, and only while its blockers fall. Past that it is yours to decide: `/task accept` it, or `/task plan <change>`. Every line the harness prints for a task unit names the bound of the unit it describes, a panel's the sum of its critics' minute ceilings and a child's its own minute ceiling, never more than the flow cap has left; at the defaults a plan panel is up to 30 minutes and an executor up to 25. One flow cap per turn limits child time (default 180 minutes, ceiling 360): when what is left is under the next unit's floor the run halts at a unit boundary, and `/task run` continues in the next turn. It bounds unattended child time; it does not promise that a task fits one turn.
 
 ## The eight verbs
 
@@ -103,7 +103,7 @@ task_flow:
 |-----|------|-------|---------|---------|
 | `panels` | critics a boundary's panel adds to its floor, by boundary | none added | none | 3 added |
 | `revisions` | revisions a boundary allows before it asks you | 0 | `new` 1, `plan` 3, `step` 1, `reply` 1 | the default plus 2; `reply` 1 |
-| `critics` | one critic's own budget, by name | 3 actions, 1 minute | 12 actions, 6 minutes; `answer` and `jtbd` 3 and 1 | 12 actions, 6 minutes |
+| `critics` | one critic's own budget, by name | 3 actions, 1 minute | 24 actions, 10 minutes | 24 actions, 10 minutes |
 | `executor` | the executor's budget | 3 actions, 1 minute | 24 actions, 25 minutes | 48 actions, 40 minutes |
 | `explorer` | an explorer's budget | 3 actions, 1 minute | 12 actions, 6 minutes | 24 actions, 10 minutes |
 | `flow_cap_minutes` | child minutes one turn may spend | 1 | 180 | 360 |
@@ -116,7 +116,7 @@ The floors and ceilings are fixed in code: not even your own config can empty a 
 
 Read [the prompt-injection threat model](../SECURITY.md#threat-model-prompt-injection) and [the approval gate](../SECURITY.md#human-approval-gate) for the whole picture; these are the parts that touch the metaharness.
 
-- A clean panel is a quality signal, never a security one. A poisoned file can make a critic answer `NONE` as easily as object. A critic holds read-only tools, fixed in code.
+- A clean panel is a quality signal, never a security one. A poisoned file can make a critic answer `NONE` as easily as object. A critic holds read-only tools, fixed in code, and on a reply `factual` and `recency` also hold the web pair.
 - No person's go-ahead stands between a plan and its steps. Executors hold the root's tools under the same approval gate, so in `auto` their ordinary repository writes and commands run unasked. What checks them is the gate, the executor's budget, the flow cap, `/task stop` and the critics.
 - The `task` tool's results are labelled untrusted: the manifest and the docs are written by the model and its children from repository files.
 - The refusal on the task and session folders is defence in depth, not a barrier. SECURITY.md names the write forms it does not cover.

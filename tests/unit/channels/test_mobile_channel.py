@@ -833,17 +833,19 @@ async def test_reply_line_a_blocked_or_unreviewed_reply_pushes_its_line_after_th
         return TaskComplete(agent_id="a", session_id="s", success=True, summary="ok", duration_seconds=0.1,
                             iterations=1, **kw)
 
-    blocked = done(verdict="blocked", finding="the cache never invalidates")
+    blocked = done(verdict="blocked", finding="the cache never invalidates", blockers=2)
     await bus.publish(blocked)
     rows = _drain(client)
     assert [r[0] for r in rows] == ["TaskComplete", "Notice"]
-    assert rows[1][2]["text"] == reply_line(blocked) and rows[1][2]["text"].startswith("◆ reply blocked")
+    assert rows[1][2]["text"] == reply_line(blocked) == "◆ reply blocked · 2 blockers · /task show reply"
     await bus.publish(done(verdict="unreviewed", finding="the critics ran out of time"))
     assert _notices(client) == [reply_line(done(verdict="unreviewed", finding="the critics ran out of time"))]
-    for quiet in (done(verdict="unreviewed", finding=""), done(verdict="pass"), done(),
+    for quiet in (done(verdict="unreviewed", finding=""), done(),
                   done(verdict="blocked", finding="x", parent_id="child")):
         await bus.publish(quiet)
     assert _notices(client) == []
+    await bus.publish(done(verdict="pass", notes=2))
+    assert _notices(client) == ["◆ reply pass · 2 notes · /task show reply"]
 
 
 async def test_a_phones_task_stop_during_an_execution_prints_the_stopped_row_and_keeps_the_session(tmp_path):
