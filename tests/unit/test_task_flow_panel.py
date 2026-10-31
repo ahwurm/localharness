@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 from localharness.agent.subagent import DelegationResult
+from localharness.channels.base import notice
 from localharness.config.loader import ConfigLoader
 from localharness.config.models import ChildBudget, TaskFlowConfig
 from localharness.core.caps import Caps
@@ -424,8 +425,9 @@ async def test_status_text_names_each_critic_with_its_computed_bound():
     seen = []
     subject = watching({"jtbd": NONE, "big-picture": NONE, "parsimony": NONE}, seen)
     await subject.run(PLAN, PanelInputs("the plan", turns=JOB))
-    assert [s[1] for s in seen] == ["checking 1/3 · jtbd · up to 13 min", "checking 2/3 · big-picture · up to 12 min",
-                                    "checking 3/3 · parsimony · up to 6 min"]
+    assert [s[1] for s in seen] == ["checking 1/3 · jtbd · up to 13 min · typing waits",
+                                    "checking 2/3 · big-picture · up to 12 min · typing waits",
+                                    "checking 3/3 · parsimony · up to 6 min · typing waits"]
     assert subject.status_text() is None
 
 
@@ -584,7 +586,7 @@ def test_status_text_carries_the_runners_phase_verbatim_and_clears_it():
     subject = Panel(sequenced({}), LIMITS)
     assert subject.status_text() is None
     subject.set_phase("step 3/5 · executing · up to 25 min")
-    assert subject.status_text() == "step 3/5 · executing · up to 25 min"
+    assert subject.status_text() == "step 3/5 · executing · up to 25 min · typing waits"
     subject.set_phase(None)
     assert subject.status_text() is None
 
@@ -643,7 +645,7 @@ async def test_a_cancel_mid_panel_reports_the_unfinished_run_then_propagates():
     subject = Panel(child, LIMITS)
     task = asyncio.create_task(subject.run(PLAN, PanelInputs("p", turns=JOB, on_run=runs.append)))
     await started.wait()
-    assert subject.status_text() == "checking 2/3 · big-picture · up to 12 min"
+    assert subject.status_text() == "checking 2/3 · big-picture · up to 12 min · typing waits"
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -805,8 +807,9 @@ async def test_a_task_panels_printed_bound_is_cut_to_the_cap_remainder(monkeypat
     subject, seen = clocked(monkeypatch)
     subject.cap = FlowCap(10)
     await subject.run(PLAN, PanelInputs("p", turns=JOB))
-    assert [s for _, _, s in seen] == ["checking 1/3 · jtbd · up to 10 min", "checking 2/3 · big-picture · up to 9 min",
-                                       "checking 3/3 · parsimony · up to 3 min"]
+    assert [s for _, _, s in seen] == ["checking 1/3 · jtbd · up to 10 min · typing waits",
+                                       "checking 2/3 · big-picture · up to 9 min · typing waits",
+                                       "checking 3/3 · parsimony · up to 3 min · typing waits"]
 
 
 async def test_a_critic_the_cap_cannot_fund_stops_the_panel_unreviewed_without_a_launch(monkeypatch):
@@ -1286,3 +1289,82 @@ def test_revision_block_cuts_a_long_draft_inside_its_fence_and_the_findings_keep
 def test_revision_block_strips_a_forged_fence_from_the_draft():
     text = panel.revision_block("a ``` b", ())
     assert "a  b" in text and text.count("```") == 4
+
+
+async def test_typing_waits_ends_a_stage_panels_status_text_and_no_reply_panels():
+    stage, reply = [], []
+    for unit, seen in ((PLAN, stage), (REPLY, reply)):
+        async def child(config, task, **kw):
+            seen.append(subject.status_text())
+            return NONE
+
+        subject = Panel(child, LIMITS)
+        await subject.run(unit, PanelInputs("p", turns=JOB, critics=("jtbd",)))
+        assert subject.status_text() is None
+    assert stage == ["checking 1/1 · jtbd · up to 1 min · typing waits"] and reply == ["checking 1/1 · jtbd · up to 1 min"]
+
+
+def test_typing_waits_follows_the_runner_phase_and_the_cut_keeps_it():
+    subject = Panel(sequenced({}), LIMITS)
+    subject.set_phase("research q1 · explorer · up to 6 min")
+    assert subject.status_text() == "research q1 · explorer · up to 6 min · typing waits"
+    subject.set_phase("p" * 100)
+    assert subject.status_text().endswith(" · typing waits") and len(subject.status_text()) <= Caps.LINE
+    assert Panel(sequenced({}), LIMITS).status_text() is None
+
+
+def test_typing_waits_leaves_the_burst_prefix_the_phases_first_clause():
+    subject = Panel(sequenced({}), LIMITS)
+    subject.set_phase("step 3/5 · executing · up to 25 min")
+    assert subject.burst_prefix() == "step 3/5"
+
+
+async def emitting(tmp_path, answer, seed=None, turns=JOB, unit=REPLY):
+    store = docs_in(tmp_path)
+    if seed is not None:
+        store.write_session("jtbd.md", seed)
+    rows = []
+    subject = Panel(sequenced({"jtbd": [answer]}), LIMITS, docs=store)
+    subject.emit = lambda *row: rows.append(row)
+    await subject.run(unit, PanelInputs("the draft", turns=turns, critics=("jtbd",)))
+    return rows
+
+
+async def test_job_a_changed_job_emits_its_line_once_with_the_latest_typed_turn(tmp_path):
+    rows = await emitting(tmp_path, job_answer("fix the login bug\nand keep the tests"), seed="write docs",
+                          turns=((2, "write docs"), (4, "fix the login bug")))
+    assert rows == [("job", "now: fix the login bug", (), "turn 4")]
+    assert notice(*rows[0]) == "◆ job now: fix the login bug · turn 4"
+
+
+async def test_job_a_first_job_an_unchanged_job_and_unchanged_emit_nothing(tmp_path):
+    assert await emitting(tmp_path, job_answer("fix the login bug")) == []
+    assert await emitting(tmp_path, job_answer("fix the login bug"), seed="fix the login bug") == []
+    assert await emitting(tmp_path, job_answer("UNCHANGED"), seed="write docs") == []
+
+
+async def test_job_a_stage_panel_and_a_panel_with_no_sink_emit_nothing_and_do_not_fail(tmp_path):
+    assert await emitting(tmp_path, job_answer("fix the login bug"), seed="write docs", unit=PLAN) == []
+    store = docs_in(tmp_path)
+    store.write_session("jtbd.md", "write docs")
+    result = await Panel(sequenced({"jtbd": [job_answer("fix the login bug")]}), LIMITS, docs=store).run(
+        REPLY, PanelInputs("d", turns=JOB, critics=("jtbd",)))
+    assert result.job == "fix the login bug"
+
+
+async def test_job_the_line_fits_the_line_cap_with_its_turn(tmp_path):
+    (row,) = await emitting(tmp_path, job_answer("j" * 200), seed="write docs", turns=((14, "x"),))
+    assert len(notice(*row)) == Caps.LINE and row[3] == "turn 14"
+
+
+async def test_job_a_sink_that_raises_does_not_fail_the_panel(tmp_path):
+    store = docs_in(tmp_path)
+    store.write_session("jtbd.md", "write docs")
+    subject = Panel(sequenced({"jtbd": [job_answer("fix the login bug")]}), LIMITS, docs=store)
+
+    def broken(*row):
+        raise RuntimeError("sink")
+
+    subject.emit = broken
+    result = await subject.run(REPLY, PanelInputs("d", turns=JOB, critics=("jtbd",)))
+    assert result.verdict == "pass" and result.job == "fix the login bug"
