@@ -1211,6 +1211,30 @@ def test_task_run_doc_bites():
     assert len(check_task_run_doc("## Nothing\n")) == len(TASK_RUN_NEEDLES)
 
 
+PHONE_TASK_NEEDLES = (
+    ("### A paired phone or Discord account", "A paired phone can also type `/task new <objective>`"),
+    ("### A paired phone or Discord account", "outside the `remote_unattended` lock"),
+    ("### A paired phone or Discord account", "ACP's `/task run` and `/task accept` are the local operator's"),
+    ("### `localharness mobile`", "closes both paths, though not `/task new`, `run` or `accept`"))
+
+
+def check_phone_task_doc(security_text: str) -> list[str]:
+    """SECURITY.md says, each in its section, that a paired phone's `/task new`, `run` and `accept` sit outside the `remote_unattended` lock and that ACP's are the local operator's."""
+    bodies = {h: " ".join((section(security_text, h) or "").split()) for h, _ in PHONE_TASK_NEEDLES}
+    return [f"SECURITY.md's {h} section does not say {n}" for h, n in PHONE_TASK_NEEDLES if n not in bodies[h]]
+
+
+def test_phone_task_doc_live():
+    assert check_phone_task_doc(_read("SECURITY.md")) == []
+
+
+def test_phone_task_doc_bites():
+    text = _read("SECURITY.md")
+    for heading, needle in PHONE_TASK_NEEDLES:
+        assert check_phone_task_doc(_swap(text, needle, "x")) == [f"SECURITY.md's {heading} section does not say {needle}"]
+    assert len(check_phone_task_doc("## Nothing\n")) == len(PHONE_TASK_NEEDLES)
+
+
 STUCK_TASK_NEEDLES = (
     "The `task` tool's results are declared untrusted, so its manifest counts as progress only through its last line, which the harness computes from the task record",
     "repeated `task` calls are bounded by the flow cap, `/task stop` and the action budget rather than by the identical-call ceiling")

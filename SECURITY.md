@@ -2068,7 +2068,7 @@ durable copy of the token, and owner-only stops other accounts, not the agent: w
 paired phone holds (see [A paired phone or Discord account](#a-paired-phone-or-discord-account)),
 and with `channels.remote_unattended` left at its default that includes the switch to
 `unattended` and a model launch, whose confirm it can answer as the phone would (setting it to
-`false` closes both paths).
+`false` closes both paths, though not `/task new`, `run` or `accept`).
 The QR drawn on a terminal carries the token into that terminal's scrollback (a tmux
 history, a `script` log). A token an older release printed — into a `localharness mobile | tee`
 log, or journald — is still in those logs; `--rotate-token` makes those copies useless.
@@ -2234,7 +2234,13 @@ launch, the launch question's legend (the model still serving), the line sent wh
 closed before the question was put, and the name a list row posts back (a tap is a `/model`
 command, planned and refused again when it runs); a llama.cpp model served without an alias is named
 there by its weights path. A managed restart interrupted after the serving peer was stopped leaves
-the session bound to that stopped peer: the next turn fails visibly and `/model` relaunches.
+the session bound to that stopped peer: the next turn fails visibly and `/model` relaunches. A paired phone can also type `/task new <objective>`, after which the root runs the whole task with
+executors holding host tools, `/task run`, and `/task accept` to clear a blocked plan or step or to
+adopt a hand-edited doc; these are outside the `remote_unattended` lock, which refuses `unattended`,
+"always" and model launches only, and the header `accept` prints first is display, not a
+confirmation. One phone message can now spend the root's action cap in `task` calls, each executor
+bounded by its own budget and the flow cap. ACP's `/task run` and `/task accept` are the local
+operator's, ungated like the terminal's.
 
 **The `LOCALHARNESS_COMMIT` marker is cooperative.** It is an environment variable, and a
 command the model runs can drop it: `env -u LOCALHARNESS_COMMIT localharness start …` starts a
