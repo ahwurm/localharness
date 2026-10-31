@@ -292,7 +292,7 @@ def _child_cfg(**tools):
 async def _first_message(mock_llm_client, bus, cfg, base) -> str:
     from localharness.agent.permissions import PermissionEvaluator
     from localharness.agent.subagent import dispatch_config_subagent
-    from tests.unit.test_task_references import capture
+    from tests.unit.llm_support import capture
 
     llm = mock_llm_client([mock_llm_client.Response(content=HANDOFF),
                            mock_llm_client.Response(content="CONFIRMED")])
