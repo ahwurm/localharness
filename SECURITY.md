@@ -1355,6 +1355,10 @@ an ACP prompt that is not a command, the objective of `/task new <objective>` an
 a missed caller demotes a turn rather than promotes it. Only the person's `/task new` and `/task plan`
 give the model one more call on their stage.
 
+`/task stop` ends the run after the running unit. Ctrl+C, the phone's stop and ACP's cancel end the
+running unit at once and can leave its files half-edited; the stopped line says so, and nothing
+reverts what the unit wrote.
+
 **Not a current vector: memory.** Tool output is written to per-agent history, not to
 the queryable facts memory, and no code path promotes tool output into the facts an
 agent recalls. If that changes, this section changes with it.

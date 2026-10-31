@@ -54,8 +54,9 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand("/pending", "Tool calls parked for you to answer", "_slash_pending"),
     SlashCommand("/approve", "Run a parked call; /approve [N] (default: the oldest)", "_slash_approve", True),
     SlashCommand("/deny", "Drop a parked call; /deny [N] (default: the oldest)", "_slash_deny", True),
-    SlashCommand("/clear", "Start a fresh conversation; settings, memory and the task record stay", "_slash_clear"),
-    SlashCommand("/task", "Show the working task record; /task clear to delete it", "_slash_task", True),
+    SlashCommand("/clear", "Start a fresh conversation; settings and memory stay, an open task pauses", "_slash_clear"),
+    SlashCommand("/task", "Run work in stages; /task new <objective>, research, plan [change], run, show [doc], accept [doc], stop, clear",
+                 "_slash_task", True),
     SlashCommand("/instructions", "The project's instructions file (CLAUDE.md, AGENTS.md); "
                  "/instructions off|on|show", "_slash_instructions", True),
     SlashCommand("/image", "Attach a picture to your next message; /image <path>, /image (the clipboard), "
