@@ -1425,11 +1425,15 @@ async def test_halted_the_remainder_at_the_next_floor_does_not_halt_and_one_seco
 
 
 async def test_halted_a_unit_that_cannot_reserve_its_floor_launches_nothing_and_halts(tmp_path):
-    flow, script, _, _ = await planned(tmp_path, cap=10.0)
+    flow, script, rows, _ = await planned(tmp_path, cap=10.0)
     flow.end_turn()
     flow.cap.reserve(ChildBudget(actions=1, minutes=9.5), 0.0)
+    shown = len(rows)
     text = await flow.run("step")
-    assert script.named("executor") == [] and flow.record.halted == "cap"
+    assert script.named("executor") == [] and flow.record.halted == "cap" and len(rows) == shown
+    flow.record.halted = None
+    await flow.run("research", "where is login")
+    assert script.named("explorer") == [] and flow.record.halted == "cap" and len(rows) == shown
     assert text == "the flow cap is spent for this turn; the person continues"
 
 

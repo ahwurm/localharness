@@ -113,10 +113,9 @@ def _label(unit: Unit) -> str:
     return f"step {unit.step}" if unit.boundary == "step" else STAGES[unit.boundary].stage or "review"
 
 
-def _running(flow: TaskFlow, unit_text: str, minutes: float) -> None:
+def _running(flow: TaskFlow, unit_text: str, bound: int) -> None:
     line = LINES["running"]
-    bound = str(printed_bound(minutes, flow.cap.remaining()))
-    flow.emit(f"t{flow.record.id}", line.state.replace("<unit>", unit_text), line.commands, line.tail.replace("<bound>", bound))
+    flow.emit(f"t{flow.record.id}", line.state.replace("<unit>", unit_text), line.commands, line.tail.replace("<bound>", str(bound)))
 
 
 def _brief(flow: TaskFlow, unit: Unit) -> str:
@@ -171,7 +170,7 @@ async def _panel(flow: TaskFlow, unit: Unit) -> PanelResult:
         if run.verdict == "pass" and "jtbd" in STAGES[unit.boundary].floor:
             flow.jtbd_stood = True
 
-    _running(flow, f"{_label(unit)} panel", unit_minutes(unit, flow.limits))
+    _running(flow, f"{_label(unit)} panel", printed_bound(unit_minutes(unit, flow.limits), flow.cap.remaining()))
     inputs = PanelInputs(_brief(flow, unit), turns=tuple(typed_turns(flow.messages())), on_run=report)
     return await flow.reply_panel.run(unit, inputs)
 
@@ -245,10 +244,10 @@ async def _explore(flow: TaskFlow, boundary: str, unit: Unit, carried: str | Non
     if stale := _stale(flow, ("research.md", None)):
         return stale
     n = len(record.questions) + 1
-    _running(flow, f"research q{n}", flow.limits.explorer.minutes)
     granted = flow.cap.reserve(flow.limits.explorer, LIMITS["explorer"].floor.minutes)
     if granted is None:
         return _spent(flow)
+    _running(flow, f"research q{n}", printed_bound(granted.minutes))
     flow.reply_panel.set_phase(f"research q{n} · explorer · up to {printed_bound(granted.minutes)} min")
     started = monotonic()
     try:
@@ -299,10 +298,10 @@ async def _execute(flow: TaskFlow, boundary: str, unit: Unit, carried: str | Non
     if findings or record.stopped_log:
         parts.append(fence(findings, record.stopped_log))
     config, pipeline, (row, budget) = build_executor_config(flow)
-    _running(flow, f"step {n}" + (" revise" if revise else ""), budget.minutes)
     granted = flow.cap.reserve(budget, LIMITS["executor"].floor.minutes)
     if granted is None:
         return _spent(flow)
+    _running(flow, f"step {n}" + (" revise" if revise else ""), printed_bound(granted.minutes))
     if revise:
         record.filed[key].counts.revised = True
     set_stage(record, "execution")
