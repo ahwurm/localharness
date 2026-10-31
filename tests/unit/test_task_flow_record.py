@@ -5,8 +5,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from localharness.config.models import ChildBudget
+from localharness.agent.subagent import DelegationResult
+from localharness.config.models import AgentConfig, ChildBudget, TaskFlowConfig
 from localharness.core.caps import Caps
+from localharness.core.types import human_message
+from localharness.orchestrator.task_flow import TaskFlow
+from localharness.orchestrator.task_flow.filer import Docs
 from localharness.orchestrator.task_flow.record import (
     BOUNDARIES,
     CRITICS_AT_FLOOR,
@@ -1060,3 +1064,56 @@ def test_next_line_renders_a_need_by_its_model_text():
     record = task(decisions="pass", plan="pass", steps=("blocked",), executed=(1,), stage="run")
     record.filed[("plan.md", "step-1")].counts.used = 1
     assert next_line(record, "step") == "step-1.md is blocked, revisions used up; the person decides"
+
+
+TYPED = [human_message("fix login", "typed", 1)]
+ROOT_TOOLS = ["read", "write", "edit", "bash_exec", "tool_result_get", "agent", "task", "skill"]
+PLAN_TWO = "\n\n".join(
+    f"## Step {n}: change {n}\nfiles: src/x{n}.py\ndepends_on: {'none' if n == 1 else n - 1}\ndone: x{n} changed" for n in (1, 2))
+
+
+class Script:
+    """A scripted run_config_child keyed by config.name that records every call."""
+
+    def __init__(self, **answers):
+        self.answers, self.calls = answers, []
+
+    async def __call__(self, config, task, **kw):
+        self.calls.append(SimpleNamespace(
+            name=config.name, config=config, task=task, budget=kw.get("budget"), note=kw.get("request_note"),
+            path=kw.get("compact_md_path"), pipeline=kw.get("pipeline"), handles=kw.get("grant_handles")))
+        answer = self.answers.get(config.name, "NONE")
+        if isinstance(answer, list):
+            answer = answer.pop(0) if len(answer) > 1 else answer[0]
+        if callable(answer):
+            answer = await answer(config, task)
+        return answer if isinstance(answer, DelegationResult) else DelegationResult(
+            text="SUBAGENT RUN COMPLETE\n" + answer, raw=answer)
+
+    def named(self, name):
+        return [c for c in self.calls if c.name == name]
+
+
+def make_flow(tmp_path, answers=None, cap=None, bus=None, messages=TYPED):
+    root = tmp_path / "proj" / ".localharness"
+    root.mkdir(parents=True)
+    script, rows, excluded = Script(**(answers or {})), [], []
+    config = AgentConfig(name="root", role="r", task_flow=TaskFlowConfig(flow_cap_minutes=cap))
+    flow = TaskFlow(run_config_child=script, emit=lambda *row: rows.append(row), exclude=excluded.append,
+                    docs=Docs(root, True, "a"), config=config, root_tools=ROOT_TOOLS, messages=lambda: messages, bus=bus)
+    return flow, script, rows, excluded
+
+
+async def test_flow_tracer_one_new_call_files_decisions_reviews_it_and_names_the_next_unit(tmp_path):
+    flow, script, rows, excluded = make_flow(tmp_path)
+    flow.open("fix login", 1)
+    text = await flow.run("new", "Objective: fix login · turn 1", by="model")
+    assert flow.docs.read(1, "decisions.md") == "Objective: fix login · turn 1"
+    review = flow.docs.read(1, "decisions-review.md")
+    assert review.startswith("## round 1 · blockers 0") and review.strip().endswith("verdict: pass")
+    assert flow.record.filed[("decisions.md", None)].verdict == "pass"
+    assert flow.record.counts["new"].blockers == 0
+    assert text.splitlines()[-1] == "next: plan · file"
+    assert [row[1] for row in rows] == ["new panel running"]
+    assert len(excluded) == 1 and excluded[0] >= 0.0
+    assert [c.name for c in script.calls] == ["jtbd"]
