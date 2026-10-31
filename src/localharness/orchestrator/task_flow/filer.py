@@ -61,8 +61,7 @@ def _open_dir(path: str | os.PathLike[str], nofollow: bool, dir_fd: int | None =
 
 
 def _walk(root: Path, workspace_layer: bool, parts: tuple[str, ...], create: bool) -> int:
-    """An open descriptor for `root/parts`, one component at a time. The root and `agents` follow a link
-    only on the machine layer; every other component refuses one."""
+    """An open descriptor for `root/parts`, one component at a time; only the root and `agents` of the machine layer follow a link."""
     fd = _open_dir(root, workspace_layer)
     for i, name in enumerate(parts):
         try:

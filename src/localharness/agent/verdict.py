@@ -57,6 +57,7 @@ from localharness.agent.gate_types import (
     VerdictResult,
 )
 from localharness.agent.permissions import PermissionResult
+from localharness.agent.shell_classify import copy_operands
 from localharness.config.paths import WORKSPACE_DIR_NAME, global_config_dir
 from localharness.tools.base import GateFamily
 
@@ -1131,7 +1132,7 @@ def _private_deny(
     return None
 
 
-def _private_shell_targets(segments) -> Iterable[tuple[str, bool]]:
+def _private_shell_targets(segments: Iterable[ShellSegment]) -> Iterable[tuple[str, bool]]:
     """Every static target the segments write, delete or link, in segment order; a link's source is one too."""
     for segment in segments:
         if not segment.unresolvable_write:
@@ -1140,8 +1141,6 @@ def _private_shell_targets(segments) -> Iterable[tuple[str, bool]]:
         if not segment.unresolvable_removal:
             yield from ((target, True) for target in segment.removal_targets)
         if segment.argv and Path(segment.argv[0]).name.casefold() == "ln":
-            from localharness.agent.shell_classify import copy_operands
-
             yield from ((source, False) for source in copy_operands(segment.argv[1:]).sources)
 
 
@@ -1564,8 +1563,6 @@ def _into_folder_writes(segment) -> list[tuple[str, Optional[tuple[str, ...]]]]:
     copy, move, link, unpack or server-named download in `segment`. The folder is the classifier's
     write target (so a `cd` earlier in the command is followed); the names come off the command
     line. A `-t DIR` copy needs nothing here: the classifier already reads it as DIR/<name>."""
-    from localharness.agent.shell_classify import copy_operands
-
     program = Path(segment.argv[0]).name.casefold() if segment.argv else ""
     args = tuple(segment.argv[1:])
     if program in _COPY_INTO_PROGRAMS:
