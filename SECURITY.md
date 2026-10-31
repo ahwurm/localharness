@@ -375,6 +375,12 @@ global config, a project's whole `proposer:` section is ignored. These are all o
   identical calls earn a nudge and an escalation); it comes back as a whole from your global
   config, so a project file can neither raise a threshold, shrink the window, nor leave a key out
   to fall back to a looser default
+- `task_flow.*`, in an agent file or a built-in agent's overlay (the whole section: the critics a
+  panel adds, the revisions each stage allows, the critic, executor and explorer budgets and the
+  flow cap); it comes back whole from your global config, and every number in it is held between a
+  floor and a ceiling fixed in code, so not even your global config can empty a panel or raise a
+  ceiling. The task pipeline's children take their budgets from it, never from org.children_budget.
+  A session that can write your global agent file can still hold one turn for the flow cap
 - `<name>.enabled`, for a plugin you installed (a plugin that ships with LocalHarness can be
   switched per project)
 

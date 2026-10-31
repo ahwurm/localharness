@@ -26,7 +26,7 @@ from localharness.agent.gate_types import PROTECTED_CONFIG_DIR_ENTRIES
 from localharness.cli.model_switch import LAUNCH_NO, LAUNCH_YES, ROW_LOCKED, ROW_WITHHELD
 from localharness.cli.plugins_cmd import CONSENT, THIRD_PARTY_CONFIRM
 from localharness.config.loader import (
-    AGENT_GLOBAL_ONLY_FIELDS, ASK_GLOBAL_ONLY_FIELDS, HARNESS_GLOBAL_ONLY_FIELDS,
+    AGENT_CORE_GLOBAL_ONLY_SECTIONS, AGENT_GLOBAL_ONLY_FIELDS, ASK_GLOBAL_ONLY_FIELDS, HARNESS_GLOBAL_ONLY_FIELDS,
 )
 from localharness.config.plugin_sections import CORE_HARNESS_KEYS, global_only_paths
 from localharness.config.skills import MAX_ENTRIES, ORIGINS
@@ -136,7 +136,7 @@ def paragraphs(text: str) -> list[str]:
 # ---------------------------------------------------------------- check 3: machine-level-only list
 
 MACHINE_ONLY_HEADING = "### Machine-level-only settings"
-_DOTPATH = re.compile(r"(?:<name>|[a-z_][a-z0-9_]*)(?:\.[a-z_][a-z0-9_]*)+")
+_DOTPATH = re.compile(r"(?:<name>|[a-z_][a-z0-9_]*)(?:(?:\.[a-z_][a-z0-9_]*)+(?:\.\*)?|\.\*)")
 _FILE_SUFFIXES = (".yaml", ".yml", ".md", ".py", ".json", ".env", ".toml", ".txt")
 
 
@@ -146,18 +146,19 @@ def machine_only_code_set(plugins: Iterable[type[Plugin]] | None = None) -> froz
     harness keys in HARNESS_GLOBAL_ONLY_FIELDS, `<name>.enabled` for a plugin you install (an
     AgentConfigModel may not mark GLOBAL_ONLY at all — the loader refuses such a plugin), and
     AGENT_GLOBAL_ONLY_FIELDS, the agent-file keys the loader re-resolves from the global layer
-    (`memory.embedding_model`, `permissions.budget.kill_file`)."""
+    (`memory.embedding_model`, `permissions.budget.kill_file`), and `<section>.*` for each core agent
+    section only the global layer may set (AGENT_CORE_GLOBAL_ONLY_SECTIONS)."""
     plugins = BUILTIN_PLUGINS if plugins is None else tuple(plugins)
     paths = {f"{P.manifest.name}.{p}" for P in plugins for p in global_only_paths(P.ConfigModel)}
     paths |= ({f"permissions.ask.{f}" for f in ASK_GLOBAL_ONLY_FIELDS} | HARNESS_GLOBAL_ONLY_FIELDS
               | AGENT_GLOBAL_ONLY_FIELDS)
-    return frozenset(paths | {"<name>.enabled"})
+    return frozenset(paths | {"<name>.enabled"} | {f"{s}.*" for s in AGENT_CORE_GLOBAL_ONLY_SECTIONS})
 
 
 def check_machine_only_list(security_text: str, code_set: frozenset[str] | None = None) -> list[str]:
     """SECURITY.md's `### Machine-level-only settings` list equals the code's set, both ways. The
-    list is the backticked dot-paths on the section's bullet lines (`- `), and a whole core section
-    such as `server` (one token, no dot); prose in the section — e.g. the tighten-only rules no
+    list is the backticked dot-paths on the section's bullet lines (`- `), a whole core section
+    such as `server` (one token, no dot), and `<section>.*`; prose in the section — e.g. the tighten-only rules no
     code set enumerates — is not compared."""
     code = machine_only_code_set() if code_set is None else code_set
     body = section(security_text, MACHINE_ONLY_HEADING)
@@ -1006,3 +1007,26 @@ def test_links_bites():
     assert check_links("README.md", "[x](docs/nope.md)\n") == ["README.md: link to missing 'docs/nope.md'"]
     assert check_links("README.md", "## A\n## A\n[l](#a)\n") == ["README.md: #a names 2 headings in README.md"]
     assert check_links("README.md", f"[s]({_BLOB}docs/plugins/memory.md#no-such-heading)\n")
+
+
+TASK_FLOW_NEEDLES = (
+    "held between a floor and a ceiling fixed in code", "never from org.children_budget",
+    "can still hold one turn for the flow cap")
+
+
+def check_task_flow_doc(security_text: str) -> list[str]:
+    """SECURITY.md's machine-level-only list says `task_flow.*` is clamped in code, apart from `org.children_budget`, and what a writable global agent file still costs."""
+    body = " ".join((section(security_text, MACHINE_ONLY_HEADING) or "").split())
+    return [f"SECURITY.md's machine-level-only list does not say {n}" for n in TASK_FLOW_NEEDLES if n not in body]
+
+
+def test_task_flow_doc_live():
+    assert check_task_flow_doc(_read("SECURITY.md")) == []
+
+
+def test_task_flow_doc_bites():
+    text = _read("SECURITY.md")
+    for needle in TASK_FLOW_NEEDLES:
+        assert check_task_flow_doc(_swap(text, needle, "x")) == [
+            f"SECURITY.md's machine-level-only list does not say {needle}"]
+    assert len(check_task_flow_doc("## Nothing\n")) == len(TASK_FLOW_NEEDLES)

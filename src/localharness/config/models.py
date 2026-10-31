@@ -7,14 +7,16 @@ import os
 import re
 from dataclasses import fields as dataclass_fields
 from pathlib import PurePath
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    NonNegativeInt,
     PrivateAttr,
     SecretStr,
+    StringConstraints,
     field_validator,
     model_validator,
 )
@@ -1428,6 +1430,15 @@ class AgentConfig(BaseModel):
         ),
     )
 
+    task_flow: TaskFlowConfig = Field(
+        default_factory=lambda: TaskFlowConfig(),
+        description=(
+            "The task pipeline's panels, revisions and budgets, held within its code limits. "
+            "Global-only as a whole. Addressable via "
+            "`agent.task_flow.{panels,revisions,critics,executor,explorer,flow_cap_minutes}`."
+        ),
+    )
+
     recovery_injection: RecoveryInjectionConfig = Field(
         default_factory=RecoveryInjectionConfig,
         description=(
@@ -1639,6 +1650,34 @@ class ChildBudget(BaseModel):
     actions: int = Field(ge=1, le=10_000, description=(
         "Tool calls the child may dispatch, checked before each of its model calls."))
     minutes: float = Field(gt=0, le=1440.0, description="Wall-clock minutes the child may run.")
+
+
+CriticName = Annotated[str, StringConstraints(pattern=r"^[a-z-]+$")]
+
+
+class TaskFlowConfig(BaseModel):
+    """The task pipeline's knobs; every number is held within the flow's limits table at use."""
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    panels: dict[str, list[CriticName]] = Field(
+        default_factory=dict,
+        description="Critics a boundary's panel adds to its own, by boundary.")
+    revisions: dict[str, NonNegativeInt] = Field(
+        default_factory=dict,
+        description="Revisions a boundary allows before it asks, by boundary; held within the limits table.")
+    critics: dict[CriticName, ChildBudget] = Field(
+        default_factory=dict,
+        description="A critic's own budget, by critic; held within the limits table.")
+    executor: ChildBudget | None = Field(
+        default=None, description="The executor's budget; unset takes the table's default.")
+    explorer: ChildBudget | None = Field(
+        default=None, description="The explorer's budget; unset takes the table's default.")
+    flow_cap_minutes: float | None = Field(
+        default=None, gt=0,
+        description="Wall-clock minutes one flow may run; held within the limits table.")
+
+
+AgentConfig.model_rebuild()
 
 
 def _child_default(entry: str) -> ChildBudget:
