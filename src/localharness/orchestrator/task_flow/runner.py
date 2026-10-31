@@ -199,18 +199,19 @@ def _read(flow: TaskFlow, boundary: str) -> str:
 
 async def _file(flow: TaskFlow, boundary: str, unit: Unit, carried: str | None) -> str:
     record, name = flow.record, DOCS[unit.boundary]
+    if len(carried.encode()) > Caps.DOC:
+        return f"{name} is over {Caps.DOC} bytes; file it shorter"
     sections = parse_plan(carried) if unit.boundary == "plan" else None
     if isinstance(sections, str):
         return sections
-    digest, cut = flow.docs.write(record.id, name, carried)
+    digest, _ = flow.docs.write(record.id, name, carried)
     file_doc(record, unit.boundary, (name, None), digest)
     reopened = rerecord(record, sections) if sections else []
     if sections:
         set_stage(record, "plan")
     if consume_flag(record, unit.boundary):
         reopen(record, unit.boundary, None)
-    notes = [*(["truncated at the doc cap"] if cut else []),
-             *([f"steps {', '.join(map(str, reopened))} reopened"] if reopened else [])]
+    notes = [f"steps {', '.join(map(str, reopened))} reopened"] if reopened else []
     result = await _panel(flow, Unit(unit.boundary, "panel"))
     return _done(flow, boundary, unit, (name, _review_doc(unit)), result=result, notes=notes)
 
