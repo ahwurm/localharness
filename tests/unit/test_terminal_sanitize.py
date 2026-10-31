@@ -104,10 +104,12 @@ async def test_reasoning_tool_and_error_lines_are_clean():
 INVISIBLE = [
     *range(0x200B, 0x2010),
     *range(0x202A, 0x202F),
-    0x2060,
-    *range(0x2066, 0x206A),
+    *range(0x2060, 0x2065),
+    *range(0x2066, 0x2070),
+    *range(0xE0000, 0xE0080),
     0xFEFF,
     0x061C,
+    0x180E,
 ]
 
 
@@ -117,8 +119,10 @@ def test_bidi_and_zero_width_characters_are_stripped(code):
 
 
 def test_the_stripped_set_is_exactly_the_listed_code_points():
-    assert sanitize_for_display("a ‐  ⁪ b") == "a ‐  ⁪ b"
+    kept = [0x2010, 0x2029, 0x202F, 0x205F, 0x200A, 0x00AD, *range(0xFE00, 0xFE10), 0xE0080]
+    assert sanitize_for_display("".join(f"a{chr(c)}" for c in kept)) == "".join(f"a{chr(c)}" for c in kept)
     assert sanitize_for_display("a\tb\nc") == "a\tb\nc"
+    assert sanitize_for_display("ab" + "".join(chr(0xE0000 + ord(c)) for c in "hidden") + "cd") == "abcd"
 
 
 def test_a_leading_notice_mark_is_neutralised_on_the_first_and_later_lines():
