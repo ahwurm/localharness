@@ -342,30 +342,29 @@ async def test_refuse_sentinel_surface(archive_store, seeded_inflight):
 
 
 # ---------------------------------------------------------------------------
-# MECH-01 seal-respect — the COMPLEMENT of the off-registry negatives.
+# Seal-respect — the COMPLEMENT of the off-registry negatives.
 #
-# agent.self_check.enabled is a NEW mechanism-class mutable axis (Phase 25). It lives in the
-# build_catalogue surface and shares no off-registry prefix, so the anti-reward-hacking seal
-# must NOT refuse it — while bench.*/holdout/sentinel siblings STILL → EXIT_REFUSE_OFFREGISTRY (6).
-# This locks the seal behavior for the new axis without touching experiment.py.
+# agent.baton_gate.enabled is a mechanism-class mutable axis. It lives in the build_catalogue
+# surface and shares no off-registry prefix, so the anti-reward-hacking seal must NOT refuse it —
+# while bench.*/holdout/sentinel siblings STILL → EXIT_REFUSE_OFFREGISTRY (6).
 # ---------------------------------------------------------------------------
 
 
-async def test_self_check_passes_seal(archive_store, seeded_inflight):
-    """MECH-01 seal-respect: agent.self_check.enabled is in the mutable catalogue, so the
-    anti-reward-hacking seal does NOT refuse it (complement of the off-registry negatives)."""
+async def test_mechanism_axis_passes_seal(archive_store, seeded_inflight):
+    """agent.baton_gate.enabled is in the mutable catalogue, so the anti-reward-hacking seal does
+    NOT refuse it (complement of the off-registry negatives)."""
     from localharness.cli.components_cmd import _build_loader
     cfg = _build_loader().load_harness()
     pid = await seeded_inflight(
-        archive_store, component="agent.self_check.enabled", before=False, after=True
+        archive_store, component="agent.baton_gate.enabled", before=True, after=False
     )
     # The seal's structural validation must NOT refuse an in-catalogue mechanism axis.
     entry, component, after = await exp._load_and_validate(archive_store, pid, cfg)
-    assert component == "agent.self_check.enabled"
-    assert after is True
+    assert component == "agent.baton_gate.enabled"
+    assert after is False
 
 
-async def test_self_check_offregistry_siblings_still_refused(archive_store, seeded_inflight):
+async def test_mechanism_axis_offregistry_siblings_still_refused(archive_store, seeded_inflight):
     """The seal stays intact: holdout / sentinel siblings STILL → EXIT_REFUSE_OFFREGISTRY (6)."""
     for comp in ("bench.scenarios.holdout.01", "sentinel.overfit_gap_threshold"):
         pid = await seeded_inflight(archive_store, component=comp, before="a", after="b")

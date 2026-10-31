@@ -205,16 +205,8 @@ def test_agent_cfg_drives_agent_star_current_value(components_home):
     )
 
 
-# ---------------------------------------------------------------------------
-# MECH-01 — SelfCheckConfig auto-enumerates as a new mechanism-class mutable axis.
-# Adding `self_check: SelfCheckConfig` to AgentConfig makes walk_model_fields recurse
-# the nested BaseModel into agent.self_check.{enabled,max_passes} with ZERO catalogue edit
-# (mirrors how agent.stuck_detector.* and agent.memory.inject_into_context enumerate).
-# ---------------------------------------------------------------------------
-
-
-def test_self_check_leaves_enumerate(components_home):
-    """MECH-01 Test A: agent.self_check.{enabled,max_passes} both appear; catalogue is 82 (was 80)."""
+def test_agent_leaves_enumerate(components_home):
+    """The nested agent sections enumerate as leaves, with their annotations."""
     from localharness.config.models import AgentConfig
     from localharness.registry.catalogue import build_catalogue
 
@@ -222,9 +214,7 @@ def test_self_check_leaves_enumerate(components_home):
     entries = build_catalogue(cfg, overlays={}, agent_cfg=AgentConfig(name="x", role="y"),
                               plugins=(_memory_plugin_rows(),))
 
-    assert "agent.self_check.enabled" in entries
-    assert "agent.self_check.max_passes" in entries
-    # #84: the deterministic baton-gate kill-switch auto-enumerates as a bool leaf too.
+    # #84: the deterministic baton-gate kill-switch auto-enumerates as a bool leaf.
     assert "agent.baton_gate.enabled" in entries
     assert entries["agent.baton_gate.enabled"].annotation is bool
     # FIX 4: the nudge bound is a configurable int leaf (agent-scope only — BatonGateConfig is
@@ -322,45 +312,12 @@ def test_self_check_leaves_enumerate(components_home):
     )
 
 
-def test_self_check_leaf_annotations(components_home):
-    """MECH-01 Test B: enabled is a bool leaf, max_passes is an int leaf.
-
-    Mirrors agent.memory.inject_into_context (bool) + agent.stuck_detector.window_size (int).
-    """
-    from localharness.config.models import AgentConfig
-    from localharness.registry.catalogue import build_catalogue
-
-    cfg = _make_minimal_harness_cfg()
-    entries = build_catalogue(cfg, overlays={}, agent_cfg=AgentConfig(name="x", role="y"))
-
-    assert entries["agent.self_check.enabled"].annotation is bool
-    assert entries["agent.self_check.max_passes"].annotation is int
-
-
-def test_self_check_defaults_and_bounds():
-    """MECH-01 Test C: defaults (enabled=False, max_passes=1) + max_passes bounds (ge=1, le=3)."""
-    import pydantic
-
-    from localharness.config.models import AgentConfig
-
-    a = AgentConfig(name="x", role="y")
-    assert a.self_check.enabled is False
-    assert a.self_check.max_passes == 1
-
-    # Out-of-bound max_passes must raise (le=3 and ge=1, so the review step provably terminates).
-    for bad in (0, 4):
-        with pytest.raises(pydantic.ValidationError):
-            AgentConfig.model_validate(
-                {"name": "x", "role": "y", "self_check": {"max_passes": bad}}
-            )
-
-
 # ---------------------------------------------------------------------------
 # MODP-01 — RoleSectionsConfig auto-enumerates as four orthogonal mutable axes.
 # Adding `role_sections: RoleSectionsConfig` (four str fields) to AgentConfig makes
 # walk_model_fields recurse the nested BaseModel into
 # agent.role_sections.{identity,tool_use,stopping,output} with ZERO catalogue edit
-# (mirrors agent.self_check.* and agent.stuck_detector.*). Catalogue 82 -> 86.
+# (mirrors agent.stuck_detector.*). Catalogue 82 -> 86.
 # ---------------------------------------------------------------------------
 
 
