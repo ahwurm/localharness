@@ -1190,7 +1190,11 @@ owner-only `strata/` folder), agent files written by `agent create`, by a start 
 in-session creation workflow, autoresearch's archive, run journals and budget file, the task folders
 `agents/<name>/tasks/t<n>/` with their docs and the session docs `sessions/jtbd.md` and
 `sessions/reply-review.md` (each written through that no-follow walk and replaced atomically, never
-through a link), and `plugins/README.md`. Each model response's row in `history.jsonl` records the model name, the
+through a link), and `plugins/README.md`. `/task show` prints a task doc only after its digest
+matches what was filed; an edited doc is headed by the line saying so instead. A folder this session
+did not make is shown read-only, headed `not adopted · not made by this session`. The header
+`/task accept` prints first is display, not a confirmation. `/task clear` removes only the open task's
+folder and an old `task.json`. Each model response's row in `history.jsonl` records the model name, the
 server-reported prompt and completion token counts and the call's duration (numbers and a name,
 nothing else from the response), and the file stays owner-only (0600). The same writers make the
 same files owner-only in a project's `.localharness/` (its sessions, history and memory). The one script `start` installs,

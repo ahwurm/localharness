@@ -1,11 +1,12 @@
-"""The task flow's renderer and the person's arming verbs: a LINES row printed through notice(), and /task new, research, plan and run."""
+"""The task flow's renderer and the person's verbs: a LINES row printed through notice(), and /task new, research, plan, run, show, accept, clear and the status."""
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 from typing import Any
 
-from localharness.channels.base import notice, sanitize_for_display
+from localharness.channels.base import notice, one_line, sanitize_for_display
+from localharness.core.caps import Caps
 from localharness.orchestrator.task_flow.filer import NO_REVIEW, Refused, _cut, digest, last_section, parse_plan, render_section, rerecord
 from localharness.orchestrator.task_flow.panel import turns_block, typed_turns
 from localharness.orchestrator.task_flow.record import (
@@ -358,6 +359,53 @@ def _accept(flow: Any, arg: str, levers: Levers) -> Reply:
     return _accepted(flow, levers, stem, (head,))
 
 
+def _unadopted(flow: Any, levers: Levers) -> list[str]:
+    """The highest folder this session did not make, and an old record, as one line each."""
+    docs = flow.docs
+    found = [n for n in docs.folders() if n not in docs.adopted]
+    names = docs.names(found[-1]) if found else []
+    lines = ([render("not adopted", levers, task=f"t{found[-1]}", doc=names[-1]) if names
+              else notice(f"t{found[-1]}", "not adopted", [])] if found else [])
+    return [*lines, *([notice("task", "old task.json", ["/task clear (removes it)"])] if docs.old_record() else [])]
+
+
+def _bare(flow: Any, levers: Levers) -> tuple[str, ...]:
+    record = flow.record
+    if record is None:
+        return (render("no task", levers), *_unadopted(flow, levers))
+    key, fields = _status(flow)
+    command = _put(LINES[key].commands[0], fields) if LINES[key].commands else "/task show"
+    head = " · ".join([f"t{record.id}", one_line(record.objective)[:Caps.LINE // 2], _put(LINES[key].state, fields),
+                       *["paused"] * record.paused])
+    row = render("paused", levers, task=f"t{record.id}", next=command) if record.paused else render(key, levers, **fields)
+    return (head, row, *_unadopted(flow, levers))
+
+
+def _clear(flow: Any) -> tuple[str, ...]:
+    """Deletes the open task's folder and an old `task.json`, and says what went."""
+    record, docs, gone = flow.record, flow.docs, []
+    if record:
+        held = docs.remove(record.id)
+        gone.append(f"t{record.id} ({len(held)} doc{'s' * (len(held) != 1)})")
+        flow.record = None
+    if docs.drop_old_record():
+        gone.append("task.json")
+    return (notice("task", "cleared", [], " · ".join(gone)) if gone else notice("task", "nothing to remove", []),)
+
+
+def wake_line(docs: Any) -> str | None:
+    """The line a wake prints when the highest task folder on disk was never finished, or None."""
+    try:
+        n = docs.highest()
+        names = docs.names(n) if n else []
+        if not n or (docs.read(n, "review.md") or "").rstrip().endswith(("verdict: pass", "verdict: accepted")):
+            return None
+    except Refused:
+        return None
+    show = [f"/task show t{n}/{names[-1]}"] if names else []
+    return notice("", "Awake again", [f"t{n} not carried over", *show, "new <objective>"])
+
+
 def _newest(record: Record) -> str | None:
     names = ["decisions", "research", "plan", *(f"step-{n}" for n in sorted(_executed(record))), "review"]
     return next((n for n in reversed(names) if (f"{n}.md", None) in record.filed), None)
@@ -422,13 +470,17 @@ def task_command(flow: Any, args: str, *, turn: int, running: bool, levers: Leve
     parts = args.split(maxsplit=1) or [""]
     verb, arg = parts[0].lower(), "".join(parts[1:]).strip()
     boundary, record = BOUNDARIES.get(verb), flow.record
-    if boundary is None and verb not in ("show", "accept"):
+    if boundary is None and verb not in ("show", "accept", "", "clear"):
         return Reply((USAGE,))
     try:
         if verb == "show":
             return Reply(_show(flow, arg, levers, phone))
         if verb == "accept":
             return _accept(flow, arg, levers)
+        if verb == "":
+            return Reply(_bare(flow, levers))
+        if verb == "clear":
+            return Reply(_clear(flow))
         if verb == "new" and arg:
             return _open(flow, arg, turn, levers)
         if record and record.stage == "done":

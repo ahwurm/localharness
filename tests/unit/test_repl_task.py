@@ -1129,7 +1129,8 @@ def test_status_with_no_task_is_the_no_task_row_and_an_unadopted_folder_and_an_o
     (flow.docs.state_dir / "agents" / "a" / "task.json").write_text("{}")
     assert bare(flow) == (*NO_TASK.lines, "◆ t5 not adopted · /task show t5/plan", "◆ task old task.json · /task clear (removes it)")
     flow.open("fix login", 1)
-    assert bare(flow)[0] == "t1 · fix login · interview open" and bare(flow)[-2:] == bare(flow)[2:4]
+    assert bare(flow) == ("t6 · fix login · interview open", "◆ t6 interview open · /task plan (skips the questions)",
+                          "◆ t5 not adopted · /task show t5/plan", "◆ task old task.json · /task clear (removes it)")
 
 
 @pytest.mark.parametrize(("stage", "verdict", "row"), [
