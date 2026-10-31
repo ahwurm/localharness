@@ -578,7 +578,7 @@ class OrchestratorREPL:
         task = self._turn_task
         if task is None or task.done():
             return False
-        task.cancel()
+        self._agent.stop_turn(task)
         return True
 
     async def _resolve_pending_from_channel(self, action: str, pending_id: int) -> None:
@@ -839,7 +839,7 @@ class OrchestratorREPL:
         'interrupt' event to the loop for arm-then-exit."""
         if self._turn_task is not None and not self._turn_task.done():
             self._cancelled_by_user = True
-            self._turn_task.cancel()
+            self._agent.stop_turn(self._turn_task)
         elif self._box_ctrl_q is not None:
             # Timestamped: a slash command holds this single coordinator for as long as it runs
             # (a managed /model swap: minutes), so a queued interrupt must be datable to tell
@@ -1095,7 +1095,7 @@ class OrchestratorREPL:
 
     async def _await_turn_with_sigint(self, turn_task: asyncio.Task) -> None:
         """Await one turn so a mid-turn Ctrl-C cancels the turn, not the session."""
-        async with sigint_cancels(turn_task) as cancelled:
+        async with sigint_cancels(turn_task, cancel=lambda: self._agent.stop_turn(turn_task)) as cancelled:
             try:
                 await turn_task
             except asyncio.CancelledError:

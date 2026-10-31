@@ -47,6 +47,7 @@ def _build_repl(channel, run_turn):
     agent.current_session_id = "s1"
     agent._llm = MagicMock()
     agent.run_turn = run_turn
+    agent.stop_turn = lambda task: task.cancel()
     bus = AsyncMock()
     repl = OrchestratorREPL(
         orchestrator=orch, agent_loop=agent, channel=channel, bus=bus,

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from types import SimpleNamespace
 
 import pytest
 import typer
@@ -91,6 +92,7 @@ def _repl(channel):
     repl._pending_handles = []
     repl._turn_task = None
     repl._staged_images = []
+    repl._agent = SimpleNamespace(stop_turn=lambda task: task.cancel())
     return repl
 
 

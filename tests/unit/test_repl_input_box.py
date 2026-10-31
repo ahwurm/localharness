@@ -78,6 +78,7 @@ def _repl(channel=None, harness=None):
     agent._llm = MagicMock(spec=[])  # no .complete -> tier-2 unavailable (unit tests use tier-1)
     agent.run_turn = AsyncMock(return_value="done")
     agent.push_user_nudge = MagicMock()
+    agent.stop_turn = lambda task: task.cancel()
     bus = AsyncMock()
     repl = OrchestratorREPL(
         orchestrator=orch, agent_loop=agent, channel=channel, bus=bus,
