@@ -91,7 +91,7 @@ Each task is a folder, `agents/<name>/tasks/t<n>/`, in the session's state folde
 
 ## Settings
 
-`task_flow` is machine-level only. It is read from your agent file in your config folder's `agents/`, else from the `agent:` section of your global `overrides.yaml`, and a project's copy is replaced whole by yours.
+`task_flow` is machine-level only. It is read from your agent file in your config folder's `agents/` and the `agent:` section of your global `overrides.yaml`, merged key by key with the agent file winning, and a project's copy is replaced whole by yours.
 
 ```yaml
 task_flow:
