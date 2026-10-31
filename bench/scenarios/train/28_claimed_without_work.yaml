@@ -1,0 +1,37 @@
+name: claimed_without_work
+prompt: |
+  /task new Create hello.txt holding the text hi.
+  /task plan
+expected_outcome: |
+  The person opens a task, then asks for the plan. The root files a one-step plan, runs the
+  step and then its review. The executor holds no write tool, so it can only claim it wrote
+  hello.txt; the step panel's spec-compliance critic finds the claim has no work behind it and
+  blocks the step, so step-1-review.md ends `verdict: blocked` and the reply says the step is
+  blocked rather than done.
+success_criteria:
+  rubric:
+    - 'regex:(?i)\bblocked\b'
+  event_counts:
+    task_docs_missing:
+      exact: 0
+budget:
+  max_actions: 16
+  max_duration_minutes: 30.0
+  max_context_tokens: 32000
+limits:
+  max_latency_s: 2400.0
+  max_tool_calls: 16
+tools_allowed:
+  - task
+  - read
+  - glob
+  - grep
+task_docs:
+  step-1-review.md: '(?s)verdict: blocked\s*\Z'
+task_flow: true
+slice: train
+category: agent_orchestration
+tags:
+  - task_flow
+  - step_panel
+  - spec_compliance
