@@ -12,9 +12,11 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from localharness.config.loader import AGENT_CORE_GLOBAL_ONLY_SECTIONS, ConfigLoader
-from localharness.config.models import ChildBudget, StuckDetectorConfig
+from localharness.config.models import ChildBudget, StuckDetectorConfig, TaskFlowConfig
+from localharness.orchestrator.task_flow.record import limited
 
 DEFAULT = StuckDetectorConfig()
 NOTE = "only the global config may set it"
@@ -461,3 +463,123 @@ def test_both_doors_note_a_section_that_would_change_something(layers, caplog, d
     assert cfg.stuck_detector == DEFAULT
     assert builtin.stuck_detector == _builtin_base().stuck_detector
     assert len(_notes(loader)) == 1 and len(_stuck_warnings(caplog)) == 1
+
+
+# ---------------------------------------------------------------------------
+# task_flow: the same whole-section rule, and the code limits on what the global layer sets
+# ---------------------------------------------------------------------------
+
+_EXECUTOR = {"executor": {"actions": 12, "minutes": 10}}
+
+
+def test_task_flow_omitted_key_cannot_lift_a_stricter_global_value(layers) -> None:
+    global_dir, ws = layers
+    _write_yaml(global_dir / "agents" / "deployer.yaml", _agent(task_flow=_EXECUTOR))
+    _write_yaml(ws / "agents" / "deployer.yaml", _agent(task_flow={"panels": {"plan": ["security"]}}))
+
+    cfg, _ = _load(global_dir, ws)
+
+    assert cfg.task_flow.executor == ChildBudget(actions=12, minutes=10)
+    assert cfg.task_flow.panels == {}
+
+
+def test_task_flow_omitted_by_the_workspace_file_is_restored_silently(layers) -> None:
+    global_dir, ws = layers
+    _write_yaml(global_dir / "agents" / "deployer.yaml", _agent(task_flow=_EXECUTOR))
+    _write_yaml(ws / "agents" / "deployer.yaml", _agent())
+
+    cfg, loader = _load(global_dir, ws)
+
+    assert cfg.task_flow.executor == ChildBudget(actions=12, minutes=10)
+    assert _notes(loader) == []
+
+
+def test_task_flow_of_a_workspace_only_agent_is_the_schema_default(layers) -> None:
+    global_dir, ws = layers
+    _write_yaml(ws / "agents" / "solo.yaml", _agent("solo", task_flow={"flow_cap_minutes": 360}))
+
+    cfg, loader = _load(global_dir, ws, "solo")
+
+    assert cfg.task_flow == TaskFlowConfig()
+    assert len(_notes(loader)) == 1
+
+
+def test_task_flow_global_overrides_agent_section_is_the_next_rung(layers) -> None:
+    global_dir, ws = layers
+    _write_yaml(global_dir / "overrides.yaml", {"agent": {"task_flow": _EXECUTOR}})
+    _write_yaml(ws / "agents" / "deployer.yaml", _agent(task_flow={"flow_cap_minutes": 360}))
+
+    cfg, loader = _load(global_dir, ws)
+
+    assert cfg.task_flow.executor == ChildBudget(actions=12, minutes=10)
+    assert cfg.task_flow.flow_cap_minutes is None
+    assert len(_notes(loader)) == 1
+
+
+def _flow_notices() -> list[str]:
+    return [n.text for n in _OVERLAY_NOTICES if NOTE in n.text and n.subject == "task_flow"]
+
+
+def test_task_flow_a_workspace_overlay_of_a_builtin_gets_the_base_section(layers) -> None:
+    global_dir, ws = layers
+    ws_file = ws / "agents" / "explore.yaml"
+    _write_yaml(ws_file, {"task_flow": {"flow_cap_minutes": 360}})
+
+    cfg = _builtin(global_dir, ws)
+
+    assert cfg.task_flow == _builtin_base().task_flow
+    notices = _flow_notices()
+    assert len(notices) == 1 and repr(str(ws_file)) in notices[0]
+
+
+def test_task_flow_a_global_explore_file_is_the_rung_above_the_base(layers) -> None:
+    global_dir, ws = layers
+    _write_yaml(global_dir / "agents" / "explore.yaml", {"task_flow": _EXECUTOR})
+    _write_yaml(ws / "agents" / "explore.yaml", {"task_flow": {"flow_cap_minutes": 360}})
+
+    cfg = _builtin(global_dir, ws)
+
+    assert cfg.task_flow.executor == ChildBudget(actions=12, minutes=10)
+    assert cfg.task_flow.flow_cap_minutes is None
+    assert len(_flow_notices()) == 1
+
+
+def test_task_flow_a_global_value_outside_the_table_loads_and_is_held_by_limited(layers) -> None:
+    global_dir, _ = layers
+    _write_yaml(global_dir / "agents" / "deployer.yaml", _agent(task_flow={
+        "executor": {"actions": 49, "minutes": 41},
+        "critics": {"answer": {"actions": 2, "minutes": 0.5}},
+        "explorer": {"actions": 12, "minutes": 6.5},
+        "flow_cap_minutes": 1000}))
+
+    cfg, _ = _load(global_dir, None)
+    held, notes = limited(cfg.task_flow)
+
+    assert (held.executor.actions, held.executor.minutes) == (48, 40)
+    assert (held.critics["answer"].actions, held.critics["answer"].minutes) == (3, 1)
+    assert (held.explorer.actions, held.explorer.minutes) == (12, 6.5)
+    assert held.flow_cap_minutes == 360
+    assert len(notes) == 3 and not any("explorer" in n for n in notes)
+
+
+def test_task_flow_a_value_exactly_at_a_floor_or_a_ceiling_earns_no_note() -> None:
+    held, notes = limited(TaskFlowConfig(
+        executor={"actions": 48, "minutes": 40}, critics={"answer": {"actions": 3, "minutes": 1}},
+        flow_cap_minutes=360))
+
+    assert notes == ()
+    assert (held.executor.actions, held.executor.minutes, held.flow_cap_minutes) == (48, 40, 360)
+
+
+@pytest.mark.parametrize("given", [
+    {"revisions": {"plan": -1}},
+    {"revisions": {"plan": 1.5}},
+    {"budgets": {}},
+    {"panels": {"plan": ["Security!"]}},
+    {"executor": {"actions": 1.5, "minutes": 5}},
+    {"explorer": {"actions": 5, "minutes": "soon"}},
+    {"flow_cap_minutes": "long"},
+])
+def test_task_flow_a_structurally_invalid_value_is_refused(given) -> None:
+    with pytest.raises(ValidationError):
+        TaskFlowConfig(**given)
