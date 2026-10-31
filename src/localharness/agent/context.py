@@ -2239,11 +2239,15 @@ class ContextManager:
         self,
         messages: list[Message],
         tool_schemas: list[dict] | None = None,
+        *,
+        compact: bool = True,
     ) -> tuple[list[Message], TokenBudget]:
         """Return repaired messages + budget snapshot for the request that will be sent.
 
         Budget reflects post-compaction state so callers (heartbeat emitter) see the
         actual size of the next outgoing request. Budget is always returned (never None).
+        `compact=False` skips the summary pipeline and raises ActiveReferenceOverflow where the
+        emergency floor would truncate: the request is sent whole or not at all.
         """
         # Wire safety: no message may reach the payload with content=None — vLLM's
         # request validation 400s on it ('Input should be a valid string'). Covers
@@ -2300,7 +2304,7 @@ class ContextManager:
                     t_evicted, evict_check.usage_fraction * 100, len(restore_pins),
                 )
 
-        if self._pipeline is not None:
+        if compact and self._pipeline is not None:
             pre_usage = self._token_counter.estimate_messages(repaired)
             pre_budget = TokenBudget(
                 total_limit=self.max_context_tokens,
@@ -2401,6 +2405,8 @@ class ContextManager:
         emergency_modified = False
         emergency_pre_frac = 0.0
         if self.max_context_tokens > 0 and floor_usage + tool_tokens > effective_limit:
+            if not compact:
+                raise ActiveReferenceOverflow("the request does not fit the window with compaction off")
             # Denominated against the SAME effective limit as TokenBudget.usage_fraction, so the
             # number published as CompactionTriggered.pre_usage_fraction is on one scale with the
             # post fraction (a mixed-denominator pair would understate the overshoot).
