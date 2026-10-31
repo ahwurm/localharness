@@ -386,7 +386,7 @@ def test_model_switch_doc_bites():
 DENY_CLASS_NEEDLES = (
     "except each agent's `tasks/` and `sessions/` folders", "never asked, in every mode",
     "lands under `agents/<name>/tasks/` or `agents/<name>/sessions/`", "the delete or move of `agents/<name>` itself",
-    "Nothing above those folders is refused", "not a barrier")
+    "Nothing above those folders is refused", "not a barrier", "write forms that name no static target under those folders")
 
 
 def check_deny_class_doc(security_text: str) -> list[str]:

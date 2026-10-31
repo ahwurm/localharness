@@ -1103,7 +1103,7 @@ def _private_parts(path: Path, ctx: GateContext) -> Optional[tuple[str, ...]]:
 
 
 def _private_reason(path: Path, ctx: GateContext, removal: bool) -> Optional[str]:
-    """Why ``path`` is harness state: an agent's tasks or sessions folder, or for a removal its folder (``a.yaml`` is a definition file, not a folder)."""
+    """Why ``path`` is harness state: an agent's tasks or sessions folder, or for a removal its folder or ``agents`` itself (a dotted ``a.yaml`` file is a definition, a dotted folder is not)."""
     parts = _private_parts(path, ctx)
     if parts is None:
         return None
@@ -1114,7 +1114,7 @@ def _private_reason(path: Path, ctx: GateContext, removal: bool) -> Optional[str
                 return PRIVATE_PLAN_REASON
             return PRIVATE_DOC_REASON.format(doc=Path(parts[4]).stem)
         return PRIVATE_STATE_REASON
-    if removal and len(low) == 2 and low[0] == "agents" and "." not in low[1]:
+    if removal and low[:1] == ("agents",) and (len(low) == 1 or len(low) == 2 and ("." not in low[1] or path.is_dir())):
         return PRIVATE_STATE_REASON
     return None
 

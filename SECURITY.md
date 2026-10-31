@@ -569,13 +569,17 @@ read and argue with. Each step below says what it does in `auto`.
      A second class sits beside the protected entries and is refused outright, never asked, in every mode:
      a write, delete, move or link the gate can read whose target, or a link's or move's source, lands under
      `agents/<name>/tasks/` or `agents/<name>/sessions/` of a config directory the session uses, and the
-     delete or move of `agents/<name>` itself. The refusal says how to change the document instead:
+     delete or move of `agents/<name>` itself (a name with a dot only when it is a folder, so `agents/a.yaml` stays
+     a file) and of the `agents` folder, which holds every one of them. The refusal says how to change the document instead:
      `/task plan` for a task's plan, or ask the person to edit it and then `/task accept` for any other task
      document. The target is judged as the entry it names and by where a symlink points. Nothing above those
-     folders is refused: an agent's own `config.yaml` and `memory.db` and the `agents/` folder itself are the
-     harness being used. This is defence in depth, not a barrier: a write by `python_exec`, an inline
-     interpreter or a script file, a path held in a variable or a glob or reached after a `cd` the gate
-     cannot follow, and a link an interpreter creates after the check, are not covered.
+     folders is refused but that removal: an agent's own `config.yaml` and `memory.db` and a write into `agents/`
+     are the harness being used. This is defence in depth, not a barrier: a write by `python_exec`, an inline
+     interpreter or a script file, a path held in a variable or a glob (`rm -r agents/*/tasks`) or reached
+     after a `cd` the gate cannot follow, and a link an interpreter creates after the check, are not covered,
+     and neither are the write forms that name no static target under those folders: `cp -r` of a folder that
+     holds a `tasks` or `sessions` entry into `agents/<name>`, `tar -x -C`, `rsync`, `git checkout` and `chmod`
+     aimed at `agents/<name>` or a folder above the two.
    - **A system directory.** `/etc`, `/usr`, `/bin`, `/sbin`, `/lib` (and `/lib64`), `/boot`,
      `/var` except `/var/tmp`, `/opt`, `/root`, `/srv`, macOS `/System`, `/Library` and
      `/Applications`, Windows `C:\Windows`, `C:\Program Files*` and `C:\ProgramData`.
