@@ -959,9 +959,7 @@ async def dispatch_config_subagent(
     child_registry = ToolRegistry.from_allowed(allowed, base_registry=base_registry)
     agent_config = _without_unoffered_optional_tools(agent_config, child_registry, narrowed)
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
-    # The child's budget is chosen once, here, from the parent's remainder as it stands NOW (D-32).
-    # Every config child takes the `default` entry (D-33), whatever it is called: a (model-writable)
-    # agents/chunk-summarizer.yaml must not pick up that built-in's rung by its name (IN-57).
+    # A config child takes the `default` rung (a writable agents/chunk-summarizer.yaml must not inherit that built-in's rung by name) unless the caller gives a row budget.
     if budget is None:
         agent_config, budget_fallback, budget_labels = _child_budget(
             agent_config, "default", children_budget=children_budget,
@@ -2055,7 +2053,7 @@ def make_explore_agent_runner(
 
         `slot` is the one-slot holder `_run_agent` fills with the child loop's own `remaining_budget`
         once that loop exists (the tool is built before the loop). The nested runner reads it at each
-        of ITS dispatches, so a grandchild is cut from its parent child's live remainder (D-49)."""
+        of ITS dispatches, so a grandchild is cut from its parent child's live remainder."""
         child_depth = depth + 1
         delegatees = NON_LEAF_AGENTS.get(name)
         if not delegatees or child_depth >= max_subagent_depth:
