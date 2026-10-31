@@ -5,6 +5,8 @@ import errno
 import hashlib
 import os
 import re
+import shutil
+import stat
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +29,7 @@ _TASK_DOC = re.compile(r"(?:(?:decisions|research|plan|step-[1-9][0-9]*)(?:-revi
 _NAMEABLE = re.compile(r"(decisions|research|plan|step-([1-9][0-9]*)|review)\.md")
 _RANK = {"decisions": 0, "research": 1, "plan": 2, "review": 4}
 _ATTEMPTS = 8
+OLD_RECORD = "task.json"
 PLAN_SHAPE = ("plan.md needs `## Step N` headings numbered 1..n in order, each with `files:`, `depends_on:` "
               "(earlier steps only, or none) and `done:` lines")
 NO_REVIEW = "no review yet"
@@ -327,6 +330,40 @@ class Docs:
         except FileNotFoundError:
             return []
         return [m[1] for m in sorted(found, key=lambda m: (_RANK.get(m[1], 3), int(m[2] or 0)))]
+
+    def remove(self, task: int) -> list[str]:
+        """Deletes a folder this session made, through the tasks folder's descriptor so no link is followed; returns the doc names it held."""
+        if task not in self.adopted:
+            raise Refused(f"t{task} was not made by this session; it is not removed")
+        try:
+            with self._dir("tasks", f"t{task}", create=False) as fd:
+                held = sorted(_listing(fd))
+            with self._dir("tasks", create=False) as fd:
+                shutil.rmtree(f"t{task}", dir_fd=fd)
+        except FileNotFoundError:
+            held = []
+        except OSError as e:
+            raise Refused(f"t{task} is a link or not a folder; the filer does not remove it") from e
+        self.adopted.discard(task)
+        return held
+
+    def _old_record(self, drop: bool) -> bool:
+        try:
+            with self._dir(create=False) as fd:
+                if stat.S_ISDIR(os.lstat(OLD_RECORD, dir_fd=fd).st_mode):
+                    return False
+                if drop:
+                    os.unlink(OLD_RECORD, dir_fd=fd)
+                return True
+        except FileNotFoundError:
+            return False
+
+    def old_record(self) -> bool:
+        """A `task.json` from before the task flow sits in the agent's folder."""
+        return self._old_record(False)
+
+    def drop_old_record(self) -> bool:
+        return self._old_record(True)
 
     def writable(self, task: int) -> None:
         """Refuses unless this session made the task folder and the walk to it still follows no link."""
