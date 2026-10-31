@@ -251,7 +251,7 @@ class DelegatingRegistry:
 
 
 def _script(mock_llm_client, *steps):
-    from tests.unit.test_task_references import scripted
+    from tests.unit.llm_support import scripted
     return scripted(mock_llm_client, *steps)
 
 
