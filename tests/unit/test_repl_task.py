@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import re
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,8 @@ from localharness.channels.base import notice
 from localharness.core import caps as caps_module
 from localharness.core.caps import Caps
 from localharness.orchestrator.task_flow import verbs
+from localharness.orchestrator.task_flow.panel import FlowCap
+from localharness.orchestrator.task_flow.record import LINES, Unit, need
 from tests.unit.test_task_flow_record import BLOCKER_LINE, PLAN_TWO, make_flow, planned
 
 RLO, ZWSP = chr(0x202E), chr(0x200B)
@@ -209,3 +212,135 @@ async def test_tracer_the_cap_clause_counts_the_units_own_reservation_as_unspent
     lines = sinking(flow, PHONE)
     await flow.run("step")
     assert lines == ["◆ t1 step 1/2 executing · stop (now) · typing waits · cap 10 min · up to 10 min"]
+
+
+LEVERS = {word: (word, "Ctrl+C (now)" if word.startswith("/task") else word) for word in STOP_WORDS}
+FIELDS = {"verb": "run", "stage": "plan", "verdict": "pass", "doc": "plan", "n": 2, "bound": 13,
+          "next": "/task run (next step)", "why": "revisions used up", "unit": "step 2", "step": (2, 5)}
+PLACEHOLDER = re.compile(r"<(stop|cancel|verb|stage|verdict|doc|n|bound|next|why|unit)>")
+MODEL_ONLY = ("person decides", "decisions unfiled", "research full", "nothing to review")
+
+
+def FIRST(command):
+    return command.split(" (")[0]
+
+
+@pytest.mark.parametrize("task", ("t3", "t10"))
+@pytest.mark.parametrize("stop_word", STOP_WORDS)
+@pytest.mark.parametrize("key", list(LINES))
+def test_every_row_renders_through_notice_with_each_stop_word(key, stop_word, task):
+    out = verbs.render(key, LEVERS[stop_word], task=task, **FIELDS)
+    if key in MODEL_ONLY:
+        assert out == ""
+        return
+    assert out.startswith(f"◆ {task} ") and out.count("◆") == 1
+    assert not PLACEHOLDER.search(out)
+    assert len(out) <= Caps.LINE or " · " not in out
+    assert ("files half-edited" in out) == (key == "step stopped")
+    if "<stop>" in LINES[key].commands:
+        assert FIRST(stop_word) in out
+    if "<cancel>" in LINES[key].commands:
+        assert FIRST(LEVERS[stop_word][1]) in out
+
+
+@pytest.mark.parametrize("stop_word", STOP_WORDS)
+@pytest.mark.parametrize("key", [k for k in LINES if k not in MODEL_ONLY and LINES[k].commands])
+def test_cut_at_t1000_and_step_10_of_12_keeps_the_first_verb(key, stop_word):
+    out = verbs.render(key, LEVERS[stop_word], task="t1000", **{**FIELDS, "step": (10, 12)})
+    first = need(key, task="t1000", stop=LEVERS[stop_word][0], cancel=LEVERS[stop_word][1], **FIELDS).commands[0]
+    assert FIRST(first) in out
+
+
+def test_model_only_rows_are_the_four_with_a_rendering_and_no_commands():
+    assert {k for k, line in LINES.items() if line.model and not line.commands} == set(MODEL_ONLY)
+    assert all(verbs.render(k, LEVERS[STOP_WORDS[0]], task="t3", **FIELDS) == "" for k in MODEL_ONLY)
+
+
+def test_command_order_is_run_then_show_then_accept_and_the_first_carries_task():
+    seen = set()
+    for key in LINES:
+        parts = verbs.render(key, LEVERS[STOP_WORDS[0]], task="t3", **FIELDS).split(" · ")[1:]
+        words = [p.removeprefix("/task ").split()[0] for p in parts]
+        if {"run", "show", "accept"} <= set(words):
+            seen.add(key)
+            order = [words.index(w) for w in ("run", "show", "accept")]
+            assert order == sorted(order) and parts[0].startswith("/task")
+    assert {"step blocked", "blocked"} <= seen
+
+
+def test_examples_render_exactly_at_80_columns_through_render():
+    box = LEVERS[STOP_WORDS[0]]
+    assert verbs.render("running", box, task="t3", unit="plan panel", bound=13) == \
+        "◆ t3 plan panel running · /task stop (after this unit) · up to 13 min"
+    assert verbs.render("step blocked", box, task="t3", step=(2, 5), n=2) == \
+        "◆ t3 step 2/5 blocked · /task run (retries) · show · accept · 2 blockers"
+    assert verbs.render("review blocked", box, task="t3", n=1) == \
+        "◆ t3 review blocked · /task plan · show review · accept (ends t3) · 1 blocker"
+    assert verbs.render("plan unreviewed", box, task="t3", bound=13) == \
+        "◆ t3 plan unreviewed · /task plan (re-panels) · up to 13 min"
+
+
+async def test_example_a_second_running_row_on_the_phone_carries_only_the_bound(tmp_path):
+    flow, *_ = make_flow(tmp_path)
+    flow.said |= {"typing", "cap"}
+    assert verbs.progress(flow, "t3", "step 2/5 executing", ("<stop>",), "up to 25 min", PHONE) == \
+        "◆ t3 step 2/5 executing · stop (now) · up to 25 min"
+
+
+def test_a_row_without_a_stop_passes_through_progress_unchanged(tmp_path):
+    flow, *_ = make_flow(tmp_path)
+    assert verbs.progress(flow, "t3", "plan reopened", ("<cancel>",), "", PHONE) == "◆ t3 plan reopened · stop (now)"
+    assert flow.said == set()
+
+
+def test_an_armed_row_says_the_cap_so_the_next_running_row_does_not(tmp_path):
+    flow, *_ = make_flow(tmp_path)
+    assert verbs.progress(flow, "t3", "plan armed", ("<stop>",), "cap 180 min", PHONE) == "◆ t3 plan armed · stop (now) · cap 180 min"
+    assert verbs.progress(flow, "t3", "plan panel running", ("<stop>",), "up to 13 min", PHONE) == \
+        "◆ t3 plan panel running · stop (now) · typing waits · up to 13 min"
+
+
+def test_bound_at_the_defaults_is_the_units_computed_from_the_table(tmp_path):
+    flow, *_ = make_flow(tmp_path)
+    units = {Unit("new", "panel"): 1, Unit("plan", "panel"): 13, Unit("research", "explore"): 6, Unit("research", "panel"): 7,
+             Unit("step", "execute", 1): 25, Unit("step", "panel", 1): 6, Unit("task", "panel"): 7}
+    assert {u: verbs.bound(flow, u) for u in units} == units
+    assert verbs.bound(flow, Unit("reply", "panel"), ("factual", "recency")) == 28
+
+
+@pytest.mark.parametrize(("seconds", "printed"), [(1500, 25), (1499, 24), (600, 10), (1501, 25), (59, 0)])
+def test_bound_of_an_executor_against_a_remainder_is_floored_to_whole_minutes(tmp_path, seconds, printed):
+    flow, *_ = make_flow(tmp_path)
+    flow.cap = FlowCap(seconds / 60)
+    assert verbs.bound(flow, Unit("step", "execute", 1)) == printed
+
+
+def test_the_cap_clause_is_the_limits_table_less_the_seconds_spent(tmp_path):
+    flow, *_ = make_flow(tmp_path)
+    assert verbs.cap_minutes(flow) == 180
+    held = flow.cap.reserve(flow.limits.executor, 1)
+    assert verbs.cap_minutes(flow) == 180
+    flow.cap.settle(held, 61)
+    assert verbs.cap_minutes(flow) == 178
+
+
+def test_a_plan_pass_adds_the_revision_command_the_unreviewed_decisions_and_the_reopened_steps():
+    box = LEVERS[STOP_WORDS[0]]
+    fields = {"task": "t3", "stage": "plan", "verdict": "pass", "next": "/task run (step 1)", "bound": 6}
+    assert verbs.render("pass", box, **fields) == notice(
+        "t3", "plan pass", ["/task run (step 1)", "plan <change> (revises)"], "up to 6 min")
+    out = verbs.render("pass", box, **fields, reopened=(3, 4, 5), decisions_unreviewed=True)
+    assert out == notice("t3", "plan pass, steps 3-5 reopened",
+                         ["/task run (step 1)", "plan <change> (revises)", "accept decisions (unreviewed)"], "up to 6 min")
+
+
+@pytest.mark.parametrize(("reopened", "said"), [((2,), "step 2"), ((2, 3), "steps 2-3"), ((2, 4), "steps 2, 4"), ((1, 2, 3, 5), "steps 1-3, 5")])
+def test_the_reopened_steps_read_as_ranges(reopened, said):
+    out = verbs.render("pass", LEVERS[STOP_WORDS[0]], task="t3", stage="plan", verdict="accepted", next="/task run", bound=6, reopened=reopened)
+    assert f"plan accepted, {said} reopened" in out
+
+
+def test_a_stage_other_than_plan_gets_no_plan_extras():
+    out = verbs.render("pass", LEVERS[STOP_WORDS[0]], task="t3", stage="new", verdict="pass", next="/task plan", bound=1,
+                       reopened=(2,), decisions_unreviewed=True)
+    assert out == notice("t3", "new pass", ["/task plan"], "up to 1 min")
