@@ -1638,3 +1638,14 @@ async def test_a_stop_the_turn_consumed_leaves_the_next_outer_cancel_to_propagat
     with pytest.raises(asyncio.CancelledError):
         await second
     assert channel.sent == []
+
+
+async def test_a_queued_notice_is_held_until_it_is_sent_and_then_released(tmp_path):
+    flow = await planned_flow(tmp_path)
+    repl, channel, agent = flow_repl(flow)
+    repl._turn_task = asyncio.ensure_future(asyncio.sleep(30))
+    repl._queued_from_channel("also log it")
+    assert len(repl._queued_notices) == 1
+    await asyncio.sleep(0.01)
+    assert repl._queued_notices == set() and channel.notices == [verbs.render("queued phone", BOX, task="t1")]
+    repl._turn_task.cancel()

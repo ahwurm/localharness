@@ -407,6 +407,7 @@ class OrchestratorREPL:
         self._fifo: deque[str] = deque()                      # queued messages → future turns (FIFO)
         self._sigint_armed: bool = False                      # idle double-Ctrl+C to exit
         self._cancelled_by_user: bool = False                 # this turn was cancelled by Ctrl+C
+        self._queued_notices: set[asyncio.Task] = set()
         self._box_ctrl_q: Optional[asyncio.Queue] = None      # box → coordinator control events
         # Bus handles for the staging queue (PermissionStaged / PermissionResolved) — the REPL
         # is the only object holding all three pieces this needs: the bus, the gate whose queue
@@ -578,7 +579,9 @@ class OrchestratorREPL:
 
     def _queued_from_channel(self, text: str) -> None:
         """A channel's message queued behind the running turn: says what waits, without holding the channel."""
-        asyncio.ensure_future(self._mid_turn("queued slash" if text.startswith("/") else "queued phone"))
+        sent = asyncio.ensure_future(self._mid_turn("queued slash" if text.startswith("/") else "queued phone"))
+        self._queued_notices.add(sent)
+        sent.add_done_callback(self._queued_notices.discard)
 
     async def _cancel_from_channel(self) -> bool:
         """Cancel the in-flight turn from a channel's own surface.
