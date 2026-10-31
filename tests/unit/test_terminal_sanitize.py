@@ -127,3 +127,16 @@ def test_a_leading_notice_mark_is_neutralised_on_the_first_and_later_lines():
     assert sanitize_for_display("ok\n\t◆ x") == "ok\n\t◇ x"
     assert sanitize_for_display(chr(0x200B) + " ◆ x") == " ◇ x"
     assert sanitize_for_display("a ◆ b\nc◆d") == "a ◆ b\nc◆d"
+
+
+@pytest.mark.parametrize("space", ["\u00a0", "\u3000", "\u2003", " \u00a0\t"], ids=ascii)
+def test_a_notice_mark_after_any_whitespace_is_neutralised(space):
+    assert sanitize_for_display(f"{space}◆ fake") == f"{space}◇ fake"
+    assert sanitize_for_display(f"ok\n{space}◆ fake") == f"ok\n{space}◇ fake"
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029"], ids=ascii)
+def test_a_notice_mark_after_a_unicode_line_separator_is_neutralised(separator):
+    assert sanitize_for_display(f"x{separator}◆ fake") == f"x{separator}◇ fake"
+    assert sanitize_for_display(f"x{separator}  ◆ fake") == f"x{separator}  ◇ fake"
+    assert sanitize_for_display(f"x{separator}y ◆ b") == f"x{separator}y ◆ b"

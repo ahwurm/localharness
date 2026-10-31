@@ -100,7 +100,7 @@ INVISIBLE_CHARS_RE = re.compile(
 
 NOTICE_MARK = "◆"
 NEUTRAL_MARK = "◇"
-LEADING_MARK_RE = re.compile(rf"^([ \t]*){NOTICE_MARK}", re.MULTILINE)
+LEADING_MARK_RE = re.compile(rf"(?:^|(?<=[\u2028\u2029]))([^\S\n]*){NOTICE_MARK}", re.MULTILINE)
 
 
 def sanitize_for_display(text: str) -> str:
