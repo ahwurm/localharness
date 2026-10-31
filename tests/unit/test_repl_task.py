@@ -1620,3 +1620,21 @@ async def test_repl_cancel_from_channel_is_the_persons_stop_so_the_loop_survives
     assert await repl._cancel_from_channel() is True
     await waiting
     assert channel.sent == ["Turn cancelled."] and repl._cancelled_by_user is False
+
+
+async def test_a_stop_the_turn_consumed_leaves_the_next_outer_cancel_to_propagate():
+    repl, channel, agent = flow_repl(None)
+    release = asyncio.Event()
+    agent.stop_turn = lambda task: release.set()
+    repl._turn_task = asyncio.ensure_future(release.wait())
+    first = asyncio.ensure_future(repl._await_turn_with_sigint(repl._turn_task))
+    await asyncio.sleep(0)
+    assert await repl._cancel_from_channel() is True
+    await first
+    assert channel.sent == [] and repl._cancelled_by_user is False and repl._stop_row is False
+    second = asyncio.ensure_future(repl._await_turn_with_sigint(asyncio.ensure_future(asyncio.sleep(30))))
+    await asyncio.sleep(0)
+    second.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await second
+    assert channel.sent == []
