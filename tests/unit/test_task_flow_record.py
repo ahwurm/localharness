@@ -10,6 +10,7 @@ from localharness.core.caps import Caps
 from localharness.orchestrator.task_flow.record import (
     BOUNDARIES,
     CRITICS_AT_FLOOR,
+    Counts,
     LIMITS,
     LINES,
     REPLY_RESERVE_MINUTES,
@@ -17,7 +18,13 @@ from localharness.orchestrator.task_flow.record import (
     STAGES,
     TOOL_STAGES,
     Need,
+    Row,
     Unit,
+    can_revise,
+    clear_turn,
+    consume_flag,
+    continue_revising,
+    counts_of,
     file_doc,
     limited,
     need,
@@ -27,8 +34,11 @@ from localharness.orchestrator.task_flow.record import (
     panel_minutes,
     pointed,
     printed_bound,
+    reopen,
     review_of,
+    set_stage,
     set_verdict,
+    stop_step,
     unit_minutes,
 )
 
@@ -274,3 +284,257 @@ def test_need_substitutes_placeholders_in_the_reason_commands_and_model():
 def test_need_unknown_row_raises():
     with pytest.raises(KeyError):
         need("no such row")
+
+
+PLAN = ("plan.md", None)
+
+
+def plan_record(verdict="blocked", blockers=2):
+    record = open_task(3, "fix login", 1)
+    file_doc(record, "plan", PLAN, "p1")
+    set_verdict(record, PLAN, verdict)
+    note_run(record, "plan", blockers)
+    return record
+
+
+def with_steps(*verdicts):
+    record = open_task(3, "fix login", 1)
+    for n, verdict in enumerate(verdicts, 1):
+        record.filed[("plan.md", f"step-{n}")] = Row(f"s{n}", verdict, Counts())
+    return record
+
+
+@pytest.mark.parametrize(("args", "expected"), [
+    ((2, 0, 1, None), True),
+    ((0, 0, 3, None), False),
+    ((2, 1, 3, 2), False),
+    ((1, 1, 3, 2), True),
+    ((1, 3, 3, 2), False),
+    ((1, 2, 3, None), True),
+    ((1, 3, 3, None), False),
+])
+def test_continue_revising_follows_the_rule(args, expected):
+    assert continue_revising(*args) is expected
+
+
+def test_continue_revising_is_true_at_limit_minus_one_and_false_at_the_limit():
+    assert continue_revising(2, 2, 3, None) and not continue_revising(2, 3, 3, None)
+
+
+def test_continue_revising_stops_on_an_equal_blocker_count_and_goes_on_with_one_fewer():
+    assert not continue_revising(2, 1, 3, 2) and continue_revising(1, 1, 3, 2)
+
+
+def test_can_revise_is_false_unless_the_row_is_blocked_then_follows_the_counts():
+    assert not can_revise(plan_record("pass", 0), "plan", 3)
+    assert not can_revise(plan_record("unreviewed", 2), "plan", 3)
+    record = plan_record()
+    assert can_revise(record, "plan", 3)
+    record.counts["plan"].used = 3
+    assert not can_revise(record, "plan", 3)
+
+
+def test_can_revise_is_false_on_a_boundary_with_no_row_or_no_run_yet():
+    record = open_task(3, "x", 1)
+    assert not can_revise(record, "plan", 3)
+    file_doc(record, "plan", PLAN, "p1")
+    set_verdict(record, PLAN, "blocked")
+    assert not can_revise(record, "plan", 3)
+
+
+def test_can_revise_reads_a_steps_counts_from_its_section_row():
+    record = with_steps("blocked")
+    note_run(record, "step", 2, step=1)
+    assert counts_of(record, "step", 1).blockers == 2
+    assert can_revise(record, "step", 1, step=1)
+    record.filed[("plan.md", "step-1")].counts.used = 1
+    assert not can_revise(record, "step", 1, step=1)
+
+
+def test_counts_of_research_and_task_are_none_and_a_missing_step_too():
+    record = with_steps("pass")
+    assert counts_of(record, "research") is None and counts_of(record, "task") is None
+    assert counts_of(record, "step", 9) is None
+
+
+def test_note_run_counts_a_revision_only_after_a_refile_and_clears_the_bit():
+    record = plan_record()
+    file_doc(record, "plan", PLAN, "p2")
+    assert record.counts["plan"].revised
+    note_run(record, "plan", 1)
+    counts = record.counts["plan"]
+    assert (counts.used, counts.previous, counts.blockers, counts.revised) == (1, 2, 1, False)
+
+
+def test_note_run_with_the_bit_clear_leaves_used_and_moves_the_counts():
+    record = plan_record()
+    note_run(record, "plan", 2)
+    counts = record.counts["plan"]
+    assert (counts.used, counts.previous, counts.blockers) == (0, 2, 2)
+
+
+def test_note_run_not_counted_clears_the_bit_and_leaves_used():
+    record = plan_record()
+    file_doc(record, "plan", PLAN, "p2")
+    note_run(record, "plan", 1, counted=False)
+    assert (record.counts["plan"].used, record.counts["plan"].revised) == (0, False)
+
+
+def test_a_panel_that_did_not_finish_calls_nothing_so_the_bit_stays_set():
+    record = plan_record()
+    file_doc(record, "plan", PLAN, "p2")
+    assert (record.counts["plan"].used, record.counts["plan"].revised) == (0, True)
+
+
+def test_note_run_on_a_step_and_on_a_boundary_without_counts():
+    record = with_steps("blocked")
+    record.filed[("plan.md", "step-1")].counts.revised = True
+    note_run(record, "step", 1, step=1)
+    assert record.filed[("plan.md", "step-1")].counts.used == 1
+    note_run(record, "research", 3)
+    note_run(record, "task", 3)
+
+
+def test_reopen_resets_used_and_previous_and_sets_the_blocker_count():
+    record = plan_record()
+    file_doc(record, "plan", PLAN, "p2")
+    note_run(record, "plan", 2)
+    reopen(record, "plan", 2)
+    counts = record.counts["plan"]
+    assert (counts.used, counts.previous, counts.blockers, counts.revised) == (0, None, 2, False)
+
+
+def test_reopen_full_cycle_cap_hit_then_reopened_then_a_refile_that_passes():
+    record = plan_record(blockers=3)
+    record.counts["plan"].used = 3
+    assert not can_revise(record, "plan", 3)
+    reopen(record, "plan", 3)
+    assert can_revise(record, "plan", 3) and record.counts["plan"].blockers == 3
+    file_doc(record, "plan", PLAN, "p2")
+    set_verdict(record, PLAN, "pass")
+    note_run(record, "plan", 0)
+    assert not can_revise(record, "plan", 3)
+
+
+def test_reopen_with_no_count_is_a_fresh_cycle_whose_first_filing_is_not_a_revision():
+    record = plan_record()
+    reopen(record, "plan", None)
+    file_doc(record, "plan", PLAN, "p2")
+    assert not record.counts["plan"].revised
+
+
+def test_set_stage_writes_the_open_stage_for_each_event():
+    record = open_task(3, "x", 1)
+    for event, stage in [("research", "research"), ("plan", "plan"), ("execution", "run"),
+                         ("task panel", "task"), ("task pass", "done"), ("opened", "new")]:
+        set_stage(record, event)
+        assert record.stage == stage
+    set_stage(record, "plan accepted")
+    assert record.stage == "done"
+
+
+def test_set_stage_research_writes_only_while_no_plan_row_exists():
+    record = open_task(3, "x", 1)
+    file_doc(record, "plan", PLAN, "p1")
+    set_stage(record, "research")
+    assert record.stage == "new"
+
+
+def test_set_stage_execution_writes_only_while_the_stage_is_not_run():
+    record = open_task(3, "x", 1)
+    set_stage(record, "execution")
+    record.stage = "run"
+    set_stage(record, "execution")
+    assert record.stage == "run"
+
+
+def test_set_stage_unknown_event_raises():
+    with pytest.raises(ValueError):
+        set_stage(open_task(3, "x", 1), "nonsense")
+
+
+def test_pointed_at_every_stage_but_run():
+    record = open_task(3, "x", 1)
+    assert pointed(record) == "decisions.md"
+    for stage, doc in [("research", "research.md"), ("plan", "plan.md"), ("task", "plan.md"), ("done", "review.md")]:
+        record.stage = stage
+        assert pointed(record) == doc
+
+
+def test_pointed_at_run_is_the_next_step_and_the_last_when_every_step_passed():
+    record = with_steps("pass", "blocked", "unreviewed")
+    record.stage = "run"
+    assert pointed(record) == "step-2.md"
+    record.filed[("plan.md", "step-2")].verdict = "accepted"
+    assert pointed(record) == "step-3.md"
+    record.filed[("plan.md", "step-3")].verdict = "pass"
+    assert pointed(record) == "step-3.md"
+
+
+def test_pointed_at_run_orders_steps_numerically_and_falls_back_to_the_plan():
+    record = with_steps(*["pass"] * 9 + ["blocked"])
+    record.stage = "run"
+    assert pointed(record) == "step-10.md"
+    bare = open_task(3, "x", 1)
+    bare.stage = "run"
+    assert pointed(bare) == "plan.md"
+
+
+def test_review_of_maps_each_doc_to_its_review_doc():
+    record = open_task(3, "x", 1)
+    for doc in ("decisions.md", "research.md", "plan.md", "step-2.md"):
+        file_doc(record, "new", (doc, None), "d")
+    assert review_of(record, "decisions.md") == "decisions-review.md"
+    assert review_of(record, "research.md") == "research-review.md"
+    assert review_of(record, "plan.md") == "plan-review.md"
+    assert review_of(record, "step-2.md") == "step-2-review.md"
+
+
+def test_review_of_plan_falls_back_to_plan_review_while_task_has_no_review_row():
+    record = plan_record()
+    record.stage = "task"
+    assert review_of(record, "plan.md") == "plan-review.md"
+    file_doc(record, "task", ("review.md", None), "r1")
+    assert review_of(record, "plan.md") == "review.md"
+    record.stage = "done"
+    assert review_of(record, "plan.md") == "review.md"
+    record.stage = "plan"
+    assert review_of(record, "plan.md") == "plan-review.md"
+
+
+def test_review_of_a_doc_that_is_not_a_filed_key_is_none():
+    record = plan_record()
+    assert review_of(record, "decisions.md") is None
+    assert review_of(record, "../plan.md") is None
+
+
+def test_review_of_a_review_doc_is_none():
+    record = plan_record()
+    file_doc(record, "task", ("review.md", None), "r1")
+    assert review_of(record, "review.md") is None
+
+
+def test_consume_flag_returns_true_once_and_false_after():
+    record = open_task(3, "x", 1)
+    record.flags["plan"] = True
+    assert consume_flag(record, "plan") is True
+    assert consume_flag(record, "plan") is False
+    assert consume_flag(record, "new") is False
+
+
+def test_clear_turn_clears_both_flags_and_the_halt():
+    record = open_task(3, "x", 1)
+    record.flags.update(new=True, plan=True)
+    record.halted = "cap"
+    clear_turn(record)
+    assert record.flags == {"new": False, "plan": False} and record.halted is None
+
+
+def test_stop_step_removes_the_step_doc_row_and_keeps_the_stopped_log_cut_at_the_block_cap():
+    record = open_task(3, "x", 1)
+    file_doc(record, "step", ("step-2.md", None), "s2")
+    stop_step(record, 2, "x" * (Caps.BLOCK + 50))
+    assert ("step-2.md", None) not in record.filed
+    assert len(record.stopped_log) == Caps.BLOCK
+    stop_step(record, 2, "short")
+    assert record.stopped_log == "short"

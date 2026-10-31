@@ -212,6 +212,10 @@ class Record:
 
 
 POINTS = {"new": "decisions.md", "research": "research.md", "plan": "plan.md", "task": "plan.md", "done": "review.md"}
+DOCS = {"new": "decisions.md", "research": "research.md", "plan": "plan.md", "task": "plan.md"}
+STAGE_WRITES = {"opened": "new", "research": "research", "plan": "plan", "execution": "run",
+                "task panel": "task", "task pass": "done", "plan accepted": "done"}
+_REVIEWED = re.compile(r"(decisions|research|plan|step-[1-9][0-9]*)\.md")
 
 
 def open_task(n: int, objective: str, turn: int) -> Record:
@@ -250,13 +254,61 @@ def continue_revising(blockers: int, used: int, limit: int, previous: int | None
     return blockers > 0 and used < limit and (previous is None or blockers < previous)
 
 
+def _row_key(boundary: str, step: int | None) -> tuple[str, str | None]:
+    return ("plan.md", f"step-{step}") if boundary == "step" else (DOCS[boundary], None)
+
+
+def can_revise(record: Record, boundary: str, limit: int, step: int | None = None) -> bool:
+    row, counts = record.filed.get(_row_key(boundary, step)), counts_of(record, boundary, step)
+    return bool(row and row.verdict == "blocked" and counts and counts.blockers is not None
+                and continue_revising(counts.blockers, counts.used, limit, counts.previous))
+
+
+def reopen(record: Record, boundary: str, blockers: int | None, step: int | None = None) -> None:
+    counts = counts_of(record, boundary, step)
+    if counts is not None:
+        counts.used, counts.previous, counts.blockers, counts.revised = 0, None, blockers, False
+
+
+def set_stage(record: Record, event: str) -> None:
+    if event not in STAGE_WRITES:
+        raise ValueError(f"unknown stage event: {event}")
+    stays = (event == "research" and ("plan.md", None) in record.filed) or (event == "execution" and record.stage == "run")
+    if not stays:
+        record.stage = STAGE_WRITES[event]
+
+
+def stop_step(record: Record, n: int, log: str) -> None:
+    record.filed.pop((f"step-{n}.md", None), None)
+    record.stopped_log = log[:Caps.BLOCK]
+
+
+def consume_flag(record: Record, boundary: str) -> bool:
+    flagged = record.flags.get(boundary, False)
+    record.flags[boundary] = False
+    return flagged
+
+
+def clear_turn(record: Record) -> None:
+    record.flags = dict.fromkeys(record.flags, False)
+    record.halted = None
+
+
 def pointed(record: Record) -> str:
-    return POINTS[record.stage]
+    if record.stage != "run":
+        return POINTS[record.stage]
+    steps = sorted(int(k[1].removeprefix("step-")) for k in record.filed if k[0] == "plan.md" and k[1])
+    if not steps:
+        return "plan.md"
+    pending = [n for n in steps if record.filed[("plan.md", f"step-{n}")].verdict not in ("pass", "accepted")]
+    return f"step-{pending[0] if pending else steps[-1]}.md"
 
 
 def review_of(record: Record, doc: str) -> str | None:
-    if (doc, None) not in record.filed:
+    if (doc, None) not in record.filed or not _REVIEWED.fullmatch(doc):
         return None
+    if doc == "plan.md" and record.stage in ("task", "done") and ("review.md", None) in record.filed:
+        return "review.md"
     return f"{doc.removesuffix('.md')}-review.md"
 
 
