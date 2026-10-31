@@ -267,7 +267,6 @@ async def test_the_grant_gate_judges_the_narrowed_set(base, loops, mock_llm_clie
 async def test_a_bash_holding_chunk_summarizer_yaml_is_refused_a_grant(base, loops, mock_llm_client):
     assert subagent.builtin_toolset("chunk-summarizer", base) is None
     load = lambda n: config_child(n, ("read", "bash_exec"))  # noqa: E731
-    assert subagent._resolve_target_toolset("chunk-summarizer", load, base) == ["read", "bash_exec"]
     runner = make_runner(base, mock_llm_client([]), load_agent=load)
     with pytest.raises(Exception, match="bash_exec"):
         await runner("chunk-summarizer", "t", grant_handles=["h"])

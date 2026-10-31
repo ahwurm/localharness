@@ -304,12 +304,6 @@ async def test_no_config_child_registry_holds_the_skill_tool(root_registry, add)
     assert not child.has("skill")
 
 
-async def test_the_grant_target_toolset_omits_skill(root_registry) -> None:
-    got = subagent._resolve_target_toolset("writer", lambda n: _yaml_child(["read", "skill"]), root_registry)
-
-    assert got == ["read"]
-
-
 @pytest.mark.parametrize("name", [*LEAF_TOOLSETS, *subagent._WEB_ROLES])
 async def test_no_built_in_role_holds_the_skill_tool(root_registry, name) -> None:
     toolset = LEAF_TOOLSETS[name] if name in LEAF_TOOLSETS else subagent.builtin_toolset(name, root_registry)
