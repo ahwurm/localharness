@@ -19,3 +19,7 @@ def capture(llm):
         return await original(messages, *a, **kw)
     llm.stream_complete = wrapped
     return seen
+
+
+def is_restore(m):
+    return (m.get("_lh") or {}).get("subtype") == "active_reference"

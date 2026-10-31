@@ -31,7 +31,6 @@ from localharness.agent.gate import PermissionGate, derive_session_boundary
 from localharness.agent.gate_types import Decision, PermissionRequest
 from localharness.agent.loop import AgentLoop, render_index
 from localharness.agent.permissions import PermissionEvaluator
-from localharness.agent.task_record import TaskState
 from localharness.bench.config import MatrixEntry
 from localharness.bench.orchestrator import _build_bench_client
 from localharness.cli.agent_cmd import _build_agent_yaml
@@ -57,6 +56,7 @@ from localharness.tools.capabilities import apply_root_capability_floor
 from localharness.tools.registry import ToolRegistry
 from tests.conftest import _minimal_config, live_target
 from tests.unit.test_skills_misc import VARIANT_A, VARIANT_B
+from tests.unit.test_task_flow_record import make_flow
 
 pytestmark = pytest.mark.live_vllm
 
@@ -154,7 +154,7 @@ def machine_dir(skill_set: SkillSet) -> Path:
     return next(lexical for label, lexical, _ in skill_set.origins if label == "machine").parent
 
 
-def root_loop(client, cfg: AgentConfig, shape: Shape, skill_set: SkillSet, registry, state, gate, bus,
+def root_loop(client, cfg: AgentConfig, shape: Shape, skill_set: SkillSet, registry, gate, bus,
               affordances=None) -> AgentLoop:
     held = {s.name for s in floor_schemas(registry, cfg.name, cfg.division or "", cfg.tools)}
     return AgentLoop(
@@ -162,7 +162,7 @@ def root_loop(client, cfg: AgentConfig, shape: Shape, skill_set: SkillSet, regis
         context_manager=ContextManager(
             max_context_tokens=shape.window, preserve_first_n=cfg.context.preserve_first_n_messages,
             preserve_last_n=cfg.context.preserve_last_n_messages, **context_size_kwargs(cfg.context)),
-        kill_file_path=None, skills=render_listing(skill_set.skills), task_context=state,
+        kill_file_path=None, skills=render_listing(skill_set.skills),
         effort=shape.effort, effort_ratios=shape.ratios,
         index=render_index(None, machine_dir(skill_set), held, False, True), affordances=affordances)
 
@@ -246,22 +246,21 @@ async def no_child(agent_id, brief, grant_handles, shape=None) -> str:
     return "no child agent is dispatched in this run"
 
 
-async def root_registry(skill_set: SkillSet, cfg: AgentConfig) -> tuple[ToolRegistry, TaskState]:
+async def root_registry(skill_set: SkillSet, cfg: AgentConfig) -> ToolRegistry:
     registry = ToolRegistry()
     await register_builtin_tools(registry)
-    state = TaskState()
     await registry.register(AgentTool(agent_runner=no_child, available_agents=NO_CHILD_AGENTS), scope="global")
-    await registry.register(TaskTool(state), scope="global")
+    await registry.register(TaskTool(make_flow(Path(tempfile.mkdtemp()))[0]), scope="global")
     await registry.register(
         SkillTool(skill_set, ContentStore(), result_cap=lambda: registry.result_size_cap_chars), scope="global")
     apply_root_capability_floor(cfg.tools, registry.global_schemas())
     assert "skill" in registry.get_tools_for_agent(cfg.name, cfg.division or "", cfg.tools)
-    return registry, state
+    return registry
 
 
 async def first_step_run(client, skill_set: SkillSet, cfg: AgentConfig, shape: Shape, prompt: str, work: Path,
                          engine=None, record_dir: Path | None = None) -> Step:
-    registry, state = await root_registry(skill_set, cfg)
+    registry = await root_registry(skill_set, cfg)
     bus = EventBus()
     gate = PermissionGate(boundary=None, workspace=work, grants=GrantStore(work.parent / "grants.yaml"), mode="read-only")
     holder, spent = None, []
@@ -278,7 +277,7 @@ async def first_step_run(client, skill_set: SkillSet, cfg: AgentConfig, shape: S
                 spent.append(time.perf_counter() - start)
 
         holder.cue = timed
-    loop = root_loop(client, cfg, shape, skill_set, registry, state, gate, bus, holder)
+    loop = root_loop(client, cfg, shape, skill_set, registry, gate, bus, holder)
     seen: list = []
     errors: list = []
     firsts: list = []
@@ -690,9 +689,9 @@ async def creator_run(client, home: Path, request: str, work: Path, base_url: st
     gate = PermissionGate(
         boundary=derive_session_boundary(cwd=work, local_dir=work / ".localharness"), workspace=work,
         grants=GrantStore(home.parent / "grants.yaml"), mode="guarded", asker=creator_asker(skills_dir, asks))
-    registry, state = await root_registry(skill_set, cfg)
+    registry = await root_registry(skill_set, cfg)
     bus = EventBus()
-    loop = root_loop(client, cfg, loop_shape(cfg_dir, cfg, base_url, served), skill_set, registry, state, gate, bus)
+    loop = root_loop(client, cfg, loop_shape(cfg_dir, cfg, base_url, served), skill_set, registry, gate, bus)
     try:
         await loop.run_turn(invoked[0])
         terminated = loop.last_terminated_reason
@@ -739,7 +738,7 @@ async def test_the_subject_model_picks_a_listed_skill_on_its_own(live_endpoint, 
         names = sorted(s.name for s in skill_set.skills)
         sets = prompts()["skills"]
         assert set(sets) == set(names)
-        registry, _ = await root_registry(skill_set, cfg)
+        registry = await root_registry(skill_set, cfg)
         tools = sorted(registry.get_tools_for_agent(cfg.name, cfg.division or "", cfg.tools))
         requests = [(skill, kind, text) for skill in names for kind in KINDS for text in sets[skill][kind]]
         assert set(holdout()["skills"]) == set(names)

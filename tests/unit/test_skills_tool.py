@@ -12,7 +12,6 @@ import localharness.agent.subagent as subagent
 from localharness.agent.context import ContentStore, ContextManager, _evict_large_tool_results
 from localharness.agent.gate import tool_meta_from_schema
 from localharness.agent.gate_types import GateSettings, Mode, Verdict
-from localharness.agent.task_record import Reference, TaskState, TooManyReferences
 from localharness.config import skills
 from localharness.config.models import AgentConfig, ToolConfig
 from localharness.config.skills import SkillSet
@@ -26,86 +25,10 @@ from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
 from localharness.tools.capabilities import GrantTargetError
 from localharness.tools.registry import ToolRegistry, cut_output
 from tests.unit.test_capabilities import _production_registry
+from tests.unit.llm_support import capture, is_restore, scripted
 from tests.unit.test_skills_discovery import _skill
 from tests.unit.test_task_context import make_loop
-from tests.unit.test_task_references import capture, is_restore, scripted
-from tests.unit.test_task_tool import refused, start, tool_for
-
-
-def sources(state):
-    return [r.source for r in state.current.references]
-
-
-async def test_add_reference_commits_and_saves(tmp_path):
-    state, tool = tool_for(tmp_path)
-    await start(tool)
-    assert state.add_reference(Reference("skill notes", handle="abc123")) is None
-    assert state.current.references[-1].source == "skill notes"
-    loaded = TaskState.load(state.path, str(tmp_path))[0]
-    assert [r.source for r in loaded.current.references] == ["skill notes"]
-
-
-async def test_add_reference_serves_path_and_handle_and_replaces_in_place(tmp_path):
-    state, tool = tool_for(tmp_path)
-    await start(tool)
-    state.add_reference(Reference("voice", path="voice.md"))
-    state.add_reference(Reference("other", handle="abc"))
-    state.add_reference(Reference("voice", handle="def"))
-    assert sources(state) == ["voice", "other"]
-    assert (state.current.references[0].path, state.current.references[0].handle) == (None, "def")
-    state.add_reference(Reference("voice", handle="def"))
-    assert sources(state) == ["voice", "other"]
-
-
-async def test_add_reference_owns_the_four_reference_limit(tmp_path):
-    state, tool = tool_for(tmp_path)
-    await start(tool)
-    for name in "abcd":
-        state.add_reference(Reference(name, handle=name))
-    before = state.path.read_bytes()
-    with pytest.raises(TooManyReferences):
-        state.add_reference(Reference("e", handle="e"))
-    assert sources(state) == list("abcd")
-    assert state.path.read_bytes() == before
-    state.add_reference(Reference("c", handle="c2"))
-    assert sources(state) == list("abcd") and state.current.references[2].handle == "c2"
-
-
-async def test_the_task_tool_keeps_its_refusal_and_its_record_file_on_a_refusal(tmp_path):
-    state, tool = tool_for(tmp_path)
-    for name in "abcdef":
-        (tmp_path / f"{name}.md").write_text(name)
-    limit = "references is limited to four; split or narrow the step"
-    five = [{"source": name, "path": f"{name}.md"} for name in "abcde"]
-    assert refused(await tool.run(action="start", objective="Report", assignment="Outline", references=five), limit)
-    assert state.current is None and not state.path.exists()
-
-    await start(tool)
-    for name in "abc":
-        assert (await tool.run(action="reference", source=name, path=f"{name}.md")).success
-    before = state.path.read_bytes()
-    assert refused(await tool.run(action="update", references=[{"source": "d", "path": "d.md"},
-                                                               {"source": "e", "path": "e.md"}]), limit)
-    assert sources(state) == list("abc") and state.path.read_bytes() == before
-
-    assert (await tool.run(action="reference", source="d", handle="h")).success
-    full = state.path.read_bytes()
-    assert refused(await tool.run(action="reference", source="fifth", handle="e"), limit)
-    assert sources(state) == list("abcd") and state.path.read_bytes() == full
-    ok = await tool.run(action="reference", source="a", handle="h2")
-    assert ok.output == "Reference a declared; it is kept in view from the next request."
-
-
-async def test_a_refused_start_leaves_a_paused_task_paused(tmp_path):
-    state, tool = tool_for(tmp_path)
-    await start(tool)
-    state.paused = True
-    for name in "abcde":
-        (tmp_path / f"{name}.md").write_text(name)
-    five = [{"source": name, "path": f"{name}.md"} for name in "abcde"]
-    assert refused(await tool.run(action="start", objective="Other", assignment="Outline", references=five),
-                   "limited to four")
-    assert state.paused and state.current.context.objective == "Tide pool report"
+from tests.unit.test_task_flow_record import make_flow
 
 
 def fill(store, step, *names):
@@ -295,11 +218,12 @@ async def test_a_body_is_reread_on_every_call(tmp_path, dirs):
     assert (await tool.run(name="notes")).error.startswith("skill 'notes' could not be read: ")
 
 
-def test_the_skill_schema_differs_from_the_task_schema_only_in_what_names_it():
-    skill, task = skill_schema(["notes"]), TaskTool(TaskState()).info()
-    same = set(type(skill).model_fields) - {"name", "group", "description", "parameters", "estimated_tokens"}
+def test_the_skill_schema_differs_from_the_task_schema_only_in_what_names_it_and_its_result_origin(tmp_path):
+    skill, task = skill_schema(["notes"]), TaskTool(make_flow(tmp_path)[0]).info()
+    same = set(type(skill).model_fields) - {"name", "group", "description", "parameters", "estimated_tokens", "result_origin"}
     assert all(getattr(skill, f) == getattr(task, f) for f in same)
     assert (skill.gate_family, skill.ingest, skill.host, skill.result_origin) == ("allow", "none", "safe", "trusted")
+    assert task.result_origin == "untrusted"
 
 
 def test_the_skill_tool_is_read_tier_in_every_mode(tmp_path):
@@ -496,22 +420,6 @@ async def test_lengths_count_code_points_and_the_handle_is_the_hash_of_the_deliv
     assert len(result.output) == 2000 - reserve() and result.output.count("é") > 1000
     (active,) = store.active_references
     assert active.handle == ContentStore().put(result.output) and store.get(active.handle) == result.output
-
-
-async def test_a_load_in_a_live_task_leaves_the_records_references_unchanged(tmp_path, dirs):
-    _skill(dirs.bundled, "notes")
-    state, task = tool_for(tmp_path)
-    await start(task)
-    state.add_reference(Reference("first", handle="first"))
-    before = state.path.read_bytes()
-    store = ContentStore()
-    tool = skill_tool(tmp_path, discovered(dirs), store=store)
-    result = await tool.run(name="notes")
-    again = await tool.run(name="notes")
-    assert again.output == result.output
-    assert sources(state) == ["first"] and state.path.read_bytes() == before
-    (active,) = store.active_references
-    assert (active.source, store.get(active.handle)) == ("skill notes", result.output)
 
 
 async def test_a_reload_replaces_its_own_source_in_the_step_and_not_a_neighbour(tmp_path, dirs):

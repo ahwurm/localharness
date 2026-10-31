@@ -28,7 +28,6 @@ from localharness.agent.calibration import (
 from localharness.agent.context import ContentStore, ContextManager, TokenCounter, fixed_tokens
 from localharness.agent.loop import AgentLoop, base_system_prompt, render_index
 from localharness.agent.permissions import PermissionEvaluator
-from localharness.agent.task_record import TaskState
 from localharness.cli import doctor_cmd, model_cmd, start_serving
 from localharness.channels.base import one_line
 from localharness.cli.workspace import MachineTrust
@@ -58,6 +57,7 @@ from tests.unit.test_embedding_model_source import MODEL, PURE, SHIPS_CODE, _cac
 from tests.unit.test_memory_plugin import _ctx
 from tests.unit.test_loop_project_instructions import _FakeHandle, _build
 from tests.unit.test_skills_discovery import _skill
+from tests.unit.test_task_flow_record import make_flow
 from tests.unit.test_skills_listing import _CFG, _MODES, _ROOT, _notes, _spy_floor, _start_world, pkg  # noqa: F401
 from tests.unit.test_start_cmd import _stub_nonvllm_start, _write_agent
 from tests.unit.test_start_floor import _capture_agent
@@ -131,9 +131,8 @@ def test_with_a_layer_the_project_line_comes_first_and_the_directories_are_relat
 @pytest.mark.usefixtures("pkg")
 async def test_no_delegated_agent_holds_skill_or_task(tmp_path):
     reg = await _production_registry()
-    state = TaskState(None, workspace=str(tmp_path))
     await reg.register(SkillTool(_notes(tmp_path), ContentStore(), result_cap=lambda: 50_000), scope="global")
-    await reg.register(TaskTool(state), scope="global")
+    await reg.register(TaskTool(make_flow(tmp_path)[0]), scope="global")
     names = {*BUILTIN_AGENT_NAMES, *subagent._STATIC_TOOLSETS, *subagent._WEB_ROLES}
     for name in names:
         toolset = subagent.builtin_toolset(name, reg)
@@ -295,7 +294,7 @@ async def test_the_launch_floor_prices_the_index_the_root_sends(tmp_path, monkey
     fixed, _ = _spy_floor(monkeypatch)
     await _start_async(None, False, False, str(tmp_path))
     (loop,) = agents
-    assert loop._index and fixed[0][0].endswith("\n\n" + loop._index)
+    assert loop._index and "\n\n" + loop._index in fixed[0][0]
 
 
 # --- index start wiring ---------------------------------------------------------------------------

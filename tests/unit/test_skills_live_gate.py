@@ -130,7 +130,7 @@ async def test_the_xml_leg_teaches_the_syntax_and_records_the_call_the_loop_disp
     monkeypatch.chdir(work)
     skill_set = install(tmp_path / "cfg")
     cfg = root_config(tmp_path / "cfg")
-    registry, _ = await live.root_registry(skill_set, cfg)
+    registry = await live.root_registry(skill_set, cfg)
     client = MockLLMClient([reply(XML_SKILL), reply("second request")])
     with xml_mode(client):
         taught = client._fn_converter.build_system_injection(registry.global_schemas())

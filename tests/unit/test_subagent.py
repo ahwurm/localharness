@@ -866,7 +866,7 @@ async def test_session_written_paths_keeps_only_successful_writes(bus):
 async def test_config_child_brief_has_budget_and_returns_delegation_result(mock_llm_client, bus):
     from localharness.agent.subagent import DelegationResult, dispatch_config_subagent
     from localharness.config.models import AgentConfig
-    from tests.unit.test_task_references import capture
+    from tests.unit.llm_support import capture
 
     cfg = AgentConfig.model_validate({
         "name": "reviewer", "role": "Reviews drafts.",
