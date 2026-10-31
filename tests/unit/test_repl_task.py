@@ -989,7 +989,7 @@ def test_accept_plan_after_a_hand_edit_shows_the_mismatch_first_then_rerecords_a
     assert record.filed[("plan.md", "step-2")].verdict == "unreviewed" and ("step-2.md", None) not in record.filed
     assert record.reopened == (2,)
     assert review_text(flow, "plan-review.md").rstrip().endswith("## accepted by the person\nverdict: accepted")
-    assert reply.lines[-1].startswith("◆ t1 step 2/2") and len(reply.lines) == 2
+    assert reply.lines[-1] == "◆ t1 step 2 not executed · /task run" and len(reply.lines) == 2
 
 
 def test_accept_plan_that_broke_the_shape_is_refused_with_the_shape_sentence_and_changes_nothing(tmp_path):
@@ -1010,8 +1010,8 @@ def test_accept_plan_while_the_task_review_blocked_ends_the_task_only_when_rerec
     reply = accept(flow, "plan")
     assert flow.record.stage == "task" and flow.record.filed[("plan.md", "step-2")].verdict == "unreviewed"
     assert reply.lines[-1].startswith("◆ t1 plan accepted · /task run")
-    flow.docs.path(1, "plan.md").write_text(PLAN_TWO)
     flow.record.filed[("plan.md", "step-2")].verdict = "pass"
+    set_verdict(flow.record, PLAN_FILED, "blocked")
     accept(flow, "plan")
     assert flow.record.stage == "done"
     assert review_text(flow, "review.md").rstrip().endswith("## accepted by the person\nverdict: accepted")
@@ -1069,7 +1069,8 @@ def test_accept_an_unadopted_folders_doc_is_not_adopted_and_a_closed_ones_is_not
 
 def test_accept_the_open_tasks_own_prefix_is_stripped(tmp_path):
     flow = shelf(tmp_path)
-    assert accept(flow, "t1/plan").lines == ("◆ t1 plan accepted · /task run · plan <change> (revises) · up to 25 min",)
+    assert accept(flow, "t1/plan").lines == ("plan.md · blocked, 2 blockers",
+                                           "◆ t1 plan accepted · /task run · plan <change> (revises) · up to 25 min")
     assert flow.record.filed[PLAN_FILED].verdict == "accepted"
 
 
