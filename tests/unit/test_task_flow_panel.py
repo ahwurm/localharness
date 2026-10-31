@@ -154,9 +154,14 @@ def test_parse_exactly_none_is_clean(raw):
     assert (p.findings, p.readable, p.clean) == ((), True, True)
 
 
-def test_parse_none_with_a_finding_is_unreadable():
+def test_parse_none_beside_a_finding_keeps_the_finding():
     p = parsed("NONE\n[NOTE] a rule — what I saw")
-    assert not p.readable and not p.clean
+    assert tags(p) == ["NOTE"] and p.readable and not p.clean
+
+
+def test_parse_prose_before_none_is_clean():
+    p = parsed("I read the draft against the doc it cites.\nFindings:\nNONE")
+    assert (p.findings, p.readable, p.clean) == ((), True, True)
 
 
 @pytest.mark.parametrize("tag", ["BLOCKER", "WARNING", "NOTE"])
@@ -176,8 +181,15 @@ def test_parse_a_line_without_the_dash_is_unreadable():
     assert not p.readable and p.findings[0].rule == "critic answer returned nothing readable"
 
 
-def test_parse_a_stray_line_among_findings_is_unreadable():
-    assert not parsed("[NOTE] r — e\nlooks fine to me\n[NOTE] r2 — e2").readable
+def test_parse_drops_the_prose_around_findings():
+    raw = "There is no draft file on disk to cite line numbers for.\n\nFindings:\n\n[BLOCKER] r — e\nlooks fine to me\n[NOTE] r2 — e2"
+    p = parsed(raw)
+    assert [(f.tag, f.rule) for f in p.findings] == [("BLOCKER", "r"), ("NOTE", "r2")] and p.readable
+
+
+def test_parse_prose_with_no_finding_and_no_none_is_unreadable():
+    p = parsed("The reply looks fine to me.\nNothing to add.")
+    assert not p.readable and p.findings[0].rule == "critic answer returned nothing readable"
 
 
 def test_parse_sorts_blocker_warning_note_stably():

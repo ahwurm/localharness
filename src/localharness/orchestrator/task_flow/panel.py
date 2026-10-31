@@ -87,11 +87,9 @@ def parse(critic: str, raw: str, terminated_reason: str | None) -> Parsed:
     lines = [line.strip() for line in raw.split("\n") if line.strip()]
     if terminated_reason not in (None, "complete") or not lines:
         return _unreadable(critic)
-    if lines == ["NONE"]:
-        return Parsed(critic, (), True, True)
-    hits = [_LINE.fullmatch(line) for line in lines]
-    if not all(hits):
-        return _unreadable(critic)
+    hits = [h for h in map(_LINE.fullmatch, lines) if h]
+    if not hits:
+        return Parsed(critic, (), True, True) if "NONE" in lines else _unreadable(critic)
     found = sorted((Finding(tag, flat(rule, Caps.FINDING), flat(evidence, Caps.FINDING), tag == "NOTE" and bool(_DECISION.search(rule)), critic)
                     for tag, rule, evidence in (h.groups() for h in hits)), key=lambda f: _RANK[f.tag])
     kept, dropped = found[:Caps.TOP], len(found) - Caps.TOP
