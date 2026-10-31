@@ -251,6 +251,9 @@ class MobileChannel(ChannelAdapter):
     channel_id = "mobile"
     stop_word = "stop"
 
+    def has_status_row(self) -> bool:
+        return True
+
     can_ask = True
     """There is a human with a screen. Declaring False would silently convert every ASK into a
     denial, which is a worse answer than asking."""
