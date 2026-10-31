@@ -286,7 +286,7 @@ async def test_the_launch_floor_prices_the_index_the_root_sends(tmp_path, monkey
     fixed, _ = _spy_floor(monkeypatch)
     await _start_async(None, False, False, str(tmp_path))
     (loop,) = agents
-    assert loop._index and "\n\n" + loop._index in fixed[0][0]
+    assert loop._index and fixed[0][0].endswith("\n\n" + loop._index)
 
 
 # --- index start wiring ---------------------------------------------------------------------------

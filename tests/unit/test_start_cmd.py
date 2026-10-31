@@ -3527,3 +3527,78 @@ async def test_start_wires_model_source_to_the_short_label(tmp_path, monkeypatch
 
     assert [label for label, _ in seen] == ["qwen3-27b-q4.gguf", "qwen3:32b"]
     assert all(isinstance(switch, ModelSwitch) for _, switch in seen)
+
+
+# ---------------------------------------------------------------------------
+# The task flow wired at start
+# ---------------------------------------------------------------------------
+
+def _capture_start(monkeypatch):
+    """The AgentLoop's and the REPL's constructor kwargs of the next start."""
+    from localharness.agent.loop import AgentLoop
+    from localharness.cli.repl import OrchestratorREPL
+
+    seen = {"loop": [], "repl": []}
+    for key, cls in (("loop", AgentLoop), ("repl", OrchestratorREPL)):
+        real = cls.__init__
+
+        def wrapped(self, *args, _real=real, _key=key, **kwargs):
+            seen[_key].append(kwargs)
+            return _real(self, *args, **kwargs)
+        monkeypatch.setattr(cls, "__init__", wrapped)
+    return seen
+
+
+async def test_task_flow_start_hands_the_loop_the_panel_and_the_note_and_registers_the_untrusted_tool(tmp_path, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    seen = _capture_start(monkeypatch)
+    await _start_async(None, False, False, str(tmp_path))
+    (kw,), (repl,) = seen["loop"], seen["repl"]
+    flow = kw["request_note"].__self__
+    (tool,) = [t for t in kw["tool_registry"].global_tools() if t.info().name == "task"]
+    assert tool._flow is flow and kw["reply_panel"] is flow.reply_panel and kw["request_note"] == flow.note
+    assert "task_context" not in kw and repl["task_flow"] is flow
+    assert kw["tool_registry"].schema_of("task").result_origin == "untrusted"
+
+
+async def test_task_flow_start_holds_no_record_no_tasks_folder_and_the_roots_tools(tmp_path, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    seen = _capture_start(monkeypatch)
+    await _start_async(None, False, False, str(tmp_path))
+    flow = seen["repl"][0]["task_flow"]
+    assert flow.record is None and not list(tmp_path.glob("agents/*/tasks"))
+    assert {"agent", "task"} <= set(flow.root_tools) and flow.root_tools == sorted(flow.root_tools)
+
+
+async def test_state_dirs_the_gate_holds_the_state_folder_once_realpathed_through_a_symlink(tmp_path, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+
+    real = tmp_path / "real"
+    real.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(real)
+    _stub_start_boundaries(real, monkeypatch)
+    seen = _capture_start(monkeypatch)
+    await _start_async(None, False, False, str(alias))
+    assert seen["loop"][0]["gate"].state_dirs == (real.resolve(),)
+
+
+async def test_state_dirs_a_write_into_the_session_docs_is_denied_by_the_start_gate_in_auto(tmp_path, monkeypatch):
+    from localharness.agent.gate_types import GateSettings, ToolMeta, Verdict
+    from localharness.agent.verdict import evaluate
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    seen = _capture_start(monkeypatch)
+    await _start_async(None, False, False, str(tmp_path))
+    gate = seen["loop"][0]["gate"]
+    target = tmp_path / "agents" / "orchestrator" / "sessions" / "jtbd.md"
+    for mode in ("auto", "guarded"):
+        gate.mode = mode
+        got = evaluate("write", {"path": str(target), "content": "x"}, ToolMeta(destructive=True, group="fs.write"),
+                       gate.context(), GateSettings())
+        assert got.verdict is Verdict.DENY
