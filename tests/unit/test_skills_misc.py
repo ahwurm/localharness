@@ -24,8 +24,7 @@ from localharness.cli.app import app
 from localharness.config.skills import BUNDLED_NAME, LISTING_BUDGET_CHARS, ORIGINS, SkillSet, Skipped, skip_line
 from localharness.agent import subagent
 from tests.unit.test_subagent_narrowing import LEAF_TOOLSETS
-from localharness.agent.context import ContentStore
-from localharness.agent.task_record import MAX_REFERENCES
+from localharness.agent.context import MAX_ACTIVE_REFERENCES, ContentStore
 from localharness.tools.builtin.skill_tool import SkillTool
 from localharness.tools.registry import ToolRegistry
 from tests.unit.agent.test_auto_mode import SETTINGS, SHELL, WRITE, _ctx, _shell, _verdict
@@ -527,7 +526,7 @@ def check_skills_entry(text: str) -> list[str]:
     flat = " ".join(entry.split())
     headings = [line for line in text.splitlines() if line.startswith("## [")]
     items = [(h, " ".join(b.split())) for h, b in bullets(entry)]
-    word = next(w for w, n in _NUMBER_WORDS.items() if n == MAX_REFERENCES)
+    word = next(w for w, n in _NUMBER_WORDS.items() if n == MAX_ACTIVE_REFERENCES)
     said = ("while a task is live", f"{LISTING_BUDGET_CHARS:,}-character", f"{word}-reference limit")
     kept = kept_variants(entry)
     return [

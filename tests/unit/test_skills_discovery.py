@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 
-from localharness.agent import task_record
 from localharness.config import skills
 from localharness.config.skills import SkillSet, skip_line
 from localharness.core import content
@@ -99,9 +98,9 @@ def _tree(name):
 
 
 def test_max_reference_bytes_lives_in_core_content():
-    assert task_record.MAX_REFERENCE_BYTES == content.MAX_REFERENCE_BYTES == 200 * 1024
+    assert content.MAX_REFERENCE_BYTES == 200 * 1024
     assert skills.MAX_REFERENCE_BYTES is content.MAX_REFERENCE_BYTES
-    tree = _tree("agent/task_record.py")
+    tree = _tree("config/skills.py")
     assert any(
         isinstance(n, ast.ImportFrom) and n.module == "localharness.core.content"
         and "MAX_REFERENCE_BYTES" in [a.name for a in n.names]
@@ -1166,7 +1165,7 @@ def test_tools_keep_their_listed_order_with_duplicates_removed(cfg):
 
 
 def test_only_the_display_and_parse_modules_read_a_purpose():
-    allowed = {"orchestrator/cards.py", "config/skills.py", "tools/builtin/agent_tool.py", "agent/task_record.py"}
+    allowed = {"orchestrator/cards.py", "config/skills.py", "tools/builtin/agent_tool.py"}
     readers = {
         str(path.relative_to(SRC))
         for path in SRC.rglob("*.py")

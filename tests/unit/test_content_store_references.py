@@ -7,12 +7,10 @@ import pytest
 import localharness
 from localharness.agent.affordance import pinned_skills
 from localharness.agent.context import MAX_ACTIVE_REFERENCES, ContentStore
-from localharness.agent.task_record import Reference
 from localharness.config import skills
 from localharness.config.skills import SkillSet
 from localharness.tools.builtin.skill_tool import SkillTool
 from tests.unit.test_skills_discovery import _skill
-from tests.unit.test_task_record import refs_state
 
 
 def fill(store, step, *names):
@@ -84,17 +82,6 @@ def test_pinned_skills_reads_the_stores_skill_references():
     assert pinned_skills(store, skills) == pinned_skills(None, skills) == set()
     fill(store, "build", "skill notes", "notes.md")
     assert pinned_skills(store, skills) == {"notes"}
-
-
-def test_the_task_records_reference_verbs_clear_the_store_through_withdraw(tmp_path, monkeypatch):
-    store, calls = ContentStore(), []
-    real = store.withdraw
-    monkeypatch.setattr(store, "withdraw", lambda: (calls.append("withdraw"), real())[1])
-    state = refs_state(tmp_path, Reference("a", handle="a"), Reference("b", handle="b"))
-    state.refresh_references(store)
-    assert state.drop_reference("a") and calls == ["withdraw"] and not store.active_references
-    state.refresh_references(store)
-    assert state.withdraw_references() and calls == ["withdraw", "withdraw"] and not store.active_references
 
 
 @pytest.mark.parametrize("module", ["tools/builtin/skill_tool.py", "agent/affordance.py"])
