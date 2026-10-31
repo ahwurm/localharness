@@ -4,6 +4,39 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.26.0] — 2026-10-31
+
+**Critics on every answer, and a task pipeline of fresh agents.** Before a reply reaches you, critic agents check it and a reply they block is revised once; `/task new <objective>` runs bigger work as decisions, research, a plan and its steps, each by a fresh agent and checked by critics, with the root calling one unit at a time while you steer.
+
+### Added
+- **the reply panel** — every reply the root gives with no tool call is checked before delivery. `answer` and `jtbd` run on every reply, so a hello pays two critics (`jtbd` stands down only for a turn of nothing but `task` calls after a passing panel that included it); `factual`, `recency` and `spec-compliance` join by what the turn did (read files or called an agent, used the web, wrote files). A blocked reply gets one tool-less revision. A `pass` prints nothing; a blocked or unreviewed reply is delivered with one line after it, and `/task show reply` prints the review. The status row and the phone show the running critic and its bound; the classic path and ACP print one line with the critic count and the bound, and the channel's stop word delivers the draft unchecked.
+- **`/task`** — the person's verbs, on the terminal, the phone and ACP: `/task new [objective]`, `/task research`, `/task plan [change]`, `/task run`, `/task show [doc]`, `/task accept [doc]`, `/task stop` and `/task clear`. A task's docs live under `agents/<name>/tasks/t<n>/`. The model drives it through the `task` tool, one unit per call, each result naming the next unit. `/task stop` ends the run after the running unit where the terminal's input box reads input. Every line names the unit's own bound.
+- **nine critics** — `answer`, `big-picture`, `factual`, `jtbd`, `parsimony`, `quality`, `recency`, `security` and `spec-compliance`, packaged with the harness and holding read-only tools fixed in code. `jtbd` keeps the session's job in `sessions/jtbd.md`.
+- **`task_flow`** — a machine-level setting only: the critics a panel adds, revisions, the critic, executor and explorer budgets and `flow_cap_minutes` (default 180, ceiling 360). Every number is held between a floor and a ceiling fixed in code; a value out of range is clamped and named at start.
+- **the task and session folders** — a write, delete, move or link the gate can read under `agents/<name>/tasks/` or `agents/<name>/sessions/`, and the removal of `agents/<name>`, is refused in every mode with a line saying how to change the doc instead.
+- **bench scenarios** — `26_reply_panel_hello`, `27_task_plan_two_steps` and `28_claimed_without_work` on train.
+
+### Changed
+- The `task` tool is rebuilt: it takes `stage` with `doc` or `question`, runs one unit per call, and labels its results untrusted. The old working record, the task packet, `task.json` loading and `AgentLoop(task_context=...)` are removed; an old `task.json` is named by `/task` and removed by `/task clear`.
+- The self-check nudge is removed. `localharness config migrate` drops `agent.self_check` from your global files and prints one line when it was on; the root's prompt carries one paragraph on when to run a task.
+- `PROTOCOL_VERSION` is 11: `TaskComplete` carries `verdict`, `stage`, `step` and `finding`, and `StatusTick` carries `text`. The phone's push is titled from the verdict and its body is the first blocking finding; nothing is pushed after your own stop.
+- A wake from disk begins with no task, while an in-process restart keeps it; `/clear` pauses an open task; a fresh start empties the session docs.
+- The terminal strips bidi, zero-width and tag characters from what it prints and neutralises a leading `◆`.
+- An agent's `purpose` shows in the `agent` tool's roster, and a skill's frontmatter may carry `purpose` and `tools` (parsed; no dispatch reads a skill's `tools` yet).
+- The stuck detector counts a `task` result as progress by its last line and exempts `task` from the identical-call ceiling.
+- A paired phone's stop ends the running turn instead of the session, and the classic loop keeps running.
+
+### Known limitations
+- No live run: the critics and the pipeline are proven with fake models and the three train scenarios, not measured on a served model.
+- The folder refusal is defence in depth, not a barrier: an interpreter, a script, a variable or glob target, `cp -r`, `tar -x -C`, `rsync`, `git checkout` and a non-recursive `chmod` are not covered.
+- `config migrate` drops `agent.self_check` from global files only, so a project agent file or overlay that still carries it fails validation naming the key.
+- The critics check quality, not safety.
+- A timeout's cancel during the reply check propagates, while your own stop delivers the draft unreviewed.
+- The phone's status clock shows only when the snapshot carries a phase.
+- A hard cancel can leave the unit's files half-edited and nothing reverts them, and a cancel during a panel or an explorer still prints `Turn cancelled.`.
+- A task is not picked back up across `localharness start`, a wake from disk or `/task new`.
+- The phone and ACP have no stop between units.
+
 ## [0.25.0] — 2026-10-29
 
 **Click-through browsing and per-call tool narrowing.** The web researcher can open a public page, click, type into a search box and scroll on it inside the browser plugin's existing sandbox and public-only proxy, and a delegating model can hand a specialist a subset of its own tools for one call.
