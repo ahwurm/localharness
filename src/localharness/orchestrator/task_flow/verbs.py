@@ -8,7 +8,8 @@ from localharness.channels.base import notice
 from localharness.orchestrator.task_flow.filer import Refused
 from localharness.orchestrator.task_flow.panel import turns_block, typed_turns
 from localharness.orchestrator.task_flow.record import (
-    DOCS, LINES, Need, Record, Unit, _executed, _fill, file_doc, precondition, printed_bound, unit_minutes)
+    DOCS, LINES, Need, Record, Unit, _PASSED, _executed, _fill, _next_step, _sections, counts_of, file_doc, next_unit,
+    precondition, printed_bound, reopen, unit_minutes)
 from localharness.orchestrator.task_flow.runner import INTERVIEW_SENTENCE
 
 Levers = tuple[str, str]
@@ -141,14 +142,48 @@ def _open(flow: Any, objective: str, turn: int, levers: Levers) -> Reply:
     return Reply((*lines, render("interview open", levers, task=_label(record))), (objective, "typed"))
 
 
-def _steer(flow: Any, verb: str, boundary: str, levers: Levers) -> Reply:
+def _typed_since_filing(flow: Any, boundary: str) -> bool:
+    filed = flow.record.filed_turn.get(boundary, 0)
+    return any(n > filed for n, _ in typed_turns(flow.messages()))
+
+
+def _reopen(flow: Any, boundary: str, arg: str, levers: Levers) -> list[str] | None:
+    """Reopens the boundary's doc by its verdict, a blocked one first; None when a passed plan has nothing to revise."""
+    record = flow.record
+    row = record.filed.get((DOCS[boundary], None))
+    if row is None:
+        return [render("interview open", levers, task=_label(record))] if boundary == "new" else []
+    if row.verdict == "blocked":
+        reopen(record, boundary, counts_of(record, boundary).blockers)
+        return []
+    if row.verdict in _PASSED and boundary == "plan" and not arg and not _typed_since_filing(flow, boundary):
+        return None
+    record.flags[boundary] = True
+    return [render("reopened", levers, task=_label(record), stage=boundary)]
+
+
+def _steer(flow: Any, verb: str, boundary: str, arg: str, levers: Levers) -> Reply:
     record, lines = flow.record, []
+    label = _label(record)
     if boundary in ("research", "plan") and record.stage == "new" and DECISIONS not in record.filed:
-        lines.append(render("decisions filed", levers, task=_label(record), n=skip_interview(flow)))
+        lines.append(render("decisions filed", levers, task=label, n=skip_interview(flow)))
+    if boundary == "step":
+        unit = next_unit(record, "step", None, flow.limits)
+        if isinstance(unit, Need):
+            n = _next_step(record)
+            blocked = unit.reason == "person decides" and n
+            return Reply((render("step blocked", levers, task=label, step=(n, len(_sections(record))),
+                                 n=counts_of(record, "step", n).blockers) if blocked else _refusal(record, unit, levers),))
+    elif (reopened := _reopen(flow, boundary, arg, levers)) is None:
+        return Reply((render("nothing to revise", levers, task=label),))
+    else:
+        lines += reopened
+    said, change = sentence(boundary, record), bool(arg) and boundary == "plan"
+    flow.sentence = said if change else ""
     record.paused, flow.armed = False, boundary
     flow.said.add("cap")
-    lines.append(render("armed", levers, task=_label(record), verb=verb, n=cap_minutes(flow)))
-    return Reply(tuple(lines), (sentence(boundary, record), "request"))
+    lines.append(render("armed", levers, task=label, verb=verb, n=cap_minutes(flow)))
+    return Reply(tuple(lines), (arg, "typed") if change else (said, "request"))
 
 
 def task_command(flow: Any, args: str, *, turn: int, running: bool, levers: Levers, phone: bool = False) -> Reply:
@@ -164,6 +199,6 @@ def task_command(flow: Any, args: str, *, turn: int, running: bool, levers: Leve
         refused = precondition(boundary, record, "person", None)
         if refused:
             return Reply((_refusal(record, refused, levers),))
-        return _steer(flow, verb, boundary, levers)
+        return _steer(flow, verb, boundary, arg, levers)
     except Refused as e:
         return Reply((notice(_label(record), str(e)),))
