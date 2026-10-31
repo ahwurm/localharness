@@ -368,7 +368,7 @@ class TaskState:
             return False
         for ref in rec.references:
             ref.status = UNFIT
-        self._store.clear_active_references()
+        self._store.withdraw()
         self._save_quietly()
         return True
 
@@ -379,7 +379,7 @@ class TaskState:
             return False
         rec.references = [r for r in rec.references if r.source != source]
         if self._store is not None:
-            self._store.clear_active_references()
+            self._store.withdraw()
         return True
 
     def add_reference(self, ref: Reference) -> None:
@@ -394,14 +394,6 @@ class TaskState:
         else:
             rec.references.append(ref)
         self._save_quietly()
-
-    def room(self, store: Any, source: str) -> tuple[str, Literal["add", "replace", "full", "none"], bool]:
-        """Ask where `source` would go and whether `store` has room for it; changes nothing."""
-        rec = self._live()
-        step = (store.active_step or f"task {rec.id}") if rec is not None else source
-        held = {r.source for r in store.active_references} if store.active_step == step else set()
-        has_room = source in held or len(held) < MAX_ACTIVE_REFERENCES
-        return step, "none" if rec is None else _task_answer(rec, source), has_room
 
     @property
     def active(self) -> bool:

@@ -266,7 +266,7 @@ async def first_step_run(client, skill_set: SkillSet, cfg: AgentConfig, shape: S
     gate = PermissionGate(boundary=None, workspace=work, grants=GrantStore(work.parent / "grants.yaml"), mode="read-only")
     holder, spent = None, []
     if engine is not None:
-        holder = Affordances(skill_set, SimpleNamespace(embedder=lambda: engine), state, record_dir)
+        holder = Affordances(skill_set, SimpleNamespace(embedder=lambda: engine), None, record_dir)
         holder.warm().join(timeout=300)
         cue = holder.cue
 
