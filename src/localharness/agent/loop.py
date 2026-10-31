@@ -43,8 +43,6 @@ from localharness.core.fence import fence_project_text
 from localharness.agent.context import (
     APPROX_CHARS_PER_TOKEN, fixed_tokens, floor_schemas, harness_floor, response_reserve)
 from localharness.agent.context import MAX_ACTIVE_REFERENCES, ActiveReferenceError, ActiveReferenceOverflow
-from localharness.agent.task_context import TaskContext
-from localharness.agent.task_record import TaskState
 from localharness.plugins.api import ContextBudget
 from localharness.tools.capabilities import CoResidenceError
 
@@ -1269,7 +1267,6 @@ class AgentLoop:
         guardrails_path: Path | None = None,
         server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
         memory_slot: Any = None,  # plugins.slot.MemorySlot
-        task_context: TaskContext | TaskState | None = None,
         template_margin_ratio: float | None = None,
         effort: tuple[str, str] | None = None,
         effort_ratios: tuple[float, float] | None = None,
@@ -1293,7 +1290,6 @@ class AgentLoop:
         self._template_margin_ratio = template_margin_ratio
         self._bus = bus
         self._ctx = context_manager
-        self._task_context = task_context
         self._request_note = request_note
         # How the last run_turn ended ("complete", "error", "stuck", "budget_*", ...): a
         # delegating parent reads it to report the child's runtime-truth status.
@@ -1685,6 +1681,10 @@ class AgentLoop:
         minutes_limit = tracker.max_duration_minutes
         minutes = 0.0 if minutes_limit == 0 else max(0.1, minutes_limit - session.elapsed_minutes())
         return actions, minutes
+
+    def messages(self) -> list[Message]:
+        """The live turn's session messages while a turn runs, else the conversation."""
+        return list((self._live_turn[0].messages if self._live_turn else self._conversation))
 
     def _deny_fn(self, tool_name: str, params: dict) -> Any:
         """THIS agent's DENY tier, handed to the gate on every check.
@@ -2147,8 +2147,6 @@ class AgentLoop:
             session.push(harness_message(cue.line, "affordance_cue"))
             await self._bus.publish(AffordanceCued(name=cue.name, origin=cue.origin, agent_id=session.agent_id,
                                                    session_id=session.session_id))
-        if self._task_context is not None:
-            self._task_context.observe_human(task)
         # #91: mark where THIS turn's assistant replies will begin, so the CONFIRMED-sentinel
         # summary fallback is turn-scoped and can never splice a prior turn's reply.
         session.turn_start_idx = len(session.messages)
@@ -2184,8 +2182,6 @@ class AgentLoop:
             while self._user_nudge_inbox:
                 nudge, nudge_subtype = self._user_nudge_inbox.pop(0)
                 session.push(human_message(nudge, nudge_subtype, turn=self.turn))
-                if self._task_context is not None:
-                    self._task_context.observe_human(nudge)
                 log.info(
                     "User nudge delivered to %s at iteration %d",
                     self._config.name, session.iteration,
@@ -2224,8 +2220,6 @@ class AgentLoop:
             except ActiveReferenceError as exc:
                 session.terminated_reason = "active_step_blocked"
                 self._conversation = _strip_sentinel_exchanges(session.messages)
-                if self._task_context is not None:
-                    self._task_context.status = "blocked"
                 return f"Active step blocked: {exc}"
             except ProviderConnectionError as exc:
                 # build_messages may have committed a summary before the token count failed.
@@ -2811,10 +2805,6 @@ class AgentLoop:
                     verdict, finding = None, ""
                 else:
                     summary, verdict, finding = await self._review_reply(session, task, content, held)
-                if self._task_context is not None:
-                    # The reply keeps the model's words; at most one evidence line is appended.
-                    # History keeps the model's own message: the packet carries current facts.
-                    summary = self._task_context.finalize(summary)
                 await self._bus.publish(TaskComplete(
                     agent_id=session.agent_id,
                     session_id=session.session_id,
@@ -2849,7 +2839,6 @@ class AgentLoop:
                 # dispatches only. stuck_detector still sees it, so a model that keeps retrying
                 # the same disallowed call is still caught by the stuck ladder.
                 if not budget.tool_call_allowed(session):
-                    self._record_task_result(tool_call, success=False)
                     refusal_text = (
                         f"Tool call not executed: this task's tool-call budget "
                         f"({budget.max_tool_calls} allowed) has been reached. Answer "
@@ -2883,7 +2872,6 @@ class AgentLoop:
                 # this loop holds no channel handle, so it cannot tell anyone anything.
                 perm_result = await self._gate_check(session, tool_call)
                 if not perm_result.allowed:
-                    self._record_task_result(tool_call, success=False)
                     denied_text = f"{DENIED_OBSERVATION_PREFIX}{perm_result.reason}"
                     session.push(_tool_message(
                         tool_call, denied_text, ok=False, denied=True,
@@ -2901,9 +2889,6 @@ class AgentLoop:
                     stuck_detector.record(tool_call.name, tool_call.arguments, (False, denied_text))
                     continue
 
-                # A live task record opens a "running" entry for an `agent` call before it runs.
-                self._open_delegation(tool_call)
-
                 # Counted only now, on the ALLOWED side of the gate. A call a human refused is
                 # not an action the agent took: it never ran, so it must not spend the task's
                 # action budget, must not appear in the "completed N tool calls" line, and must
@@ -2920,9 +2905,6 @@ class AgentLoop:
                 result_truncated = False
                 original_length: int | None = None
                 artifact: ArtifactRef | None = None
-                task_before = self._task_context.revisions() if self._task_context else {}
-                result_metadata: dict[str, Any] = {}
-                tool_result = None
                 if self._tools is not None:
                     try:
                         result = await self._tools.dispatch(
@@ -2932,9 +2914,7 @@ class AgentLoop:
                             self._config.division or "",
                             self._config.tools,
                         )
-                        tool_result = result
                         is_error = not result.success
-                        result_metadata = result.metadata
                         # Error results carry their message in .error with output "" —
                         # forward it or the model sees an empty result it can't react to.
                         result_content = (result.output if result.success
@@ -2961,10 +2941,6 @@ class AgentLoop:
                     result_content = "No tool registry available."
                     is_error = True
 
-                self._record_task_result(
-                    tool_call, success=not is_error, metadata=result_metadata, before=task_before,
-                    result=tool_result,
-                )
                 session.push(_tool_message(tool_call, result_content, ok=not is_error))
 
                 await self._bus.publish(Observation(
@@ -3049,31 +3025,6 @@ class AgentLoop:
                 )
                 self._conversation = _strip_sentinel_exchanges(session.messages)
                 return summary
-
-    def _record_task_result(
-        self, call: Any, *, success: bool, metadata: dict | None = None,
-        before: dict | None = None, result: Any = None,
-    ) -> None:
-        if self._task_context is not None:
-            self._task_context.record_result(
-                call.name, call.arguments, call.id, success=success,
-                metadata=metadata or {},
-                before=self._task_context.revisions() if before is None else before,
-            )
-            # Settle the task record's delegation entry (no entry for this call: a no-op).
-            record = getattr(self._task_context, "record_delegation", None)
-            if call.name == "agent" and record is not None:
-                record(call.id, result)
-
-    def _open_delegation(self, call: Any) -> None:
-        """Open the task record's running entry for an `agent` call before dispatch; inert
-        without a live record."""
-        begin = getattr(self._task_context, "begin_delegation", None)
-        if call.name != "agent" or begin is None:
-            return
-        args = call.arguments or {}
-        begin(call.id, str(args.get("agent_id", "")),
-              str(args.get("purpose") or args.get("task", ""))[:120])
 
     def _reconnect_bound(self, session: Session | None = None) -> float:
         """The configured reconnect wait in seconds, or 0.0 (reconnect off). Honoured only when the
@@ -3369,31 +3320,15 @@ class AgentLoop:
         return text
 
     async def _build_request(self, messages: list[Message], tools: list | None):
-        # Re-snapshot and re-declare the active task's references (files may have changed; the
-        # turn reset cleared protection) before packing, so packing and the final enforce pass
-        # both see them. Inert without an active record; plain TaskContext has no such method.
-        refresh = getattr(self._task_context, "refresh_references", None)
-        if refresh is not None:
-            refresh(getattr(self._ctx, "_content_store", None))
         note = self._current_note()
         try:
             return await self._pack_request(messages, tools, note)
         except ActiveReferenceOverflow:
-            # Reported, not enforced: the task references are withdrawn for this request (the
-            # packet marks them unprotected) and the request goes out; the model decides whether
-            # to drop or narrow them. Withdrawal clears the store's whole active set, including a
-            # model's own tool_result_get declarations merged into the task step. With nothing to
-            # withdraw (no task record, no references) the overflow propagates and blocks.
-            withdraw = getattr(self._task_context, "withdraw_references", None)
-            withdrawn = withdraw is not None and bool(withdraw())
-            if not withdrawn and not note:
+            if not note:
                 raise
-            # build_messages raises from inside (it runs the same fit check) or returns a base
-            # that already carries restore pairs, so the whole pack runs again. A summary fired
-            # by the first pass is already in `messages`; keep its commit for _absorb_commit.
-            # Nothing to withdraw: the request note is what is dropped, so it cannot block the turn.
+            # A summary fired by the first pass is already in `messages`; keep its commit for _absorb_commit.
             commit = self._ctx.last_commit
-            packed, budget = await self._pack_request(messages, tools, note if withdrawn else "")
+            packed, budget = await self._pack_request(messages, tools, "")
             if self._ctx.last_commit is None:
                 self._ctx.last_commit = commit
             return packed, budget
@@ -3409,17 +3344,12 @@ class AgentLoop:
 
     async def _pack_request(self, messages: list[Message], tools: list | None, note: str, *, compact: bool = True):
         packed, budget = await self._ctx.build_messages(messages, tools, **({} if compact else {"compact": False}))
-        # An empty packet (a TaskState with no active record) is an ordinary request.
-        packet = self._task_context.packet() if self._task_context is not None else ""
-        if packet:
-            # Request-local, after every lossy transform: one current packet, no growing log.
-            packed = [*packed, harness_message(packet, "active_task")]
         if note:
+            # Request-local, after every lossy transform: one current note, no growing log.
             packed = [*packed, harness_message(note, "request_note")]
-        if packet or note:
             packed = self._ctx.ensure_active_references(packed, tools, enforce_budget=True)
             budget = replace(budget, current_usage=self._ctx._token_counter.estimate_messages(packed))
-        active = bool(packet) or bool(note) or bool(
+        active = bool(note) or bool(
             getattr(getattr(self._ctx, "_content_store", None), "active_references", ())
         )
         mode = getattr(getattr(self._llm, "config", None), "tool_call_mode", "native")
@@ -3771,8 +3701,6 @@ class AgentLoop:
 
         if not tool_calls:
             session.terminated_reason = "complete"
-            if self._task_context is not None:
-                content = self._task_context.finalize(content or "")
             return StepResult(
                 action="complete",
                 llm_response_preview=(content or "")[:200],
@@ -3782,7 +3710,6 @@ class AgentLoop:
         for tool_call in tool_calls:
             perm = await self._gate_check(session, tool_call)
             if not perm.allowed:
-                self._record_task_result(tool_call, success=False)
                 # Neither counter moves for a refused call: it did not run. `executed` fed
                 # `StepResult.tool_calls_executed`, so a turn whose every call was denied
                 # reported the same number as one where every call ran.
@@ -3791,14 +3718,10 @@ class AgentLoop:
                     staged=getattr(perm, "pending", None) is not None,
                 ))
                 continue
-            self._open_delegation(tool_call)
             session.actions_taken += 1
             self._mark_instruction_calls(tool_call)
             result_content = ""
-            task_before = self._task_context.revisions() if self._task_context else {}
             success = False
-            metadata: dict[str, Any] = {}
-            tool_result = None
             if self._tools is not None:
                 try:
                     result = await self._tools.dispatch(
@@ -3810,14 +3733,8 @@ class AgentLoop:
                     )
                     result_content = result.output
                     success = result.success
-                    metadata = result.metadata
-                    tool_result = result
                 except Exception as exc:
                     result_content = f"Error: {exc}"
-            self._record_task_result(
-                tool_call, success=success, metadata=metadata, before=task_before,
-                result=tool_result,
-            )
             session.push(_tool_message(tool_call, result_content, ok=success))
             executed += 1
 

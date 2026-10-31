@@ -27,7 +27,7 @@ from localharness.tools.registry import ToolRegistry, cut_output
 from tests.unit.test_capabilities import _production_registry
 from tests.unit.llm_support import capture, is_restore, scripted
 from tests.unit.test_skills_discovery import _skill
-from tests.unit.test_task_context import make_loop
+from tests.unit.test_active_references import make_loop
 from tests.unit.test_task_flow_record import make_flow
 
 

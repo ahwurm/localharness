@@ -2,7 +2,7 @@
 from localharness.core.events import Observation
 from localharness.tools.builtin.task_tool import TaskTool
 from localharness.tools.registry import ToolRegistry
-from tests.unit.test_task_context import make_loop
+from tests.unit.test_active_references import make_loop
 from tests.unit.test_task_flow_record import make_flow
 
 
@@ -28,7 +28,7 @@ async def test_an_ordinary_question_adds_no_call_with_task_advertised(tmp_path, 
     seen, tools = capture_with_tools(llm)
     reg = ToolRegistry()
     await reg.register(TaskTool(make_flow(tmp_path)[0]), scope="global")
-    loop = make_loop(llm, bus, tmp_path, None, reg)
+    loop = make_loop(llm, bus, tmp_path, reg)
     assert await loop.run_turn("Answer only: what is 17 + 25?") == "42"
     assert len(seen) == 2  # the answer plus the pre-existing act-guard round-trip
     assert all("task" in tool_names(t) for t in tools)
