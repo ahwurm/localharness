@@ -847,6 +847,38 @@ def test_the_0_21_0_changelog_entry_tells_the_three_plugins_changes_in_user_term
         assert needle in flat, needle
 
 
+RELEASE_0_26_0_HEADER = "## [0.26.0] — 2026-10-31"
+RELEASE_0_26_0_NEEDLES = (
+    "### Added", "### Changed", "### Known limitations",
+    "`/task new [objective]`", "`/task research`", "`/task plan [change]`", "`/task run`",
+    "`/task show [doc]`", "`/task accept [doc]`", "`/task stop`", "`/task clear`",
+    "`task_flow`", "`PROTOCOL_VERSION` is 11",
+    "No live run", "defence in depth, not a barrier", "global files only", "quality, not safety", "half-edited",
+)
+
+
+def check_0_26_0_entry(text: str) -> list[str]:
+    """CHANGELOG's 0.26.0 entry exists, names the eight verbs, `task_flow`, protocol 11 and the recorded limitations."""
+    found = re.search(rf"^{re.escape(RELEASE_0_26_0_HEADER)}\n.*?(?=^## \[|\Z)", text, re.M | re.S)
+    if not found:
+        return [f"CHANGELOG has no {RELEASE_0_26_0_HEADER} entry"]
+    flat = " ".join(found.group(0).split())
+    return [f"CHANGELOG's 0.26.0 entry does not say {n}" for n in RELEASE_0_26_0_NEEDLES if n not in flat]
+
+
+def test_the_0_26_0_changelog_entry_live():
+    assert check_0_26_0_entry(_read("CHANGELOG.md")) == []
+
+
+def test_the_0_26_0_changelog_entry_bites():
+    good = _read("CHANGELOG.md")
+    for needle in RELEASE_0_26_0_NEEDLES:
+        assert check_0_26_0_entry(_swap(good, needle, "x")) == [f"CHANGELOG's 0.26.0 entry does not say {needle}"], needle
+    missing = [f"CHANGELOG has no {RELEASE_0_26_0_HEADER} entry"]
+    assert check_0_26_0_entry(_swap(good, RELEASE_0_26_0_HEADER, "## [0.26.0] — 2026-11-01")) == missing
+    assert check_0_26_0_entry("## Nothing\n") == missing
+
+
 def _good_changelog() -> str:
     return (
         "# Changelog\n\n## [Unreleased]\n\nThis release adds plugins.\n\n### Added\n"
