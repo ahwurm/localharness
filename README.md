@@ -85,7 +85,7 @@ Early stage (v0.25.0, pre-1.0). Interfaces and config schema may change without 
 
 - [SECURITY.md](SECURITY.md): trust boundaries, the permission gate, the prompt-injection threat model
 - [src/localharness/](src/localharness/): the source, one package per component; the CLI is [`cli/`](src/localharness/cli/)
-- [docs/task-context.md](docs/task-context.md): how a session keeps a working record for substantive work, with an [example workflow](examples/workflows/research-note/)
+- [docs/metaharness.md](docs/metaharness.md): the critics that check every reply, and the task pipeline `/task` drives, with an [example workflow](examples/workflows/research-note/)
 - [docs/reference-architectures/](docs/reference-architectures/README.md): tested hardware and setup notes
 - [docs/running-agents-locally.md](docs/running-agents-locally.md): where LocalHarness fits among local agent tools, and where it is behind
 - [LocalShift](https://github.com/ahwurm/localshift): the companion project that moves a headless Claude Code job onto LocalHarness once a local model proves good enough
