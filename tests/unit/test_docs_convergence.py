@@ -1058,3 +1058,94 @@ def test_filer_walk_doc_bites():
     for needle in FILER_WALK_NEEDLES:
         assert check_filer_walk_doc(_swap(text, needle, "x")) == [f"SECURITY.md does not say {needle}"]
     assert len(check_filer_walk_doc("## Nothing\n")) == len(FILER_WALK_NEEDLES)
+
+
+_PANEL = "src/localharness/orchestrator/task_flow/panel.py"
+REPLY_PANEL_NEEDLES = (
+    "A clean panel is a quality signal, never a security one",
+    "a poisoned file can as easily make a critic answer `NONE` as object",
+    f"`{_source_constant(_PANEL, 'FENCE_LABEL')}`", f"`{_source_constant(_PANEL, 'FENCE_CLOSE')}`",
+    "the same class as the laundered influence above",
+    "the first blocking finding reaches a paired phone's lock screen as the push body",
+    "cut to 120 characters and encrypted to the device",
+    "one generation with no tools offered, no retry and no compaction",
+    "is delivered as text and never run")
+
+
+def check_reply_panel_doc(security_text: str) -> list[str]:
+    """SECURITY.md's prompt-injection section says a clean panel is no security signal, names the fenced findings path with the shipped fence, and the tool-less revision."""
+    body = " ".join((section(security_text, "## Threat model: prompt injection") or "").split())
+    return [f"SECURITY.md's prompt-injection section does not say {n}" for n in REPLY_PANEL_NEEDLES if n not in body]
+
+
+def test_reply_panel_doc_live():
+    assert check_reply_panel_doc(_read("SECURITY.md")) == []
+
+
+def test_reply_panel_doc_bites():
+    text = _read("SECURITY.md")
+    for needle in REPLY_PANEL_NEEDLES:
+        assert check_reply_panel_doc(_swap(text, needle, "x")) == [
+            f"SECURITY.md's prompt-injection section does not say {needle}"]
+    assert len(check_reply_panel_doc("## Nothing\n")) == len(REPLY_PANEL_NEEDLES)
+
+
+SLEEP_FILE_NEEDLES = ("restamped as an ordinary request", "a wake holds no trusted subtype")
+
+
+def check_sleep_file_doc(security_text: str) -> list[str]:
+    """SECURITY.md says a slept conversation's human-origin messages are restamped as ordinary requests, so a wake holds no trusted subtype."""
+    body = " ".join((section(security_text, "## Files the harness writes") or "").split())
+    return [f"SECURITY.md's files section does not say {n}" for n in SLEEP_FILE_NEEDLES if n not in body]
+
+
+def test_sleep_file_doc_live():
+    assert check_sleep_file_doc(_read("SECURITY.md")) == []
+
+
+def test_sleep_file_doc_bites():
+    text = _read("SECURITY.md")
+    for needle in SLEEP_FILE_NEEDLES:
+        assert check_sleep_file_doc(_swap(text, needle, "x")) == [f"SECURITY.md's files section does not say {needle}"]
+    assert len(check_sleep_file_doc("## Nothing\n")) == len(SLEEP_FILE_NEEDLES)
+
+
+_ROOT_PARAGRAPH = (
+    "Answer ordinary questions directly, and make a single edit or lookup directly: read first, then change. "
+    "When the work is bigger than that, run it through the task: write what you need to know and what you will read "
+    "before you read it, plan the steps before you change anything, and let the critics judge the plan and each "
+    "result, calling the task again after each result until it says done, blocked or halted. Follow the person's "
+    "latest request and corrections and stop where they asked. Say plainly what is done, what the critics still "
+    "flag, and what you do not know.")
+_SELF_CHECK_LINE = "agent.self_check dropped from config; the critics replace it"
+_GONE_SPELLINGS = ("_SELF_CHECK" + "_NUDGE", "SelfCheck" + "Config", "Answer ordinary questions directly. " + "For substantive work")
+
+
+def _joined(source: str) -> str:
+    return re.sub(r'"\s*\n\s*"', "", source)
+
+
+def check_self_check_gone(src_tree_text: str, loop_text: str, migrate_line: str) -> list[str]:
+    """No source spells the deleted self-review nudge, config class or old root paragraph; the root prompt holds the task paragraph; migrate's dropped-setting line is the spec's."""
+    src = _joined(src_tree_text)
+    out = [f"src/localharness still spells {s}" for s in _GONE_SPELLINGS if s in src]
+    out += [] if _ROOT_PARAGRAPH in _joined(loop_text) else ["agent/loop.py does not hold the root paragraph"]
+    return out + ([] if migrate_line == _SELF_CHECK_LINE else ["config/migrate.py's SELF_CHECK_DROPPED differs from the spec's line"])
+
+
+def _self_check_args() -> tuple[str, str, str]:
+    return ("\n".join(p.read_text(encoding="utf-8") for p in sorted(SRC.rglob("*.py"))),
+            _read("src/localharness/agent/loop.py"), _source_constant("src/localharness/config/migrate.py", "SELF_CHECK_DROPPED"))
+
+
+def test_self_check_gone_live():
+    assert check_self_check_gone(*_self_check_args()) == []
+
+
+def test_self_check_gone_bites():
+    tree, loop, line = _self_check_args()
+    for planted in _GONE_SPELLINGS:
+        assert check_self_check_gone(tree + f'\nX = "{planted}"\n', loop, line) == [f"src/localharness still spells {planted}"]
+    assert check_self_check_gone(tree, _swap(loop, "let the critics judge the plan and each result", "x"), line) == [
+        "agent/loop.py does not hold the root paragraph"]
+    assert check_self_check_gone(tree, loop, line + " ") == ["config/migrate.py's SELF_CHECK_DROPPED differs from the spec's line"]
