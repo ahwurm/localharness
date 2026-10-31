@@ -462,6 +462,7 @@ class AcpChannel(ChannelAdapter):
     """
 
     channel_id = "acp"
+    stop_word = "cancel"
 
     can_ask = True
     """PRD §3.5: Zed renders an ASK as its own permission dialog, held open with no timeout."""
@@ -1308,6 +1309,9 @@ class AcpChannel(ChannelAdapter):
     ) -> None:
         if content:
             await self._update(update_agent_message_text(content))
+
+    async def panel_started(self, line: str) -> None:
+        await self.send_message(line)
 
     async def on_provider_lost(self, event: ProviderLost) -> None:
         """The base line, set off by blank lines. ACP renders system lines as agent-message text, and
