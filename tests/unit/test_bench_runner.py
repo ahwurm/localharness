@@ -1490,3 +1490,56 @@ def test_task_docs_missing_counts_every_doc_when_no_task_was_opened():
 
     assert _task_docs_missing(None, {"plan.md": "x", "plan-review.md": "y"}) == 2
     assert _task_docs_missing(None, {}) == 0
+
+
+HELLO_PLAN = "## Step 1\nfiles: hello.txt\ndepends_on: none\ndone: hello.txt holds hi\n"
+NEVER_WRITTEN = "[BLOCKER] hello.txt must hold hi \u2014 step-1.md:2 shows 0 files written"
+
+
+def _claimed_queue(mock_llm_client, verdict=NEVER_WRITTEN):
+    say = lambda text: _say(mock_llm_client, text)  # noqa: E731
+    return mock_llm_client([
+        *_opening(mock_llm_client, "Which directory should hello.txt go in?"),
+        _task_call(mock_llm_client, 1, stage="plan"),
+        _task_call(mock_llm_client, 2, stage="plan", doc=HELLO_PLAN),
+        *[r for _ in range(3) for r in say("NONE")],
+        _task_call(mock_llm_client, 3, stage="run"),
+        *say("I wrote hello.txt with the text hi."),
+        _task_call(mock_llm_client, 4, stage="run"),
+        *say(verdict),
+        mock_llm_client.Response(content="Step 1 is blocked: nothing was written."),
+        *say("NONE"),
+    ])
+
+
+def test_claimed_without_work_loads_as_a_train_scenario_whose_executor_holds_no_write_tool():
+    scen = _train_scenario("28_claimed_without_work.yaml")
+    assert (scen.slice, scen.task_flow, scen.tools_allowed) == ("train", True, ["task", "read", "glob", "grep"])
+    assert set(scen.task_docs) == {"step-1-review.md"}
+    assert scen.success_criteria.event_counts == {"task_docs_missing": {"exact": 0}}
+    assert scen.limits.max_tool_calls > 12
+
+
+@pytest.mark.asyncio
+async def test_claimed_without_work_blocks_the_step_with_seven_critic_children_and_no_stuck_recovery(mock_llm_client, tmp_path):
+    from localharness.bench.runner import execute_one_run
+    from localharness.core.events import TurnCompleted
+
+    run_path = tmp_path / "c.jsonl"
+    scen = _expecting(_train_scenario("28_claimed_without_work.yaml"), critic_children=7, task_docs_missing=0, stuck_recoveries=0)
+    completed = await execute_one_run(scen, "m", run_path, _claimed_queue(mock_llm_client))
+    assert completed.success is True
+    children = [e.agent_id for e in _events(run_path) if isinstance(e, TurnCompleted) and e.parent_id]
+    assert children.count("executor") == 1
+    assert children.count("spec-compliance") == 1
+
+
+@pytest.mark.asyncio
+async def test_claimed_without_work_fails_when_the_critic_lets_the_step_pass(mock_llm_client, tmp_path):
+    from localharness.bench.runner import execute_one_run
+
+    scen = _train_scenario("28_claimed_without_work.yaml")
+    completed = await execute_one_run(scen, "m", tmp_path / "p.jsonl", _claimed_queue(mock_llm_client, verdict="NONE"))
+    assert completed.success is False
+    counted = _expecting(scen, task_docs_missing=1)
+    assert (await execute_one_run(counted, "m", tmp_path / "q.jsonl", _claimed_queue(mock_llm_client, verdict="NONE"))).success is True
