@@ -30,9 +30,10 @@ from __future__ import annotations
 import fnmatch
 import os
 import posixpath
+import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Callable, Literal, Optional
+from typing import Callable, Iterable, Literal, Optional
 from urllib.parse import urlparse
 
 from localharness.agent.gate_types import (
@@ -217,6 +218,10 @@ READ_ONLY_DENY_REASON = "not permitted in read-only mode"
 """PRD §3.4: the soft-deny text. It is returned to the model AS the tool observation, so the
 model can re-plan rather than retry — hence a sentence, not an error code."""
 
+PRIVATE_PLAN_REASON = "a task's plan is changed with /task plan, not edited"
+PRIVATE_DOC_REASON = "a task document is not editable by the agent; ask the person to edit it, then /task accept {doc}"
+PRIVATE_STATE_REASON = "harness state; not editable"
+
 MISSING_TARGET_DISPLAY = "<no path argument>"
 """A write-shaped call that names no target at all. It cannot be resolved, so PRD §3.2 step 8's
 "unresolvable targets are treated as outside" applies — the call asks rather than passing."""
@@ -383,6 +388,9 @@ class GateContext:
     config_dir: Optional[Path] = None
     """The session's machine config folder (`--config-dir` / LOCALHARNESS_DIR as start resolved it),
     whose tools folder and settings files the two rules guard. None: global_config_dir()."""
+    state_dirs: tuple[Path, ...] = ()
+    """Extra state folders whose ``agents/*/tasks`` and ``agents/*/sessions`` the deny class guards; the
+    config folders the gate knows are always guarded."""
 
 
 # ------------------------------------------------------------------- internals
@@ -1083,6 +1091,46 @@ def _target_asks(
     return asks
 
 
+def _private_parts(path: Path, ctx: GateContext) -> Optional[tuple[str, ...]]:
+    for folder in ctx.state_dirs:
+        try:
+            resolved = Path(folder).resolve()
+        except (OSError, ValueError, RuntimeError):
+            continue
+        if _within(resolved, path):
+            return path.relative_to(resolved).parts
+    return _below_config_folder(path, ctx)
+
+
+def _private_reason(path: Path, ctx: GateContext, removal: bool) -> Optional[str]:
+    """Why ``path`` is harness state the agent may not touch: an agent's tasks or sessions folder, or (for a removal) the agent itself."""
+    parts = _private_parts(path, ctx)
+    if parts is None:
+        return None
+    low = tuple(part.casefold() for part in parts)
+    if len(low) >= 3 and low[0] == "agents" and low[2] in ("tasks", "sessions"):
+        if low[2] == "tasks" and len(low) == 5 and re.fullmatch("t[0-9]+", low[3]):
+            if low[4] == "plan.md":
+                return PRIVATE_PLAN_REASON
+            return PRIVATE_DOC_REASON.format(doc=Path(parts[4]).stem)
+        return PRIVATE_STATE_REASON
+    if removal and len(low) == 2 and low[0] == "agents":
+        return PRIVATE_STATE_REASON
+    return None
+
+
+def _private_deny(
+    targets: Iterable[tuple[str, bool]], anchor: Optional[Path], ctx: GateContext
+) -> Optional[VerdictResult]:
+    """DENY for the first ``(target, is_removal)`` that lands in harness state, in every mode and ahead of every ask."""
+    for raw, removal in targets:
+        for path in _named_file(raw, anchor):
+            reason = _private_reason(path, ctx, removal)
+            if reason is not None:
+                return VerdictResult(Verdict.DENY, reason)
+    return None
+
+
 def _evaluate_write(
     tool_name: str, params: dict, ctx: GateContext, settings: GateSettings
 ) -> VerdictResult:
@@ -1097,6 +1145,10 @@ def _evaluate_write(
             grantable=False, detail=bad,
         )], salient="")
     raw = _write_target(tool_name, params)
+    if raw:
+        denied = _private_deny(((raw, False),), Path(ctx.workspace), ctx)
+        if denied is not None:
+            return denied
     target = ((raw, _resolve(raw, ctx.workspace)),) if raw else ((MISSING_TARGET_DISPLAY, None),)
     salient = raw or ""
     asks = _target_asks(ctx, settings, target)
