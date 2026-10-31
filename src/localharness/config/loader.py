@@ -580,7 +580,7 @@ section (`memory.embedding_model`: the model sentence-transformers loads, and a 
 imports Python from) is re-resolved by `_narrow_agent_global_only`. Never marked GLOBAL_ONLY on the
 plugin's AgentConfigModel: the resolver refuses such a plugin (plugins/resolve.py)."""
 
-AGENT_CORE_GLOBAL_ONLY_SECTIONS: frozenset[str] = frozenset({"stuck_detector"})
+AGENT_CORE_GLOBAL_ONLY_SECTIONS: frozenset[str] = frozenset({"stuck_detector", "task_flow"})
 """Core agent-file SECTIONS only the global layer may set. A workspace agent file (and a workspace
 overlay of a built-in) gets such a section restored WHOLE from the global layer: the global
 `agents/<name>.yaml` section, else the global overrides' `agent:` section, else the schema default.

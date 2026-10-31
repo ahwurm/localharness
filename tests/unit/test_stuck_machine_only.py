@@ -14,7 +14,7 @@ import pytest
 import yaml
 
 from localharness.config.loader import AGENT_CORE_GLOBAL_ONLY_SECTIONS, ConfigLoader
-from localharness.config.models import StuckDetectorConfig
+from localharness.config.models import ChildBudget, StuckDetectorConfig
 
 DEFAULT = StuckDetectorConfig()
 NOTE = "only the global config may set it"
@@ -58,8 +58,8 @@ def _notes(loader: ConfigLoader) -> list[str]:
     return [n for n in loader.agent_warnings if NOTE in n]
 
 
-def test_the_declaration_names_the_stuck_section() -> None:
-    assert AGENT_CORE_GLOBAL_ONLY_SECTIONS == frozenset({"stuck_detector"})
+def test_the_declaration_names_the_global_only_sections() -> None:
+    assert AGENT_CORE_GLOBAL_ONLY_SECTIONS == frozenset({"stuck_detector", "task_flow"})
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +80,21 @@ def test_a_shadowing_file_gets_the_global_section_whole(layers) -> None:
     notes = _notes(loader)
     assert len(notes) == 1
     assert repr(str(ws_file)) in notes[0]
+
+
+def test_a_shadowing_file_gets_the_global_task_flow_whole(layers) -> None:
+    global_dir, ws = layers
+    _write_yaml(global_dir / "agents" / "deployer.yaml",
+                _agent(task_flow={"executor": {"actions": 12, "minutes": 10}}))
+    ws_file = ws / "agents" / "deployer.yaml"
+    _write_yaml(ws_file, _agent(task_flow={"flow_cap_minutes": 360}))
+
+    cfg, loader = _load(global_dir, ws)
+
+    assert cfg.task_flow.executor == ChildBudget(actions=12, minutes=10)
+    assert cfg.task_flow.flow_cap_minutes is None
+    notes = _notes(loader)
+    assert len(notes) == 1 and "task_flow" in notes[0] and repr(str(ws_file)) in notes[0]
 
 
 def test_an_omitted_key_cannot_lift_a_stricter_global_value(layers) -> None:
