@@ -1273,7 +1273,7 @@ async def test_executor_runs_one_step_with_its_row_a_brief_and_files_the_step_do
     assert RAW in doc and "files written: 1: src/x1.py" in doc
     assert RAW not in text and last(text) == "next: run · step 1 panel"
     assert text.splitlines()[0] == "filed: step-1.md" and "step 1: 1 files written, 0 compactions" in text
-    assert rows[-1][1] == "step 1 running"
+    assert rows[-1][1] == "step 1/2 executing"
 
 
 async def test_executor_receives_the_step_as_written_with_its_indented_code(tmp_path):
@@ -1438,7 +1438,7 @@ async def test_cap_a_25_minute_executor_against_a_10_minute_remainder_is_launche
     flow.end_turn()
     await flow.run("step")
     assert script.named("executor")[0].budget == ("task_flow.executor", ChildBudget(actions=24, minutes=10.0))
-    assert rows[-1][1:] == ("step 1 running", ("<stop>",), "up to 10 min")
+    assert rows[-1][1:] == ("step 1/2 executing", ("<stop>",), "up to 10 min")
 
 
 @pytest.mark.parametrize("used, halted", [(540.0, None), (541.0, "cap")])
@@ -1607,7 +1607,7 @@ async def test_review_after_the_last_step_the_task_panel_runs_and_a_clean_review
     text = await flow.run("task")
     assert [c.name for c in script.calls[before:]] == ["jtbd", "big-picture"]
     assert flow.record.stage == "done" and last(text) == "next: done" and flow.reply_panel.jtbd_stood is True
-    assert flow.record.filed[PLAN_ROW].verdict == "pass" and rows[-1][1] == "review panel running"
+    assert flow.record.filed[PLAN_ROW].verdict == "pass" and rows[-1][1] == "task panel running"
     assert flow.docs.read(1, "review.md").strip().endswith("verdict: pass")
     assert "done" in await flow.run("task")
 
