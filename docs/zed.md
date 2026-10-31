@@ -129,6 +129,12 @@ Zed you get the review pane; the fallback is for other ACP clients.
 **Cancel works.** The stop button cancels the running turn, the same path `Ctrl-C` takes in the
 terminal.
 
+**`/task` works as a whole message.** A message that is only `/task <verb>` runs the verb as the
+terminal does (see [the metaharness](metaharness.md)); while a turn runs it is refused with a line
+naming what is running. Cancel ends the running unit of a task at once and can leave its files
+half-edited, and while a reply is being checked it delivers the reply unchecked. There is no stop
+between units here.
+
 ## Not yet
 
 Honest list of what this adapter does not do in its first version.

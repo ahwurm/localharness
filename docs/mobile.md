@@ -98,7 +98,8 @@ The phone buzzes for exactly two things:
 
 - **A turn finished while you were away.** Only if nothing is watching — with the page open and
   visible you get no notification — and only for a turn longer than the measured median, because
-  a turn you could have stood and waited for is not news.
+  a turn you could have stood and waited for is not news. When the critics blocked the reply, the
+  notification says so and carries the first blocking finding; your own stop sends no notification.
 - **Something needs you:** a parked call, a blocking permission question, or the harness's own
   "stuck, needs a human" signal.
 
@@ -194,7 +195,8 @@ and the token: on the reference box, 83 MB before any session, 1.8 GB with a ses
 embedding model loaded, 0.9 GB asleep (the model's memory is released; the libraries it needed
 stay imported). The ribbon says *asleep — wakes on your next message*. Your next message brings a
 session up from that file and the conversation continues where it left off, as a new sitting: the
-model has every earlier turn, and memory sees one sitting end and another begin. Opening the app
+model has every earlier turn, and memory sees one sitting end and another begin. An open task does not come back: the wake line names
+its folder, and `/task show t<n>/<doc>` reads what it filed. Opening the app
 does not wake it; only a message does — a backgrounded page reconnects on its own, and the point
 of sleeping was that nobody's pocket keeps the box busy. The first reply after a wake pays the
 warm-up. Ctrl-C with a live session puts it to sleep the same way, so a server restart continues
@@ -207,9 +209,16 @@ or an open question keeps the session awake: both live only in that session's ga
 
 The file carries the conversation, at the trust level of the session log beside it, and never
 authority: a permission mode looser than your configured one is not restored from it (the folder
-is one a cloned repo can ship and the agent's own write tool can reach), and lines typed ahead
-are never in it. The thread belongs to the folder it slept in: a server started from another
+is one a cloned repo can ship; the agent's own write tools and the shell writes the gate can read
+are refused there, so only what the deny class does not cover can still reach it), and lines typed
+ahead are never in it. The thread belongs to the folder it slept in: a server started from another
 folder leaves it where it is and starts fresh.
+
+**`/task` works from the phone.** Type `/task new <objective>` and the other verbs as on the
+terminal (see [the metaharness](metaharness.md)); a slash sent while a turn runs waits for the turn
+to end, and a message sent mid-turn is marked `heard` or `queued`. The stop button ends the running
+unit at once and can leave its files half-edited, and while a reply is being checked it delivers the
+reply unchecked; the phone has no stop between units.
 
 **The model pill names the serving model, and tapping it lists what you can switch to.** Once the
 session is up the pill shows the session's model, and it follows every switch, made here or at the
