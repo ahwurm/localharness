@@ -38,7 +38,7 @@ def test_instructions_name_the_lint_command_and_working_record():
 def test_readme_and_docs_carry_the_agent_setup_line():
     """LocalHarness loads project agents from .localharness/agents/, not the example's agents/."""
     assert SETUP in (EX / "README.md").read_text()
-    assert SETUP in (EX.parents[2] / "docs" / "task-context.md").read_text()
+    assert SETUP in (EX.parents[2] / "docs" / "metaharness.md").read_text()
     assert SETUP in (EX.parents[1] / "README.md").read_text()
 
 

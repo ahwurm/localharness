@@ -122,6 +122,25 @@ Read [the prompt-injection threat model](../SECURITY.md#threat-model-prompt-inje
 - The refusal on the task and session folders is defence in depth, not a barrier. SECURITY.md names the write forms it does not cover.
 - A paired phone's `/task new`, `run` and `accept` sit outside the `remote_unattended` lock.
 
+## The example workflow
+
+A synthetic research-note workflow ships in the repository (`examples/workflows/research-note/`), not in the PyPI package. Copy it outside the LocalHarness repository, put its two specialists where project agents load from, and start a session:
+
+```bash
+cp -r examples/workflows/research-note ~/research-note && cd ~/research-note
+mkdir -p .localharness/agents && cp agents/*.yaml .localharness/agents/
+localharness start
+```
+
+Then, in the session:
+
+1. Type `/task new Prepare the Acme Analytics customer profile following INSTRUCTIONS.md. Discuss the angle first.` The task opens with that line as its objective, and the root asks about the angle in ordinary replies. Answer it, for example "Use the second angle."
+2. The root files `decisions.md`, checked by `jtbd`, then plans the outline, the draft and the lint as steps in `plan.md`, checked by `jtbd`, `big-picture` and `parsimony`. `/task show plan` reads it.
+3. The root runs each step with a fresh executor, each checked by `spec-compliance`. `/task show step-2` reads a step's log. In box mode `/task stop` ends the run after the running step and `/task run` continues it.
+4. Exit and run `localharness start` again. The task is not carried over, its folder stays, and `/task show t1/plan` reads the plan.
+
+What happens at each step depends on the model; the docs show what it filed and what the critics found.
+
 ## Known limitations
 
 - No live run: the critics and the pipeline have been exercised with fake models and three bench scenarios, never against a live model, so whether a critic earns its place is decided in use.

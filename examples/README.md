@@ -56,7 +56,7 @@ for copying it.
 
 ## `workflows/research-note/`
 
-A fictional customer-profile research note for trying the working record on substantive work: an
+A fictional customer-profile research note for trying the task pipeline on substantive work: an
 instruction file with stages and checks, two sources, a voice sample, a deterministic lint, and a
 read-only reviewer plus a writer. Copy the folder outside this repository first, then make the
 specialists available, because LocalHarness loads project agents from `.localharness/agents/`:
@@ -67,5 +67,5 @@ mkdir -p .localharness/agents && cp agents/*.yaml .localharness/agents/
 localharness start
 ```
 
-See [the example workflow](../docs/task-context.md#the-example-workflow) for what to ask and what
-the record should show.
+See [the example workflow](../docs/metaharness.md#the-example-workflow) for what to ask and what
+the task's docs should show.
