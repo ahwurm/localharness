@@ -28,6 +28,7 @@ class TaskFlow:
         self.armed: str | None = None
         self.unit: tuple[str, int] | None = None
         self.busy = False
+        self.reply_panel.emit = emit
 
     def open(self, objective: str, turn: int) -> Record:
         self.record = open_task(self.docs.new_task(), objective, turn)

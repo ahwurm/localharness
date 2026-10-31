@@ -79,7 +79,7 @@ def root_note(flow: TaskFlow) -> str:
     head = " ".join(p for p in (record.stage, _verdict(record)) if p)
     pointer = one_line(f"t{record.id} \u00b7 {head} \u00b7 {next_line(record, boundary, flow.limits)}")[:Caps.LINE]
     interview = INTERVIEW_SENTENCE if record.stage == "new" and ("decisions.md", None) not in record.filed else ""
-    return "\n".join(p for p in (pointer, interview) if p)
+    return "\n".join(p for p in (pointer, interview, flow.sentence) if p)
 
 
 def _exclude(flow: TaskFlow, seconds: float) -> None:
@@ -215,8 +215,10 @@ async def _file(flow: TaskFlow, boundary: str, unit: Unit, carried: str | None) 
         return sections
     digest, _ = flow.docs.write(record.id, name, carried)
     file_doc(record, unit.boundary, (name, None), digest)
+    record.filed_turn[unit.boundary] = flow.turn()
     reopened = rerecord(record, sections) if sections else []
     if sections:
+        record.reopened = tuple(reopened)
         set_stage(record, "plan")
     if consume_flag(record, unit.boundary):
         reopen(record, unit.boundary, None)
