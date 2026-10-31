@@ -326,7 +326,7 @@ class Panel:
 
     @staticmethod
     def _brief(inputs: PanelInputs) -> str:
-        return f"{inputs.brief}\n\n{_data('the reply under review', inputs.draft)}" if inputs.draft else inputs.brief
+        return f"{inputs.brief}\n\n{_data('the reply under review', inputs.draft[:Caps.BLOCK])}" if inputs.draft else inputs.brief
 
     async def _ask(self, name: str, inputs: PanelInputs, budget: ChildBudget) -> tuple[Parsed, str]:
         if name != "jtbd":
@@ -336,7 +336,7 @@ class Panel:
         job = self.docs.read_session("jtbd.md").strip() if self.docs else ""
         brief = "\n\n".join((_data("the person's typed turns this session", block),
                               _data("the current jtbd.md", job or "none yet"),
-                              _data("the draft or doc under review", inputs.draft or inputs.brief)))
+                              _data("the draft or doc under review", inputs.draft[:Caps.BLOCK] or inputs.brief)))
         result = await _ask(name, brief, self._child, budget, inputs.handles)
         head, tail = (_JOB_RULE.split(result.raw, maxsplit=1) + [""])[:2]
         parsed, job = apply_jtbd(parse(name, head, result.terminated_reason), tail, shown, self.docs if inputs.turns else None)
