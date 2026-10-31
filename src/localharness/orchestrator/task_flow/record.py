@@ -430,7 +430,7 @@ def boundary_of(stage: str, record: Record | None) -> str:
 
 
 def valid_question(q: object) -> bool:
-    return (isinstance(q, str) and 0 < len(q) <= Caps.LINE and not any(c in q for c in "\n\r\t")
+    return (isinstance(q, str) and bool(q.strip()) and len(q) <= Caps.LINE and not any(c in q for c in "\n\r\t")
             and not CONTROL_CHARS_RE.search(q) and not INVISIBLE_CHARS_RE.search(q))
 
 
