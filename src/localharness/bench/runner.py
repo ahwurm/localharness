@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
+import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -71,9 +73,6 @@ async def _start_bench_memory(agent_config: Any, scenario: ScenarioSpec, seeds: 
     gating (FIX 4): a memory tool the scenario does not allow is unregistered — [] means pure-LLM,
     and the seeded facts still reach the system prompt through the slot. Returns
     (LifecycleResult, tmp_dir); the caller stops the plugins and removes the dir."""
-    import shutil
-    import tempfile
-
     import yaml
 
     from localharness.config.loader import ConfigLoader
@@ -145,6 +144,7 @@ class MetricAccumulator:
     peak_context_pct: float = 0.0
     deny_events: int = 0
     compaction_triggered: int = 0
+    critic_children: int = 0
 
     def on_turn_completed(self, event: TurnCompleted) -> None:
         self.tokens_in += int(getattr(event, "input_tokens", 0) or 0)
@@ -154,6 +154,7 @@ class MetricAccumulator:
             self.tokens_estimated = True
         if event.summary:
             self.final_message = event.summary
+        self._count_critic(event)
 
     def on_turn_failed(self, event: TurnFailed) -> None:
         # Failed runs never emit TurnCompleted; capture their real iterations/tokens.
@@ -164,6 +165,12 @@ class MetricAccumulator:
         self.iterations = max(self.iterations, int(event.iterations))
         if getattr(event, "tokens_estimated", False):
             self.tokens_estimated = True
+        self._count_critic(event)
+
+    def _count_critic(self, event: TurnCompleted | TurnFailed) -> None:
+        from localharness.orchestrator.task_flow.panel import critic_names
+        if event.parent_id and event.agent_id in critic_names():
+            self.critic_children += 1
 
     def on_action(self, event: Action) -> None:
         if event.tool_name:
@@ -296,6 +303,8 @@ async def execute_one_run(
         # vars(), not getattr: a test's stub loop (MagicMock) would answer any getattr with a mock.
         _own = getattr(loop, "__dict__", {})
         await _stop_bench_memory(_own.get("_plugin_result"), _own.get("_plugin_tmp"))
+        if _own.get("_flow_dir") is not None:
+            shutil.rmtree(_own["_flow_dir"], ignore_errors=True)
 
     latency_total = (scen.limits.max_latency_s if timed_out else time.monotonic() - t_start)
     counts = {
@@ -307,6 +316,7 @@ async def execute_one_run(
         "tool_call_count": acc.tool_call_count,
         "deny_events": acc.deny_events,
         "compaction_triggered": acc.compaction_triggered,
+        "critic_children": acc.critic_children,
     }
     success = False if timed_out else scen.success_criteria.evaluate(acc.final_message, counts=counts)
 
@@ -383,6 +393,7 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
             memory_slot=None,
             kill_file_path=None,
             compact_md_path=COMPACT_DISABLED,
+            reply_panel=None,  # a task_flow scenario passes its TaskFlow's panel
         )
 
     Bench synthesizes a minimal AgentConfig + ContextManager + ToolRegistry +
@@ -406,6 +417,8 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
     from localharness.agent.permissions import PermissionEvaluator
     from localharness.config.grants import GrantStore
     from localharness.config.models import AgentConfig
+    from localharness.orchestrator.task_flow import TaskFlow
+    from localharness.orchestrator.task_flow.filer import Docs
     from localharness.tools.registry import ToolRegistry
 
     if agent_config is None:
@@ -550,6 +563,7 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
     # the gate look like a capability regression instead of a permission change. `unattended`
     # is today's pre-gate behaviour named honestly: the DENY tier still holds, every ASK
     # becomes ALLOW, and `asker=None` guarantees no bench run can ever block on a human.
+    flow_dir = Path(tempfile.mkdtemp(prefix="bench-flow-")) if scenario.task_flow else None
     bench_gate = PermissionGate(
         boundary=Path.cwd(),
         workspace=Path.cwd(),
@@ -563,6 +577,7 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
         deny=deny_fn_from(perm_evaluator, getattr(agent_config, "permissions", None)),
         settings=settings_from(getattr(agent_config, "permissions", None)),
         bus=bus,
+        state_dirs=(flow_dir,) if flow_dir is not None else (),
     )
 
     # SUBAGENT-05 / J3: register the REAL delegation runner when 'agent' is in tools_allowed, built via
@@ -575,7 +590,8 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
     # it). PRIOR BUG: the bench hard-routed EVERY agent() to Explore (agent_id ignored), so a scored
     # agent('cruncher') scenario silently ran Explore and the cruncher was UNREACHABLE from the bench —
     # every "faithful over-window" claim rested on mocked unit tests with no scored regression signal.
-    if "agent" in scenario.tools_allowed:
+    _agent_runner = None
+    if "agent" in scenario.tools_allowed or scenario.task_flow:
         from localharness.agent.subagent import make_explore_agent_runner
         from localharness.config.paths import global_config_dir
         from localharness.tools.builtin.agent_tool import AgentTool, BUILTIN_AGENT_NAMES
@@ -604,10 +620,12 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
             # Amendment #3: bench resolves the GLOBAL dir explicitly — a sibling worktree's
             # .localharness/ must never steer a bench run.
             config_dir=global_config_dir(),
+            state_dir=flow_dir,
         )
-        tool_registry._tools["global"]["agent"] = AgentTool(
-            agent_runner=_agent_runner, available_agents=_bench_agents)
-        tool_registry._schemas["agent"] = tool_registry._tools["global"]["agent"].info()
+        if "agent" in scenario.tools_allowed:
+            tool_registry._tools["global"]["agent"] = AgentTool(
+                agent_runner=_agent_runner, available_agents=_bench_agents)
+            tool_registry._schemas["agent"] = tool_registry._tools["global"]["agent"].info()
 
     # EVAL-01 / MEMP-05 (B1): memory ONLY for the seeded scenarios, keyed by scenario.name, built
     # through the plan builder + plugin lifecycle under the loop's own agent_id (agent_config.name)
@@ -621,7 +639,15 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
             tool_registry=tool_registry, session_id=session_id,
             context_tokens=effective_max_context_tokens)
 
+    loop = None
     try:
+        flow = None if flow_dir is None else TaskFlow(
+            run_config_child=_agent_runner.run_config_child,
+            emit=lambda unit, state, commands, tail: log.info("bench flow %s: %s", unit, state),
+            exclude=lambda seconds: loop.exclude(seconds),
+            docs=Docs(flow_dir, False, agent_config.name),
+            config=agent_config, root_tools=scenario.tools_allowed, llm=llm_client,
+            token_counter=token_counter, bus=bus)
         loop = AgentLoop(
             config=agent_config,
             llm=llm_client,
@@ -636,9 +662,12 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
             # Without this the loop's per-turn session setter would overwrite the manager's
             # stable run id with a fresh per-turn uuid.
             session_id=session_id,
+            reply_panel=None if flow is None else flow.reply_panel,
         )
     except BaseException as e:
         await _stop_bench_memory(plugin_result, plugin_tmp)
+        if flow_dir is not None:
+            shutil.rmtree(flow_dir, ignore_errors=True)
         if not isinstance(e, TypeError):
             raise
         raise RuntimeError(
@@ -650,6 +679,8 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
         ) from e
     if plugin_result is not None:  # execute_one_run's finally stops these (#43: no hung aiosqlite)
         loop._plugin_result, loop._plugin_tmp = plugin_result, plugin_tmp
+    if flow_dir is not None:
+        loop._flow_dir = flow_dir
     return loop
 
 
@@ -659,7 +690,6 @@ async def _stop_bench_memory(result: Any, tmp: Any) -> None:
         from localharness.plugins.lifecycle import stop_plugins
         await stop_plugins(result)
     if tmp is not None:
-        import shutil
         shutil.rmtree(tmp, ignore_errors=True)
 
 
