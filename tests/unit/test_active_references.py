@@ -1,18 +1,34 @@
 """Required reference snapshots survive the actual outgoing packing path."""
+import inspect
 import json
 
 import pytest
 
 from localharness.agent.context import (
+    COMPACT_DISABLED,
     ActiveReferenceError,
+    ActiveReferenceOverflow,
     CompactionPipeline,
     ContentStore,
     ContextManager,
     TokenCounter,
     response_reserve,
 )
+from localharness.agent.loop import AgentLoop
+from localharness.agent.permissions import PermissionEvaluator
+from localharness.config.models import AgentConfig
 from localharness.core.types import provider_messages
 from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
+
+
+def make_loop(llm, bus, tmp_path, registry=None, window=32768, ctx=None, request_note=None):
+    cfg = AgentConfig.model_validate({
+        "name": "evidence", "role": "Complete the requested task.",
+        "permissions": {"mode": "unattended", "deny_patterns": []},
+    })
+    ctx = ContextManager(max_context_tokens=window) if ctx is None else ctx
+    return AgentLoop(cfg, llm, bus, ctx, registry, PermissionEvaluator(), compact_md_path=COMPACT_DISABLED,
+                     config_dir=tmp_path, request_note=request_note)
 
 
 def pair(body, call_id="read"):
@@ -210,7 +226,6 @@ async def test_general_eviction_restores_only_the_declared_reference(monkeypatch
 @pytest.mark.asyncio
 async def test_over_four_refusal_reaches_the_model_through_the_loop(tmp_path, bus, mock_llm_client):
     from localharness.tools.base import ToolResult
-    from tests.unit.test_task_context import make_loop
 
     store = ContentStore()
     handle = store.put("Source snapshot")
@@ -233,3 +248,81 @@ async def test_over_four_refusal_reaches_the_model_through_the_loop(tmp_path, bu
     tool_messages = [m for m in loop._conversation if m.get("role") == "tool"]
     assert len(tool_messages) == 5
     assert "exceeds four references; split or narrow" in tool_messages[-1]["content"]
+
+
+def _subtypes(messages):
+    return [m.get("_lh", {}).get("subtype") for m in messages if m.get("_lh")]
+
+
+def test_the_loop_takes_no_task_record():
+    assert "task_context" not in inspect.signature(AgentLoop.__init__).parameters
+    assert not hasattr(make_loop(None, None, None), "_task_context")
+
+
+@pytest.mark.asyncio
+async def test_a_note_is_the_one_harness_message_after_the_lossy_transforms(tmp_path, bus, mock_llm_client):
+    loop = make_loop(mock_llm_client([]), bus, tmp_path)
+    original_build = loop._ctx.build_messages
+
+    async def lossy(messages, tools):
+        return await original_build([{"role": "user", "content": "old request"}], tools)
+
+    loop._ctx.build_messages = lossy
+    packed, _ = await loop._pack_request([], None, "the note")
+    assert packed[-1]["content"] == "the note"
+    assert _subtypes(packed) == ["request_note"]
+    packed, _ = await loop._pack_request([], None, "")
+    assert _subtypes(packed) == []
+
+
+@pytest.mark.asyncio
+async def test_an_overflow_with_a_note_retries_without_it_and_with_none_propagates(tmp_path, bus, mock_llm_client):
+    loop = make_loop(mock_llm_client([]), bus, tmp_path, request_note=lambda: "the note")
+    seen = []
+    fits_without_note = True
+
+    async def pack(messages, tools, note, **kw):
+        seen.append(note)
+        if note or not fits_without_note:
+            raise ActiveReferenceOverflow("too big")
+        return [], "budget"
+
+    loop._pack_request = pack
+    assert await loop._build_request([], None) == ([], "budget")
+    assert seen == ["the note", ""]
+
+    fits_without_note, loop._request_note = False, None
+    with pytest.raises(ActiveReferenceOverflow):
+        await loop._build_request([], None)
+
+
+@pytest.mark.asyncio
+async def test_xml_injection_is_counted_at_final_boundary(tmp_path, bus):
+    from localharness.agent.context import TokenCounter as Base
+    from localharness.provider.client import LLMClient, LLMConfig
+    from localharness.tools.base import ToolSchema
+
+    class Counter(Base):
+        def count_messages(self, messages, tools=None):
+            return 9000 if any("giant tool instruction" in (m.get("content") or "")
+                               for m in messages) else 100
+
+    llm = LLMClient(LLMConfig(base_url="http://127.0.0.1:9/v1", model="test",
+                              is_local=False, tool_call_mode="xml"))
+    loop = make_loop(llm, bus, tmp_path, window=8192)
+    loop._ctx._token_counter = Counter()
+    tools = [ToolSchema(name="check", description="giant tool instruction", parameters={})]
+    with pytest.raises(ActiveReferenceOverflow, match="XML prompt"):
+        await loop._pack_request([{"role": "user", "content": "Check"}], tools, "the note")
+    await llm._client.close()
+
+
+@pytest.mark.asyncio
+async def test_messages_reads_the_conversation_between_turns_and_the_session_during_one(tmp_path, bus, mock_llm_client):
+    llm = mock_llm_client([mock_llm_client.Response(content="42")])
+    loop = make_loop(llm, bus, tmp_path)
+    assert loop.messages() == []
+    await loop.run_turn("17 + 25?")
+    assert [m["role"] for m in loop.messages()] == [m["role"] for m in loop._conversation]
+    loop._live_turn = (type("S", (), {"messages": [{"role": "user", "content": "live"}]})(), None)
+    assert loop.messages() == [{"role": "user", "content": "live"}]

@@ -11,7 +11,7 @@ from localharness.cli.session_resume import SLEEP_ACTION, Resume, asleep_path, t
 from localharness.config.models import AgentConfig
 from localharness.core.bus import EventBus
 from localharness.core.types import human_message, provider_messages
-from tests.unit.test_task_context import make_loop
+from tests.unit.test_active_references import make_loop
 
 
 def _humans(loop):
