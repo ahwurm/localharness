@@ -1600,3 +1600,48 @@ def test_note_the_executors_provider_is_the_child_sentence_and_a_header_within_t
 def test_note_the_child_sentence_is_spec_text_verbatim():
     assert runner.CHILD_SENTENCE == ("Say in one line what you will produce, read what it depends on before you change "
                                      "anything, do the work, and write your doc as your final answer.")
+
+
+async def test_run_unit_a_doc_less_call_on_a_passed_plan_returns_the_doc_and_the_last_review_section(tmp_path):
+    flow, script, _, _ = await planned(tmp_path, {"parsimony": "[WARNING] the smallest plan — step 2 is optional"})
+    calls = len(script.calls)
+    text = await flow.run("plan")
+    assert text.startswith("doc:\n## Step 1") and "## round 1 · blockers 0" in text
+    assert "[WARNING] the smallest plan" in text and "verdict: pass" in text and last(text) == "next: run · step 1"
+    assert len(script.calls) == calls and flow.record.stage == "plan"
+
+
+async def test_run_unit_a_doc_less_decisions_read_before_any_review_says_so(tmp_path):
+    flow, script, _, _ = make_flow(tmp_path)
+    flow.open("fix login", 1)
+    text = await flow.run("new")
+    assert "doc:" not in text and "no review yet" in text and last(text) == "next: new · file" and script.calls == []
+
+
+async def test_run_unit_a_doc_over_the_cap_is_cut_and_the_manifest_says_so(tmp_path):
+    flow, _, _, _ = make_flow(tmp_path)
+    flow.open("fix login", 1)
+    text = await flow.run("new", "d" * (Caps.DOC + 10))
+    assert "note: truncated at the doc cap" in text and flow.docs.read(1, "decisions.md").endswith("[truncated]\n")
+
+
+async def test_refile_a_changed_executed_step_is_reopened_and_named_in_the_manifest(tmp_path):
+    flow, _, _, _ = await planned(tmp_path)
+    await flow.run("step")
+    await flow.run("step")
+    assert step_row(flow).verdict == "pass" and ("step-1.md", None) in flow.record.filed
+    flow.record.flags["plan"] = True
+    text = await flow.run("plan", PLAN_TWO.replace("x1 changed", "x1 changed differently"))
+    assert "note: steps 1 reopened" in text and ("step-1.md", None) not in flow.record.filed
+    assert step_row(flow, 1).verdict == step_row(flow, 2).verdict == "unreviewed"
+
+
+async def test_flow_end_turn_clears_the_flags_the_halt_the_cap_the_total_and_the_jtbd_bit(tmp_path):
+    flow, _, _, _ = await planned(tmp_path)
+    flow.record.flags.update(new=True, plan=True)
+    flow.record.halted = "stopped"
+    flow.cap.reserve(ChildBudget(actions=1, minutes=5.0), 0.0)
+    flow.excluded, flow.jtbd_stood = 90.0, True
+    flow.end_turn()
+    assert flow.record.flags == {"new": False, "plan": False} and flow.record.halted is None
+    assert flow.cap.remaining() == flow.limits.flow_cap_minutes * 60 and flow.excluded == 0.0 and flow.jtbd_stood is False
