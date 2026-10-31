@@ -133,6 +133,11 @@ def _brief(flow: TaskFlow, unit: Unit) -> str:
     return f"Review {here(DOCS[unit.boundary])}." + (f" Read also: {named}." if named else "")
 
 
+def _ended(result: Any) -> str:
+    """Why a child did not finish, or empty when it did."""
+    return "" if result.status == "completed" else one_line(result.terminated_reason or result.status)[:Caps.LINE]
+
+
 def _stale(flow: TaskFlow, *keys: tuple[str, str | None]) -> str | None:
     bad = next((k for k in keys if k in flow.record.filed and not flow.docs.verified(flow.record, k)), None)
     return _text(need("edited since filed", doc=bad[0])) if bad else None
@@ -251,12 +256,13 @@ async def _explore(flow: TaskFlow, boundary: str, unit: Unit, carried: str | Non
     finally:
         flow.cap.settle(granted, monotonic() - started)
         flow.reply_panel.set_phase(None)
-    digest, _ = flow.docs.write(record.id, "research.md",
-                                file_answer(flow.docs.read(record.id, "research.md") or "", n, carried, "explorer", result.raw))
+    ended = _ended(result)
+    digest, _ = flow.docs.write(record.id, "research.md", file_answer(
+        flow.docs.read(record.id, "research.md") or "", n, carried, "explorer", result.raw, ended))
     record.questions.append(carried)
     file_doc(record, "research", ("research.md", None), digest)
     set_stage(record, "research")
-    child = f"q{n}: explorer " + ("answered" if answered(result.raw) else "returned none")
+    child = f"q{n}: explorer " + (f"stopped ({ended})" if ended else "answered" if answered(result.raw) else "returned none")
     return _done(flow, boundary, unit, ("research.md",), child, notes=_research_changed(flow))
 
 
@@ -308,7 +314,7 @@ async def _execute(flow: TaskFlow, boundary: str, unit: Unit, carried: str | Non
                                              compact_md_path=COMPACT_DISABLED, pipeline=pipeline)
     except asyncio.CancelledError:
         with suppress(Refused):
-            flow.docs.write_step(record.id, n, log, "", runtime, stopped=True)
+            flow.docs.write_step(record.id, n, log, "", runtime, stopped="cancelled")
         stop_step(record, n, "\n".join(log.lines))
         raise
     finally:
@@ -320,11 +326,15 @@ async def _execute(flow: TaskFlow, boundary: str, unit: Unit, carried: str | Non
     if not handles:
         for artifact in result.artifacts:
             log.add(f"wrote {artifact}")
-    digest, _ = flow.docs.write_step(record.id, n, log, result.raw, runtime)
+    ended = _ended(result)
+    digest, _ = flow.docs.write_step(record.id, n, log, result.raw, runtime, ended)
+    child = f"step {n}: {len(result.artifacts)} files written, {runtime['compactions']} compactions"
+    if ended:
+        stop_step(record, n, "\n".join(log.lines))
+        return _done(flow, boundary, unit, (f"step-{n}.md",), f"{child}; the executor stopped ({ended})")
     record.filed[(f"step-{n}.md", None)] = Row(digest)
     record.stopped_log = ""
     set_verdict(record, key, "unreviewed")
-    child = f"step {n}: {len(result.artifacts)} files written, {runtime['compactions']} compactions"
     return _done(flow, boundary, unit, (f"step-{n}.md",), child)
 
 

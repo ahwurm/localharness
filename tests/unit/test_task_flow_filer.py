@@ -629,11 +629,11 @@ def test_a_cancelled_step_holds_a_stopped_at_line_naming_the_last_event(tmp_path
     log = StepLog()
     log.add("read src/a.py")
     log.add("write src/b.py")
-    docs.write_step(1, 2, log, "", {"files": ["src/b.py"]}, stopped=True)
+    docs.write_step(1, 2, log, "", {"files": ["src/b.py"]}, stopped="cancelled")
     text = docs.read(1, "step-2.md")
     assert "stopped at write src/b.py" in text and "## final answer" not in text
     assert "files written: 1: src/b.py" in text and "tools called: none" in text and "compactions: 0" in text
-    docs.write_step(1, 3, StepLog(), "", {}, stopped=True)
+    docs.write_step(1, 3, StepLog(), "", {}, stopped="cancelled")
     assert "stopped at the start" in docs.read(1, "step-3.md")
 
 
