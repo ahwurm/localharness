@@ -1985,7 +1985,6 @@ async def test_act_guard_nudges_announce_then_halt(bus, tmp_path):
         "tools": {"deny": ["web_search", "web_fetch", "web_page_query"]},
         "permissions": {"budget": {"max_actions": 5, "max_duration_minutes": 5.0,
                                    "kill_file": str(tmp_path / "KILL")}},
-        "self_check": {"enabled": False},
     })
     llm = _AnnounceThenActLLM()
     loop = AgentLoop(config=cfg, llm=llm, bus=bus, context_manager=ContextManager(),
@@ -2037,7 +2036,6 @@ async def test_act_guard_confirmed_surfaces_prior_reply(bus, tmp_path):
         "tools": {"deny": ["web_search", "web_fetch", "web_page_query"]},
         "permissions": {"budget": {"max_actions": 5, "max_duration_minutes": 5.0,
                                    "kill_file": str(tmp_path / "KILL")}},
-        "self_check": {"enabled": False},
     })
     llm = _ConfirmOnNudgeLLM()
     loop = AgentLoop(config=cfg, llm=llm, bus=bus, context_manager=ContextManager(),
@@ -2089,7 +2087,6 @@ async def test_act_guard_echoed_confirmed_surfaces_prior_reply(bus, tmp_path):
         "tools": {"deny": ["web_search", "web_fetch", "web_page_query"]},
         "permissions": {"budget": {"max_actions": 5, "max_duration_minutes": 5.0,
                                    "kill_file": str(tmp_path / "KILL")}},
-        "self_check": {"enabled": False},
     })
     llm = _EchoConfirmOnNudgeLLM()
     loop = AgentLoop(config=cfg, llm=llm, bus=bus, context_manager=ContextManager(),
@@ -2148,7 +2145,6 @@ async def _run_reasoning_parser_double(bus, tmp_path, llm):
         "tools": {"deny": ["web_search", "web_fetch", "web_page_query"]},
         "permissions": {"budget": {"max_actions": 5, "max_duration_minutes": 5.0,
                                    "kill_file": str(tmp_path / "KILL")}},
-        "self_check": {"enabled": False},
     })
     loop = AgentLoop(config=cfg, llm=llm, bus=bus, context_manager=ContextManager(),
                      tool_registry=reg, permission_evaluator=PermissionEvaluator())
@@ -2217,7 +2213,6 @@ async def test_act_guard_nudge_text_offers_sentinel(bus, tmp_path):
         "tools": {"deny": ["web_search", "web_fetch", "web_page_query"]},
         "permissions": {"budget": {"max_actions": 5, "max_duration_minutes": 5.0,
                                    "kill_file": str(tmp_path / "KILL")}},
-        "self_check": {"enabled": False},
     })
     llm = _ConfirmOnNudgeLLM()
     loop = AgentLoop(config=cfg, llm=llm, bus=bus, context_manager=ContextManager(),
@@ -2256,7 +2251,6 @@ async def test_act_guard_omits_the_hatch_when_tools_required(bus, tmp_path):
         "tools": {"deny": ["web_search", "web_fetch", "web_page_query"]},
         "permissions": {"budget": {"max_actions": 5, "max_duration_minutes": 5.0,
                                    "kill_file": str(tmp_path / "KILL")}},
-        "self_check": {"enabled": False},
     })
     loop = AgentLoop(config=cfg, llm=_ConfirmOnNudgeLLM(), bus=bus,
                      context_manager=ContextManager(), tool_registry=reg,
@@ -2696,19 +2690,17 @@ async def test_dropped_native_tool_calls_publish_parse_failed(mock_llm_client, b
 # turn completed success=True with a STALE narration line as its summary.
 # ---------------------------------------------------------------------------
 
-def _no_self_check_config():
-    from localharness.config.models import AgentConfig, SelfCheckConfig
-    return AgentConfig(name="test-agent", role="Test agent.",
-                       self_check=SelfCheckConfig(enabled=False))
+def _plain_config():
+    from localharness.config.models import AgentConfig
+    return AgentConfig(name="test-agent", role="Test agent.")
 
 
 def _capped_config(max_tokens=4_096):
     """An agent that CONFIGURED an output cap. The default is no cap at all — max_tokens is not
     sent and the model stops when it is done — so every test of the fit-and-grow machinery has
     to say out loud that its agent chose a number, or it is testing a path nobody is on."""
-    from localharness.config.models import AgentConfig, SelfCheckConfig
-    return AgentConfig(name="test-agent", role="Test agent.", max_tokens=max_tokens,
-                       self_check=SelfCheckConfig(enabled=False))
+    from localharness.config.models import AgentConfig
+    return AgentConfig(name="test-agent", role="Test agent.", max_tokens=max_tokens)
 
 
 @pytest.mark.asyncio
@@ -2719,7 +2711,7 @@ async def test_empty_completion_reprompts_once_then_fails_loudly(mock_llm_client
         Response(content="", finish_reason="length"),
         Response(content="", finish_reason="length"),
     ]
-    loop = _make_agent_loop(mock_llm_client, responses, bus, config=_no_self_check_config())
+    loop = _make_agent_loop(mock_llm_client, responses, bus, config=_plain_config())
     summary = await loop.run_turn("write the report")
 
     # Honest-failure pathway (same as parse-retry exhaustion and #152): no TaskComplete is
@@ -2740,7 +2732,7 @@ async def test_empty_completion_then_real_answer_completes_normally(mock_llm_cli
         Response(content="", finish_reason="length"),
         Response(content="Here is the answer.", finish_reason="stop"),
     ]
-    loop = _make_agent_loop(mock_llm_client, responses, bus, config=_no_self_check_config())
+    loop = _make_agent_loop(mock_llm_client, responses, bus, config=_plain_config())
     summary = await loop.run_turn("write the report")
 
     assert summary == "Here is the answer."
@@ -2760,7 +2752,7 @@ async def test_empty_completion_then_real_answer_completes_normally(mock_llm_cli
 async def test_plain_requests_carry_no_output_cap_override(mock_llm_client, bus):
     Response = mock_llm_client.Response
     loop = _make_agent_loop(mock_llm_client, [Response(content="Done.")], bus,
-                            config=_no_self_check_config())
+                            config=_plain_config())
     await loop.run_turn("hello")
     assert loop._llm.calls and all("max_tokens" not in c for c in loop._llm.calls)
 
@@ -2897,7 +2889,7 @@ async def test_uncapped_length_finish_does_not_invent_a_cap_to_double(mock_llm_c
                  usage=Usage(prompt_tokens=1_000, completion_tokens=4_096, total_tokens=5_096)),
         Response(content="Here is the answer.", finish_reason="stop"),
     ]
-    loop = _make_agent_loop(mock_llm_client, responses, bus, config=_no_self_check_config())
+    loop = _make_agent_loop(mock_llm_client, responses, bus, config=_plain_config())
     with caplog.at_level(logging.WARNING, logger="localharness.agent.loop"):
         summary = await loop.run_turn("write the report")
 
@@ -2921,7 +2913,7 @@ async def test_uncapped_truncated_final_answer_ships_without_a_retry(mock_llm_cl
         Response(content="The draft begins and then", finish_reason="length",
                  usage=Usage(prompt_tokens=2_000, completion_tokens=4_096, total_tokens=6_096)),
     ]
-    loop = _make_agent_loop(mock_llm_client, responses, bus, config=_no_self_check_config())
+    loop = _make_agent_loop(mock_llm_client, responses, bus, config=_plain_config())
     summary = await loop.run_turn("write the report")
 
     assert summary == "The draft begins and then"
@@ -2956,7 +2948,7 @@ async def test_degenerate_stream_is_retried_once_with_a_presence_penalty(bus, mo
     from localharness.config.models import AgentConfig
     Response = mock_llm_client.Response
     llm = _degenerate_then(mock_llm_client, [Response(content="Here is the answer.")])
-    loop = AgentLoop(config=_no_self_check_config(), llm=llm, bus=bus,
+    loop = AgentLoop(config=_plain_config(), llm=llm, bus=bus,
                      context_manager=ContextManager(), tool_registry=None,
                      permission_evaluator=PermissionEvaluator())
     summary = await loop.run_turn("write the report")
@@ -2975,7 +2967,7 @@ async def test_degenerate_stream_twice_fails_the_turn_honestly(bus, mock_llm_cli
     from localharness.core.events import TaskComplete
     Response = mock_llm_client.Response
     llm = _degenerate_then(mock_llm_client, [Response(content="never reached")], times=2)
-    loop = AgentLoop(config=_no_self_check_config(), llm=llm, bus=bus,
+    loop = AgentLoop(config=_plain_config(), llm=llm, bus=bus,
                      context_manager=ContextManager(), tool_registry=None,
                      permission_evaluator=PermissionEvaluator())
     summary = await loop.run_turn("write the report")

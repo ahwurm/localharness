@@ -19,6 +19,7 @@ import pytest
 
 from localharness.agent.context import ContextManager
 from localharness.agent.loop import (
+    _ACT_GUARD_NUDGE,
     AgentLoop,
     Session,
     _format_completion_summary,
@@ -50,17 +51,23 @@ class _ScriptedNoToolLLM:
         return NS(content=self._contents[idx], tool_calls=None), None
 
 
-def _make_loop(llm, bus, *, self_check: dict | None = None) -> AgentLoop:
-    overrides = {"name": "sum-agent", "role": "Test agent."}
-    if self_check is not None:
-        overrides["self_check"] = self_check
-    cfg = AgentConfig.model_validate(overrides)
+async def _glob_registry():
+    """One read-only tool, so the loop offers tool schemas and the act-guard can arm."""
+    from localharness.tools.builtin import register_builtin_tools
+    from localharness.tools.registry import ToolRegistry
+
+    full = ToolRegistry()
+    await register_builtin_tools(full)
+    return ToolRegistry.from_allowed(["glob"], base_registry=full)
+
+
+def _make_loop(llm, bus, *, tool_registry=None) -> AgentLoop:
     return AgentLoop(
-        config=cfg,
+        config=AgentConfig.model_validate({"name": "sum-agent", "role": "Test agent."}),
         llm=llm,
         bus=bus,
         context_manager=ContextManager(),
-        tool_registry=None,
+        tool_registry=tool_registry,
         permission_evaluator=PermissionEvaluator(),
     )
 
@@ -134,7 +141,7 @@ def test_real_content_returned_verbatim():
 async def test_double_confirmed_reprompts_once_then_honest(bus):
     """Both iterations are the bare sentinel with nothing to confirm: one bounded re-prompt,
     then the honest 'No answer was produced this turn.' — never a prior turn, never a loop."""
-    llm = _ScriptedNoToolLLM(["CONFIRMED", "CONFIRMED"])  # self_check OFF (default)
+    llm = _ScriptedNoToolLLM(["CONFIRMED", "CONFIRMED"])  
     loop = _make_loop(llm, bus)
     session = Session(agent_id="sum-agent", session_id="s-dc", messages=[])
 
@@ -161,10 +168,10 @@ async def test_reprompt_recovers_a_real_answer(bus):
 
 @pytest.mark.asyncio
 async def test_confirmed_with_in_turn_answer_does_not_reprompt(bus):
-    """When the sentinel confirms a real in-turn answer, NO #91 re-prompt fires (self-check path
-    stays intact — mirrors test_agent_loop_selfcheck)."""
+    """When the sentinel confirms a real in-turn answer (after the act-guard's one nudge), NO #91
+    re-prompt fires."""
     llm = _ScriptedNoToolLLM(["The answer is 42.", "CONFIRMED"])
-    loop = _make_loop(llm, bus, self_check={"enabled": True, "max_passes": 1})
+    loop = _make_loop(llm, bus, tool_registry=await _glob_registry())
     session = Session(agent_id="sum-agent", session_id="s-ok", messages=[])
 
     summary = await loop._execute_loop(session, "meaning of life?", None)
@@ -180,14 +187,14 @@ async def test_confirmed_with_in_turn_answer_does_not_reprompt(bus):
 
 def test_strip_sentinel_exchanges_drops_nudge_confirmed_pair():
     # Only structured harness origin permits removing the inducing nudge.
-    from localharness.agent.loop import _SELF_CHECK_NUDGE, _strip_sentinel_exchanges
+    from localharness.agent.loop import _ACT_GUARD_NUDGE, _strip_sentinel_exchanges
     from localharness.core.types import harness_message
 
     msgs = [
         {"role": "system", "content": "sys"},
         {"role": "user", "content": "the task"},
         {"role": "assistant", "content": "The answer is 42."},
-        harness_message(_SELF_CHECK_NUDGE, "self_check"),
+        harness_message(_ACT_GUARD_NUDGE, "act_guard"),
         {"role": "assistant", "content": "CONFIRMED"},
     ]
     out = _strip_sentinel_exchanges(msgs)
@@ -209,10 +216,10 @@ def test_strip_sentinel_exchanges_keeps_plain_history():
 
 @pytest.mark.asyncio
 async def test_conversation_persist_strips_confirmed_pair(bus):
-    """After a self-check turn ending in CONFIRMED, the persisted cross-turn conversation keeps
-    the real answer but drops the review-nudge + CONFIRMED pair (imitable precedent, #91b)."""
+    """After an act-guard turn ending in CONFIRMED, the persisted cross-turn conversation keeps
+    the real answer but drops the nudge + CONFIRMED pair (imitable precedent, #91b)."""
     llm = _ScriptedNoToolLLM(["The answer is 42.", "CONFIRMED"])
-    loop = _make_loop(llm, bus, self_check={"enabled": True, "max_passes": 1})
+    loop = _make_loop(llm, bus, tool_registry=await _glob_registry())
     session = Session(agent_id="sum-agent", session_id="s-persist", messages=[])
 
     await loop._execute_loop(session, "q", None)
@@ -220,9 +227,7 @@ async def test_conversation_persist_strips_confirmed_pair(bus):
     conv = loop._conversation
     assert any(m["role"] == "assistant" and m.get("content") == "The answer is 42." for m in conv)
     assert not any(m["role"] == "assistant" and _is_confirmation(m.get("content")) for m in conv)
-    assert not any(
-        m["role"] == "user" and "Review your answer" in (m.get("content") or "") for m in conv
-    )
+    assert not any(m["role"] == "user" and m.get("content") == _ACT_GUARD_NUDGE for m in conv)
 
 
 # ---------------------------------------------------------------------------
@@ -278,11 +283,11 @@ def test_echoed_sentinel_surfaces_this_turns_real_answer():
 
 @pytest.mark.asyncio
 async def test_persist_strips_echoed_confirmed_pair(bus):
-    """#91b hygiene must cover the echo: after a self-check turn ending in the ECHOED
+    """#91b hygiene must cover the echo: after an act-guard turn ending in the ECHOED
     sentinel, the summary is the real answer and the nudge + echo pair is dropped from
     the persisted conversation."""
     llm = _ScriptedNoToolLLM(["The answer is 42.", _LIVE_ECHO])
-    loop = _make_loop(llm, bus, self_check={"enabled": True, "max_passes": 1})
+    loop = _make_loop(llm, bus, tool_registry=await _glob_registry())
     session = Session(agent_id="sum-agent", session_id="s-persist-echo", messages=[])
 
     summary = await loop._execute_loop(session, "q", None)
@@ -293,9 +298,7 @@ async def test_persist_strips_echoed_confirmed_pair(bus):
     assert not any(
         m["role"] == "assistant" and "CONFIRMED" in (m.get("content") or "") for m in conv
     )
-    assert not any(
-        m["role"] == "user" and "Review your answer" in (m.get("content") or "") for m in conv
-    )
+    assert not any(m["role"] == "user" and m.get("content") == _ACT_GUARD_NUDGE for m in conv)
 
 
 # ---------------------------------------------------------------------------

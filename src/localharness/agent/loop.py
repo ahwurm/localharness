@@ -572,12 +572,6 @@ _ACT_GUARD_NUDGE_TOOLS_REQUIRED = (
     "they work; if you believe one is missing or broken, say which in a single line and then call "
     "the closest tool you do have. Do not answer from memory."
 )
-_SELF_CHECK_NUDGE = (
-    "Review your answer above for correctness and completeness. "
-    "If it is correct, reply with only the single word: CONFIRMED. If not, reply with "
-    "the corrected complete answer on its own — only your latest reply "
-    "is shown to the user, so never refer back to an earlier reply."
-)
 _SENTINEL_REPROMPT_NUDGE = (
     "Your last reply was only a confirmation, but there is nothing in this "
     "turn to confirm. Provide your full answer to the task now."
@@ -631,7 +625,7 @@ _EMPTY_TURN_NOTICE_NO_CAP_THINKING_OFF = (
     "shorten the task or serve a larger window."
 )
 # #152: NOT a member of _is_harness_nudge's exact-match set — it is a template (it names the
-# repeat count), and unlike the act-guard/self-check nudges it never asks for the CONFIRMED
+# repeat count), and unlike the act-guard nudge it never asks for the CONFIRMED
 # sentinel, so it can never be half of a nudge->sentinel pair that wants stripping.
 _REPETITION_NUDGE_TEMPLATE = (
     "Your last reply was the same line repeated {total} times — that is not an answer. "
@@ -685,7 +679,7 @@ def _strip_sentinel_exchanges(messages: list[Message]) -> list[Message]:
     """#91b: return a copy of `messages` with each deterministic nudge -> bare-CONFIRMED pair
     removed, for persistence into the cross-turn conversation.
 
-    The act-guard / self-check / #91 sentinel re-prompt each end with a 'reply CONFIRMED'
+    The act-guard and the #91 sentinel re-prompt each end with a 'reply CONFIRMED'
     instruction; persisting that user+CONFIRMED pair verbatim is an imitable precedent that
     teaches a small local model to emit a spontaneous CONFIRMED next turn (the #91 splice
     trigger). Same spirit as the xml trailing-prose truncation (~loop.py:1071-1083): sanitize
@@ -2032,8 +2026,6 @@ class AgentLoop:
             call_only_multiplier=sd_cfg.call_only_multiplier,
             result_origin=getattr(self._tools, "result_origin", None),
         )
-        sc_cfg = self._config.self_check
-        self_check_passes_used = 0
         bg_cfg = self._config.baton_gate
         rg_cfg = self._config.repetition_guard
 
@@ -2741,11 +2733,10 @@ class AgentLoop:
                 # ("Now let me read X…") instead of doing it would otherwise be accepted verbatim
                 # as the final answer — the act-guard only arms at zero actions, so an
                 # announce-AFTER-work reply slips through. Nudge (persisted into history the same
-                # way the stuck-recovery/self-check nudges are, so the model sees it), then
+                # way the stuck-recovery nudges are, so the model sees it), then
                 # continue. Bounded by baton_gate.max_nudges per turn (default 1, i.e. the
                 # original #84 behavior): once every nudge is spent, a further announced
-                # intention is accepted (no loop). Runs BEFORE self_check so a genuinely-final
-                # reply still gets its review. The nudge CONTENT escalates with the count
+                # intention is accepted (no loop). The nudge CONTENT escalates with the count
                 # (_baton_nudge_message) — the count itself does not.
                 if bg_cfg.enabled and session.baton_nudges_used < bg_cfg.max_nudges and (
                         announced := _baton_closing_announce(content)):
@@ -2756,17 +2747,6 @@ class AgentLoop:
                     )
                     session.push(harness_message(_baton_nudge_message(
                         announced, session.baton_nudges_used), "baton"))
-                    continue
-
-                # Self-check (MECH-01): one bounded review pass before finalizing.
-                # A loop-structure mechanism — re-enters the while-loop for one more
-                # LLM round-trip (using the recovery-injection "append user turn +
-                # continue" idiom, loop.py:548-551). Bounded by max_passes (ge=1,le=3)
-                # so it provably terminates. Use the "user" role — vLLM rejects
-                # mid-conversation system messages.
-                if sc_cfg.enabled and self_check_passes_used < sc_cfg.max_passes:
-                    self_check_passes_used += 1
-                    session.push(harness_message(_SELF_CHECK_NUDGE, "self_check"))
                     continue
 
                 # #91: a completion that is empty or a bare sentinel with NO real assistant

@@ -6,7 +6,7 @@ import pytest
 from localharness.agent.context import ContextManager
 from localharness.agent.loop import AgentLoop
 from localharness.agent.permissions import PermissionEvaluator
-from localharness.config.models import AgentConfig, SelfCheckConfig
+from localharness.config.models import AgentConfig
 from localharness.provider.client import REASONING_CHARS_PER_TOKEN, ProviderReasoningBudgetError
 from tests.unit.test_client_effort_keys import MODES, MSGS, THINK_OFF, Server, _bad, make
 
@@ -16,7 +16,7 @@ LEVELS = {"off": "none", "low": "low", "high": "high", "max": "high"}
 
 def _loop(llm, bus, effort: str) -> AgentLoop:
     return AgentLoop(
-        config=AgentConfig(name="t", role="r", self_check=SelfCheckConfig(enabled=False)),
+        config=AgentConfig(name="t", role="r"),
         llm=llm, bus=bus, context_manager=ContextManager(max_context_tokens=131_072),
         tool_registry=None, permission_evaluator=PermissionEvaluator(), effort=(effort, "session"),
     )

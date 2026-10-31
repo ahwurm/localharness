@@ -10,7 +10,7 @@ import pytest
 from localharness.agent.context import ContextManager
 from localharness.agent.loop import AgentLoop
 from localharness.agent.permissions import PermissionEvaluator
-from localharness.config.models import AgentConfig, SelfCheckConfig
+from localharness.config.models import AgentConfig
 from localharness.core.events import StuckRecovered, TurnStarted
 
 
@@ -62,16 +62,12 @@ class TestDelivery:
         assert users.index("first nudge") < users.index("second nudge")
 
     async def test_nudge_pushed_midturn_lands_at_next_step_boundary(self, mock_llm_client, bus):
-        # self_check forces a 2nd iteration with no tools: iter-1 draft -> review -> iter-2.
+        # the baton gate forces a 2nd iteration with no tools: iter-1 announce -> nudge -> iter-2.
         Response = mock_llm_client.Response
-        cfg = AgentConfig(
-            name="test-agent", role="Test.",
-            self_check=SelfCheckConfig(enabled=True, max_passes=1),
-        )
         loop = _make_loop(
             mock_llm_client,
-            [Response(content="draft answer"), Response(content="CONFIRMED")],
-            bus, config=cfg,
+            [Response(content="Now let me read the spec."), Response(content="The spec is read.")],
+            bus,
         )
         orig = loop._llm.stream_complete
         seen = {"n": 0, "call2": None}
@@ -88,7 +84,7 @@ class TestDelivery:
         loop._llm.stream_complete = wrapper
         await loop.run_turn("do the thing")
 
-        assert seen["n"] == 2, "self_check should force a 2nd iteration"
+        assert seen["n"] == 2, "the baton gate should force a 2nd iteration"
         contents = [m.get("content") for m in seen["call2"]]
         assert "stop and re-read the spec first" in contents, (
             "nudge must be drained into iteration-2's request at the step boundary"
