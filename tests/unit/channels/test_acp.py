@@ -42,6 +42,7 @@ from localharness.agent.gate import PermissionGate
 from localharness.agent.loop import AgentLoop
 from localharness.agent.permissions import PermissionEvaluator
 from localharness.channels.acp import NOTHING_PENDING, PENDING_UNKNOWN, AcpChannel
+from localharness.core.events import Action, TaskComplete, TurnFailed
 from localharness.config.grants import GrantStore
 from localharness.config.models import AgentConfig
 from localharness.core.bus import EventBus
@@ -1397,3 +1398,64 @@ async def test_sigterm_tears_the_session_down_and_exits_clean(tmp_path, keep_cwd
     )
     assert "SIGTERM" in logged
     assert process.returncode is None or process.returncode == 0
+
+
+# ------------------------------------------------------------------ a held reply
+
+
+class _Texts:
+    def __init__(self):
+        self.texts: list[str] = []
+
+    async def session_update(self, session_id, update, **kw):
+        self.texts.append(update.content.text)
+
+
+def _speaking(tmp_path):
+    ch = AcpChannel(config_dir=str(tmp_path / "config"))
+    ch._conn, ch._session_id = _Texts(), "sess"
+    return ch
+
+
+def _generation(tool_calls, **kw):
+    return Action(agent_id="a", session_id="s", action_type="llm_response", content="", has_tool_calls=tool_calls, **kw)
+
+
+def _complete(summary, **kw):
+    return TaskComplete(agent_id="a", session_id="s", success=True, summary=summary, duration_seconds=0.1, iterations=1, **kw)
+
+
+async def test_a_held_final_is_delivered_from_the_summary_after_streamed_narration(tmp_path):
+    ch = _speaking(tmp_path)
+    await ch._on_token("Looking at the files.")
+    await ch.on_action(_generation(True))
+    await ch.on_task_complete(_complete("The answer is 42."))
+    assert ch._conn.texts[-1].strip() == "The answer is 42."
+    assert len(ch._conn.texts) == 2
+
+
+async def test_a_streamed_final_after_a_tool_call_is_not_printed_twice(tmp_path):
+    ch = _speaking(tmp_path)
+    await ch._on_token("Looking.")
+    await ch.on_action(_generation(True))
+    await ch._on_token("The answer is 42.")
+    await ch.on_task_complete(_complete("The answer is 42."))
+    assert ch._conn.texts == ["Looking.", "The answer is 42."]
+
+
+async def test_a_held_budget_wrapup_is_delivered_from_turn_failed_after_streamed_narration(tmp_path):
+    ch = _speaking(tmp_path)
+    await ch._on_token("Looking.")
+    await ch.on_action(_generation(True))
+    failed = TurnFailed(agent_id="a", session_id="s", reason="budget_exceeded", detail="Found two files.",
+                        iterations=3, duration_seconds=1.0)
+    await ch.send_wrapup_reply(failed)
+    assert [t.strip() for t in ch._conn.texts] == ["Looking.", "Found two files."]
+
+
+async def test_a_childs_tool_call_generation_does_not_reset_the_streamed_flag(tmp_path):
+    ch = _speaking(tmp_path)
+    await ch._on_token("The answer is 42.")
+    await ch.on_action(_generation(True, parent_id="child"))
+    await ch.on_task_complete(_complete("The answer is 42."))
+    assert ch._conn.texts == ["The answer is 42."]
