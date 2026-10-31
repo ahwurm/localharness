@@ -1,10 +1,13 @@
 """The task flow's tables and its in-memory record: stages, limits and the revision rule."""
 from __future__ import annotations
 
+import math
+import re
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
 from localharness.config.models import ChildBudget
+from localharness.core.caps import Caps
 
 BOUNDARIES = ("reply", "new", "research", "plan", "step", "task")
 
@@ -40,16 +43,139 @@ class Limit(NamedTuple):
     ceiling: Any
 
 
-LIMITS: dict[str, Limit] = {
-    "critic": Limit(ChildBudget(actions=3, minutes=1), ChildBudget(actions=12, minutes=6),
-                    ChildBudget(actions=12, minutes=6)),
-}
+SENSED = ("factual", "recency", "spec-compliance")
 CRITICS_AT_FLOOR = frozenset({"jtbd", "answer"})
+_CEILING = ChildBudget(actions=12, minutes=6)
+_FLOOR = ChildBudget(actions=3, minutes=1)
+
+LIMITS: dict[str, Limit] = {
+    "critic": Limit(_FLOOR, _CEILING, _CEILING),
+    "executor": Limit(_FLOOR, ChildBudget(actions=24, minutes=25), ChildBudget(actions=48, minutes=40)),
+    "explorer": Limit(_FLOOR, ChildBudget(actions=12, minutes=6), ChildBudget(actions=24, minutes=10)),
+    "additions": Limit(0, 0, 3),
+    "flow_cap_minutes": Limit(1.0, 180.0, 360.0),
+    **{f"revisions.{b}": Limit(0, row.revisions, 1 if b == "reply" else row.revisions + 2)
+       for b, row in STAGES.items() if row.revisions},
+}
+REPLY_RESERVE_MINUTES = ((len(STAGES["reply"].floor) + len(SENSED) + LIMITS["additions"].ceiling)
+                         * (LIMITS["revisions.reply"].ceiling + 1) * LIMITS["critic"].ceiling.minutes)
+_NAME = re.compile(r"[a-z-]+")
 
 
-def panel_minutes(critics: tuple[str, ...], limits: Any = None) -> float:
-    return sum((LIMITS["critic"].floor if name in CRITICS_AT_FLOOR else LIMITS["critic"].default).minutes
-               for name in critics)
+@dataclass(frozen=True)
+class Limits:
+    executor: ChildBudget
+    explorer: ChildBudget
+    flow_cap_minutes: float
+    additions: dict[str, tuple[str, ...]]
+    revisions: dict[str, int]
+    critics: dict[str, ChildBudget]
+
+    def critic(self, name: str) -> ChildBudget:
+        return self.critics.get(name, LIMITS["critic"].floor if name in CRITICS_AT_FLOOR else LIMITS["critic"].default)
+
+
+def _clip(value: Any, low: Any, high: Any) -> Any:
+    return min(max(value, low), high)
+
+
+def _shown(b: Any) -> str:
+    return f"({b.actions}, {b.minutes:g})"
+
+
+def _refusal(name: Any, kept: list[str], floor: tuple[str, ...], known: Any) -> str | None:
+    if not isinstance(name, str) or not _NAME.fullmatch(name):
+        return "is not a critic name"
+    if name in floor or name in kept:
+        return "is already on the panel"
+    if known is not None and name not in known:
+        return "is not a known critic"
+    if len(kept) >= LIMITS["additions"].ceiling:
+        return "is past the additions ceiling"
+    return None
+
+
+def limited(cfg: Any = None, known: Any = None) -> tuple[Limits, tuple[str, ...]]:
+    notes: list[str] = []
+
+    def note(key: str, what: str) -> None:
+        notes.append(f"task_flow.{key}: {what}")
+
+    def number(key: str, value: Any, limit: Limit) -> Any:
+        out = _clip(value, limit.floor, limit.ceiling)
+        if out != value:
+            note(key, f"{value} is outside {limit.floor}..{limit.ceiling}; using {out}")
+        return out
+
+    def budget(key: str, value: Any, limit: Limit) -> ChildBudget:
+        out = ChildBudget(actions=_clip(value.actions, limit.floor.actions, limit.ceiling.actions),
+                          minutes=_clip(value.minutes, limit.floor.minutes, limit.ceiling.minutes))
+        if (out.actions, out.minutes) != (value.actions, value.minutes):
+            note(key, f"{_shown(value)} is outside {_shown(limit.floor)}..{_shown(limit.ceiling)}; using {_shown(out)}")
+        return out
+
+    def given(name: str) -> Any:
+        return getattr(cfg, name, None)
+
+    own = {name: budget(name, given(name) or LIMITS[name].default, LIMITS[name]) for name in ("executor", "explorer")}
+    cap = given("flow_cap_minutes")
+    flow = LIMITS["flow_cap_minutes"].default if cap is None else number("flow_cap_minutes", cap, LIMITS["flow_cap_minutes"])
+    revisions = {k.removeprefix("revisions."): row.default for k, row in LIMITS.items() if k.startswith("revisions.")}
+    for boundary, value in (given("revisions") or {}).items():
+        row = LIMITS.get(f"revisions.{boundary}")
+        if row is None:
+            note(f"revisions.{boundary}", "has no revisions to configure; dropped")
+        else:
+            revisions[boundary] = number(f"revisions.{boundary}", value, row)
+    critics: dict[str, ChildBudget] = {}
+    for name, value in (given("critics") or {}).items():
+        if not _NAME.fullmatch(name) or (known is not None and name not in known):
+            note(f"critics.{name}", "is not a known critic; dropped")
+        else:
+            critics[name] = budget(f"critics.{name}", value, LIMITS["critic"])
+    additions: dict[str, tuple[str, ...]] = {}
+    for boundary, names in (given("panels") or {}).items():
+        if boundary not in STAGES:
+            note(f"panels.{boundary}", "is not a boundary; dropped")
+            continue
+        kept: list[str] = []
+        for name in names:
+            reason = _refusal(name, kept, STAGES[boundary].floor, known)
+            if reason:
+                note(f"panels.{boundary}", f"{name!r} {reason}; dropped")
+            else:
+                kept.append(name)
+        additions[boundary] = tuple(kept)
+    return Limits(own["executor"], own["explorer"], flow, additions, revisions, critics), tuple(notes)
+
+
+def panel_critics(boundary: str, limits: Limits, sensed: tuple[str, ...] = ()) -> tuple[str, ...]:
+    return tuple(dict.fromkeys((*STAGES[boundary].floor, *sensed, *limits.additions.get(boundary, ()))))
+
+
+def panel_minutes(critics: tuple[str, ...], limits: Limits | None = None) -> float:
+    limits = limits or limited()[0]
+    return sum(limits.critic(name).minutes for name in critics)
+
+
+class Unit(NamedTuple):
+    boundary: str
+    kind: str
+    step: int | None = None
+
+
+def unit_minutes(unit: Unit, limits: Limits, sensed: tuple[str, ...] = ()) -> float:
+    if unit.kind == "explore":
+        return limits.explorer.minutes
+    if unit.kind in ("execute", "revise"):
+        return limits.executor.minutes
+    panels = 1 + limits.revisions["reply"] if unit.boundary == "reply" else 1
+    return panels * panel_minutes(panel_critics(unit.boundary, limits, sensed), limits)
+
+
+def printed_bound(minutes: float, remainder_seconds: float | None = None) -> int:
+    seconds = minutes * 60 if remainder_seconds is None else min(minutes * 60, remainder_seconds)
+    return math.floor(seconds / 60)
 
 
 @dataclass
@@ -132,3 +258,93 @@ def review_of(record: Record, doc: str) -> str | None:
     if (doc, None) not in record.filed:
         return None
     return f"{doc.removesuffix('.md')}-review.md"
+
+
+class Line(NamedTuple):
+    state: str
+    commands: tuple[str, ...] = ()
+    tail: str = ""
+    model: str = ""
+
+
+_BOUND = "up to <bound> min"
+_STOP = ("<stop>",)
+
+LINES: dict[str, Line] = {
+    "armed": Line("<verb> armed", _STOP, "cap <n> min"),
+    "running": Line("<unit> running", _STOP, _BOUND),
+    "stopping": Line("stopping", ("<cancel>",), f"after this unit · {_BOUND}"),
+    "stopping idle": Line("stopping", ("<cancel>",), "before the next task call"),
+    "heard": Line("heard", _STOP, "after this unit"),
+    "queued": Line("queued", _STOP, "after this turn · ! nudges"),
+    "queued slash": Line("queued", _STOP, "after this turn · a command waits"),
+    "queued phone": Line("queued", _STOP, "after this turn"),
+    "decisions filed": Line("decisions filed", (), "from <n> turns"),
+    "pass": Line("<stage> <verdict>", ("<next>",), _BOUND),
+    "reopened": Line("<stage> reopened", ("<cancel>",)),
+    "blocked": Line("<stage> blocked", ("/task <verb> (reopens)", "show <doc>", "accept"), "<n> blockers"),
+    "unreviewed": Line("<stage> unreviewed", ("/task <verb> (re-panels)", "<next>"), _BOUND,
+                       "panel unfinished; the person re-runs it"),
+    "interview open": Line("interview open", ("/task plan (skips the questions)",)),
+    "research blocked": Line("research blocked", ("/task plan (plans anyway)", "show research"), "<n> blockers"),
+    "research unreviewed": Line("research unreviewed", ("/task research (re-runs)", "plan"), _BOUND),
+    "plan unreviewed": Line("plan unreviewed", ("/task plan (re-panels)",), _BOUND),
+    "review blocked": Line("review blocked", ("/task plan", "show review", "accept (ends tN)"), "<n> blockers",
+                           "the task review blocked the plan; call stage=plan for the findings, then revise it"),
+    "review unreviewed": Line("review unreviewed", ("/task run (re-runs the task panel)",), _BOUND),
+    "step pass": Line("step N/M pass", _STOP, _BOUND),
+    "step pass ended": Line("step N/M pass", ("/task run (next step)",), _BOUND),
+    "step pass last": Line("step N/M pass", ("/task run (task review)",), _BOUND),
+    "step blocked": Line("step N/M blocked", ("/task run (retries)", "show", "accept"), "<n> blockers"),
+    "step unreviewed": Line("step N/M unreviewed", ("/task run (panels it)",), _BOUND),
+    "step accepted": Line("step N/M accepted", ("/task run",), _BOUND),
+    "step stopped": Line("step N/M stopped, files half-edited", ("/task run (re-runs)",), _BOUND),
+    "halted": Line("halted", ("<next> (continues)",), "after <unit> · clean", "halted by the person"),
+    "halted cap": Line("halted", ("<next> (continues)",), "cap <n> min hit · clean",
+                       "the flow cap is spent for this turn; the person continues"),
+    "not started": Line("<stage> not started", ("/task <verb>",), "the model answered instead"),
+    "done": Line("done", ("/task show review",)),
+    "closed": Line("closed", ("/task show tN/<doc>",), "not resumable, folder kept"),
+    "paused": Line("paused", ("<next>", "clear (deletes the folder)")),
+    "run needs a plan": Line("run needs a plan", ("/task plan",), "",
+                             "run needs a passed or accepted plan; call stage=plan"),
+    "decisions unfiled": Line("decisions unfiled", (), "", "the interview is open; ask, or file stage=new first"),
+    "decisions blocked": Line("decisions blocked", ("/task new (reopens)", "accept"), "",
+                              "decisions.md is blocked; the person reopens or accepts it"),
+    "person decides": Line("person decides", (), "", "<doc> is blocked, <why>; the person decides"),
+    "nothing blocked": Line("nothing blocked", ("/task show",)),
+    "nothing to revise": Line("nothing to revise", ("/task plan <change>",)),
+    "research full": Line("research full", (), "", f"{Caps.QUESTIONS} questions are filed; call stage=research to review them"),
+    "nothing to review": Line("nothing to review", (), "", "no unreviewed answer; next: plan"),
+    "no task": Line("no task", ("/task new <objective>",), "", "no task is open; the person opens one with /task new"),
+    "open and not blocked": Line("open and not blocked", ("/task plan (revises)", "new <objective> (closes tN)")),
+    "step not executed": Line("step N not executed", ("/task run",)),
+    "step not in the plan": Line("step N not in the plan", ("/task show plan",)),
+    "research closed": Line("research closed", ("/task show research", "new <objective> (closes tN)"), "",
+                            "plan.md is filed; research is closed"),
+    "done refused": Line("done", ("/task show review", "new <objective>"), "",
+                         "the task is done; the person starts the next"),
+    "not adopted": Line("not adopted", ("/task show tN/<doc>",)),
+    "not the open task": Line("not the open task", ("/task show tN/<doc>",)),
+    "not a task doc": Line("not a task doc", ("/task show <doc>",)),
+    "edited since filed": Line("<doc> edited since filed", ("/task accept <doc> (uses your edit)",), "",
+                               "the doc changed after it was filed; the person accepts it"),
+}
+
+
+@dataclass(frozen=True)
+class Need:
+    commands: tuple[str, ...]
+    reason: str
+    model: str = ""
+
+
+def _fill(text: str, fields: dict[str, Any]) -> str:
+    for name, value in fields.items():
+        text = text.replace(f"<{name}>", str(value))
+    return text.replace("tN", str(fields["task"])) if "task" in fields else text
+
+
+def need(row: str, **fields: Any) -> Need:
+    line = LINES[row]
+    return Need(tuple(_fill(c, fields) for c in line.commands), _fill(line.state, fields), _fill(line.model, fields))
