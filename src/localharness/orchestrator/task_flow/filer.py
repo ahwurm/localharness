@@ -30,10 +30,11 @@ PLAN_SHAPE = ("plan.md needs `## Step N` headings numbered 1..n in order, each w
 NO_REVIEW = "no review yet"
 _HEADING = re.compile(r"## Step ([1-9][0-9]*)(?:[:\s].*)?")
 _FIELD = re.compile(r"(?:[-*] )?(files|depends_on|done):(.*)")
-_SPLIT = re.compile(r"(?m)^(?=##(?!#))")
+_SECTION_BREAK = re.compile(r"(?m)^(?=##(?!#))")
 _STEP_KEY = re.compile(r"step-([1-9][0-9]*)")
 _REVIEW_DOC = re.compile(r"(?:[a-z0-9-]+-)?review\.md")
 _HEADING_LINE = re.compile(r"(?m)^#")
+FENCE_RUN = re.compile(r"`{3,}")
 VERDICTS = ("pass", "blocked", "accepted", "unreviewed")
 UNANSWERED = "unanswered"
 
@@ -153,7 +154,7 @@ def _depends(value: str, step: int) -> tuple[int, ...] | None:
 def parse_plan(text: str) -> list[Section] | str:
     """The `## Step N` sections of a plan, or `PLAN_SHAPE`; text before the first heading is no section."""
     out: list[Section] = []
-    for i, chunk in enumerate(_SPLIT.split(text)[1:], 1):
+    for i, chunk in enumerate(_SECTION_BREAK.split(text)[1:], 1):
         head, *body = lines = _normal(chunk)
         heading, found = _HEADING.fullmatch(head), [m for line in body if (m := _FIELD.fullmatch(line))]
         if not heading or heading[1] != str(i) or sorted(m[1] for m in found) != ["depends_on", "done", "files"]:
@@ -188,8 +189,9 @@ def rerecord(record: Record, sections: list[Section]) -> list[int]:
     return reopened
 
 
-def _flat(text: str, cap: int = Caps.LINE) -> str:
-    return one_line(text)[:cap]
+def flat(text: str, cap: int = Caps.LINE) -> str:
+    """One sanitised line cut to `cap`, with no backtick run long enough to open or close a fence."""
+    return " ".join(FENCE_RUN.sub("", one_line(text)).split())[:cap]
 
 
 def _quote(text: str) -> str:
@@ -201,13 +203,13 @@ def render_section(round_n: int | None, findings: Iterable[Finding], verdict: st
     if verdict not in VERDICTS:
         raise ValueError(f"{verdict!r} is not a review verdict")
     head = "## accepted by the person" if round_n is None else f"## round {round_n} · blockers {blockers}"
-    rows = (f"- [{f.tag}] {_flat(' — '.join(p for p in (f.rule, f.evidence) if p), Caps.FINDING)}"
-            + (f" ({_flat(f.critic)})" if f.critic else "") for f in findings)
+    rows = (f"- [{f.tag}] {flat(' — '.join(p for p in (f.rule, f.evidence) if p), Caps.FINDING)}"
+            + (f" ({flat(f.critic)})" if f.critic else "") for f in findings)
     return "\n".join([head, *rows, f"verdict: {verdict}"])
 
 
 def _sections(text: str) -> list[str]:
-    return [p for p in _SPLIT.split(text) if p.startswith("##")]
+    return [p for p in _SECTION_BREAK.split(text) if p.startswith("##")]
 
 
 def last_section(text: str) -> str:
@@ -229,13 +231,13 @@ class StepLog:
         self.lines: list[str] = []
 
     def add(self, line: str) -> None:
-        self.lines.append(_flat(line))
+        self.lines.append(flat(line))
 
     def render(self, final: str, runtime: dict, stopped: str = "") -> str:
-        files, tools = [_flat(str(f)) for f in runtime.get("files", ())], runtime.get("tools", {})
-        called = ", ".join(f"{_flat(str(k))} x{v}" for k, v in tools.items())
+        files, tools = [flat(str(f)) for f in runtime.get("files", ())], runtime.get("tools", {})
+        called = ", ".join(f"{flat(str(k))} x{v}" for k, v in tools.items())
         tail = "\n".join([
-            *(["## stopped", f"stopped at {self.lines[-1] if self.lines else 'the start'} · {_flat(stopped)}"] if stopped else []),
+            *(["## stopped", f"stopped at {self.lines[-1] if self.lines else 'the start'} · {flat(stopped)}"] if stopped else []),
             *(["## final answer", _clip(_quote(final.strip()), Caps.BLOCK)] if final.strip() else []),
             "## runtime",
             f"files written: {len(files)}" + (f": {_clip(', '.join(files), Caps.BLOCK // 4)}" if files else ""),
@@ -254,9 +256,9 @@ def answered(answer: str) -> bool:
 
 def file_answer(text: str, n: int, question: str, explorer: str, answer: str, ended: str = "") -> str:
     """`research.md` with question `n`'s section written or replaced; `none`, `blocked` and empty leave it unanswered, an explorer that `ended` early files its reason and no answer."""
-    body = f"stopped: {_flat(ended)}" if ended else _clip(_quote(answer.strip()), Caps.BLOCK // 4) if answered(answer) else UNANSWERED
-    section = "\n".join([f"## q{n} · {_flat(question)}", body, f"explorer: {_flat(explorer)}"])
-    parts = [p.strip() for p in _SPLIT.split(text) if p.strip()]
+    body = f"stopped: {flat(ended)}" if ended else _clip(_quote(answer.strip()), Caps.BLOCK // 4) if answered(answer) else UNANSWERED
+    section = "\n".join([f"## q{n} · {flat(question)}", body, f"explorer: {flat(explorer)}"])
+    parts = [p.strip() for p in _SECTION_BREAK.split(text) if p.strip()]
     out = [section if p.startswith(f"## q{n} ·") else p for p in parts]
     return "\n\n".join(out if section in out else [*out, section]) + "\n"
 
@@ -265,9 +267,9 @@ def manifest(filed: Iterable[str], child: str = "", verdict: str = "", doc: str 
              notes: Iterable[str] = (), next_line: str = "") -> str:
     """What the root reads from a unit: filed names, counts, verdicts and fenced findings, never a child's output."""
     names = ", ".join(filed)
-    parts = (f"filed: {names}" if names else "", _flat(child, Caps.FINDING), _flat(verdict, Caps.FINDING),
+    parts = (f"filed: {names}" if names else "", flat(child, Caps.FINDING), flat(verdict, Caps.FINDING),
              f"doc:\n{doc.strip()}" if doc.strip() else "", findings,
-             *(f"note: {_flat(n, Caps.FINDING)}" for n in notes), next_line)
+             *(f"note: {flat(n, Caps.FINDING)}" for n in notes), next_line)
     return "\n".join(p for p in parts if p)
 
 
@@ -349,7 +351,7 @@ class Docs:
         if not _REVIEW_DOC.fullmatch(doc):
             raise Refused(f"{doc} is not a review doc")
         text = "\n\n".join(p for p in ((self.read(task, doc) or "").strip(), section.strip()) if p)
-        body = _newest([f"{p.strip()}\n\n" for p in _SPLIT.split(text) if p.strip()])
+        body = _newest([f"{p.strip()}\n\n" for p in _SECTION_BREAK.split(text) if p.strip()])
         return self.write(task, doc, body.rstrip() + "\n")[0]
 
     def write_step(self, task: int, n: int, log: StepLog, final: str, runtime: dict, stopped: str = "") -> tuple[str, bool]:

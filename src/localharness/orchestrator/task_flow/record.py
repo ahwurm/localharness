@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, NamedTuple
 
 from localharness.channels.base import CONTROL_CHARS_RE, INVISIBLE_CHARS_RE
-from localharness.config.models import ChildBudget
+from localharness.config.models import CRITIC_NAME, ChildBudget
 from localharness.core.caps import Caps
 
 BOUNDARIES = ("reply", "new", "research", "plan", "step", "task")
@@ -60,7 +60,6 @@ LIMITS: dict[str, Limit] = {
 }
 REPLY_RESERVE_MINUTES = ((len(STAGES["reply"].floor) + len(SENSED) + LIMITS["additions"].ceiling)
                          * (LIMITS["revisions.reply"].ceiling + 1) * LIMITS["critic"].ceiling.minutes)
-_NAME = re.compile(r"[a-z-]+")
 
 
 @dataclass(frozen=True)
@@ -85,7 +84,7 @@ def _shown(b: Any) -> str:
 
 
 def _refusal(name: Any, kept: list[str], floor: tuple[str, ...], known: Any) -> str | None:
-    if not isinstance(name, str) or not _NAME.fullmatch(name):
+    if not isinstance(name, str) or not CRITIC_NAME.fullmatch(name):
         return "is not a critic name"
     if name in floor or name in kept:
         return "is already on the panel"
@@ -130,7 +129,7 @@ def limited(cfg: Any = None, known: Any = None) -> tuple[Limits, tuple[str, ...]
             revisions[boundary] = number(f"revisions.{boundary}", value, row)
     critics: dict[str, ChildBudget] = {}
     for name, value in (given("critics") or {}).items():
-        if not _NAME.fullmatch(name) or (known is not None and name not in known):
+        if not CRITIC_NAME.fullmatch(name) or (known is not None and name not in known):
             note(f"critics.{name}", "is not a known critic; dropped")
         else:
             critics[name] = budget(f"critics.{name}", value, LIMITS["critic"])

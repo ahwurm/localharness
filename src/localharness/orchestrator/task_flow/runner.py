@@ -12,7 +12,7 @@ from localharness.agent.context import (
     COMPACT_DISABLED, CompactionPipeline, TokenCounter, make_compaction_summarize_fn, summarizer_input_chars)
 from localharness.agent.subagent import EXPLORE_TOOLS, _config_child_allowed
 from localharness.channels.base import one_line
-from localharness.config.models import AgentConfig, BudgetConfig, PermissionConfig, ToolConfig
+from localharness.config.models import CRITIC_NAME, AgentConfig, BudgetConfig, PermissionConfig, ToolConfig
 from localharness.core.caps import Caps
 from localharness.core.events import CompactionTriggered, Observation
 from localharness.orchestrator.task_flow.filer import (
@@ -35,7 +35,7 @@ EXPLORER_ROLE = ("Answer the one question from the repository's files with read,
 EXECUTOR_ROLE = ("Carry out the one step you are briefed with. When you cannot proceed, take the safe option and write "
                  "why in your final answer; never ask the person.")
 _RUNS = ("new", "research", "plan", "step", "task")
-_FINDING = re.compile(r"- \[(BLOCKER|WARNING|NOTE)\] (.*?)(?: \(([a-z-]+)\))?")
+_FINDING = re.compile(rf"- \[(BLOCKER|WARNING|NOTE)\] (.*?)(?: \(({CRITIC_NAME.pattern})\))?")
 _CAPPED = "the flow cap is spent for this turn; the person continues"
 _TRUNCATED = ["truncated at the doc cap"]
 

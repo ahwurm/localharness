@@ -1652,7 +1652,8 @@ class ChildBudget(BaseModel):
     minutes: float = Field(gt=0, le=1440.0, description="Wall-clock minutes the child may run.")
 
 
-CriticName = Annotated[str, StringConstraints(pattern=r"^[a-z-]+$")]
+CRITIC_NAME = re.compile(r"[a-z-]+")
+CriticName = Annotated[str, StringConstraints(pattern=f"^{CRITIC_NAME.pattern}$")]
 
 
 class TaskFlowConfig(BaseModel):
