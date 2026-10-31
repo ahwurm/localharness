@@ -1182,6 +1182,28 @@ def test_task_docs_doc_bites():
     assert len(check_task_docs_doc("## Nothing\n")) == len(TASK_DOCS_NEEDLES)
 
 
+STUCK_TASK_NEEDLES = (
+    "The `task` tool's results are declared untrusted, so its manifest counts as progress only through its last line, which the harness computes from the task record",
+    "repeated `task` calls are bounded by the flow cap, `/task stop` and the action budget rather than by the identical-call ceiling")
+
+
+def check_stuck_task_doc(security_text: str) -> list[str]:
+    """SECURITY.md's prompt-injection section says a `task` result counts as progress only through the manifest's last line and what bounds repeated calls."""
+    body = " ".join((section(security_text, "## Threat model: prompt injection") or "").split())
+    return [f"SECURITY.md's prompt-injection section does not say {n}" for n in STUCK_TASK_NEEDLES if n not in body]
+
+
+def test_stuck_task_doc_live():
+    assert check_stuck_task_doc(_read("SECURITY.md")) == []
+
+
+def test_stuck_task_doc_bites():
+    text = _read("SECURITY.md")
+    for needle in STUCK_TASK_NEEDLES:
+        assert check_stuck_task_doc(_swap(text, needle, "x")) == [f"SECURITY.md's prompt-injection section does not say {needle}"]
+    assert len(check_stuck_task_doc("## Nothing\n")) == len(STUCK_TASK_NEEDLES)
+
+
 _ROOT_PARAGRAPH = (
     "Answer ordinary questions directly, and make a single edit or lookup directly: read first, then change. "
     "When the work is bigger than that, run it through the task: write what you need to know and what you will read "

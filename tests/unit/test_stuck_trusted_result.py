@@ -137,6 +137,55 @@ def test_identical_trusted_results_hash_alike():
     assert len(set(sd._window)) == 1
 
 
+# --- the task tool: progress is the manifest's last line ---------------------
+
+RUN = {"stage": "run"}
+PLAN = {"stage": "plan"}
+
+
+def _manifest(body, last):
+    return (True, f"{body}\n\n{last}\n")
+
+
+def test_task_run_calls_that_advance_are_progress():
+    sd = StuckDetector(result_origin=_untrusted)
+    lasts = ("next: run · step 1 panel", "next: run · step 2", "next: run · step 2 panel")
+    states = [_step(sd, "task", RUN, _manifest(f"unit {i}", last)) for i, last in enumerate(lasts)]
+    assert states == [StuckState.CLEAR] * 3
+
+
+def test_task_repeating_a_last_line_climbs_the_ladder():
+    sd = StuckDetector(result_origin=_untrusted)
+    done = (True, "the plan\nrefused: no task is open")
+    assert _step(sd, "task", PLAN, done) == StuckState.CLEAR
+    assert _step(sd, "task", PLAN, done) == StuckState.RECOVERING
+    assert _step(sd, "task", PLAN, done) == StuckState.CLEAR
+    assert _step(sd, "task", PLAN, done) == StuckState.ESCALATE
+
+
+def test_task_body_that_changes_under_one_last_line_is_one_signature():
+    sd = StuckDetector(result_origin=_untrusted)
+    sd.record("task", RUN, _manifest("a nonce 1", "next: run · step 1"))
+    sd.record("task", RUN, _manifest("a nonce 2", "next: run · step 1"))
+    assert len(set(sd._window)) == 1
+    assert sd.check() == StuckState.RECOVERING
+
+
+def test_task_is_outside_the_identical_call_ceiling():
+    sd = StuckDetector(result_origin=_untrusted)
+    states = [_step(sd, "task", RUN, _manifest("u", f"next: run · step {i}")) for i in range(10)]
+    assert states == [StuckState.CLEAR] * 10
+    assert sd.ceiling_hit is None
+    assert sd.call_count(sd.compute_signature("task", RUN)) == 0
+
+
+def test_task_rule_does_not_leak_to_other_tools():
+    sd = StuckDetector(result_origin=_trusted)
+    states = [_step(sd, "read", {"path": "a"}, (True, f"v{i}")) for i in range(9)]
+    assert states[-1] == StuckState.ESCALATE
+    assert sd.ceiling_hit == sd.compute_signature("read", {"path": "a"})
+
+
 # --- the knob -----------------------------------------------------------------
 
 

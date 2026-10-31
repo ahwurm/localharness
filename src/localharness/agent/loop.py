@@ -262,6 +262,10 @@ class StuckDetector:
 
     def record(self, tool_name: str, args: dict, result: tuple[bool, str]) -> None:
         call_sig = self.compute_signature(tool_name, args)
+        if tool_name == "task":
+            last = next((ln for ln in reversed(result[1].splitlines()) if ln.strip()), "")
+            self._window.append(hashlib.sha256(f"{call_sig}:{last}".encode()).hexdigest()[:16])
+            return
         self._call_counts[call_sig] = self._call_counts.get(call_sig, 0) + 1
         if self._trusted(tool_name):
             ok, content = result
