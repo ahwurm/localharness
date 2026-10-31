@@ -299,7 +299,7 @@ def clear_turn(record: Record) -> None:
 def pointed(record: Record) -> str:
     if record.stage != "run":
         return POINTS[record.stage]
-    steps = _sections(record)
+    steps = sections(record)
     if not steps:
         return "plan.md"
     pending = [n for n in steps if record.filed[("plan.md", f"step-{n}")].verdict not in ("pass", "accepted")]
@@ -393,7 +393,7 @@ class Need:
     model: str = ""
 
 
-def _fill(text: str, fields: dict[str, Any]) -> str:
+def fill(text: str, fields: dict[str, Any]) -> str:
     for name, value in fields.items():
         text = text.replace(f"<{name}>", str(value))
     return text.replace("tN", str(fields["task"])) if "task" in fields else text
@@ -401,32 +401,32 @@ def _fill(text: str, fields: dict[str, Any]) -> str:
 
 def need(row: str, **fields: Any) -> Need:
     line = LINES[row]
-    return Need(tuple(_fill(c, fields) for c in line.commands), _fill(line.state, fields), _fill(line.model, fields))
+    return Need(tuple(fill(c, fields) for c in line.commands), fill(line.state, fields), fill(line.model, fields))
 
 
-_PASSED = ("pass", "accepted")
+PASSED = ("pass", "accepted")
 _STEP_DOC = re.compile(r"step-([1-9][0-9]*)\.md")
 DOC_NAME = re.compile(r"(decisions|research|plan|review|reply|job|step-[1-9][0-9]*)")
 PLAN_KEY = ("plan.md", None)
 
 
-def _sections(record: Record) -> list[int]:
+def sections(record: Record) -> list[int]:
     return sorted(int(k[1].removeprefix("step-")) for k in record.filed if k[0] == "plan.md" and k[1])
 
 
-def _executed(record: Record) -> set[int]:
+def executed(record: Record) -> set[int]:
     return {int(m[1]) for k in record.filed if (m := _STEP_DOC.fullmatch(k[0]))}
 
 
-def _next_step(record: Record) -> int | None:
-    return next((n for n in _sections(record) if record.filed[("plan.md", f"step-{n}")].verdict not in _PASSED), None)
+def next_step(record: Record) -> int | None:
+    return next((n for n in sections(record) if record.filed[("plan.md", f"step-{n}")].verdict not in PASSED), None)
 
 
 def boundary_of(stage: str, record: Record | None) -> str:
     if stage != "run":
         return stage
-    rows = [record.filed.get(("plan.md", s)) for s in (None, *(f"step-{n}" for n in _sections(record)))] if record else []
-    return "task" if len(rows) > 1 and all(r and r.verdict in _PASSED for r in rows) else "step"
+    rows = [record.filed.get(("plan.md", s)) for s in (None, *(f"step-{n}" for n in sections(record)))] if record else []
+    return "task" if len(rows) > 1 and all(r and r.verdict in PASSED for r in rows) else "step"
 
 
 def valid_question(q: object) -> bool:
@@ -449,7 +449,7 @@ def precondition(boundary: str, record: Record | None, by: str, carried: str | N
         return need("open and not blocked", task=f"t{record.id}") if by == "person" and carried is None and PLAN_KEY in filed else None
     if boundary in ("research", "plan"):
         decisions = filed.get(("decisions.md", None))
-        if boundary == "research" and _executed(record):
+        if boundary == "research" and executed(record):
             return need("research closed", task=f"t{record.id}")
         if decisions is None and by == "model":
             return need("decisions unfiled")
@@ -463,7 +463,7 @@ def precondition(boundary: str, record: Record | None, by: str, carried: str | N
             return need("run needs a plan")
         if plan.verdict == "blocked":
             return need("review blocked", task=f"t{record.id}") if record.stage == "task" else need("blocked", stage="plan", verb="plan", doc="plan")
-        if not _sections(record) or _executed(record) - set(_sections(record)):
+        if not sections(record) or executed(record) - set(sections(record)):
             return need("edited since filed", doc="plan.md")
     return None
 
@@ -479,17 +479,17 @@ def _explore(record: Record, boundary: str, carried: str | None, limits: Limits)
 
 
 def _execute(record: Record, boundary: str, carried: str | None, limits: Limits) -> int | None:
-    n = _next_step(record)
+    n = next_step(record)
     return n if n and (f"step-{n}.md", None) not in record.filed else None
 
 
 def _revise(record: Record, boundary: str, carried: str | None, limits: Limits) -> int | None:
-    n = _next_step(record)
+    n = next_step(record)
     return n if n and can_revise(record, "step", limits.revisions["step"], n) else None
 
 
 def _panel(record: Record, boundary: str, carried: str | None, limits: Limits) -> int | bool | None:
-    n = _next_step(record) if boundary == "step" else None
+    n = next_step(record) if boundary == "step" else None
     row = record.filed.get(_row_key(boundary, n))
     return (n or True) if row and row.verdict == "unreviewed" and record.flags.get(boundary, True) else None
 
@@ -532,7 +532,7 @@ def next_unit(record: Record, boundary: str, carried: str | None = None, limits:
             return Unit("plan", "panel")
         if plan and plan.verdict == "blocked":
             return _decides(record, "plan", limits) or Unit("plan", "file")
-    n = _next_step(record) if boundary == "step" else None
+    n = next_step(record) if boundary == "step" else None
     if decides := _decides(record, boundary, limits, n):
         return decides
     for kind, predicate in PREDICATES.items():
@@ -554,7 +554,7 @@ def _words(unit: Unit) -> str:
 
 def following(record: Record, boundary: str, limits: Limits | None = None) -> Unit | Need:
     row = record.filed.get(_row_key(boundary, None)) if boundary in ("new", "research", "plan") else None
-    passed = row and (row.verdict in _PASSED or (boundary == "research" and row.verdict == "blocked"))
+    passed = row and (row.verdict in PASSED or (boundary == "research" and row.verdict == "blocked"))
     out = _closed(record)
     if out is None and passed:
         after = STAGES[boundary].next
