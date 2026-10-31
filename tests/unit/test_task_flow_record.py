@@ -1606,7 +1606,7 @@ async def test_review_after_the_last_step_the_task_panel_runs_and_a_clean_review
     before = len(script.calls)
     text = await flow.run("task")
     assert [c.name for c in script.calls[before:]] == ["jtbd", "big-picture"]
-    assert flow.record.stage == "done" and last(text) == "next: done" and flow.jtbd_stood is True
+    assert flow.record.stage == "done" and last(text) == "next: done" and flow.reply_panel.jtbd_stood is True
     assert flow.record.filed[PLAN_ROW].verdict == "pass" and rows[-1][1] == "review panel running"
     assert flow.docs.read(1, "review.md").strip().endswith("verdict: pass")
     assert "done" in await flow.run("task")
@@ -1653,10 +1653,9 @@ def test_note_with_no_task_is_empty(tmp_path):
     assert flow.note() == ""
 
 
-def test_note_while_paused_is_empty_even_with_a_revision_pending(tmp_path):
+def test_note_while_paused_is_empty(tmp_path):
     flow, *_ = make_flow(tmp_path)
     flow.open("fix login", 1)
-    flow.revision_block = "a draft and its findings"
     flow.record.paused = True
     assert flow.note() == ""
 
@@ -1694,15 +1693,6 @@ async def test_note_follows_the_run_stage_to_the_step_and_the_done_stage_to_done
     assert flow.note() == "t1 · run unreviewed · next: run · step 1 panel"
     flow.record.stage = "done"
     assert flow.note() == "t1 · done pass · next: done"
-
-
-def test_note_a_revision_block_over_the_cap_is_cut_to_it_and_follows_the_pointer(tmp_path):
-    flow, *_ = make_flow(tmp_path)
-    flow.open("fix login", 1)
-    flow.record.stage = "plan"
-    flow.revision_block = "d" * (Caps.BLOCK + 500)
-    pointer, block = flow.note().split("\n")
-    assert pointer.startswith("t1 · plan") and block == "d" * Caps.BLOCK
 
 
 def test_note_the_executors_provider_is_the_child_sentence_and_a_header_within_the_line_cap():
@@ -1788,7 +1778,7 @@ async def test_flow_end_turn_clears_the_flags_the_halt_the_cap_the_total_and_the
     flow.record.flags.update(new=True, plan=True)
     flow.record.halted = "stopped"
     flow.cap.reserve(ChildBudget(actions=1, minutes=5.0), 0.0)
-    flow.excluded, flow.jtbd_stood = 90.0, True
+    flow.excluded, flow.reply_panel.jtbd_stood = 90.0, True
     flow.end_turn()
     assert flow.record.flags == {"new": False, "plan": False} and flow.record.halted is None
-    assert flow.cap.remaining() == flow.limits.flow_cap_minutes * 60 and flow.excluded == 0.0 and flow.jtbd_stood is False
+    assert flow.cap.remaining() == flow.limits.flow_cap_minutes * 60 and flow.excluded == 0.0 and flow.reply_panel.jtbd_stood is False

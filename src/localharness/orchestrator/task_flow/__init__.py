@@ -23,7 +23,7 @@ class TaskFlow:
         self.limits = limited(config.task_flow, known=critic_names())[0]
         self.cap = FlowCap(self.limits.flow_cap_minutes)
         self.reply_panel = Panel(run_config_child, self.limits, self.cap, docs)
-        self.record, self.revision_block, self.jtbd_stood, self.excluded = record, "", False, 0.0
+        self.record, self.excluded = record, 0.0
 
     def open(self, objective: str, turn: int) -> Record:
         self.record = open_task(self.docs.new_task(), objective, turn)
@@ -40,4 +40,4 @@ class TaskFlow:
         if self.record is not None:
             clear_turn(self.record)
         self.cap.reset()
-        self.excluded, self.jtbd_stood = 0.0, False
+        self.excluded, self.reply_panel.jtbd_stood = 0.0, False
