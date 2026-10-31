@@ -1079,3 +1079,157 @@ async def test_a_task_unit_briefs_its_critics_with_the_brief_alone():
     child = briefing()
     await Panel(child, LIMITS).run(PLAN, PanelInputs("the plan", turns=JOB, critics=("big-picture",)))
     assert child.seen == [("big-picture", "the plan")]
+
+
+STOP = "Ctrl+C delivers it unchecked"
+
+
+def watched(subject, seen, answers=None):
+    base = sequenced(answers or {})
+
+    async def child(config, task, **kw):
+        seen.append(subject.status_text())
+        return await base(config, task, **kw)
+
+    return child
+
+
+async def test_stop_clause_ends_the_status_text_of_a_four_critic_reply_panel_through_its_revision():
+    seen = []
+    subject = Panel(None, LIMITS)
+    subject._child = watched(subject, seen, {"answer": [answered(BLOCKER), NONE]})
+    subject.stop = "Ctrl+C"
+
+    async def revise(draft, findings):
+        seen.append(subject.status_text())
+        return "draft v2"
+
+    critics = panel_critics("reply", LIMITS, ("factual", "recency"))
+    await subject.run(REPLY, PanelInputs("d", draft="d", turns=JOB, critics=critics), revise)
+    assert seen[2] == f"checking 3/4 · factual · up to 26 min · {STOP}"
+    assert seen[4] == f"revising · 1 blocker · up to 14 min · {STOP}"
+    assert seen[8] == f"rechecking 4/4 · recency · up to 6 min · {STOP}"
+    assert all(s.endswith(STOP) for s in seen) and subject.status_text() is None
+
+
+def test_stop_clause_is_never_dropped_by_the_cut_which_drops_the_name_then_the_tally_then_the_bound():
+    line, short, tail = panel._progress, "x" * 20 + " delivers it unchecked", "x" * 30 + " delivers it unchecked"
+    assert line("checking", " 3/4", "factual", "up to 26 min", STOP) == f"checking 3/4 · factual · up to 26 min · {STOP}"
+    assert line("checking", " 3/4", "n" * 12, "up to 26 min", short) == f"checking 3/4 · up to 26 min · {short}"
+    assert line("checking", " 3/4", "factual", "up to 26 min", tail) == f"checking · up to 26 min · {tail}"
+    assert line("p" * 20, " 3/4", "n", "up to 26 min", tail) == f"{'p' * 20} · {tail}"
+    assert line("p" * 30, " 3/4", "n", "up to 26 min", tail) == f"{'p' * 25} · {tail}"
+    assert line("p" * 100, " 3/4", "n", "up to 26 min", STOP).endswith(STOP)
+
+
+async def test_stop_clause_through_the_panel_status_text_cut():
+    seen, subject = [], Panel(None, LIMITS)
+    subject._child = watched(subject, seen)
+    subject.stop = "x" * 30
+    await subject.run(REPLY, PanelInputs("d", turns=JOB, critics=("answer", "jtbd")))
+    assert seen == [f"checking · up to 2 min · {subject.stop} delivers it unchecked",
+                    f"checking · up to 1 min · {subject.stop} delivers it unchecked"]
+
+
+async def test_without_a_stop_word_the_status_texts_are_unchanged():
+    seen, subject = [], Panel(None, LIMITS)
+    subject._child = watched(subject, seen)
+    await subject.run(REPLY, PanelInputs("d", turns=JOB, critics=("answer", "jtbd")))
+    assert seen == ["checking 1/2 · answer · up to 2 min", "checking 2/2 · jtbd · up to 1 min"]
+
+
+async def test_a_task_units_panel_never_carries_the_stop_clause():
+    seen, subject = [], Panel(None, LIMITS)
+    subject._child = watched(subject, seen)
+    subject.stop = "Ctrl+C"
+    await subject.run(PLAN, PanelInputs("p", turns=JOB, critics=("answer",)))
+    assert seen == ["checking 1/1 · answer · up to 1 min"]
+
+
+def announcing(subject):
+    lines = []
+
+    async def announce(text):
+        lines.append((text, subject.status_text()))
+
+    subject.announce = announce
+    return lines
+
+
+async def test_a_reply_run_announces_once_before_the_first_critic_with_the_units_bound():
+    seen, subject = [], Panel(None, LIMITS)
+    subject._child = watched(subject, seen)
+    lines, subject.stop = announcing(subject), "Ctrl+C"
+
+    async def revise(draft, findings):
+        return "draft v2"
+
+    critics = panel_critics("reply", LIMITS, ("factual", "recency"))
+    await subject.run(REPLY, PanelInputs("d", draft="d", turns=JOB, critics=critics), revise)
+    assert [t for t, _ in lines] == [f"checking reply · 4 critics · up to 28 min · {STOP}"] and not any(s is None for s in seen)
+    assert len(seen) == 4
+
+
+async def test_the_announce_line_carries_no_stop_clause_without_a_stop_word_and_keeps_it_when_cut():
+    subject = Panel(sequenced({}), LIMITS)
+    lines = announcing(subject)
+    await subject.run(REPLY, PanelInputs("d", turns=JOB, critics=("answer", "jtbd")))
+    assert lines[0][0] == "checking reply · 2 critics · up to 2 min"
+    subject.stop = "x" * 30
+    await subject.run(REPLY, PanelInputs("d", turns=JOB, critics=("answer", "jtbd")))
+    assert lines[1][0] == f"checking reply · {'x' * 30} delivers it unchecked"
+
+
+async def test_a_raising_announce_is_logged_and_the_panel_still_runs(caplog):
+    subject = Panel(sequenced({}), LIMITS)
+
+    async def announce(text):
+        raise RuntimeError("sink lost")
+
+    subject.announce = announce
+    with caplog.at_level("WARNING"):
+        result = await subject.run(REPLY, PanelInputs("d", turns=JOB, critics=("answer", "jtbd")))
+    assert result.verdict == "pass" and "announce" in caplog.text
+
+
+async def test_a_cancel_inside_announce_propagates_and_clears_the_text():
+    subject = Panel(sequenced({}), LIMITS)
+
+    async def announce(text):
+        raise asyncio.CancelledError
+
+    subject.announce = announce
+    with pytest.raises(asyncio.CancelledError):
+        await subject.run(REPLY, PanelInputs("d", turns=JOB, critics=("answer", "jtbd")))
+    assert subject.status_text() is None
+
+
+async def test_a_task_unit_never_announces():
+    subject = Panel(sequenced({}), LIMITS)
+    lines = announcing(subject)
+    await subject.run(PLAN, PanelInputs("p", turns=JOB, critics=("answer",)))
+    assert lines == []
+
+
+def test_burst_prefix_is_the_runner_phases_first_clause_only_while_no_critic_runs():
+    subject = Panel(sequenced({}), LIMITS)
+    assert subject.burst_prefix() is None
+    subject.set_phase("step 3/5 · executor · up to 25 min")
+    assert subject.burst_prefix() == "step 3/5"
+    subject.set_phase("research q2 · explorer · up to 5 min")
+    assert subject.burst_prefix() == "research q2"
+    subject.set_phase(None)
+    assert subject.burst_prefix() is None
+
+
+async def test_burst_prefix_is_none_while_a_critic_runs():
+    seen, subject = [], Panel(None, LIMITS)
+
+    async def child(config, task, **kw):
+        seen.append(subject.burst_prefix())
+        return NONE
+
+    subject._child = child
+    subject.set_phase("step 3/5 · executor · up to 25 min")
+    await subject.run(PLAN, PanelInputs("p", turns=JOB, critics=("answer",)))
+    assert seen == [None] and subject.burst_prefix() == "step 3/5"
