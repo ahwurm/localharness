@@ -245,10 +245,13 @@ class StepLog:
         return "\n".join(["## log", *([f"[{dropped} earlier events dropped]"] if dropped else []), *kept, tail])
 
 
+def answered(answer: str) -> bool:
+    return answer.strip().lower() not in ("", "none", "blocked")
+
+
 def file_answer(text: str, n: int, question: str, explorer: str, answer: str) -> str:
     """`research.md` with question `n`'s section written or replaced; `none`, `blocked` and empty leave it unanswered."""
-    claim = answer.strip()
-    body = UNANSWERED if claim.lower() in ("", "none", "blocked") else _quote(claim[:Caps.BLOCK // 4])
+    body = _quote(answer.strip()[:Caps.BLOCK // 4]) if answered(answer) else UNANSWERED
     section = "\n".join([f"## q{n} · {_flat(question)}", body, f"explorer: {_flat(explorer)}"])
     parts = [p.strip() for p in _SPLIT.split(text) if p.strip()]
     out = [section if p.startswith(f"## q{n} ·") else p for p in parts]

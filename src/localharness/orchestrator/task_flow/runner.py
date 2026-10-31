@@ -1,21 +1,64 @@
 """The task flow's runner: one unit per call, the executor's config and the two request-note providers."""
 from __future__ import annotations
 
+import asyncio
 import math
 import re
+from contextlib import suppress
 from time import monotonic
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable
 
-from localharness.orchestrator.task_flow.filer import Refused, manifest, render_section
-from localharness.orchestrator.task_flow.panel import PanelInputs, PanelResult, PanelRun, fence, typed_turns
+from localharness.agent.context import (
+    COMPACT_DISABLED, CompactionPipeline, TokenCounter, make_compaction_summarize_fn, summarizer_input_chars)
+from localharness.agent.subagent import EXPLORE_TOOLS
+from localharness.channels.base import one_line
+from localharness.config.models import AgentConfig, BudgetConfig, PermissionConfig, ToolConfig
+from localharness.core.caps import Caps
+from localharness.core.events import CompactionTriggered, Observation
+from localharness.orchestrator.task_flow.filer import (
+    Refused, StepLog, answered, file_answer, last_section, manifest, parse_plan, render_section, rerecord)
+from localharness.orchestrator.task_flow.panel import Finding, PanelInputs, PanelResult, PanelRun, fence, typed_turns, unit_floor
 from localharness.orchestrator.task_flow.record import (
-    DOCS, LINES, STAGES, Need, Row, Unit, can_revise, file_doc, need, next_line, next_unit, note_run, precondition,
-    printed_bound, set_verdict, unit_minutes)
+    DOCS, LIMITS, LINES, PLAN_KEY, STAGES, Need, Row, Unit, can_revise, consume_flag, file_doc, following, need,
+    next_line, next_unit, note_run, precondition, printed_bound, reopen, review_of, set_stage, set_verdict, stop_step,
+    unit_minutes, valid_question)
 
 if TYPE_CHECKING:
     from localharness.orchestrator.task_flow import TaskFlow
 
+CHILD_SENTENCE = ("Say in one line what you will produce, read what it depends on before you change anything, "
+                  "do the work, and write your doc as your final answer.")
+INTERVIEW_SENTENCE = ("Ask the person what you need to know to write decisions.md, one question at a time, "
+                      'or if the objective is clear call task(stage="new", doc=...).')
+EXPLORER_ROLE = ("Answer the one question from the repository's files with read, glob and grep. Reply with one claim per "
+                 "line, each with the file:line that shows it, and nothing else; reply none when the files do not answer it.")
+EXECUTOR_ROLE = ("Carry out the one step you are briefed with. When you cannot proceed, take the safe option and write "
+                 "why in your final answer; never ask the person.")
 _RUNS = ("new", "research", "plan", "step", "task")
+_FINDING = re.compile(r"- \[(BLOCKER|WARNING|NOTE)\] (.*?)(?: \(([a-z-]+)\))?")
+_CAPPED = "the flow cap is spent for this turn; the person continues"
+
+
+def _config(name: str, role: str, tools: ToolConfig) -> AgentConfig:
+    return AgentConfig(name=name, role=role, tools=tools, permissions=PermissionConfig(budget=BudgetConfig()))
+
+
+def explorer_config() -> AgentConfig:
+    return _config("explorer", EXPLORER_ROLE, ToolConfig(add=list(EXPLORE_TOOLS)))
+
+
+def build_executor_config(flow: TaskFlow):
+    pipeline = CompactionPipeline(
+        token_counter=flow.token_counter or TokenCounter(),
+        llm_summarize_fn=make_compaction_summarize_fn(flow.llm, summarizer_input_chars(flow.config.context.max_context_tokens)),
+        compact_md_path=COMPACT_DISABLED)
+    config = _config("executor", EXECUTOR_ROLE, ToolConfig(add=list(flow.root_tools), deny=["tool_result_get"]))
+    return config, pipeline, ("task_flow.executor", flow.limits.executor)
+
+
+def executor_note(header: str) -> Callable[[], str]:
+    text = f"{CHILD_SENTENCE}\n{one_line(header)[:Caps.LINE]}"
+    return lambda: text
 
 
 def _exclude(flow: TaskFlow, seconds: float) -> None:
@@ -26,8 +69,13 @@ def _exclude(flow: TaskFlow, seconds: float) -> None:
     flow.exclude(valid)
 
 
-def _text(need_: Need) -> str:
-    return need_.model or need_.reason
+def _text(refusal: Need) -> str:
+    return refusal.model or refusal.reason
+
+
+def _spent(flow: TaskFlow) -> str:
+    flow.record.halted = "cap"
+    return _CAPPED
 
 
 def _key(unit: Unit) -> tuple[str, str | None]:
@@ -41,7 +89,7 @@ def _review_doc(unit: Unit) -> str:
 
 
 def _label(unit: Unit) -> str:
-    return f"step {unit.step}" if unit.boundary == "step" else STAGES[unit.boundary].stage or unit.boundary
+    return f"step {unit.step}" if unit.boundary == "step" else STAGES[unit.boundary].stage or "review"
 
 
 def _running(flow: TaskFlow, unit_text: str, minutes: float) -> None:
@@ -70,8 +118,14 @@ def _stale(flow: TaskFlow, *keys: tuple[str, str | None]) -> str | None:
     return _text(need("edited since filed", doc=bad[0])) if bad else None
 
 
+def _findings(section: str) -> list[Finding]:
+    return [Finding(m[1], m[2], "", False, m[3] or "") for line in section.splitlines() if (m := _FINDING.fullmatch(line))]
+
+
 async def _panel(flow: TaskFlow, unit: Unit) -> PanelResult:
-    record, key = flow.record, _key(unit)
+    record, key, task = flow.record, _key(unit), unit.boundary == "task"
+    if task:
+        set_stage(record, "task panel")
 
     def report(run: PanelRun) -> None:
         doc = _review_doc(unit)
@@ -79,9 +133,15 @@ async def _panel(flow: TaskFlow, unit: Unit) -> PanelResult:
         digest = flow.docs.append_section(record.id, doc, render_section(rounds, run.findings, run.verdict, run.blockers))
         record.filed[(doc, None)] = Row(digest)
         settled = run.verdict in ("pass", "blocked")
-        set_verdict(record, key, run.verdict)
-        if settled:
-            note_run(record, unit.boundary, run.blockers, unit.step)
+        if task and run.verdict == "blocked":
+            set_verdict(record, key, "blocked")
+            reopen(record, "plan", run.blockers)
+        elif task and settled:
+            set_stage(record, "task pass")
+        elif not task:
+            set_verdict(record, key, run.verdict)
+            if settled:
+                note_run(record, unit.boundary, run.blockers, unit.step)
         if run.verdict == "pass" and "jtbd" in STAGES[unit.boundary].floor:
             flow.jtbd_stood = True
 
@@ -93,6 +153,12 @@ async def _panel(flow: TaskFlow, unit: Unit) -> PanelResult:
 def _done(flow: TaskFlow, boundary: str, unit: Unit, filed=(), child: str = "", result: PanelResult | None = None,
           notes=()) -> str:
     record = flow.record
+    nxt = following(record, boundary, flow.limits)
+    if isinstance(nxt, Unit) and not record.halted and unit_floor(nxt, flow.limits) * 60 > flow.cap.remaining():
+        record.halted = "cap"
+    research = record.filed.get(("research.md", None))
+    if unit.boundary == "plan" and research and research.verdict == "blocked":
+        notes = [*notes, "research.md is blocked"]
     verdict = f"{_label(unit)} {result.verdict}" + (f" · {result.blockers} blockers" if result.verdict == "blocked" else "") if result else ""
     revising = (result and result.verdict == "blocked" and unit.boundary in ("new", "plan")
                 and can_revise(record, unit.boundary, flow.limits.revisions[unit.boundary]))
@@ -101,23 +167,146 @@ def _done(flow: TaskFlow, boundary: str, unit: Unit, filed=(), child: str = "", 
     return manifest(filed, child, verdict, doc, findings, notes, next_line(record, boundary, flow.limits))
 
 
+def _read(flow: TaskFlow, boundary: str) -> str:
+    record, doc = flow.record, DOCS.get(boundary, "plan.md")
+    if stale := _stale(flow, (doc, None)):
+        return stale
+    review = review_of(record, doc)
+    section = last_section(flow.docs.read(record.id, review) or "") if review else last_section("")
+    return manifest((), doc=flow.docs.read(record.id, doc) or "", findings=section,
+                    next_line=next_line(record, boundary, flow.limits))
+
+
 async def _file(flow: TaskFlow, boundary: str, unit: Unit, carried: str | None) -> str:
     record, name = flow.record, DOCS[unit.boundary]
+    sections = parse_plan(carried) if unit.boundary == "plan" else None
+    if isinstance(sections, str):
+        return sections
     digest, cut = flow.docs.write(record.id, name, carried)
     file_doc(record, unit.boundary, (name, None), digest)
+    reopened = rerecord(record, sections) if sections else []
+    if sections:
+        set_stage(record, "plan")
+    if consume_flag(record, unit.boundary):
+        reopen(record, unit.boundary, None)
+    notes = [*(["truncated at the doc cap"] if cut else []),
+             *([f"steps {', '.join(map(str, reopened))} reopened"] if reopened else [])]
     result = await _panel(flow, Unit(unit.boundary, "panel"))
-    return _done(flow, boundary, unit, (name, _review_doc(unit)), result=result,
-                 notes=["truncated at the doc cap"] if cut else [])
+    return _done(flow, boundary, unit, (name, _review_doc(unit)), result=result, notes=notes)
 
 
 async def _review(flow: TaskFlow, boundary: str, unit: Unit, carried: str | None) -> str:
-    if stale := _stale(flow, _key(unit)):
+    keys = [_key(unit)] + ([PLAN_KEY] if unit.boundary == "task" else [])
+    if stale := _stale(flow, *keys):
         return stale
     result = await _panel(flow, unit)
     return _done(flow, boundary, unit, (_review_doc(unit),), result=result)
 
 
-_KINDS = {"file": _file, "panel": _review}
+def _research_changed(flow: TaskFlow) -> list[str]:
+    plan = flow.record.filed.get(PLAN_KEY)
+    if plan and plan.verdict == "pass":
+        plan.verdict = "unreviewed"
+    return ["research changed"] if plan else []
+
+
+async def _explore(flow: TaskFlow, boundary: str, unit: Unit, carried: str | None) -> str:
+    record = flow.record
+    if not valid_question(carried):
+        return f"a question is one plain line of at most {Caps.LINE} characters"
+    if stale := _stale(flow, ("research.md", None)):
+        return stale
+    n = len(record.questions) + 1
+    _running(flow, f"research q{n}", flow.limits.explorer.minutes)
+    granted = flow.cap.reserve(flow.limits.explorer, LIMITS["explorer"].floor.minutes)
+    if granted is None:
+        return _spent(flow)
+    flow.reply_panel.set_phase(f"research q{n} · explorer · up to {printed_bound(granted.minutes)} min")
+    started = monotonic()
+    try:
+        result = await flow.run_config_child(explorer_config(), f"{CHILD_SENTENCE}\nQuestion: {carried}",
+                                             budget=("task_flow.explorer", granted))
+    finally:
+        flow.cap.settle(granted, monotonic() - started)
+        flow.reply_panel.set_phase(None)
+    digest, _ = flow.docs.write(record.id, "research.md",
+                                file_answer(flow.docs.read(record.id, "research.md") or "", n, carried, "explorer", result.raw))
+    record.questions.append(carried)
+    file_doc(record, "research", ("research.md", None), digest)
+    set_stage(record, "research")
+    child = f"q{n}: explorer " + ("answered" if answered(result.raw) else "returned none")
+    return _done(flow, boundary, unit, ("research.md",), child, notes=_research_changed(flow))
+
+
+def _watch(bus: Any, log: StepLog, runtime: dict) -> list[Any]:
+    if bus is None:
+        return []
+
+    def saw(event: Observation) -> None:
+        if event.parent_id is not None:
+            name = event.tool_name or event.observation_type
+            runtime["tools"][name] = runtime["tools"].get(name, 0) + 1
+            log.add(f"{name} failed: {event.error}" if event.error else name)
+
+    def compacted(event: CompactionTriggered) -> None:
+        runtime["compactions"] += event.parent_id is not None
+
+    return [bus.subscribe(Observation, saw), bus.subscribe(CompactionTriggered, compacted)]
+
+
+async def _execute(flow: TaskFlow, boundary: str, unit: Unit, carried: str | None) -> str:
+    record, n = flow.record, unit.step
+    key = ("plan.md", f"step-{n}")
+    plan = parse_plan(flow.docs.read(record.id, "plan.md") or "")
+    section = next((s for s in plan if s.n == n), None) if not isinstance(plan, str) else None
+    deps = [(f"step-{d}.md", None) for d in section.depends_on] if section else []
+    if stale := _stale(flow, key, *deps):
+        return stale
+    header = f"step {n}/{len(plan)} · {section.done}"
+    parts = [CHILD_SENTENCE, f"Step {n} of {len(plan)}:", section.text,
+             *(f"step-{d}.md (done before you):\n{flow.docs.read(record.id, f'step-{d}.md') or ''}" for d in section.depends_on)]
+    revise = unit.kind == "revise"
+    findings = _findings(last_section(flow.docs.read(record.id, f"step-{n}-review.md") or "")) if revise else []
+    if findings or record.stopped_log:
+        parts.append(fence(findings, record.stopped_log))
+    config, pipeline, (row, budget) = build_executor_config(flow)
+    _running(flow, f"step {n}" + (" revise" if revise else ""), budget.minutes)
+    granted = flow.cap.reserve(budget, LIMITS["executor"].floor.minutes)
+    if granted is None:
+        return _spent(flow)
+    if revise:
+        record.filed[key].counts.revised = True
+    set_stage(record, "execution")
+    log, runtime = StepLog(), {"files": [], "tools": {}, "compactions": 0}
+    handles = _watch(flow.bus, log, runtime)
+    flow.reply_panel.set_phase(f"step {n}/{len(plan)} · executor · up to {printed_bound(granted.minutes)} min")
+    started = monotonic()
+    try:
+        result = await flow.run_config_child(config, "\n\n".join(parts), budget=(row, granted), request_note=executor_note(header),
+                                             compact_md_path=COMPACT_DISABLED, pipeline=pipeline)
+    except asyncio.CancelledError:
+        with suppress(Refused):
+            flow.docs.write_step(record.id, n, log, "", runtime, stopped=True)
+        stop_step(record, n, "\n".join(log.lines))
+        raise
+    finally:
+        flow.cap.settle(granted, monotonic() - started)
+        flow.reply_panel.set_phase(None)
+        for handle in handles:
+            flow.bus.unsubscribe(handle)
+    runtime["files"] = result.artifacts
+    if not handles:
+        for artifact in result.artifacts:
+            log.add(f"wrote {artifact}")
+    digest, _ = flow.docs.write_step(record.id, n, log, result.raw, runtime)
+    record.filed[(f"step-{n}.md", None)] = Row(digest)
+    record.stopped_log = ""
+    set_verdict(record, key, "unreviewed")
+    child = f"step {n}: {len(result.artifacts)} files written, {runtime['compactions']} compactions"
+    return _done(flow, boundary, unit, (f"step-{n}.md",), child)
+
+
+_KINDS = {"file": _file, "explore": _explore, "execute": _execute, "revise": _execute, "panel": _review}
 
 
 async def run_unit(flow: TaskFlow, boundary: str, carried: str | None = None, by: str = "model") -> str:
@@ -133,7 +322,7 @@ async def run_unit(flow: TaskFlow, boundary: str, carried: str | None = None, by
         unit = next_unit(record, boundary, carried, flow.limits)
         if isinstance(unit, Need):
             return _text(unit)
-        return await _KINDS[unit.kind](flow, boundary, unit, carried)
+        return await _KINDS[unit.kind](flow, boundary, unit, carried) if unit else _read(flow, boundary)
     except Refused as e:
         return str(e)
     finally:

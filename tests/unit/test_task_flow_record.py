@@ -1,6 +1,8 @@
 """The task flow's tables and record: the stage table, the limits, the lines and the revision rule."""
 from __future__ import annotations
 
+import asyncio
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -8,9 +10,11 @@ import pytest
 from localharness.agent.subagent import DelegationResult
 from localharness.config.models import AgentConfig, ChildBudget, TaskFlowConfig
 from localharness.core.caps import Caps
+from localharness.core.events import CompactionTriggered, Observation
 from localharness.core.types import human_message
-from localharness.orchestrator.task_flow import TaskFlow
-from localharness.orchestrator.task_flow.filer import Docs
+from localharness.orchestrator.task_flow import TaskFlow, runner
+from localharness.orchestrator.task_flow.filer import PLAN_SHAPE, Docs, digest, parse_plan, rerecord
+from localharness.orchestrator.task_flow.panel import FENCE_LABEL
 from localharness.orchestrator.task_flow.record import (
     BOUNDARIES,
     CRITICS_AT_FLOOR,
@@ -1117,3 +1121,412 @@ async def test_flow_tracer_one_new_call_files_decisions_reviews_it_and_names_the
     assert [row[1] for row in rows] == ["new panel running"]
     assert len(excluded) == 1 and excluded[0] >= 0.0
     assert [c.name for c in script.calls] == ["jtbd"]
+
+
+BLOCKER_LINE = "[BLOCKER] the step did the step — src/x1.py was never touched — example fix: touch it"
+RAW = "RAWANSWER-the-child-said-this"
+
+
+class Bus:
+    def __init__(self):
+        self.subs = []
+
+    def subscribe(self, kind, handler):
+        self.subs.append((kind, handler))
+        return len(self.subs) - 1
+
+    def unsubscribe(self, handle):
+        self.subs[handle] = (None, None)
+
+    def publish(self, event):
+        for kind, handler in self.subs:
+            if kind and isinstance(event, kind):
+                handler(event)
+
+    @property
+    def live(self):
+        return [s for s in self.subs if s[0]]
+
+
+def observed(tool, parent="p", error=None):
+    return Observation(agent_id="a", session_id="s", observation_type="tool_result", tool_name=tool,
+                       parent_id=parent, error=error)
+
+
+def clock(monkeypatch, *values):
+    ticks, now = iter(values), [0.0]
+
+    def tick():
+        now[0] = next(ticks, now[0])
+        return now[0]
+    monkeypatch.setattr(runner, "monotonic", tick)
+
+
+async def planned(tmp_path, answers=None, **kw):
+    flow, script, rows, excluded = make_flow(tmp_path, answers, **kw)
+    flow.open("fix login", 1)
+    await flow.run("new", "Objective: fix login · turn 1")
+    await flow.run("plan", PLAN_TWO)
+    return flow, script, rows, excluded
+
+
+def last(text):
+    return text.splitlines()[-1]
+
+
+def step_row(flow, n=1):
+    return flow.record.filed[("plan.md", f"step-{n}")]
+
+
+async def test_run_unit_plan_files_the_doc_rerecords_sets_the_stage_and_runs_the_plan_panel(tmp_path):
+    flow, script, rows, _ = make_flow(tmp_path)
+    flow.open("fix login", 1)
+    await flow.run("new", "Objective: fix login")
+    text = await flow.run("plan", PLAN_TWO)
+    assert flow.docs.read(1, "plan.md") == PLAN_TWO and flow.record.stage == "plan"
+    assert [(k[1], r.verdict) for k, r in flow.record.filed.items() if k[0] == "plan.md" and k[1]] == [
+        ("step-1", "unreviewed"), ("step-2", "unreviewed")]
+    assert flow.record.filed[("plan.md", None)].verdict == "pass"
+    assert [c.name for c in script.calls[1:]] == ["jtbd", "big-picture", "parsimony"]
+    assert rows[-1][1] == "plan panel running" and last(text) == "next: run · step 1"
+    assert "## round 1" in flow.docs.read(1, "plan-review.md")
+
+
+async def test_run_unit_a_malformed_plan_returns_the_shape_and_leaves_the_stage_the_flag_and_the_disk(tmp_path):
+    flow, script, _, _ = make_flow(tmp_path)
+    flow.open("fix login", 1)
+    await flow.run("new", "Objective: fix login")
+    flow.record.flags["plan"] = True
+    calls = len(script.calls)
+    assert await flow.run("plan", "## Step 2\nfiles: a\ndepends_on: none\ndone: x") == PLAN_SHAPE
+    assert flow.docs.read(1, "plan.md") is None and flow.record.stage == "new"
+    assert flow.record.flags["plan"] is True and len(script.calls) == calls
+
+
+async def test_run_unit_a_refused_call_returns_the_need_model_text_and_writes_nothing(tmp_path):
+    flow, script, rows, _ = make_flow(tmp_path)
+    flow.open("fix login", 1)
+    text = await flow.run("plan", PLAN_TWO)
+    assert text == "the interview is open; ask, or file stage=new first"
+    assert flow.docs.read(1, "plan.md") is None and script.calls == [] and rows == []
+    assert await flow.run("task") == "run needs a passed or accepted plan; call stage=plan"
+
+
+async def test_run_unit_run_on_an_unreviewed_plan_runs_the_plan_panel_alone(tmp_path):
+    flow, script, _, _ = make_flow(tmp_path)
+    flow.open("fix login", 1)
+    await flow.run("new", "Objective: fix login")
+    flow.record.stage = "plan"
+    flow.docs.write(1, "plan.md", PLAN_TWO)
+    file_doc(flow.record, "plan", PLAN_ROW, digest(PLAN_TWO))
+    rerecord(flow.record, parse_plan(PLAN_TWO))
+    before = len(script.calls)
+    text = await flow.run("step")
+    assert [c.name for c in script.calls[before:]] == ["jtbd", "big-picture", "parsimony"]
+    assert last(text) == "next: run · step 1"
+
+
+async def test_executor_runs_one_step_with_its_row_a_brief_and_files_the_step_doc_once(tmp_path):
+    answers = {"executor": DelegationResult(text="x", raw=RAW, artifacts=["src/x1.py"])}
+    flow, script, rows, _ = await planned(tmp_path, answers)
+    text = await flow.run("step")
+    (call,) = script.named("executor")
+    assert call.budget == ("task_flow.executor", ChildBudget(actions=24, minutes=25.0))
+    assert call.path is runner.COMPACT_DISABLED and call.pipeline is not None
+    assert runner.CHILD_SENTENCE in call.task and "## Step 1" in call.task and "files: src/x1.py" in call.task
+    assert runner.CHILD_SENTENCE in call.note() and "step 1/2" in call.note()
+    assert flow.record.stage == "run" and ("step-1.md", None) in flow.record.filed
+    doc = flow.docs.read(1, "step-1.md")
+    assert RAW in doc and "files written: 1: src/x1.py" in doc
+    assert RAW not in text and last(text) == "next: run · step 1 panel"
+    assert text.splitlines()[0] == "filed: step-1.md" and "step 1: 1 files written, 0 compactions" in text
+    assert rows[-1][1] == "step 1 running"
+
+
+async def test_executor_brief_carries_the_verified_depends_on_docs(tmp_path):
+    answers = {"executor": [DelegationResult(text="x", raw="ONE-DONE"), DelegationResult(text="x", raw="TWO-DONE")]}
+    flow, script, _, _ = await planned(tmp_path, answers)
+    await flow.run("step")
+    await flow.run("step")
+    await flow.run("step")
+    first, second = script.named("executor")
+    assert "step-1.md" not in first.task
+    assert "step-1.md (done before you):" in second.task and "ONE-DONE" in second.task and "## Step 2" in second.task
+
+
+async def test_executor_a_blocked_step_runs_revise_with_the_fenced_findings_and_the_bit_set_at_launch(tmp_path):
+    seen = []
+
+    async def revising(config, task):
+        seen.append(step_row(flow).counts.revised)
+        return DelegationResult(text="x", raw="fixed")
+
+    flow, script, _, _ = await planned(tmp_path, {"spec-compliance": [BLOCKER_LINE, "NONE"], "executor": ["done", revising]})
+    await flow.run("step")
+    text = await flow.run("step")
+    assert step_row(flow).verdict == "blocked" and step_row(flow).counts.blockers == 1
+    assert "step 1 blocked" in text and FENCE_LABEL in text and "touch it" not in text
+    assert last(text) == "next: run · step 1 revise"
+    await flow.run("step")
+    revise = script.named("executor")[1]
+    assert FENCE_LABEL in revise.task and "src/x1.py was never touched" in revise.task and "touch it" not in revise.task
+    assert seen == [True] and step_row(flow).verdict == "unreviewed"
+    text = await flow.run("step")
+    assert step_row(flow).verdict == "pass" and step_row(flow).counts.used == 1
+    assert last(text) == "next: run · step 2"
+
+
+async def test_explorer_runs_one_per_question_and_files_its_answer_under_it(tmp_path):
+    flow, script, rows, _ = make_flow(tmp_path, {"explorer": RAW})
+    flow.open("fix login", 1)
+    await flow.run("new", "Objective: fix login")
+    text = await flow.run("research", "where is login")
+    (call,) = script.named("explorer")
+    assert call.config.tools.add == ["read", "glob", "grep"]
+    assert call.budget == ("task_flow.explorer", ChildBudget(actions=12, minutes=6.0)) and runner.CHILD_SENTENCE in call.task
+    doc = flow.docs.read(1, "research.md")
+    assert doc.startswith("## q1 · where is login") and RAW in doc and "explorer: explorer" in doc
+    assert flow.record.filed[("research.md", None)].verdict == "unreviewed"
+    assert flow.record.stage == "research" and flow.record.questions == ["where is login"]
+    assert RAW not in text and "q1: explorer answered" in text and last(text) == "next: research · panel"
+    assert rows[-1][1] == "research q1 running"
+
+
+async def test_explorer_none_marks_the_question_unanswered_and_a_panel_call_reviews_research(tmp_path):
+    flow, script, _, _ = make_flow(tmp_path, {"explorer": "none"})
+    flow.open("fix login", 1)
+    await flow.run("new", "Objective: fix login")
+    text = await flow.run("research", "where is login")
+    assert "q1: explorer returned none" in text and "unanswered" in flow.docs.read(1, "research.md")
+    text = await flow.run("research")
+    assert [c.name for c in script.calls[-2:]] == ["jtbd", "factual"]
+    assert flow.record.filed[("research.md", None)].verdict == "pass" and last(text) == "next: plan · file"
+    assert await flow.run("research") == "no unreviewed answer; next: plan"
+
+
+@pytest.mark.parametrize("question", ["a\nb", "", "x" * (Caps.LINE + 1), "a‮b"])
+async def test_explorer_refuses_an_invalid_question_before_launching(tmp_path, question):
+    flow, script, _, _ = make_flow(tmp_path)
+    flow.open("fix login", 1)
+    await flow.run("new", "Objective: fix login")
+    calls = len(script.calls)
+    assert "plain line" in await flow.run("research", question)
+    assert len(script.calls) == calls and flow.docs.read(1, "research.md") is None
+
+
+async def test_explorer_after_the_plan_is_filed_sets_a_passed_plan_row_unreviewed(tmp_path):
+    flow, _, _, _ = await planned(tmp_path)
+    text = await flow.run("research", "where is login")
+    assert flow.record.filed[PLAN_ROW].verdict == "unreviewed" and flow.record.stage == "plan"
+    assert "note: research changed" in text
+
+
+async def test_cap_a_25_minute_executor_against_a_10_minute_remainder_is_launched_with_10_and_says_so(tmp_path):
+    flow, script, rows, _ = await planned(tmp_path, cap=10.0)
+    flow.end_turn()
+    await flow.run("step")
+    assert script.named("executor")[0].budget == ("task_flow.executor", ChildBudget(actions=24, minutes=10.0))
+    assert rows[-1][1:] == ("step 1 running", ("<stop>",), "up to 10 min")
+
+
+@pytest.mark.parametrize("used, halted", [(540.0, None), (541.0, "cap")])
+async def test_halted_the_remainder_at_the_next_floor_does_not_halt_and_one_second_less_does(tmp_path, monkeypatch, used, halted):
+    flow, _, _, _ = await planned(tmp_path, cap=10.0)
+    flow.end_turn()
+    clock(monkeypatch, 0.0, 0.0, used, used)
+    text = await flow.run("step")
+    assert flow.record.halted == halted
+    if halted is None:
+        return
+    assert last(text) == "next: halted"
+    assert await flow.run("step") == "the flow cap is spent for this turn; the person continues"
+    assert await flow.run("task") == "the flow cap is spent for this turn; the person continues"
+    flow.end_turn()
+    assert flow.record.halted is None and flow.cap.remaining() == 600.0
+
+
+async def test_halted_a_unit_that_cannot_reserve_its_floor_launches_nothing_and_halts(tmp_path):
+    flow, script, _, _ = await planned(tmp_path, cap=10.0)
+    flow.end_turn()
+    flow.cap.reserve(ChildBudget(actions=1, minutes=9.5), 0.0)
+    text = await flow.run("step")
+    assert script.named("executor") == [] and flow.record.halted == "cap"
+    assert text == "the flow cap is spent for this turn; the person continues"
+
+
+async def test_exclude_three_calls_totalling_more_than_the_cap_pass_exactly_the_cap(tmp_path, monkeypatch):
+    flow, _, _, excluded = make_flow(tmp_path, cap=10.0)
+    flow.open("fix login", 1)
+    clock(monkeypatch, 0.0, 400.0, 0.0, 400.0, 0.0, 400.0)
+    for _ in range(3):
+        await flow.run("task")
+    assert excluded == [400.0, 200.0, 0.0] and sum(excluded) == 600.0
+    flow.end_turn()
+    clock(monkeypatch, 0.0, 100.0)
+    await flow.run("task")
+    assert excluded[-1] == 100.0
+
+
+@pytest.mark.parametrize("end", [-5.0, math.nan, math.inf, -math.inf])
+async def test_exclude_a_negative_or_non_finite_duration_passes_zero(tmp_path, monkeypatch, end):
+    flow, _, _, excluded = make_flow(tmp_path)
+    flow.open("fix login", 1)
+    clock(monkeypatch, 0.0, end)
+    await flow.run("task")
+    assert excluded == [0.0] and flow.excluded == 0.0
+
+
+async def test_refile_a_doc_on_a_flagged_pass_plan_writes_consumes_the_flag_and_resets_the_counts(tmp_path):
+    flow, script, _, _ = await planned(tmp_path)
+    counts = flow.record.counts["plan"]
+    counts.used, counts.previous, counts.blockers = 2, 3, 1
+    flow.record.flags["plan"] = True
+    text = await flow.run("plan", PLAN_TWO + "\n\n## Step 3: more\nfiles: src/y.py\ndepends_on: 2\ndone: y")
+    assert flow.record.flags["plan"] is False and "## Step 3" in flow.docs.read(1, "plan.md")
+    assert (counts.used, counts.previous, counts.blockers, counts.revised) == (0, None, 0, False)
+    assert "plan pass" in text and ("plan.md", "step-3") in flow.record.filed
+    assert step_row(flow, 1).verdict == "unreviewed"
+
+
+async def test_refile_a_shape_refused_doc_consumes_nothing_and_resets_nothing(tmp_path):
+    flow, _, _, _ = await planned(tmp_path)
+    counts = flow.record.counts["plan"]
+    counts.used, counts.previous, counts.blockers = 2, 3, 1
+    flow.record.flags["plan"] = True
+    before = flow.docs.read(1, "plan.md")
+    assert await flow.run("plan", "no steps here") == PLAN_SHAPE
+    assert flow.record.flags["plan"] is True and (counts.used, counts.previous, counts.blockers) == (2, 3, 1)
+    assert flow.docs.read(1, "plan.md") == before
+
+
+async def test_cancel_the_executor_writes_the_stopped_step_doc_clears_the_row_and_keeps_the_log(tmp_path):
+    bus, started = Bus(), asyncio.Event()
+
+    async def hang(config, task):
+        bus.publish(observed("write"))
+        started.set()
+        await asyncio.sleep(3600)
+
+    flow, script, _, _ = await planned(tmp_path, {"executor": [hang, "done"]}, bus=bus)
+    run = asyncio.create_task(flow.run("step"))
+    await started.wait()
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+    assert "stopped at write" in flow.docs.read(1, "step-1.md")
+    assert ("step-1.md", None) not in flow.record.filed and flow.record.stopped_log == "write"
+    assert len(flow.record.stopped_log) <= Caps.BLOCK and bus.live == [] and flow.reply_panel.status_text() is None
+    await flow.run("step")
+    again = script.named("executor")[1]
+    assert FENCE_LABEL in again.task and "write" in again.task
+    assert flow.record.stopped_log == "" and ("step-1.md", None) in flow.record.filed
+
+
+async def test_cancel_a_revise_has_already_counted_when_the_next_panel_runs(tmp_path):
+    started = asyncio.Event()
+
+    async def hang(config, task):
+        started.set()
+        await asyncio.sleep(3600)
+
+    flow, _, _, _ = await planned(tmp_path, {"spec-compliance": [BLOCKER_LINE, "NONE"], "executor": ["done", hang, "again"]})
+    await flow.run("step")
+    await flow.run("step")
+    run = asyncio.create_task(flow.run("step"))
+    await started.wait()
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+    assert step_row(flow).counts.revised is True and ("step-1.md", None) not in flow.record.filed
+    await flow.run("step")
+    await flow.run("step")
+    assert step_row(flow).counts.used == 1 and step_row(flow).verdict == "pass"
+
+
+async def test_executor_logs_one_line_per_observation_and_counts_the_childs_compactions(tmp_path):
+    bus = Bus()
+
+    async def work(config, task):
+        bus.publish(observed("read"))
+        bus.publish(observed("write", error="denied"))
+        bus.publish(observed("read", parent=None))
+        bus.publish(CompactionTriggered(agent_id="a", session_id="s", iteration=1, pre_usage_fraction=0.9,
+                                        post_usage_fraction=0.5, parent_id="p"))
+        bus.publish(CompactionTriggered(agent_id="a", session_id="s", iteration=1, pre_usage_fraction=0.9,
+                                        post_usage_fraction=0.5))
+        return DelegationResult(text="x", raw="done", artifacts=["src/x1.py"])
+
+    flow, _, _, _ = await planned(tmp_path, {"executor": work}, bus=bus)
+    text = await flow.run("step")
+    doc = flow.docs.read(1, "step-1.md")
+    assert doc.startswith("## log\nread\nwrite failed: denied\n") and "tools called: read x1, write x1" in doc
+    assert "compactions: 1" in doc and "1 compactions" in text and bus.live == []
+
+
+async def test_executor_without_a_bus_logs_one_line_per_artifact(tmp_path):
+    answers = {"executor": DelegationResult(text="x", raw="done", artifacts=["src/a.py", "src/b.py"])}
+    flow, _, _, _ = await planned(tmp_path, answers)
+    await flow.run("step")
+    assert flow.docs.read(1, "step-1.md").startswith("## log\nwrote src/a.py\nwrote src/b.py\n")
+
+
+async def test_review_a_hand_edited_step_section_returns_the_mismatch_before_any_child_runs(tmp_path):
+    flow, script, _, _ = await planned(tmp_path)
+    flow.docs.path(1, "plan.md").write_text(PLAN_TWO.replace("x1 changed", "x1 edited by hand"))
+    calls = len(script.calls)
+    assert await flow.run("step") == "the doc changed after it was filed; the person accepts it"
+    assert len(script.calls) == calls
+
+
+async def finished(tmp_path, answers=None, **kw):
+    flow, script, rows, excluded = await planned(tmp_path, answers, **kw)
+    for _ in range(4):
+        await flow.run("step")
+    return flow, script, rows, excluded
+
+
+async def test_review_after_the_last_step_the_task_panel_runs_and_a_clean_review_ends_the_task_done(tmp_path):
+    flow, script, rows, _ = await finished(tmp_path)
+    before = len(script.calls)
+    text = await flow.run("task")
+    assert [c.name for c in script.calls[before:]] == ["jtbd", "big-picture"]
+    assert flow.record.stage == "done" and last(text) == "next: done" and flow.jtbd_stood is True
+    assert flow.record.filed[PLAN_ROW].verdict == "pass" and rows[-1][1] == "review panel running"
+    assert flow.docs.read(1, "review.md").strip().endswith("verdict: pass")
+    assert "done" in await flow.run("task")
+
+
+async def test_review_a_blocked_task_review_blocks_the_plan_row_reopens_it_and_run_answers_review_blocked(tmp_path):
+    flow, _, _, _ = await finished(tmp_path, {"big-picture": ["NONE", "[BLOCKER] every decision has a step — decision 2 has none", "NONE"]})
+    text = await flow.run("task")
+    assert flow.record.filed[PLAN_ROW].verdict == "blocked" and flow.record.stage == "task"
+    counts = flow.record.counts["plan"]
+    assert (counts.blockers, counts.used, counts.previous) == (1, 0, None)
+    assert "review blocked · 1 blockers" in text and FENCE_LABEL in text
+    assert flow.docs.read(1, "review.md").strip().endswith("verdict: blocked")
+    assert await flow.run("step") == "the task review blocked the plan; call stage=plan for the findings, then revise it"
+    revised = await flow.run("plan", PLAN_TWO)
+    assert "plan pass" in revised and flow.record.filed[PLAN_ROW].verdict == "pass"
+
+
+async def test_review_a_task_panel_cut_short_by_the_cap_leaves_the_row_the_counts_and_the_bit(tmp_path):
+    flow, _, _, _ = await finished(tmp_path)
+    flow.end_turn()
+    flow.cap.reserve(ChildBudget(actions=1, minutes=179.0), 0.0)
+    counts = flow.record.counts["plan"]
+    kept = (counts.used, counts.previous, counts.blockers, counts.revised)
+    text = await flow.run("task")
+    assert flow.record.filed[PLAN_ROW].verdict == "pass" and flow.record.stage == "task"
+    assert (counts.used, counts.previous, counts.blockers, counts.revised) == kept
+    assert flow.docs.read(1, "review.md").strip().endswith("verdict: unreviewed") and "review unreviewed" in text
+
+
+async def test_no_manifest_contains_a_childs_raw_answer(tmp_path):
+    answers = {"executor": DelegationResult(text="x", raw=RAW, artifacts=["src/x1.py"]), "explorer": RAW,
+               "spec-compliance": [BLOCKER_LINE + " " + RAW, "NONE"]}
+    flow, _, _, _ = make_flow(tmp_path, answers)
+    flow.open("fix login", 1)
+    manifests = [await flow.run("new", "Objective: fix login"), await flow.run("research", "where is login"),
+                 await flow.run("research"), await flow.run("plan", PLAN_TWO)]
+    manifests += [await flow.run("step") for _ in range(3)]
+    assert all(RAW not in m and "touch it" not in m for m in manifests) and RAW in flow.docs.read(1, "step-1.md")
