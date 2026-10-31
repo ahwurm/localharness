@@ -113,9 +113,10 @@ def _label(unit: Unit) -> str:
     return f"step {unit.step}" if unit.boundary == "step" else STAGES[unit.boundary].stage or "review"
 
 
-def _running(flow: TaskFlow, unit_text: str, bound: int) -> None:
+def _running(flow: TaskFlow, state: str, bound: int) -> None:
     line = LINES["running"]
-    flow.emit(f"t{flow.record.id}", line.state.replace("<unit>", unit_text), line.commands, line.tail.replace("<bound>", str(bound)))
+    flow.unit, flow.busy = (state, bound), True
+    flow.emit(f"t{flow.record.id}", state, line.commands, line.tail.replace("<bound>", str(bound)))
 
 
 def _brief(flow: TaskFlow, unit: Unit) -> str:
@@ -170,7 +171,9 @@ async def _panel(flow: TaskFlow, unit: Unit) -> PanelResult:
         if run.verdict == "pass" and "jtbd" in STAGES[unit.boundary].floor:
             flow.reply_panel.jtbd_stood = True
 
-    _running(flow, f"{_label(unit)} panel", printed_bound(unit_minutes(unit, flow.limits), flow.cap.remaining()))
+    steps = sum(1 for k in record.filed if k[0] == "plan.md" and k[1])
+    state = f"step {unit.step}/{steps} checking" if unit.boundary == "step" else f"{STAGES[unit.boundary].stage or 'task'} panel running"
+    _running(flow, state, printed_bound(unit_minutes(unit, flow.limits), flow.cap.remaining()))
     inputs = PanelInputs(_brief(flow, unit), turns=tuple(typed_turns(flow.messages())), on_run=report)
     return await flow.reply_panel.run(unit, inputs)
 
@@ -249,7 +252,7 @@ async def _explore(flow: TaskFlow, boundary: str, unit: Unit, carried: str | Non
     granted = flow.cap.reserve(flow.limits.explorer, LIMITS["explorer"].floor.minutes)
     if granted is None:
         return _spent(flow)
-    _running(flow, f"research q{n}", printed_bound(granted.minutes))
+    _running(flow, f"research q{n} running", printed_bound(granted.minutes))
     flow.reply_panel.set_phase(f"research q{n} · explorer · up to {printed_bound(granted.minutes)} min")
     started = monotonic()
     try:
@@ -303,7 +306,7 @@ async def _execute(flow: TaskFlow, boundary: str, unit: Unit, carried: str | Non
     granted = flow.cap.reserve(budget, LIMITS["executor"].floor.minutes)
     if granted is None:
         return _spent(flow)
-    _running(flow, f"step {n}" + (" revise" if revise else ""), printed_bound(granted.minutes))
+    _running(flow, f"step {n}/{len(plan)} executing", printed_bound(granted.minutes))
     if revise:
         record.filed[key].counts.revised = True
     set_stage(record, "execution")
@@ -348,7 +351,9 @@ async def run_unit(flow: TaskFlow, boundary: str, carried: str | None = None, by
     """The unit `next_unit` names for this call, run, as a manifest of names, counts, verdicts and fenced findings."""
     if boundary not in _RUNS:
         raise ValueError(f"no unit runs at {boundary!r}")
-    started = monotonic()
+    started, cancelled = monotonic(), False
+    if by == "model":
+        flow.called.add(boundary)
     try:
         record = flow.record
         refused = precondition(boundary, record, by, carried) or (need("no task") if record is None else None)
@@ -362,5 +367,9 @@ async def run_unit(flow: TaskFlow, boundary: str, carried: str | None = None, by
         return await _KINDS[unit.kind](flow, boundary, unit, carried) if unit else _read(flow, boundary)
     except Refused as e:
         return str(e)
+    except asyncio.CancelledError:
+        cancelled = True
+        raise
     finally:
+        flow.busy = flow.busy and cancelled
         _exclude(flow, monotonic() - started)

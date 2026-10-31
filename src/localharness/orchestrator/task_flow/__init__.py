@@ -17,13 +17,17 @@ class TaskFlow:
     def __init__(self, *, run_config_child: Callable[..., Awaitable[Any]], emit: Callable[[str, str, tuple, str], None],
                  exclude: Callable[[float], None], docs: Docs, config: Any, root_tools: Iterable[str], llm: Any = None,
                  token_counter: Any = None, messages: Callable[[], Iterable[dict]] = lambda: (), bus: Any = None,
-                 record: Record | None = None) -> None:
+                 record: Record | None = None, turn: Callable[[], int] = lambda: 0) -> None:
         self.run_config_child, self.emit, self.exclude, self.docs, self.config = run_config_child, emit, exclude, docs, config
         self.root_tools, self.llm, self.token_counter, self.messages, self.bus = list(root_tools), llm, token_counter, messages, bus
         self.limits = limited(config.task_flow, known=critic_names())[0]
         self.cap = FlowCap(self.limits.flow_cap_minutes)
         self.reply_panel = Panel(run_config_child, self.limits, self.cap, docs)
-        self.record, self.excluded = record, 0.0
+        self.record, self.excluded, self.turn = record, 0.0, turn
+        self.called, self.said, self.sentence = set[str](), set[str](), ""
+        self.armed: str | None = None
+        self.unit: tuple[str, int] | None = None
+        self.busy = False
 
     def open(self, objective: str, turn: int) -> Record:
         self.record = open_task(self.docs.new_task(), objective, turn)
@@ -41,3 +45,6 @@ class TaskFlow:
             clear_turn(self.record)
         self.cap.reset()
         self.excluded, self.reply_panel.jtbd_stood = 0.0, False
+        self.called.clear()
+        self.said.clear()
+        self.sentence, self.armed, self.unit, self.busy = "", None, None, False

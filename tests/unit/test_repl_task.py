@@ -201,3 +201,11 @@ async def test_tracer_called_holds_the_boundaries_the_model_called_and_not_the_p
     await flow.run("plan", PLAN_TWO, by="model")
     await flow.run("step", by="model")
     assert flow.called == {"plan", "step"}
+
+
+async def test_tracer_the_cap_clause_counts_the_units_own_reservation_as_unspent(tmp_path):
+    flow, *_ = await planned(tmp_path, cap=10.0)
+    flow.end_turn()
+    lines = sinking(flow, PHONE)
+    await flow.run("step")
+    assert lines == ["◆ t1 step 1/2 executing · stop (now) · typing waits · cap 10 min · up to 10 min"]

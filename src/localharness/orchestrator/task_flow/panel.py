@@ -204,9 +204,14 @@ class FlowCap:
 
     def __init__(self, minutes: float) -> None:
         self._total = self._left = _nonneg(minutes) * 60
+        self._held = 0.0
 
     def remaining(self) -> float:
         return max(0.0, self._left)
+
+    def unspent(self) -> float:
+        """Seconds the settled children have not used: what a line may say is left, a reservation in flight still counted."""
+        return self.remaining() + self._held
 
     def reserve(self, budget: ChildBudget, floor_minutes: float, keep_minutes: float = 0.0) -> ChildBudget | None:
         room = self.remaining() - keep_minutes * 60
@@ -214,13 +219,15 @@ class FlowCap:
             return None
         grant = min(budget.minutes * 60, room)
         self._left -= grant
+        self._held += grant
         return ChildBudget(actions=budget.actions, minutes=grant / 60)
 
     def settle(self, reserved: ChildBudget, used_seconds: float) -> None:
         self._left = min(self._total, max(0.0, self._left + reserved.minutes * 60 - _nonneg(used_seconds)))
+        self._held = max(0.0, self._held - reserved.minutes * 60)
 
     def reset(self) -> None:
-        self._left = self._total
+        self._left, self._held = self._total, 0.0
 
 
 def unit_floor(unit: Unit, limits: Limits, sensed: tuple[str, ...] = ()) -> float:
