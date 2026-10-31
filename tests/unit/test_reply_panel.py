@@ -15,9 +15,9 @@ from localharness.channels.base import ChannelAdapter
 from localharness.config.models import AgentConfig
 from localharness.core.caps import Caps
 from localharness.core.events import Action, TaskComplete
-from localharness.orchestrator.task_flow.panel import FENCE_CLOSE, FENCE_LABEL, Panel
+from localharness.orchestrator.task_flow.panel import FENCE_CLOSE, FENCE_LABEL, Panel, PanelInputs
 from localharness.cli.repl import OrchestratorREPL
-from localharness.orchestrator.task_flow.record import limited
+from localharness.orchestrator.task_flow.record import Unit, limited
 from tests.unit.test_subagent_children import FakeLoop, config_child, make_runner
 from tests.unit.test_capabilities import _builtin_registry
 
@@ -937,3 +937,53 @@ async def test_classic_path_prints_the_start_line_once_and_the_box_prints_nothin
 
 async def test_a_channel_with_no_override_prints_nothing_when_a_panel_starts():
     assert await Chan().panel_started("checking reply") is None and Chan().stop_word == ""
+
+
+async def mobile_channel():
+    from localharness.channels.mobile.channel import MobileChannel
+    from localharness.core.bus import EventBus
+
+    channel = MobileChannel(bus=EventBus(), config={})
+    await channel.start()
+    return channel
+
+
+async def test_status_tick_carries_the_composed_text_and_none_without_it():
+    channel = await mobile_channel()
+    channel.progress_source = lambda: {"phase": "writing", "answer_tokens": 7, "elapsed": 3.0, "text": "checking reply · phone stop"}
+    tick = channel.status_frame()
+    assert (tick.text, tick.phase, tick.answer_tokens, tick.elapsed) == ("checking reply · phone stop", "writing", 7, 3.0)
+    channel.progress_source = lambda: {"phase": "writing", "text": None}
+    assert channel.status_frame().text is None
+    channel.progress_source = None
+    assert channel.status_frame().text is None
+
+
+async def test_status_tick_text_ends_with_the_phones_stop_clause_through_the_wiring():
+    from localharness.cli.start_cmd import _wire_reply_panel
+
+    channel = await mobile_channel()
+    panel = panel_of()
+    _wire_reply_panel(channel, SimpleNamespace(stream_snapshot=lambda: None), panel)
+    panel._parts, panel._reply = ("checking reply", " 1/2", "answer", "up to 4 min"), True
+    text = channel.status_frame().text
+    assert text.endswith("stop delivers it unchecked") and len(text) <= Caps.LINE
+    assert await channel.panel_started("checking reply") is None
+
+
+async def test_acp_line_is_announced_once_through_the_message_channel_with_the_cancel_clause(tmp_path):
+    from localharness.channels.acp import AcpChannel
+    from localharness.cli.start_cmd import _wire_reply_panel
+
+    channel = AcpChannel(config_dir=str(tmp_path / "config"))
+    sent: list[str] = []
+
+    async def send_message(content, agent_id=None, metadata=None):
+        sent.append(content)
+
+    channel.send_message = send_message
+    panel = panel_of()
+    _wire_reply_panel(channel, SimpleNamespace(stream_snapshot=lambda: None), panel)
+    assert not hasattr(channel, "progress_source") or channel.progress_source is None
+    await panel.run(Unit("reply", "panel"), PanelInputs(brief="b", draft="Hello.", critics=("answer", "jtbd")))
+    assert sent == ["checking reply · 2 critics · up to 2 min · cancel delivers it unchecked"]

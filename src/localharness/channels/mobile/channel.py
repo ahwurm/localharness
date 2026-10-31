@@ -248,6 +248,7 @@ class MobileChannel(ChannelAdapter):
     """
 
     channel_id = "mobile"
+    stop_word = "stop"
 
     can_ask = True
     """There is a human with a screen. Declaring False would silently convert every ASK into a
@@ -854,6 +855,7 @@ class MobileChannel(ChannelAdapter):
             tps_verified=verified,
             model=self.model_label(),
             context_pct=self._context_pct,
+            text=snap.get("text"),
         )
 
     def model_label(self) -> Optional[str]:
