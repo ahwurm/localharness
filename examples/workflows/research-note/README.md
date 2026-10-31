@@ -3,9 +3,10 @@
 A small, fully fictional workflow for trying LocalHarness on substantive writing work: an
 instruction file with stages and checks, two synthetic sources, a voice sample, a deterministic
 lint, and two specialist agents (a read-only reviewer and a writer). Start `localharness start` in
-this folder and ask, for example: "Follow INSTRUCTIONS.md to prepare the Acme Analytics customer
-profile. Discuss the angle first." Then: "Write the outline and stop for my review." Use `/task`
-at any time to see the working record, and restart the session to see it resume.
+this folder and type `/task new Prepare the Acme Analytics customer profile following
+INSTRUCTIONS.md. Discuss the angle first.` Use `/task` at any time to see where the task stands and
+`/task show plan` to read its plan. A restart does not carry the task over; its folder stays, and
+`/task show t1/plan` reads it.
 
 ## Setup
 
@@ -24,4 +25,4 @@ On the first start in a folder, a terminal session may ask once whether you trus
 workspace; answer yes to let tools run there without asking, or no to run the session in guarded
 mode. Because the agent files come from a project folder, the session may also print a line that it
 ignores their `unattended` permission mode: a project layer may only tighten the mode. The
-working record is saved in `.localharness/agents/<agent>/task.json` inside this folder.
+task's docs are written under `.localharness/agents/<agent>/tasks/t1/` inside this folder.

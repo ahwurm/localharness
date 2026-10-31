@@ -32,7 +32,8 @@ def test_lint_passes_a_clean_draft_and_fails_a_banned_phrase(tmp_path):
 def test_instructions_name_the_lint_command_and_working_record():
     text = (EX / "INSTRUCTIONS.md").read_text()
     assert "python3 checks/lint.py draft.md" in text
-    assert "## Working record" in text and "exit_code" in text
+    assert "## Working record" in text and "/task new" in text
+    assert "result_field" not in text and "human_turn" not in text
 
 
 def test_readme_and_docs_carry_the_agent_setup_line():

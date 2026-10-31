@@ -41,13 +41,11 @@ folder. Follow the stages in order and stop where the user asks you to stop.
 
 ## Working record
 
-If a `task` tool is available, keep the working record with it: start the task with the
-objective and the current stage as the assignment; declare this file, the voice sample, and the
-source files you use as references; declare `draft.md` (and `outline.md`) as artifacts; declare
-the lint command as a check before you run it (tool `bash_exec`, arguments
-`{"command": "python3 checks/lint.py draft.md"}`, result_field `exit_code`, expected `0`,
-depends on the draft artifact); record the user's corrections as decisions citing the turn where the user said them (`human_turn`);
-record the editorial criteria as judgments. Close the task at the stage the user asked for.
+When the user opens a task with `/task new`, file the angle the user chose and the source and voice
+rules above as the decisions, then plan the outline, the draft and the lint as steps. The lint step
+runs `python3 checks/lint.py draft.md` and reports its exit code. A step's agent cannot delegate, so
+when the user wants a review, ask the `reviewer` yourself after the steps. Stop at the stage the
+user asked for.
 
 ## Boundaries
 
