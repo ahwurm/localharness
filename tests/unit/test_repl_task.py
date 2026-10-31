@@ -1640,6 +1640,34 @@ async def test_a_stop_the_turn_consumed_leaves_the_next_outer_cancel_to_propagat
     assert channel.sent == []
 
 
+async def test_a_stop_that_already_cancelled_a_parked_turn_ends_it_as_the_persons_stop():
+    repl, channel, agent = flow_repl(None)
+    lines = iter(["next"])
+
+    async def read_input():
+        try:
+            return next(lines)
+        except StopIteration:
+            raise EOFError from None
+
+    async def unwind():
+        try:
+            await asyncio.sleep(30)
+        finally:
+            await asyncio.sleep(0.05)
+
+    async def nothing():
+        pass
+
+    channel.read_input, channel.start, channel.stop = read_input, nothing, nothing
+    repl._establish_workspace_trust = nothing
+    repl._turn_task = asyncio.ensure_future(unwind())
+    await asyncio.sleep(0)
+    assert await repl._cancel_from_channel() is True
+    await repl._run_classic()
+    assert channel.sent == ["Turn cancelled."] and repl._cancelled_by_user is False
+
+
 async def test_a_queued_notice_is_held_until_it_is_sent_and_then_released(tmp_path):
     flow = await planned_flow(tmp_path)
     repl, channel, agent = flow_repl(flow)

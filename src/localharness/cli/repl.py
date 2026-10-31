@@ -668,6 +668,7 @@ class OrchestratorREPL:
                     # Run as a task so a mid-turn Ctrl+C cancels the turn, not the session.
                     if task is not None:
                         self._turn_task = task  # so `_turn_running()` is true here too
+                        self._cancelled_by_user = False
                         await self._await_turn_with_sigint(task)
                     # Co-author consent (spec 14): if the git hook flagged a first
                     # commit for an undecided project, ask now (after the turn).
@@ -1147,7 +1148,6 @@ class OrchestratorREPL:
 
     async def _await_turn_with_sigint(self, turn_task: asyncio.Task) -> None:
         """Await one turn so a mid-turn Ctrl-C cancels the turn, not the session."""
-        self._cancelled_by_user = False
         async with sigint_cancels(turn_task, cancel=lambda: self._agent.stop_turn(turn_task)) as cancelled:
             try:
                 await turn_task
