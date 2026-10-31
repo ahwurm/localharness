@@ -699,3 +699,23 @@ async def test_one_fan_out_opens_one_client_not_one_per_device(tmp_path):
 
     assert len(requests) == 3, "every enrolled device must still be reached"
     assert len(opened) == 1, "one client for the fan-out, not one per device"
+
+
+@pytest.mark.parametrize("verdict,finding,title,body", [
+    ("pass", "", "reply ready", "the reply"),
+    ("unreviewed", "no revision", "reply ready (unchecked)", "the reply"),
+    ("blocked", "[BLOCKER] x", "reply blocked", "[BLOCKER] x"),
+    (None, "", "turn finished", "the reply"),
+])
+def test_a_finishing_turn_is_titled_from_the_replys_verdict(verdict, finding, title, body):
+    p = _policy()
+    p.turn_started("s1", now=0.0)
+    out = p.turn_finished("s1", clients_attached=0, now=1000.0, summary="the reply", verdict=verdict, finding=finding)
+    assert (out.title, out.body) == (title, body)
+
+
+def test_an_unreviewed_reply_with_no_reason_pushes_nothing_and_still_resets_the_clock():
+    p = _policy()
+    p.turn_started("s1", now=0.0)
+    assert p.turn_finished("s1", clients_attached=0, now=1000.0, verdict="unreviewed") is None
+    assert p.turn_finished("s1", clients_attached=0, now=2000.0) is None

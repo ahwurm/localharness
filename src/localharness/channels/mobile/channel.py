@@ -49,6 +49,7 @@ from localharness.core.events import (
     InstructionsChanged,
     PermissionResolved,
     PermissionStaged,
+    TaskComplete,
     TurnCompleted,
     TurnFailed,
     TurnStarted,
@@ -330,6 +331,7 @@ class MobileChannel(ChannelAdapter):
         self._stream_id: Optional[str] = None
         self._status_task: Optional[asyncio.Task] = None
         self._turn_running = False
+        self._reply_verdict: Optional[tuple[Optional[str], str]] = None
         self._activity = ""
         self._context_pct: Optional[float] = None
 
@@ -728,11 +730,13 @@ class MobileChannel(ChannelAdapter):
             if root:
                 self._turn_running = True
                 self._stream_id = None
+                self._reply_verdict = None
                 await self._start_status_ticker()
                 if policy is not None:
                     policy.turn_started(self.session_id)
         elif isinstance(event, (TurnCompleted, TurnFailed)):
             if root:
+                verdict, finding = (self._reply_verdict or (None, "")) if isinstance(event, TurnCompleted) else (None, "")
                 self._turn_running = False
                 await self._stop_status_ticker()
                 self._close_stream(None)
@@ -745,7 +749,12 @@ class MobileChannel(ChannelAdapter):
                         clients_attached=self.client_count,
                         duration=getattr(event, "duration_seconds", None),
                         summary=(getattr(event, "summary", "") or "")[:PUSH_SUMMARY_CHARS],
+                        verdict=verdict,
+                        finding=finding[:PUSH_SUMMARY_CHARS],
                     ))
+        elif isinstance(event, TaskComplete):
+            if root:
+                self._reply_verdict = (event.verdict, event.finding)
         elif isinstance(event, PermissionStaged):
             # NOT gated on `root`: a subagent's parked call needs a human exactly as much as the
             # orchestrator's does, and 45% of real sessions delegate.

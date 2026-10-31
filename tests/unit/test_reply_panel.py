@@ -987,3 +987,65 @@ async def test_acp_line_is_announced_once_through_the_message_channel_with_the_c
     assert not hasattr(channel, "progress_source") or channel.progress_source is None
     await panel.run(Unit("reply", "panel"), PanelInputs(brief="b", draft="Hello.", critics=("answer", "jtbd")))
     assert sent == ["checking reply · 2 critics · up to 2 min · cancel delivers it unchecked"]
+
+
+async def finished_turn(tmp_path, verdict, finding="", *, child=False, summary="the reply text", fail=False):
+    from localharness.channels.mobile.push import TURN_PUSH_MIN_S
+    from localharness.core.events import TurnCompleted, TurnFailed, TurnStarted
+    from tests.unit.channels.test_mobile_push import _pushable
+
+    bus, channel, recorder = await _pushable(tmp_path)
+    await bus.publish(TurnStarted(session_id="s1", agent_id="orchestrator", task_summary="t", budget={"max_actions": 5}))
+    if verdict is not None:
+        await bus.publish(TaskComplete(
+            session_id="s1", agent_id="critic" if child else "orchestrator", parent_id="root-1" if child else None,
+            success=True, summary=summary, duration_seconds=1.0, iterations=1, verdict=verdict, finding=finding))
+    if fail:
+        await bus.publish(TurnFailed(session_id="s1", agent_id="orchestrator", reason="llm_error", detail="boom", iterations=1,
+                                     duration_seconds=TURN_PUSH_MIN_S + 30))
+    else:
+        await bus.publish(TurnCompleted(session_id="s1", agent_id="orchestrator", iterations=1, elapsed_tokens=9,
+                                        duration_seconds=TURN_PUSH_MIN_S + 30, summary=summary))
+    await channel.flush_push()
+    return bus, channel, recorder
+
+
+async def test_push_pass_is_titled_reply_ready_with_the_summary_cut_at_120(tmp_path):
+    _, _, recorder = await finished_turn(tmp_path, "pass", summary="x" * 300)
+    assert [(p.title, p.body) for p in recorder.sent] == [("reply ready", "x" * 120)]
+
+
+async def test_push_blocked_carries_the_finding_cut_at_120(tmp_path):
+    _, _, recorder = await finished_turn(tmp_path, "blocked", "[BLOCKER] " + "y" * 300)
+    assert [(p.title, p.body) for p in recorder.sent] == [("reply blocked", ("[BLOCKER] " + "y" * 300)[:120])]
+
+
+async def test_push_unreviewed_with_a_reason_is_titled_unchecked_and_carries_the_summary(tmp_path):
+    _, _, recorder = await finished_turn(tmp_path, "unreviewed", "the revision came back empty")
+    assert [(p.title, p.body) for p in recorder.sent] == [("reply ready (unchecked)", "the reply text")]
+
+
+async def test_push_unreviewed_with_no_reason_is_the_persons_own_stop_and_sends_nothing(tmp_path):
+    _, _, recorder = await finished_turn(tmp_path, "unreviewed", "")
+    assert recorder.sent == []
+
+
+async def test_push_without_a_verdict_is_turn_finished_as_before_also_after_a_failed_turn(tmp_path):
+    _, _, none = await finished_turn(tmp_path, None)
+    _, _, failed = await finished_turn(tmp_path, "blocked", "[BLOCKER] x", fail=True)
+    assert [p.title for p in none.sent] == ["turn finished"] and [p.title for p in failed.sent] == ["turn finished"]
+
+
+async def test_push_a_childs_task_complete_never_sets_the_verdict_and_the_next_root_turn_clears_it(tmp_path):
+    _, _, recorder = await finished_turn(tmp_path, "blocked", "[BLOCKER] x", child=True)
+    assert [p.title for p in recorder.sent] == ["turn finished"]
+
+    from localharness.channels.mobile.push import TURN_PUSH_MIN_S
+    from localharness.core.events import TurnCompleted, TurnStarted
+
+    bus, channel, recorder = await finished_turn(tmp_path, "blocked", "[BLOCKER] x")
+    await bus.publish(TurnStarted(session_id="s1", agent_id="orchestrator", task_summary="t", budget={"max_actions": 5}))
+    await bus.publish(TurnCompleted(session_id="s1", agent_id="orchestrator", iterations=1, elapsed_tokens=9,
+                                    duration_seconds=TURN_PUSH_MIN_S + 30, summary="later"))
+    await channel.flush_push()
+    assert [p.title for p in recorder.sent] == ["reply blocked", "turn finished"]
