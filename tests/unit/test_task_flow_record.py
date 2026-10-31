@@ -1226,6 +1226,39 @@ async def test_run_unit_run_on_an_unreviewed_plan_runs_the_plan_panel_alone(tmp_
     assert last(text) == "next: run · step 1"
 
 
+def unreviewed_plan(flow):
+    flow.record.stage = "plan"
+    flow.docs.write(1, "plan.md", PLAN_TWO)
+    file_doc(flow.record, "plan", PLAN_ROW, digest(PLAN_TWO))
+    rerecord(flow.record, parse_plan(PLAN_TWO))
+    flow.record.flags["plan"] = True
+
+
+async def test_run_unit_a_flagged_re_panel_of_an_unreviewed_plan_consumes_the_flag(tmp_path):
+    flow, script, _, _ = make_flow(tmp_path)
+    flow.open("fix login", 1)
+    await flow.run("new", "Objective: fix login")
+    unreviewed_plan(flow)
+    before = len(script.calls)
+    await flow.run("plan")
+    assert [c.name for c in script.calls[before:]] == ["jtbd", "big-picture", "parsimony"]
+    assert flow.record.flags["plan"] is False
+
+
+async def test_run_unit_a_stale_re_panel_leaves_the_flag_until_the_doc_is_whole(tmp_path):
+    flow, script, _, _ = make_flow(tmp_path)
+    flow.open("fix login", 1)
+    await flow.run("new", "Objective: fix login")
+    unreviewed_plan(flow)
+    flow.docs.write(1, "plan.md", PLAN_TWO + "\nedited")
+    before = len(script.calls)
+    assert "changed after it was filed" in await flow.run("plan")
+    assert flow.record.flags["plan"] is True and len(script.calls) == before
+    flow.docs.write(1, "plan.md", PLAN_TWO)
+    await flow.run("plan")
+    assert flow.record.flags["plan"] is False
+
+
 async def test_executor_runs_one_step_with_its_row_a_brief_and_files_the_step_doc_once(tmp_path):
     answers = {"executor": DelegationResult(text="x", raw=RAW, artifacts=["src/x1.py"])}
     flow, script, rows, _ = await planned(tmp_path, answers)

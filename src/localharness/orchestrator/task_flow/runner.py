@@ -226,6 +226,8 @@ async def _review(flow: TaskFlow, boundary: str, unit: Unit, carried: str | None
     keys = [_key(unit)] + ([PLAN_KEY] if unit.boundary == "task" else [])
     if stale := _stale(flow, *keys):
         return stale
+    if unit.boundary in flow.record.flags:
+        consume_flag(flow.record, unit.boundary)
     result = await _panel(flow, unit)
     return _done(flow, boundary, unit, (_review_doc(unit),), result=result)
 
