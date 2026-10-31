@@ -28,11 +28,14 @@ from localharness.orchestrator.task_flow.record import (
     file_doc,
     limited,
     need,
+    next_line,
+    next_unit,
     note_run,
     open_task,
     panel_critics,
     panel_minutes,
     pointed,
+    precondition,
     printed_bound,
     reopen,
     review_of,
@@ -538,3 +541,37 @@ def test_stop_step_removes_the_step_doc_row_and_keeps_the_stopped_log_cut_at_the
     assert len(record.stopped_log) == Caps.BLOCK
     stop_step(record, 2, "short")
     assert record.stopped_log == "short"
+
+
+DECISIONS = ("decisions.md", None)
+
+
+def test_precondition_refuses_the_models_new_with_no_task_and_admits_the_persons_objective():
+    refused = precondition("new", None, "model", None)
+    assert refused.reason == "no task"
+    assert refused.model == "no task is open; the person opens one with /task new"
+    assert precondition("new", None, "person", "fix login") is None
+    assert precondition("new", None, "person", None).reason == "no task"
+
+
+def test_precondition_admits_the_models_new_while_a_task_is_open():
+    assert precondition("new", open_task(3, "fix login", 1), "model", "doc") is None
+
+
+def test_next_unit_files_a_carried_doc_on_the_new_boundary():
+    assert next_unit(open_task(3, "fix login", 1), "new", "doc") == Unit("new", "file", None)
+
+
+def test_next_unit_names_the_unreviewed_need_for_a_doc_less_new_call_on_an_unreviewed_row():
+    record = open_task(3, "fix login", 1)
+    file_doc(record, "new", DECISIONS, "d1")
+    refused = next_unit(record, "new")
+    assert isinstance(refused, Need) and refused.model == "panel unfinished; the person re-runs it"
+
+
+def test_next_line_after_a_new_pass_names_the_plan_file_unit():
+    record = open_task(3, "fix login", 1)
+    file_doc(record, "new", DECISIONS, "d1")
+    set_verdict(record, DECISIONS, "pass")
+    note_run(record, "new", 0)
+    assert next_line(record, "new") == "next: plan \u00b7 file"
