@@ -13,11 +13,11 @@ from localharness.channels.base import notice
 from localharness.core import caps as caps_module
 from localharness.core.caps import Caps
 from localharness.core.types import human_message
-from localharness.orchestrator.task_flow import verbs
+from localharness.orchestrator.task_flow import runner, verbs
 from localharness.orchestrator.task_flow.filer import digest
 from localharness.orchestrator.task_flow.panel import FlowCap
-from localharness.orchestrator.task_flow.record import LINES, Row, Unit, file_doc, need
-from tests.unit.test_task_flow_record import BLOCKER_LINE, PLAN_TWO, make_flow, planned
+from localharness.orchestrator.task_flow.record import LINES, Row, Unit, file_doc, need, set_verdict
+from tests.unit.test_task_flow_record import BLOCKER_LINE, PLAN_TWO, TYPED, make_flow, planned
 
 RLO, ZWSP = chr(0x202E), chr(0x200B)
 
@@ -439,3 +439,159 @@ def test_task_command_new_closes_the_open_task_naming_its_newest_doc_and_opens_o
 
 def test_task_command_is_synchronous():
     assert not asyncio.iscoroutinefunction(verbs.task_command)
+
+
+SENTENCE_FOR = {
+    "research": ('Call task(stage="research", question=...) once per question the plan needs answered from the '
+                 'repository, then task(stage="research") to review the answers.'),
+    "new blocked": 'Call task(stage="new") to read the findings, then call it again with doc= your revised decisions.',
+    "new unreviewed": 'Call task(stage="new").',
+    "new reopened": ('Call task(stage="new") to read the decisions, then call it again with doc= the decisions '
+                     "revised as the person's messages since they were filed ask."),
+    "plan unfiled": PLAN_UNFILED,
+    "plan unreviewed": 'Call task(stage="plan").',
+    "plan blocked": 'Call task(stage="plan") to read the findings, then call it again with doc= your revised plan.',
+    "plan reopened": ('Call task(stage="plan") to read the plan, then call it again with doc= the plan revised '
+                      "as the person's messages since it was filed ask."),
+    "run": 'Call task(stage="run") and call it again after each result until it says done, blocked or halted.',
+}
+ARMED = "◆ t1 {} armed · /task stop (after this unit) · cap 180 min"
+PLAN_ROW = ("plan.md", None)
+
+
+def staged(tmp_path, decisions=None, plan=None, messages=TYPED, stage=None, filed=3, blockers=2):
+    flow, *_ = make_flow(tmp_path, messages=messages)
+    flow.open("fix login", 1)
+    for boundary, key, verdict in (("new", DECISIONS, decisions), ("plan", PLAN_ROW, plan)):
+        if verdict:
+            file_doc(flow.record, boundary, key, digest(key[0]))
+            set_verdict(flow.record, key, verdict)
+            flow.record.filed_turn[boundary] = filed
+            flow.record.counts[boundary].blockers, flow.record.counts[boundary].used = blockers, 3
+            flow.record.counts[boundary].previous = blockers + 1
+    flow.record.stage = stage or ("plan" if plan else "new")
+    return flow
+
+
+def test_task_command_sentence_is_chosen_from_the_record_and_is_the_specs_own(tmp_path):
+    flow = staged(tmp_path)
+    record = flow.record
+    assert verbs.sentence("research", record) == SENTENCE_FOR["research"]
+    assert verbs.sentence("plan", record) == SENTENCE_FOR["plan unfiled"]
+    for verdict, key in (("blocked", "blocked"), ("unreviewed", "unreviewed"), ("pass", "reopened"), ("accepted", "reopened")):
+        for boundary, row in (("new", DECISIONS), ("plan", PLAN_ROW)):
+            record.filed[row] = Row("d", verdict)
+            assert verbs.sentence(boundary, record) == SENTENCE_FOR[f"{boundary} {key}"]
+    assert verbs.sentence("step", record) == SENTENCE_FOR["run"]
+
+
+def test_task_command_reopen_of_a_passed_plan_with_a_typed_turn_since_the_filing_sets_the_flag(tmp_path):
+    flow = staged(tmp_path, decisions="pass", plan="pass", messages=asked((2, "typed", "fix login"), (5, "typed", "smaller steps")))
+    reply = command(flow, "plan", turn=6)
+    assert flow.record.flags == {"new": False, "plan": True}
+    assert reply.lines == ("◆ t1 plan reopened · Ctrl+C (now)", ARMED.format("plan"))
+    assert reply.turn == (SENTENCE_FOR["plan reopened"], "request") and flow.sentence == ""
+    assert flow.armed == "plan" and flow.said == {"cap"}
+
+
+@pytest.mark.parametrize("verdict", ("pass", "accepted"))
+def test_task_command_nothing_to_revise_arms_nothing_when_no_typed_turn_came_after_the_filing(tmp_path, verdict):
+    flow = staged(tmp_path, decisions="pass", plan=verdict, messages=asked((2, "typed", "fix login"), (3, "typed", "at the filing")))
+    reply = command(flow, "plan", turn=6)
+    assert reply == verbs.Reply(("◆ t1 nothing to revise · /task plan <change>",))
+    assert flow.record.flags["plan"] is False and flow.armed is None and flow.said == set()
+
+
+@pytest.mark.parametrize("verdict", ("pass", "accepted", "unreviewed", "blocked"))
+def test_task_command_plan_change_is_the_typed_turn_and_the_sentence_rides_the_note(tmp_path, verdict):
+    flow = staged(tmp_path, decisions="pass", plan=verdict)
+    reply = command(flow, "plan Add a Retry step")
+    assert reply.turn == ("Add a Retry step", "typed")
+    expected = {"pass": "reopened", "accepted": "reopened", "unreviewed": "unreviewed", "blocked": "blocked"}[verdict]
+    assert flow.sentence == SENTENCE_FOR[f"plan {expected}"]
+    assert flow.record.flags["plan"] is (verdict != "blocked") and reply.lines[-1] == ARMED.format("plan")
+
+
+@pytest.mark.parametrize("stage", ("plan", "task"))
+def test_task_command_reopen_of_a_blocked_plan_or_a_blocked_task_review_resets_the_count_and_keeps_the_blockers(tmp_path, stage):
+    flow = staged(tmp_path, decisions="pass", plan="blocked", stage=stage)
+    reply = command(flow, "plan")
+    counts = flow.record.counts["plan"]
+    assert (counts.used, counts.previous, counts.blockers, counts.revised) == (0, None, 2, False)
+    assert flow.record.flags["plan"] is False
+    assert reply.lines == (ARMED.format("plan"),) and reply.turn == (SENTENCE_FOR["plan blocked"], "request")
+
+
+def test_task_command_reopen_of_an_unreviewed_plan_sets_the_flag_and_names_the_panel_call(tmp_path):
+    flow = staged(tmp_path, decisions="pass", plan="unreviewed")
+    reply = command(flow, "plan")
+    assert flow.record.flags["plan"] is True and reply.turn == ('Call task(stage="plan").', "request")
+    assert reply.lines == ("◆ t1 plan reopened · Ctrl+C (now)", ARMED.format("plan"))
+
+
+def test_task_command_bare_new_reopens_the_decisions_by_their_row(tmp_path):
+    flow = staged(tmp_path)
+    reply = command(flow, "new")
+    assert reply.lines == ("◆ t1 interview open · /task plan (skips the questions)", ARMED.format("new"))
+    assert reply.turn == (runner.INTERVIEW_SENTENCE, "request") and flow.record.flags["new"] is False
+    for verdict in ("blocked", "unreviewed", "pass", "accepted"):
+        flow = staged(tmp_path / verdict, decisions=verdict)
+        reply = command(flow, "new")
+        flagged = verdict != "blocked"
+        assert flow.record.flags["new"] is flagged
+        assert reply.lines == (("◆ t1 new reopened · Ctrl+C (now)",) * flagged + (ARMED.format("new"),))
+        assert reply.turn[1] == "request" and (flow.record.counts["new"].used == 0) is (not flagged)
+
+
+def test_task_command_bare_new_once_the_plan_is_filed_says_open_and_not_blocked(tmp_path):
+    flow = staged(tmp_path, decisions="pass", plan="pass")
+    reply = command(flow, "new")
+    assert reply == verbs.Reply(("◆ t1 open and not blocked · /task plan (revises) · new <objective> (closes t1)",))
+    assert flow.record.flags == {"new": False, "plan": False} and flow.armed is None
+
+
+def test_task_command_research_arms_with_its_sentence_after_the_skip(tmp_path):
+    flow = staged(tmp_path, messages=asked((1, "typed", "fix login")))
+    reply = command(flow, "research", turn=2)
+    assert flow.docs.read(1, "decisions.md") == "fix login (turn 1)"
+    assert reply.lines == ("◆ t1 decisions filed · from 1 turn", ARMED.format("research"))
+    assert reply.turn == (SENTENCE_FOR["research"], "request") and flow.armed == "research"
+
+
+async def test_task_command_run_arms_the_step_boundary_with_the_run_sentence(tmp_path):
+    flow, *_ = await planned(tmp_path)
+    flow.end_turn()
+    reply = command(flow, "run")
+    assert reply.lines == (ARMED.format("run"),) and reply.turn == (SENTENCE_FOR["run"], "request")
+    assert flow.armed == "step"
+
+
+async def test_task_command_run_on_a_step_blocked_past_its_limit_prints_the_row_and_arms_nothing(tmp_path):
+    flow, *_ = await planned(tmp_path)
+    flow.end_turn()
+    row = flow.record.filed[("plan.md", "step-1")]
+    row.verdict, row.counts.blockers, row.counts.used = "blocked", 2, 1
+    reply = command(flow, "run")
+    assert reply == verbs.Reply(("◆ t1 step 1/2 blocked · /task run (retries) · show · accept · 2 blockers",))
+    assert flow.armed is None and flow.said == set()
+
+
+async def test_task_command_refile_flag_is_left_by_a_read_and_a_refused_doc_and_consumed_by_the_refile(tmp_path):
+    flow, script, *_ = await planned(tmp_path)
+    flow.end_turn()
+    command(flow, "plan")
+    assert flow.record.flags["plan"] is True
+    await flow.run("plan", None, by="model")
+    await flow.run("plan", "not a plan", by="model")
+    assert flow.record.flags["plan"] is True
+    panels = len(script.named("big-picture"))
+    await flow.run("plan", PLAN_TWO, by="model")
+    assert flow.record.flags["plan"] is False and len(script.named("big-picture")) == panels + 1
+
+
+async def test_task_command_reopen_flag_is_cleared_when_the_turn_ends(tmp_path):
+    flow, *_ = await planned(tmp_path)
+    flow.end_turn()
+    command(flow, "plan")
+    flow.end_turn()
+    assert flow.record.flags == {"new": False, "plan": False} and flow.armed is None
