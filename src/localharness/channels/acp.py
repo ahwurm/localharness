@@ -798,7 +798,7 @@ class AcpChannel(ChannelAdapter):
             return
         task = self._turn_task
         if task is not None and not task.done():
-            task.cancel()
+            self._agent_loop.stop_turn(task)
 
     # ------------------------------------------------------------ session bring-up
 

@@ -434,7 +434,7 @@ async def cancelled_during_a_critic(bus, gate, replies=("Hello there.",)):
     loop, llm = gated_loop(bus, gate, replies)
     task = asyncio.create_task(turn(loop))
     await gate.started.wait()
-    task.cancel()
+    loop.stop_turn(task)
     return task, loop, llm
 
 
@@ -447,6 +447,23 @@ async def test_cancel_during_a_critic_is_consumed_and_the_draft_is_delivered_unr
     assert (done.verdict, done.finding, done.summary) == ("unreviewed", "", "Hello there.")
     (action,) = tool_less(bus)
     assert action.content == "Hello there." and action.seq < done.seq
+
+
+async def test_a_cancel_the_person_did_not_make_during_a_critic_cancels_the_turn(bus):
+    gate = Gate()
+    loop, _ = gated_loop(bus, gate)
+    task = asyncio.create_task(turn(loop))
+    await gate.started.wait()
+    task.cancel()
+    await asyncio.wait({task})
+    assert task.cancelled() and not events(bus, TaskComplete)
+
+
+async def test_a_timeout_during_a_critic_raises_timeout(bus):
+    gate = Gate()
+    loop, _ = gated_loop(bus, gate)
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(turn(loop), timeout=0.05)
 
 
 async def test_cancel_during_a_critic_prints_no_turn_cancelled_and_acp_answers_end_turn(bus):
@@ -637,10 +654,11 @@ async def test_on_reasoning_is_restored_after_a_cancel_mid_panel(bus):
     _, original, _ = recorder()
     gate = Gate()
     llm = Streaming([gen("Hello there.")], original)
-    task = asyncio.create_task(loop_of(llm, bus, Panel(gate, LIMITS)).run_turn("hello"))
+    loop = loop_of(llm, bus, Panel(gate, LIMITS))
+    task = asyncio.create_task(loop.run_turn("hello"))
     await gate.started.wait()
     assert llm.on_reasoning is not original
-    task.cancel()
+    loop.stop_turn(task)
     assert await task == "Hello there." and llm.on_reasoning is original
 
 

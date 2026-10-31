@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def sigint_cancels(
     task: asyncio.Task, *, on_stopping: Callable[[], None] | None = None,
+    cancel: Callable[[], None] | None = None,
 ) -> AsyncIterator[Callable[[], bool]]:
     """Yields `cancelled()`: true in the awaiting task's `except CancelledError` only for a user stop."""
     previous = signal.getsignal(signal.SIGINT)
@@ -35,7 +36,7 @@ async def sigint_cancels(
             _restore()
             return
         by_user = True
-        task.cancel()
+        (cancel or task.cancel)()
         if on_stopping is not None:
             timer = loop.call_later(1, on_stopping)
 

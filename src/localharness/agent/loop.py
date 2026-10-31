@@ -1385,6 +1385,7 @@ class AgentLoop:
         self._live_turn: tuple[Session, BudgetTracker] | None = None
         self._in_flight = False
         self._held: list[tuple[Callable, str]] = []
+        self._person_stop = False
         # PAPI-04's consumer seam: the memory slot, asked for its per-turn section right after the
         # guardrails. It is the loop's ONLY memory path — the loop never holds a store; recall
         # scope, writes and traces are the occupant's. None or an empty slot adds no section.
@@ -1882,6 +1883,7 @@ class AgentLoop:
                     self._llm.on_reasoning = self._reasoning_gate(original)
                 summary = await self._execute_loop(session, task, on_token, images, subtype)
             finally:
+                self._person_stop = False
                 if self.reply_panel is not None:
                     self._llm.on_reasoning = original
                     self._held.clear()
@@ -3277,6 +3279,11 @@ class AgentLoop:
                 await original(piece)
         return gate
 
+    def stop_turn(self, task: asyncio.Task) -> None:
+        """The person's stop: cancels the turn task and marks the cancel as theirs, so the reply panel's seam consumes it."""
+        self._person_stop = True
+        task.cancel()
+
     async def _publish_held(self, held: "list[Action]") -> None:
         while held:
             await self._bus.publish(held.pop())
@@ -3309,6 +3316,9 @@ class AgentLoop:
                 if verdict == "unreviewed":
                     finding = kept.reason or next((finding_text(f) for f in result.findings if f.tag == "NOTE"), "")
             except asyncio.CancelledError:
+                if not self._person_stop:
+                    raise
+                self._person_stop = False
                 asyncio.current_task().uncancel()
                 verdict, finding, delivered = "unreviewed", "", kept.draft
             except Exception:  # noqa: BLE001 - a panel that breaks delivers the draft unreviewed
