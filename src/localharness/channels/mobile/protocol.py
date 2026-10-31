@@ -30,7 +30,7 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-PROTOCOL_VERSION = 10
+PROTOCOL_VERSION = 11
 """Bumped on any breaking change to the wire.
 
 v2: Observation gained an optional generated-image id field (never released; replaced by v4's artifact).
@@ -50,6 +50,7 @@ v7: InstructionsChanged, NarrowingNotice: new events; additive, older pages igno
 v8: ConversationCleared: a new event; additive, older pages ignore it at `default: break`.
 v9: ModelSwitched (event), Activity (frame), Hello.model, /api/health model, GET /api/model; additive, older pages ignore them at `default: break`.
 v10: AffordanceCued: a new event; additive, older pages ignore it at `default: break`.
+v11: TaskComplete gained verdict, stage, step and finding, and StatusTick gained text; additive, older pages ignore them.
 
 One recorded exception to "a moved schema bumps the version": additive OPTIONAL fields on an
 existing event that the page does not read re-record the snapshot without a bump (the page renders
@@ -279,6 +280,10 @@ class StatusTick(WireFrame):
                     "yellow >=20 (`provider/speed_stats.py`).",
     )
     model: Optional[str] = Field(default=None, description="The model serving this turn, swap-safe.")
+    text: Optional[str] = Field(
+        default=None,
+        description="The reply panel's or a stage's progress text; shown in place of the phase words when set.",
+    )
     context_pct: Optional[float] = Field(
         default=None,
         description="Latest Heartbeat.context_utilization_pct. Bands <50/<65/<80/>=80, where 80 "
