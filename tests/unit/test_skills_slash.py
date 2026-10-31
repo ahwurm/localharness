@@ -790,7 +790,7 @@ async def test_a_start_with_a_skill_hands_one_warmed_holder_to_the_loop_and_the_
     await _start_async(None, False, False, str(tmp_path))
     holder = seen["agent"]._affordances
     assert isinstance(holder, Affordances) and warmed == [holder]
-    assert seen["session"]._affordances is holder
+    assert seen["session"]._affordances is holder and holder._store is seen["tool"]._store
 
 
 async def test_a_root_denied_the_skill_tool_gets_no_holder(tmp_path, pkg, rows, monkeypatch):

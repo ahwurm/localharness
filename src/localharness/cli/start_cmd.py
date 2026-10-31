@@ -3167,7 +3167,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             from localharness.agent.affordance import Affordances
             memory_entry = plugin_resolution.plan.entry("memory") if plugin_resolution is not None else None
             bundled_memory = memory_slot.occupant_name == "memory" and memory_entry is not None and memory_entry.bundled
-            affordances = Affordances(skill_set, memory_slot, task_state, cfg_path / "affordance" if bundled_memory else None)
+            affordances = Affordances(skill_set, memory_slot, eviction_store, cfg_path / "affordance" if bundled_memory else None)
             affordances.warm()
 
         # --- 10. Agent loop ---

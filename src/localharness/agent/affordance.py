@@ -17,7 +17,7 @@ from localharness.agent.calibration import normalise, scores
 from localharness.core.types import is_harness_message
 
 if TYPE_CHECKING:
-    from localharness.agent.task_record import TaskState
+    from localharness.agent.context import ContentStore
     from localharness.config.skills import Skill, SkillSet
     from localharness.plugins.api import QueryEmbedder
     from localharness.plugins.slot import MemorySlot
@@ -73,9 +73,8 @@ def cued_skills(messages, skills) -> set[str]:
     return {s.name for s in skills if _line(s) in lines}
 
 
-def task_skills(task_state: TaskState | None, skills) -> set[str]:
-    rec = task_state._live() if task_state is not None else None
-    sources = {r.source for r in rec.references} if rec is not None else set()
+def pinned_skills(store: ContentStore | None, skills) -> set[str]:
+    sources = {r.source for r in store.active_references} if store is not None else set()
     return {s.name for s in skills if f"skill {s.name}" in sources}
 
 
@@ -86,9 +85,9 @@ def _named_in(turn: str, names) -> set[str]:
 class Affordances:
     """The cue's holder for one sitting: description vectors warmed once from a local snapshot, at most one cue a turn."""
 
-    def __init__(self, skill_set: SkillSet, memory_slot: MemorySlot, task_state: TaskState | None,
+    def __init__(self, skill_set: SkillSet, memory_slot: MemorySlot, store: ContentStore | None,
                  record_dir: Path | None = None) -> None:
-        self._skill_set, self._slot, self._task_state, self._record_dir = skill_set, memory_slot, task_state, record_dir
+        self._skill_set, self._slot, self._store, self._record_dir = skill_set, memory_slot, store, record_dir
         self._skills: tuple[Skill, ...] = ()
         self._ready: tuple[QueryEmbedder, np.ndarray, float] | None = None
         self.named: str | None = None
@@ -162,5 +161,5 @@ class Affordances:
         if i is None:
             return None
         skill = skills[keep[i]]
-        in_view = held_skills(messages) | cued_skills(messages, skills) | task_skills(self._task_state, skills)
+        in_view = held_skills(messages) | cued_skills(messages, skills) | pinned_skills(self._store, skills)
         return None if skill.name in in_view else Cue(skill.name, skill.origin, _line(skill))

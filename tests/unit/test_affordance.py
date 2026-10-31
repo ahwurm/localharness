@@ -20,7 +20,7 @@ import pytest
 import yaml
 
 from localharness.agent import affordance, calibration, loop as loop_module, subagent
-from localharness.agent.affordance import Affordances, Cue, cued_skills, held_skills, normalise, pick, scores, task_skills
+from localharness.agent.affordance import Affordances, Cue, cued_skills, held_skills, normalise, pick, pinned_skills, scores
 from localharness.agent.calibration import (
     NO_SEPARATION, calibrate, descriptions_digest, entry_state, read_entry, record_path, shipped_pins, snapshot_files,
     write_entry,
@@ -28,8 +28,7 @@ from localharness.agent.calibration import (
 from localharness.agent.context import ContentStore, ContextManager, TokenCounter, fixed_tokens
 from localharness.agent.loop import AgentLoop, base_system_prompt, render_index
 from localharness.agent.permissions import PermissionEvaluator
-from localharness.agent.task_context import TaskContext
-from localharness.agent.task_record import Reference, TaskRecord, TaskState
+from localharness.agent.task_record import TaskState
 from localharness.cli import doctor_cmd, model_cmd, start_serving
 from localharness.channels.base import one_line
 from localharness.cli.workspace import MachineTrust
@@ -778,21 +777,18 @@ def test_cued_skills_matches_only_its_own_harness_line():
     assert cued_skills([human_message(line), harness_message(line, "self_check")], (COMMIT, NOTES)) == set()
 
 
-def _task(tmp_path, *sources, **flags):
-    state = TaskState(tmp_path / "task.json", workspace=str(tmp_path))
-    state.current = TaskRecord(context=TaskContext("goal"), workspace=str(tmp_path),
-                               references=[Reference(s) for s in sources], **flags)
-    return state
+def _held(*sources):
+    store = ContentStore()
+    for source in sources:
+        store.declare_active_reference("build", store.put(source), source)
+    return store
 
 
-def test_task_skills_reads_only_the_live_records_skill_references(tmp_path):
+def test_pinned_skills_reads_only_the_stores_skill_references():
     skills = (COMMIT, NOTES)
-    assert task_skills(_task(tmp_path, "skill notes"), skills) == {"notes"}
-    paused = _task(tmp_path, "skill notes")
-    paused.paused = True
-    for state in (paused, _task(tmp_path, "skill notes", closed=True), _task(tmp_path, "skill notes", retired=True),
-                  _task(tmp_path, "skill other", "notes.md"), None):
-        assert task_skills(state, skills) == set()
+    assert pinned_skills(_held("skill notes"), skills) == {"notes"}
+    for store in (ContentStore(), _held("skill other", "notes.md"), None):
+        assert pinned_skills(store, skills) == set()
 
 
 @pytest.mark.parametrize("turn, named", [
@@ -849,9 +845,9 @@ def _record(tmp_path, monkeypatch, prompts=LAB):
     return _snapshot(tmp_path / "hub" / "snapshots" / "rev", {"config.json": "aa11", "model.safetensors": "bb22"})
 
 
-def _warmed(tmp_path, monkeypatch, task_state=None, skills=SKILLS, record_dir=None):
+def _warmed(tmp_path, monkeypatch, store=None, skills=SKILLS, record_dir=None):
     fake = FakeEmbedder(_record(tmp_path, monkeypatch))
-    holder = Affordances(SkillSet(skills, (), ()), _slot(fake), task_state, record_dir)
+    holder = Affordances(SkillSet(skills, (), ()), _slot(fake), store, record_dir)
     holder.warm().join(timeout=5)
     fake.asked.clear()
     return holder, fake
@@ -975,25 +971,16 @@ async def test_a_dropped_skill_call_re_arms(tmp_path, monkeypatch):
     assert (await holder.cue(TURN, [human_message(TURN)])).name == "commit-message"
 
 
-async def test_a_skill_the_live_task_references_is_in_view_after_compaction(tmp_path, monkeypatch):
-    holder, fake = _warmed(tmp_path, monkeypatch, task_state=_task(tmp_path, "skill commit-message"))
+async def test_a_skill_the_store_holds_is_in_view_after_compaction(tmp_path, monkeypatch):
+    holder, fake = _warmed(tmp_path, monkeypatch, store=_held("skill commit-message"))
     assert await holder.cue(TURN, [human_message(TURN)]) is None
     fake.answer = [0.0, 1.0, 0.0]
     assert (await holder.cue("keep a note", [])).name == "notes"
 
 
-def _paused(state):
-    state.paused = True
-    return state
-
-
-@pytest.mark.parametrize("state", [
-    lambda t: _paused(_task(t, "skill commit-message")),
-    lambda t: _task(t, "skill commit-message", closed=True),
-    lambda t: _task(t, "skill notes"),
-], ids=["paused", "closed and settled", "another skill"])
-async def test_a_task_that_is_not_live_or_references_another_skill_does_not_suppress(tmp_path, monkeypatch, state):
-    holder, _ = _warmed(tmp_path, monkeypatch, task_state=state(tmp_path))
+@pytest.mark.parametrize("store", [ContentStore, lambda: _held("skill notes")], ids=["empty", "another skill"])
+async def test_a_store_that_is_empty_or_holds_another_skill_does_not_suppress(tmp_path, monkeypatch, store):
+    holder, _ = _warmed(tmp_path, monkeypatch, store=store())
     assert (await holder.cue(TURN, [])).name == "commit-message"
 
 
