@@ -51,13 +51,14 @@ MEASURED_LONG_TURN_S = 600.0
 """Ten minutes — the tail of the same measurement: 15.1% of real turns run past it."""
 
 TURN_PUSH_MIN_S = MEASURED_MEDIAN_TURN_S
-REPLY_TITLES = {"pass": "reply ready", "unreviewed": "reply ready (unchecked)", "blocked": "reply blocked"}
 """Below this, a finished turn is not worth a notification.
 
 A turn shorter than the median is one you could have stood and waited for; buzzing for it is how
 a phone earns its notifications being switched off — and then the permission badge reaches
 nobody, which is the failure §5.5 exists to prevent.
 """
+
+REPLY_TITLES = {"pass": "reply ready", "unreviewed": "reply ready (unchecked)", "blocked": "reply blocked"}
 
 NEEDS_YOU_COOLDOWN_S = MEASURED_LONG_TURN_S
 """One alerting "needs you" per session per window.
