@@ -3060,6 +3060,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             remote_unattended=harness.channels.remote_unattended,
             trusted_for_run=trust_flag,
             config_dir=cfg_path,  # the session's own tools folder and settings files are guarded
+            state_dirs=(state_dir,),
         )
         if resume is not None and resume.gate_mode != gate.mode:
             from localharness.agent.gate_types import MODE_STRICTNESS
@@ -3154,6 +3155,19 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             project_agents_dir=loader.agents_dir("project"),
         )
         await tool_registry.register(agent_tool, scope="global")
+        from localharness.orchestrator.task_flow import TaskFlow
+        from localharness.orchestrator.task_flow.filer import Docs
+        from localharness.tools.builtin.task_tool import TaskTool
+        flow_sink: list = []  # the channel fills it once it exists
+        flow = TaskFlow(
+            run_config_child=_run_agent.run_config_child,
+            emit=lambda *row: flow_sink[0](*row) if flow_sink else None,
+            exclude=lambda seconds: agent_loop.exclude(seconds),
+            docs=Docs(state_dir, workspace is not None, agent_config.name),
+            config=agent_config, root_tools=(), llm=llm, token_counter=token_counter, bus=bus,
+            messages=lambda: agent_loop.messages(), turn=lambda: agent_loop.turn,
+        )
+        await tool_registry.register(TaskTool(flow), scope="global")
         from localharness.tools.builtin.skill_tool import SkillTool
         if skill_set.skills:
             await tool_registry.register(
@@ -3165,6 +3179,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 tool_registry, agent_config.name, agent_config.division or "", agent_config.tools)}
         except Exception:  # noqa: BLE001 — names every tool the root registered, though the loop's own resolution then holds none
             held = {"agent", "task", "skill"} if skill_set.skills else {"agent", "task"}
+        flow.root_tools = sorted(held)
         skill_listing = skill_listing if "skill" in held else ""
         affordances = None
         if skill_listing:
@@ -3217,6 +3232,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             template_margin_ratio=harness.autosense.template_margin_ratio,
             effort=(_effort_level, _effort_rung),
             effort_ratios=_effort_ratios,
+            request_note=flow.note,
+            reply_panel=flow.reply_panel,
         )
         from localharness.agent.subagent import builtin_role_floors
         from localharness.provider.lifecycle import record_floor
@@ -3551,6 +3568,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # (D-19) and it never senses again.
             unit_state=_unit,
             skills=SkillSession(skill_set, affordances) if skill_set.skills else None,
+            task_flow=flow,
         )
 
         repl_cell.append(repl)  # late binding: the supplier now answers repl.server_recovery()
