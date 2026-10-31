@@ -200,3 +200,19 @@ def test_the_first_private_target_in_segment_order_is_named(ws):
     root = ws.parent / ".localharness" / "agents" / "a"
     command = f"echo x > a.txt; rm {root}/sessions/x; echo y > {root}/tasks/t1/plan.md"
     assert shell(make_ctx(ws), command).reason == PRIVATE_STATE_REASON
+
+
+def test_gate_state_dirs_are_realpathed_and_reach_the_context(ws, tmp_path):
+    from localharness.agent.gate import PermissionGate
+    from localharness.config.grants import GrantStore
+
+    state = tmp_path / "state"
+    state.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(state)
+    kw = dict(boundary=ws, workspace=ws, grants=GrantStore())
+    assert PermissionGate(**kw).state_dirs == ()
+    gate = PermissionGate(**kw, state_dirs=(alias,))
+    assert gate.state_dirs == (state.resolve(),)
+    target = state / "agents" / "a" / "sessions" / "x.md"
+    assert is_private(write(gate.context(), target))

@@ -197,6 +197,10 @@ class ScenarioSpec(BaseModel):
             "plugin = 'plugin:plugin_name.tool_name'."
         ),
     )
+    task_flow: bool = Field(
+        default=False,
+        description="Run with a task flow: a per-run state dir on the gate and the reply panel at the loop's acceptance seam.",
+    )
     tolerance: float = 0.10
     min_runs: int = 3
     max_runs: int = 20

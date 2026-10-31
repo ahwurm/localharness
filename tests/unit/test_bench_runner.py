@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -1078,3 +1079,190 @@ async def test_emergency_floor_publishes_compaction_triggered_on_runner_built_pa
         "emergency floor shrank the request but did not publish CompactionTriggered — a silent "
         "cut, exactly what the event exists to record"
     )
+
+
+# ---------------------------------------------------------------------------
+# task_flow scenarios: a per-run state dir, the gate's state_dirs, the reply panel
+# ---------------------------------------------------------------------------
+
+
+def _flow_scen(task_flow=True, **kw):
+    from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
+    from localharness.core.events import BudgetSpec
+
+    return ScenarioSpec(
+        name=kw.pop("name", "flow_hello"),
+        prompt="Hello! How are you today?",
+        success_criteria=kw.pop("success_criteria", SuccessCriteria(
+            rubric=["regex:(?i)hello"], event_counts={"critic_children": {"exact": 2}})),
+        budget=BudgetSpec(),
+        limits=LimitsSpec(max_tool_calls=0, **kw.pop("limits", {})),
+        tools_allowed=[],
+        slice="train",
+        category="agent_orchestration",
+        task_flow=task_flow,
+        **kw,
+    )
+
+
+def _greeting_queue(mock_llm_client, root="Hello! How can I help you today?"):
+    Response = mock_llm_client.Response
+    return mock_llm_client([Response(content=root), Response(content="NONE"), Response(content="NONE")])
+
+
+def test_task_flow_defaults_to_false():
+    assert _flow_scen(task_flow=False).task_flow is False
+    from localharness.bench.schema import ScenarioSpec
+    assert ScenarioSpec.model_fields["task_flow"].default is False
+
+
+def test_critic_children_counts_only_children_that_are_critics():
+    from localharness.bench.runner import MetricAccumulator
+    from localharness.core.events import TurnCompleted, TurnFailed
+
+    acc = MetricAccumulator()
+
+    def done(agent_id, parent_id):
+        return TurnCompleted(agent_id=agent_id, session_id="s", parent_id=parent_id, iterations=1,
+                             duration_seconds=1.0, elapsed_tokens=1, summary="x")
+
+    acc.on_turn_completed(done("answer", "run"))
+    acc.on_turn_failed(TurnFailed(agent_id="jtbd", session_id="s", parent_id="run", reason="llm_error", detail="d",
+                                  iterations=1, duration_seconds=1.0))
+    acc.on_turn_completed(done("explore", "run"))
+    acc.on_turn_completed(done("answer", None))
+    assert acc.critic_children == 2
+
+
+@pytest.mark.asyncio
+async def test_task_flow_run_pays_two_critic_children_and_delivers_unreviewed(mock_llm_client, tmp_path):
+    from localharness.core.events import TaskComplete, TurnCompleted, deserialize_event
+
+    run_path = tmp_path / "flow.jsonl"
+    llm = _greeting_queue(mock_llm_client)
+    from localharness.bench.runner import execute_one_run
+    completed = await execute_one_run(_flow_scen(), "m", run_path, llm)
+    events = [deserialize_event(ln) for ln in run_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    kids = [e for e in events if isinstance(e, TurnCompleted) and e.parent_id]
+    done = [e for e in events if isinstance(e, TaskComplete) and not e.parent_id]
+    assert sorted(e.agent_id for e in kids) == ["answer", "jtbd"]
+    assert [e.verdict for e in done] == ["unreviewed"]
+    assert done[0].summary == "Hello! How can I help you today?"
+    assert completed.success is True
+
+
+@pytest.mark.asyncio
+async def test_task_flow_run_fails_its_floor_when_a_critic_is_missing(mock_llm_client, tmp_path):
+    from localharness.bench.runner import execute_one_run
+    from localharness.bench.schema import SuccessCriteria
+
+    scen = _flow_scen(success_criteria=SuccessCriteria(event_counts={"critic_children": {"exact": 3}}))
+    completed = await execute_one_run(scen, "m", tmp_path / "f.jsonl", _greeting_queue(mock_llm_client))
+    assert completed.success is False
+
+
+@pytest.mark.asyncio
+async def test_task_flow_loop_holds_the_panel_and_its_gate_guards_the_state_dir(tmp_path, monkeypatch):
+    import tempfile
+    from localharness.agent.gate_types import GateSettings, ToolMeta, Verdict
+    from localharness.agent.verdict import evaluate
+    from localharness.bench import runner as bench_runner
+    from localharness.core.bus import EventBus
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    loop = await bench_runner._build_agent_loop(bus=EventBus(), llm_client=None, scenario=_flow_scen())
+    try:
+        (flow_dir,) = tmp_path.glob("bench-flow-*")
+        assert loop.reply_panel is not None
+        assert loop.gate.state_dirs == (flow_dir.resolve(),)
+        ctx = loop.gate.context()
+        assert ctx.state_dirs == (flow_dir.resolve(),)
+        target = flow_dir / "agents" / "bench-flow-hello" / "sessions" / "jtbd.md"
+        result = evaluate("write", {"path": str(target), "content": "x"}, ToolMeta(destructive=True, group="fs.write"),
+                          ctx, GateSettings())
+        assert result.verdict is Verdict.DENY
+    finally:
+        await bench_runner._stop_bench_memory(None, loop.__dict__.get("_flow_dir"))
+
+
+@pytest.mark.asyncio
+async def test_scenario_without_task_flow_builds_no_panel_no_state_dir(tmp_path, monkeypatch):
+    import tempfile
+    from localharness.bench import runner as bench_runner
+    from localharness.core.bus import EventBus
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    loop = await bench_runner._build_agent_loop(bus=EventBus(), llm_client=None, scenario=_flow_scen(task_flow=False))
+    assert loop.reply_panel is None
+    assert loop.gate.state_dirs == ()
+    assert "_flow_dir" not in vars(loop)
+    assert not list(tmp_path.glob("bench-flow-*"))
+
+
+async def _flow_run(monkeypatch, tmp_path, run_loop, **limits):
+    import tempfile
+    from localharness.bench import runner as bench_runner
+
+    seen: list = []
+
+    async def _spy(loop, prompt, on_token):
+        seen.append((Path(loop._flow_dir), Path(loop._flow_dir).is_dir()))
+        await run_loop(loop, prompt, on_token)
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(bench_runner, "_run_loop", _spy)
+    scen = _flow_scen(limits=limits)
+    completed = await bench_runner.execute_one_run(scen, "m", tmp_path / "r.jsonl", llm_client=None)
+    return completed, seen
+
+
+@pytest.mark.asyncio
+async def test_task_flow_state_dir_exists_during_the_run_and_is_gone_after_success(monkeypatch, tmp_path):
+    async def _ok(loop, prompt, on_token):
+        return None
+    _completed, seen = await _flow_run(monkeypatch, tmp_path, _ok)
+    assert [alive for _d, alive in seen] == [True]
+    assert not seen[0][0].exists() and not list(tmp_path.glob("bench-flow-*"))
+
+
+@pytest.mark.asyncio
+async def test_task_flow_state_dir_is_removed_after_a_timeout(monkeypatch, tmp_path):
+    async def _hang(loop, prompt, on_token):
+        await asyncio.sleep(30)
+    completed, seen = await _flow_run(monkeypatch, tmp_path, _hang, max_latency_s=0.2)
+    assert completed.success is False
+    assert not seen[0][0].exists()
+
+
+@pytest.mark.asyncio
+async def test_task_flow_state_dir_is_removed_after_a_scenario_error(monkeypatch, tmp_path):
+    async def _boom(loop, prompt, on_token):
+        raise RuntimeError("loop exploded")
+    _completed, seen = await _flow_run(monkeypatch, tmp_path, _boom)
+    assert not seen[0][0].exists()
+
+
+@pytest.mark.asyncio
+async def test_two_task_flow_runs_never_share_a_state_dir(monkeypatch, tmp_path):
+    async def _ok(loop, prompt, on_token):
+        return None
+    _c1, first = await _flow_run(monkeypatch, tmp_path, _ok)
+    _c2, second = await _flow_run(monkeypatch, tmp_path, _ok)
+    assert first[0][0] != second[0][0]
+
+
+@pytest.mark.asyncio
+async def test_task_flow_build_removes_the_state_dir_when_loop_construction_fails(monkeypatch, tmp_path):
+    import tempfile
+    from localharness.bench import runner as bench_runner
+    from localharness.core.bus import EventBus
+
+    class _Broken:
+        def __init__(self, **kw):
+            raise ValueError("construction failed")
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr("localharness.agent.loop.AgentLoop", _Broken)
+    with pytest.raises(ValueError, match="construction failed"):
+        await bench_runner._build_agent_loop(bus=EventBus(), llm_client=None, scenario=_flow_scen())
+    assert not list(tmp_path.glob("bench-flow-*"))
