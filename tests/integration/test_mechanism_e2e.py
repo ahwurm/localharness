@@ -1,6 +1,6 @@
-"""Phase 25 (MECH-02) — offline propose→seed→experiment run→verdict for the MECHANISM axis.
+"""Offline propose→seed→experiment run→verdict for the MECHANISM axis.
 
-Proves agent.self_check.enabled (the axis 25-01 made first-class) flows end-to-end through the
+Proves agent.baton_gate.enabled flows end-to-end through the
 EXISTING promotion gate and reaches the gate BAND (a real verdict, exit 0-3), NOT a structural
 refusal (>=4) — while the anti-reward-hacking seal stays intact on the SAME path (off-registry /
 holdout / sentinel / multi-component STILL refuse, with zero bench arms run).
@@ -8,8 +8,7 @@ holdout / sentinel / multi-component STILL refuse, with zero bench arms run).
 Fully offline: an injected FakeRunSlice supplies per-fixture success maps, so run_experiment never
 builds a worktree or calls an LLM (experiment.py:451 — run_slice injected => _build_default_run_slice
 is bypassed). The holdout maps are in-memory in the fake; no bench/scenarios/holdout/ slice is ever
-executed. TEST-ONLY: zero src change — the mutation rides the already-wired agent.* cascade and the
-v1.2-GREEN-PIN gate/Welch path UNTOUCHED.
+executed. The mutation rides the agent.* cascade and the gate/Welch path untouched.
 
 FakeRunSlice + the band-verdict fixtures are imported verbatim from the canonical gate suite
 (tests/unit/test_experiment.py) — the same seam the EXP-01..05 contract is written against.
@@ -37,11 +36,11 @@ _BAND = (exp.EXIT_PROMOTE, exp.EXIT_REJECT_TRAIN, exp.EXIT_REJECT_HOLDOUT, exp.E
 
 
 async def test_mechanism_e2e_reaches_band_promote(archive_store, seeded_inflight):
-    """MECH-02 e2e: agent.self_check.enabled flows seed→run_experiment→verdict and reaches the gate
+    """agent.baton_gate.enabled flows seed→run_experiment→verdict and reaches the gate
     BAND (a real verdict 0-3), NOT a structural refusal. Clear train improvement + non-regressing
     holdout → EXIT_PROMOTE=0. Fully offline via the injected FakeRunSlice."""
     pid = await seeded_inflight(
-        archive_store, component="agent.self_check.enabled", before=False, after=True
+        archive_store, component="agent.baton_gate.enabled", before=True, after=False
     )
     fake = FakeRunSlice(
         train_base=_IMPROVED_TRAIN_BASE,
@@ -62,7 +61,7 @@ async def test_mechanism_e2e_train_reject_is_still_in_band(archive_store, seeded
     """Equal arms → EXIT_REJECT_TRAIN=1 — still a BAND verdict (a real gate decision on the
     mechanism), NOT a refusal. Confirms the axis is GATED, not waved through."""
     pid = await seeded_inflight(
-        archive_store, component="agent.self_check.enabled", before=False, after=True
+        archive_store, component="agent.baton_gate.enabled", before=True, after=False
     )
     fake = FakeRunSlice(train_base=_EQUAL_TRAIN, train_head=_EQUAL_TRAIN)
     code = await exp.run_experiment(pid, store=archive_store, run_slice=fake)
@@ -87,11 +86,11 @@ async def test_mechanism_e2e_seal_still_refuses_offregistry_and_multi(archive_st
     # multi-component diff (even with the mechanism axis as one leg) → EXIT_REFUSE_MULTI_COMPONENT=4.
     multi = json.dumps(
         {
-            "before": {"agent.self_check.enabled": False, "agent.role": "a"},
-            "after": {"agent.self_check.enabled": True, "agent.role": "x"},
+            "before": {"agent.baton_gate.enabled": True, "agent.role": "a"},
+            "after": {"agent.baton_gate.enabled": False, "agent.role": "x"},
         }
     )
-    pid = await seeded_inflight(archive_store, component="agent.self_check.enabled", diff=multi)
+    pid = await seeded_inflight(archive_store, component="agent.baton_gate.enabled", diff=multi)
     fake = FakeRunSlice(train_base=_EQUAL_TRAIN, train_head=_EQUAL_TRAIN)
     code = await exp.run_experiment(pid, store=archive_store, run_slice=fake)
     assert code == exp.EXIT_REFUSE_MULTI_COMPONENT

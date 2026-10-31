@@ -113,7 +113,7 @@ from localharness.config.models import AgentConfig
 
 class _ScriptedNoToolLLM:
     """Content-only script, one entry per LLM round-trip; never emits tool calls
-    (mirrors the self-check suite's fake). tool_registry=None -> no tool_schemas -> the act-guard
+    tool_registry=None -> no tool_schemas -> the act-guard
     is out of the way, so the baton gate is exercised in isolation."""
 
     def __init__(self, contents):
@@ -129,10 +129,8 @@ class _ScriptedNoToolLLM:
         return NS(content=self._contents[idx], tool_calls=None), None
 
 
-def _make_loop(llm, bus, *, self_check=None, baton_gate=None):
+def _make_loop(llm, bus, *, baton_gate=None):
     overrides = {"name": "baton-agent", "role": "Test agent."}
-    if self_check is not None:
-        overrides["self_check"] = self_check
     if baton_gate is not None:
         overrides["baton_gate"] = baton_gate
     cfg = AgentConfig.model_validate(overrides)
@@ -185,25 +183,6 @@ async def test_baton_gate_off_restores_verbatim_accept(bus):
     assert _baton_nudges(session) == []
     assert session.iteration == 1
     assert summary == "Now let me read the notebooks."
-
-
-@pytest.mark.asyncio
-async def test_baton_gate_composes_with_self_check(bus):
-    """Order: baton gate FIRST, then self_check. Both bounded -> +1 (baton) +1 (self_check)."""
-    llm = _ScriptedNoToolLLM([
-        "Now let me read the notebooks.",    # -> baton nudge (iter 1)
-        "The notebooks show 92% accuracy.",  # -> self_check review nudge (iter 2)
-        "CONFIRMED",                         # -> accept the confirmed answer (iter 3)
-    ])
-    loop = _make_loop(llm, bus, self_check={"enabled": True, "max_passes": 1})
-    session = Session(agent_id="baton-agent", session_id="s-compose", messages=[])
-    summary = await loop._execute_loop(session, "analyze", None)
-    assert len(_baton_nudges(session)) == 1
-    reviews = [m for m in session.messages if m.get("role") == "user"
-               and "Review your answer" in (m.get("content") or "")]
-    assert len(reviews) == 1
-    assert session.iteration == 3
-    assert summary == "The notebooks show 92% accuracy."   # the confirmed answer, not "CONFIRMED"
 
 
 @pytest.mark.asyncio
