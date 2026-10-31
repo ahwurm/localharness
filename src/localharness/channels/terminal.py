@@ -1328,7 +1328,19 @@ class TerminalChannel(ChannelAdapter):
         """Print a message to the terminal. Wraps in Panel if agent_id provided. The text is
         sanitized first: a Markdown panel would otherwise hand the model's escape sequences to
         the terminal verbatim."""
-        content = sanitize_for_display(content)
+        await self._say(sanitize_for_display(content), agent_id, metadata)
+
+    async def send_notice(self, line: str) -> None:
+        """Prints a finished `notice()` line with its own mark, which `send_message` would neutralise."""
+        await self._say(line, None, None)
+
+    def has_status_row(self) -> bool:
+        return self._box_app is not None and self._box_active
+
+    def levers(self) -> tuple[str, str]:
+        return ("/task stop (after this unit)", "Ctrl+C (now)") if self.has_status_row() else super().levers()
+
+    async def _say(self, content: str, agent_id: str | None, metadata: dict[str, Any] | None) -> None:
         async with self._output_lock:
             self._stop_thinking()
             self._close_burst()
@@ -1345,10 +1357,10 @@ class TerminalChannel(ChannelAdapter):
                 # by band via Text spans (never markup — content stays injection-proof).
                 self._console.print(_colorize_rate_notes(content))
             else:
-                self._console.print(escape(content))
+                self._console.print(_markup_escape(content))
 
     async def panel_started(self, line: str) -> None:
-        if not (self._box_app is not None and self._box_active):
+        if not self.has_status_row():
             await self.send_message(line)
 
     async def send_renderable(

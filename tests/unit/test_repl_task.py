@@ -1470,3 +1470,85 @@ def test_channel_adapter_levers_come_from_the_stop_word_and_notice_falls_back_to
     assert adapter.levers() == ("stop (now)", "stop (now)") and adapter.has_status_row() is False
     asyncio.run(adapter.send_notice("◆ t1 done"))
     assert sent == [("◆ t1 done", {"style": "system.info"})]
+
+
+async def running_repl(tmp_path, levers=BOX):
+    flow = await planned_flow(tmp_path)
+    repl, channel, agent = flow_repl(flow, executing(flow), levers)
+    repl._turn_task = await repl._dispatch_input("/task run")
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    channel.notices.clear()
+    return flow, repl, channel, agent
+
+
+async def end(repl):
+    repl._turn_task.cancel()
+    await asyncio.gather(repl._turn_task, return_exceptions=True)
+
+
+async def test_repl_stop_mid_turn_sets_the_halt_on_the_control_path_and_prints_the_stopping_row(tmp_path):
+    flow, repl, channel, agent = await running_repl(tmp_path)
+    flow.unit = ("step 2/5 executing", 25)
+    await repl._route_during_turn("/task stop", False)
+    assert flow.record.halted == "stopped" and not repl._fifo
+    assert channel.notices == ["◆ t1 stopping · Ctrl+C (now) · after this unit · up to 25 min"]
+    await end(repl)
+
+
+async def test_repl_stop_between_units_says_before_the_next_task_call(tmp_path):
+    flow, repl, channel, agent = await running_repl(tmp_path)
+    flow.busy = False
+    await repl._route_during_turn("  /TASK   stop ", False)
+    assert flow.record.halted == "stopped"
+    assert channel.notices == ["◆ t1 stopping · Ctrl+C (now) · before the next task call"]
+    assert await flow.run("step", None, by="model") == "halted by the person"
+    await end(repl)
+
+
+async def test_repl_stop_with_no_turn_running_sets_nothing_and_prints_the_bare_status(tmp_path):
+    flow = await planned_flow(tmp_path)
+    repl, channel, agent = flow_repl(flow)
+    assert await repl._handle_slash("/task stop")
+    assert flow.record.halted is None
+    assert tuple(channel.notices) == command(flow, "").lines
+
+
+async def test_repl_every_other_slash_typed_mid_turn_queues_and_clear_removes_nothing(tmp_path):
+    flow, repl, channel, agent = await running_repl(tmp_path)
+    await repl._route_during_turn("/task clear", False)
+    await repl._route_during_turn("/task stop now", False)
+    assert list(repl._fifo) == ["/task clear", "/task stop now"] and flow.record is not None
+    assert flow.docs.names(1) and flow.record.halted is None
+    assert channel.notices == ["◆ t1 queued · /task stop (after this unit) · after this turn · a command waits"] * 2
+    await end(repl)
+
+
+async def test_repl_a_nudge_while_a_task_is_open_prints_heard(tmp_path):
+    flow, repl, channel, agent = await running_repl(tmp_path)
+    await repl._route_during_turn("fix the title", True)
+    assert agent.nudges == ["fix the title"]
+    assert channel.notices == ["◆ t1 heard · /task stop (after this unit) · after this unit"]
+    await end(repl)
+
+
+async def test_repl_a_queued_message_prints_queued_and_a_tier2_upgrade_prints_heard(tmp_path):
+    from localharness.channels import input_router
+
+    flow, repl, channel, agent = await running_repl(tmp_path)
+    queue = input_router.Decision(input_router.Route.QUEUE, "tier1", "r")
+    await repl._deliver_route("when you can, rename x", queue)
+    assert channel.notices == ["◆ t1 queued · /task stop (after this unit) · after this turn · ! nudges"]
+    await repl._apply_tier2_result("when you can, rename x", input_router.Decision(input_router.Route.NUDGE, "tier2", "r"))
+    assert channel.notices[-1] == "◆ t1 heard · /task stop (after this unit) · after this unit" and not repl._fifo
+    await end(repl)
+
+
+async def test_repl_routed_messages_print_nothing_with_no_task_open(tmp_path):
+    from localharness.channels import input_router
+
+    flow, *_ = make_flow(tmp_path)
+    repl, channel, agent = flow_repl(flow)
+    await repl._deliver_route("x", input_router.Decision(input_router.Route.QUEUE, "tier1", "r"))
+    await repl._deliver_route("y", input_router.Decision(input_router.Route.NUDGE, "tier1", "r"))
+    assert channel.notices == [] and agent.nudges == ["y"]
