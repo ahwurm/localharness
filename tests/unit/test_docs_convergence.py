@@ -1035,3 +1035,25 @@ def test_task_flow_doc_bites():
         assert check_task_flow_doc(_swap(text, needle, "x")) == [
             f"SECURITY.md's machine-level-only list does not say {needle}"]
     assert len(check_task_flow_doc("## Nothing\n")) == len(TASK_FLOW_NEEDLES)
+
+
+FILER_WALK_NEEDLES = (
+    "follows no link below `agents/`", "a machine config folder or `agents/` folder that is itself a link keeps working",
+    "A task folder is created fresh", "`sessions/jtbd.md`")
+
+
+def check_filer_walk_doc(security_text: str) -> list[str]:
+    """SECURITY.md says the task and session folders are walked without following a link below `agents/`, what still works, and that the session docs are written through that walk."""
+    body = " ".join(((section(security_text, "## Trust boundaries") or "") + (section(security_text, "## Files the harness writes") or "")).split())
+    return [f"SECURITY.md does not say {n}" for n in FILER_WALK_NEEDLES if n not in body]
+
+
+def test_filer_walk_doc_live():
+    assert check_filer_walk_doc(_read("SECURITY.md")) == []
+
+
+def test_filer_walk_doc_bites():
+    text = _read("SECURITY.md")
+    for needle in FILER_WALK_NEEDLES:
+        assert check_filer_walk_doc(_swap(text, needle, "x")) == [f"SECURITY.md does not say {needle}"]
+    assert len(check_filer_walk_doc("## Nothing\n")) == len(FILER_WALK_NEEDLES)

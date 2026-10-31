@@ -14,9 +14,11 @@ from localharness.core.private_files import PRIVATE_DIR_MODE, NotRegularFile, at
 from localharness.orchestrator.task_flow.record import Record
 
 TRUNCATION_MARKER = "\n[truncated]\n"
+SESSION_DOCS = ("jtbd.md", "reply-review.md")
 _BOUND = Caps.DOC + len(TRUNCATION_MARKER.encode())
 _DIR = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
 _FOLDER = re.compile(r"t[0-9]+")
+_TASK_DOC = re.compile(r"(?:(?:decisions|research|plan|step-[1-9][0-9]*)(?:-review)?|review)\.md")
 _ATTEMPTS = 8
 
 
@@ -65,6 +67,19 @@ def _listing(fd: int) -> list[str]:
 
 def _highest(fd: int) -> int:
     return max((int(n[1:]) for n in _listing(fd) if _FOLDER.fullmatch(n)), default=0)
+
+
+def _folder(task: int, name: str) -> str:
+    folder = f"t{task}"
+    if not _FOLDER.fullmatch(folder) or not _TASK_DOC.fullmatch(name):
+        raise Refused(f"{folder}/{name} is not a task doc")
+    return folder
+
+
+def _session(name: str) -> str:
+    if name not in SESSION_DOCS:
+        raise Refused(f"{name} is not a session doc")
+    return name
 
 
 def _cut(text: str) -> tuple[str, bool]:
@@ -126,21 +141,42 @@ class Docs:
         raise Refused("no free task folder")
 
     def write(self, task: int, name: str, text: str) -> tuple[str, bool]:
+        folder = _folder(task, name)
         if task not in self.adopted:
-            raise Refused(f"t{task} was not made by this session; it is read-only")
+            raise Refused(f"{folder} was not made by this session; it is read-only")
         cut, truncated = _cut(text)
-        with self._dir("tasks", f"t{task}", create=False) as fd:
+        with self._dir("tasks", folder, create=False) as fd:
             atomic_write_text(name, cut, dir_fd=fd)
         return digest(cut), truncated
 
     def read(self, task: int, name: str) -> str | None:
+        folder = _folder(task, name)
         try:
-            with self._dir("tasks", f"t{task}", create=False) as fd:
+            with self._dir("tasks", folder, create=False) as fd:
                 return _slurp(fd, name)
         except FileNotFoundError:
             return None
 
+    def read_session(self, name: str) -> str:
+        try:
+            with self._dir("sessions", create=False) as fd:
+                return _slurp(fd, _session(name)) or ""
+        except FileNotFoundError:
+            return ""
+
+    def write_session(self, name: str, text: str) -> None:
+        with self._dir("sessions", create=True) as fd:
+            atomic_write_text(_session(name), _cut(text)[0], dir_fd=fd)
+
+    def reset_sessions(self) -> None:
+        for name in SESSION_DOCS:
+            self.write_session(name, "")
+
+    def path(self, task: int, name: str) -> Path:
+        return self.state_dir / "agents" / self.agent / "tasks" / f"t{task}" / name
+
     def verified(self, record: Record, key: tuple[str, str | None]) -> bool:
+        """A whole doc's current text still has the digest it was filed with."""
         row = record.filed.get(key)
         try:
             text = self.read(record.id, key[0])

@@ -84,6 +84,11 @@ not check it), and the machine's file of that name is used instead: a project's 
 files inside its `.localharness/`, judged by where they sit, never by where they point. That rule is
 for a project's files only: a symlink among your machine's own agent files loads as the file it
 points to, as a dotfiles setup expects. So does a machine `agents/` folder that is itself a symlink.
+The harness's task and session folders are stricter: it walks `agents/<name>/tasks/t<n>/` and
+`agents/<name>/sessions/` one folder at a time and follows no link below `agents/` (in a project's
+`.localharness/`, at no step), so a linked task or session folder is refused rather than followed; a
+machine config folder or `agents/` folder that is itself a link keeps working. A task folder is created
+fresh, and only the session that created it writes into it.
 The harness's agent writer never writes through a linked agent file in either layer: it refuses to
 write over an agent file that is a symlink, in a project it also refuses an `agents/` folder that is a symlink or
 leads outside `.localharness/`, and it never creates a project's `.localharness/`. What your
@@ -1178,8 +1183,10 @@ logs, the phone session's `sessions/asleep.json` while it sleeps, `history.jsonl
 not a protected path), `strata/<port>.json` and `strata/<port>.log` (the copy of a Strata config a
 launch hands the server and its engine log, written without following links inside the protected,
 owner-only `strata/` folder), agent files written by `agent create`, by a start (the root agent) or by the
-in-session creation workflow, autoresearch's archive, run journals and budget file, and
-`plugins/README.md`. Each model response's row in `history.jsonl` records the model name, the
+in-session creation workflow, autoresearch's archive, run journals and budget file, the task folders
+`agents/<name>/tasks/t<n>/` with their docs and the session docs `sessions/jtbd.md` and
+`sessions/reply-review.md` (each written through that no-follow walk and replaced atomically, never
+through a link), and `plugins/README.md`. Each model response's row in `history.jsonl` records the model name, the
 server-reported prompt and completion token counts and the call's duration (numbers and a name,
 nothing else from the response), and the file stays owner-only (0600). The same writers make the
 same files owner-only in a project's `.localharness/` (its sessions, history and memory). The one script `start` installs,
