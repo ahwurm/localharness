@@ -14,7 +14,7 @@ from localharness.core import caps as caps_module
 from localharness.core.caps import Caps
 from localharness.core.types import human_message
 from localharness.orchestrator.task_flow import runner, verbs
-from localharness.orchestrator.task_flow.filer import digest, parse_plan, render_section, rerecord
+from localharness.orchestrator.task_flow.filer import PLAN_SHAPE, digest, parse_plan, render_section, rerecord
 from localharness.orchestrator.task_flow.panel import Finding, FlowCap
 from localharness.orchestrator.task_flow.record import LINES, Row, Unit, file_doc, need, set_verdict, stop_step
 from tests.unit.test_task_flow_record import BLOCKER_LINE, PLAN_TWO, TYPED, make_flow, planned
@@ -907,3 +907,183 @@ def test_show_a_body_with_bidi_zero_width_or_a_leading_mark_prints_neutralised(t
         assert not any(line.startswith("◆") for line in text.splitlines()) and "◇ t1 plan pass" in text
     foreign_folder(flow, 9, plan_md=hostile)
     assert not any(line.startswith("◆") for line in "\n".join(show(flow, "t9/plan")).splitlines())
+
+
+def accept(flow, args=""):
+    return verbs.task_command(flow, f"accept {args}".rstrip(), turn=2, running=False, levers=BOX)
+
+
+def review_text(flow, doc):
+    return flow.docs.read(1, doc)
+
+
+def test_accept_bare_on_a_blocked_plan_accepts_the_row_files_the_section_and_prints_the_accepted_row(tmp_path):
+    flow = shelf(tmp_path)
+    before = flow.record.counts["plan"].blockers
+    reply = accept(flow)
+    row, text = flow.record.filed[PLAN_FILED], review_text(flow, "plan-review.md")
+    assert row.verdict == "accepted" and row.digest == digest(PLAN_TWO) and flow.record.counts["plan"].blockers == before
+    assert text.rstrip().endswith("## accepted by the person\nverdict: accepted") and "## round 1" in text
+    assert flow.record.filed[("plan-review.md", None)].digest == digest(text) and flow.docs.verified(flow.record, ("plan-review.md", None))
+    assert reply.lines == ("◆ t1 plan accepted · /task run · plan <change> (revises) · up to 25 min",) and reply.turn is None
+    assert flow.record.stage == "plan"
+
+
+@pytest.mark.parametrize("verdict", ("pass", "accepted", "unreviewed"))
+def test_accept_bare_on_nothing_blocked_prints_the_row_and_changes_nothing(tmp_path, verdict):
+    flow = shelf(tmp_path, verdict)
+    before, doc = dict(flow.record.filed), review_text(flow, "plan-review.md")
+    assert accept(flow).lines == ("◆ t1 nothing blocked · /task show",)
+    assert flow.record.filed == before and review_text(flow, "plan-review.md") == doc
+
+
+def test_accept_bare_with_no_task_is_the_no_task_line(tmp_path):
+    flow, *_ = make_flow(tmp_path)
+    assert accept(flow) == NO_TASK
+
+
+def test_accept_bare_on_a_blocked_step_accepts_its_section_row_and_files_into_its_review(tmp_path):
+    flow = shelf(tmp_path, "pass")
+    executed(flow, 1)
+    reply = accept(flow)
+    assert flow.record.filed[("plan.md", "step-1")].verdict == "accepted"
+    assert review_text(flow, "step-1-review.md").rstrip().endswith("## accepted by the person\nverdict: accepted")
+    assert reply.lines == ("◆ t1 step 1/2 accepted · /task run · up to 25 min",)
+    assert flow.record.filed[PLAN_FILED].verdict == "pass" and accept(flow).lines == ("◆ t1 nothing blocked · /task show",)
+
+
+def test_accept_bare_on_a_blocked_task_review_ends_the_task_when_every_step_passed_or_was_accepted(tmp_path):
+    flow = shelf(tmp_path, stage="task")
+    for n, verdict in ((1, "pass"), (2, "accepted")):
+        flow.record.filed[("plan.md", f"step-{n}")].verdict = verdict
+    flow.record.filed[("review.md", None)] = Row(flow.docs.write(1, "review.md", "## round 1 · blockers 2\nverdict: blocked\n")[0])
+    reply = accept(flow)
+    assert flow.record.stage == "done" and flow.record.filed[PLAN_FILED].verdict == "accepted"
+    assert review_text(flow, "review.md").rstrip().endswith("## accepted by the person\nverdict: accepted")
+    assert review_text(flow, "plan-review.md").count("accepted by the person") == 0
+    assert reply.lines == ("◆ t1 done · /task show review",)
+
+
+def test_accept_bare_on_a_blocked_task_review_with_a_step_left_accepts_the_plan_row_and_the_stage_stays(tmp_path):
+    flow = shelf(tmp_path, stage="task")
+    flow.record.filed[("plan.md", "step-1")].verdict = "pass"
+    flow.record.filed[("review.md", None)] = Row(flow.docs.write(1, "review.md", "## round 1 · blockers 2\nverdict: blocked\n")[0])
+    reply = accept(flow)
+    assert flow.record.stage == "task" and flow.record.filed[PLAN_FILED].verdict == "accepted"
+    assert reply.lines == ("◆ t1 plan accepted · /task run · plan <change> (revises) · up to 25 min",)
+
+
+def test_accept_plan_after_a_hand_edit_shows_the_mismatch_first_then_rerecords_and_adopts_the_edit(tmp_path):
+    flow = shelf(tmp_path, "pass")
+    executed(flow, 1, "pass")
+    executed(flow, 2, "pass")
+    flow.record.filed[("plan.md", "step-2")].counts.blockers = 7
+    edited = PLAN_TWO.replace("x2 changed", "x2 reworked")
+    flow.docs.path(1, "plan.md").write_text(edited)
+    reply = accept(flow, "plan")
+    assert reply.lines[0] == "◆ t1 plan.md edited since filed · /task accept plan (uses your edit)"
+    record = flow.record
+    assert record.filed[PLAN_FILED].digest == digest(edited) and record.filed[PLAN_FILED].verdict == "accepted"
+    assert flow.docs.verified(record, PLAN_FILED)
+    assert record.filed[("plan.md", "step-1")].verdict == "pass" and ("step-1.md", None) in record.filed
+    assert record.filed[("plan.md", "step-2")].verdict == "unreviewed" and ("step-2.md", None) not in record.filed
+    assert record.reopened == (2,)
+    assert review_text(flow, "plan-review.md").rstrip().endswith("## accepted by the person\nverdict: accepted")
+    assert reply.lines[-1].startswith("◆ t1 step 2/2") and len(reply.lines) == 2
+
+
+def test_accept_plan_that_broke_the_shape_is_refused_with_the_shape_sentence_and_changes_nothing(tmp_path):
+    flow = shelf(tmp_path)
+    flow.docs.path(1, "plan.md").write_text("no steps here")
+    before, review = dict(flow.record.filed), review_text(flow, "plan-review.md")
+    reply = accept(flow, "plan")
+    assert reply.lines[0].startswith("◆ t1 plan.md edited since filed") and PLAN_SHAPE in reply.lines[-1]
+    assert flow.record.filed == before and review_text(flow, "plan-review.md") == review
+
+
+def test_accept_plan_while_the_task_review_blocked_ends_the_task_only_when_rerecord_leaves_every_step_passed(tmp_path):
+    flow = shelf(tmp_path, stage="task")
+    for n in (1, 2):
+        flow.record.filed[("plan.md", f"step-{n}")].verdict = "pass"
+    flow.record.filed[("review.md", None)] = Row(flow.docs.write(1, "review.md", "## round 1 · blockers 2\nverdict: blocked\n")[0])
+    flow.docs.path(1, "plan.md").write_text(PLAN_TWO.replace("x2 changed", "x2 reworked"))
+    reply = accept(flow, "plan")
+    assert flow.record.stage == "task" and flow.record.filed[("plan.md", "step-2")].verdict == "unreviewed"
+    assert reply.lines[-1].startswith("◆ t1 plan accepted · /task run")
+    flow.docs.path(1, "plan.md").write_text(PLAN_TWO)
+    flow.record.filed[("plan.md", "step-2")].verdict = "pass"
+    accept(flow, "plan")
+    assert flow.record.stage == "done"
+    assert review_text(flow, "review.md").rstrip().endswith("## accepted by the person\nverdict: accepted")
+
+
+def test_accept_decisions_adopts_a_hand_edit_and_names_the_next_command(tmp_path):
+    flow = shelf(tmp_path)
+    flow.docs.path(1, "decisions.md").write_text("my edit")
+    reply = accept(flow, "decisions")
+    row = flow.record.filed[DECISIONS]
+    assert reply.lines[0] == "◆ t1 decisions.md edited since filed · /task accept decisions (uses your edit)"
+    assert (row.digest, row.verdict) == (digest("my edit"), "accepted") and flow.docs.verified(flow.record, DECISIONS)
+    assert reply.lines[-1] == "◆ t1 new accepted · /task plan · up to 13 min"
+    assert review_text(flow, "decisions-review.md").rstrip().endswith("verdict: accepted")
+
+
+def test_accept_step_with_no_step_doc_row_is_not_executed_and_changes_nothing(tmp_path):
+    flow = shelf(tmp_path)
+    before = dict(flow.record.filed)
+    assert accept(flow, "step-2").lines == ("◆ t1 step 2 not executed · /task run",)
+    assert accept(flow, "step-9").lines == ("◆ t1 step 9 not in the plan · /task show plan",)
+    assert flow.record.filed == before
+
+
+def test_accept_step_redigests_its_doc_and_accepts_its_section_row(tmp_path):
+    flow = shelf(tmp_path, "pass")
+    executed(flow, 1)
+    flow.docs.path(1, "step-1.md").write_text("fixed by hand")
+    reply = accept(flow, "step-1")
+    assert reply.lines[0] == "◆ t1 step-1.md edited since filed · /task accept step-1 (uses your edit)"
+    assert flow.record.filed[("step-1.md", None)].digest == digest("fixed by hand")
+    assert flow.record.filed[("plan.md", "step-1")].verdict == "accepted" and flow.docs.verified(flow.record, ("step-1.md", None))
+    assert review_text(flow, "step-1-review.md").rstrip().endswith("## accepted by the person\nverdict: accepted")
+    assert reply.lines[-1] == "◆ t1 step 1/2 accepted · /task run · up to 25 min"
+
+
+@pytest.mark.parametrize("name", ("reply", "job", "notes", "../plan", "step-１", "plan x", "t1/reply", "t9/notes"))
+def test_accept_a_name_that_is_not_a_task_doc_is_refused_before_anything_changes(tmp_path, name):
+    flow = shelf(tmp_path)
+    foreign_folder(flow, 9, plan_md="x")
+    before = dict(flow.record.filed)
+    assert accept(flow, name).lines == ("◆ t1 not a task doc · /task show <doc>",) and flow.record.filed == before
+
+
+def test_accept_an_unadopted_folders_doc_is_not_adopted_and_a_closed_ones_is_not_the_open_task(tmp_path):
+    flow = shelf(tmp_path)
+    foreign_folder(flow, 9, plan_md="theirs")
+    foreign_folder(flow, 2, plan_md="older")
+    flow.docs.adopted.add(2)
+    before = dict(flow.record.filed)
+    assert accept(flow, "t9/plan").lines == ("◆ t9 not adopted · /task show t9/plan",)
+    assert accept(flow, "t2/plan").lines == ("◆ t2 not the open task · /task show t2/plan",)
+    assert flow.record.filed == before and flow.docs.adopted == {1, 2} and flow.docs.read(9, "plan.md") == "theirs"
+
+
+def test_accept_the_open_tasks_own_prefix_is_stripped(tmp_path):
+    flow = shelf(tmp_path)
+    assert accept(flow, "t1/plan").lines == ("◆ t1 plan accepted · /task run · plan <change> (revises) · up to 25 min",)
+    assert flow.record.filed[PLAN_FILED].verdict == "accepted"
+
+
+def test_accept_a_doc_never_filed_is_one_line(tmp_path):
+    flow = shelf(tmp_path)
+    assert accept(flow, "research").lines == ("◆ t1 research.md not filed · /task show",)
+
+
+def test_accept_review_is_the_bare_accept_of_a_blocked_task_review_and_nothing_blocked_otherwise(tmp_path):
+    flow = shelf(tmp_path, stage="task")
+    flow.record.filed[("review.md", None)] = Row(flow.docs.write(1, "review.md", "## round 1 · blockers 2\nverdict: blocked\n")[0])
+    for n in (1, 2):
+        flow.record.filed[("plan.md", f"step-{n}")].verdict = "pass"
+    assert accept(flow, "review").lines == ("◆ t1 done · /task show review",) and flow.record.stage == "done"
+    flow = shelf(tmp_path / "again")
+    assert accept(flow, "review").lines == ("◆ t1 nothing blocked · /task show",)
+    assert flow.record.filed[PLAN_FILED].verdict == "blocked"
