@@ -911,6 +911,7 @@ def _budget_note(session: Session, budget: BudgetTracker) -> str:
 _REVISION_NO_FIT = "the revision did not fit the window"
 _REVISION_FAILED = "the revision failed"
 _REVISION_EMPTY = "the revision came back empty"
+_PANEL_FAILED = "the panel failed"
 
 
 @dataclass
@@ -2148,7 +2149,9 @@ class AgentLoop:
         if hasattr(self._ctx, "set_session_id"):
             self._ctx.set_session_id(session.session_id)
 
+        held: list[Action] = []
         while True:
+            await self._publish_held(held)
             session.iteration += 1
             # FIX 4: wire the real per-turn iteration into the ContextManager so the emergency-floor
             # log and CompactionTriggered events carry it (production never called set_iteration).
@@ -2490,8 +2493,8 @@ class AgentLoop:
             # Mode-correct: native reads response_message.tool_calls, xml/text parses content.
             tool_calls = _extract_tool_calls(response_message, tool_call_mode)
 
-            # 8. Publish Action event
-            await self._bus.publish(Action(
+            # 8. Publish Action event; with a reply panel a tool-less one is held until its exit.
+            reply_action = Action(
                 agent_id=session.agent_id,
                 session_id=session.session_id,
                 action_type="llm_response",
@@ -2504,7 +2507,11 @@ class AgentLoop:
                 prompt_tokens=_usage_count(usage, "prompt_tokens"),
                 completion_tokens=_usage_count(usage, "completion_tokens"),
                 latency_ms=_latency_ms,
-            ))
+            )
+            if self.reply_panel is not None and not tool_calls:
+                held.append(reply_action)
+            else:
+                await self._bus.publish(reply_action)
 
             # 8b. When the calls came from CONTENT (xml mode, or the native taught-XML
             # fallback), populate assistant message tool_calls so repair_tool_pairing
@@ -2558,6 +2565,7 @@ class AgentLoop:
             # 9. No tool calls — check if parse failed on an attempted tool call
             if not tool_calls:
                 if has_tool_call_attempt(raw_content or ""):
+                    await self._publish_held(held)
                     session.parse_retries += 1
                     await self._bus.publish(ParseFailed(
                         agent_id=session.agent_id,
@@ -2655,6 +2663,7 @@ class AgentLoop:
                         "Empty completion twice (finish_reason=%s) for %s — ending the turn "
                         "without an answer", finish_reason, self._config.name,
                     )
+                    await self._publish_held(held)
                     session.terminated_reason = "error"
                     self._conversation = _strip_sentinel_exchanges(session.messages)
                     if finish_reason == "length" and self._no_cap_sent(request_cap):
@@ -2712,6 +2721,7 @@ class AgentLoop:
                             "%d unique) — failing the turn instead of delivering it as an answer",
                             self._config.name, rep.total_lines, rep.unique_lines,
                         )
+                        await self._publish_held(held)
                         session.terminated_reason = "error"
                         self._conversation = _strip_sentinel_exchanges(session.messages)
                         sample = next(
@@ -2784,7 +2794,7 @@ class AgentLoop:
                     summary = _clean_summary(_format_completion_summary(session, content))
                     verdict, finding = None, ""
                 else:
-                    summary, verdict, finding = await self._review_reply(session, task, content)
+                    summary, verdict, finding = await self._review_reply(session, task, content, held.pop() if held else None)
                 if self._task_context is not None:
                     # The reply keeps the model's words; at most one evidence line is appended.
                     # History keeps the model's own message: the packet carries current facts.
@@ -3226,9 +3236,17 @@ class AgentLoop:
                     handles.append(store.put(bodies[call["id"]], origin or "untrusted"))
         return calls, written, handles
 
-    async def _review_reply(self, session: Session, task: str, content: str | None) -> tuple[str, str, str]:
-        """The reply panel's judgment of the draft the person would receive: (the summary to deliver, the verdict, the finding)."""
-        from localharness.orchestrator.task_flow.panel import PanelInputs, reply_brief, sense, typed_turns
+    async def _publish_held(self, held: "list[Action]") -> None:
+        while held:
+            await self._bus.publish(held.pop())
+
+    async def _review_reply(
+        self, session: Session, task: str, content: str | None, action: "Action | None",
+    ) -> tuple[str, str, str]:
+        """The reply panel's judgment of the draft the person would receive: (the summary to deliver, the verdict, the finding).
+
+        The held Action is published after the verdict, shielded; the person's own stop during the panel is consumed once and delivers the latest good draft unreviewed."""
+        from localharness.orchestrator.task_flow.panel import PanelInputs, finding_text, reply_brief, sense, typed_turns
         from localharness.orchestrator.task_flow.record import Unit
         panel = self.reply_panel
         draft = _format_completion_summary(session, content)
@@ -3244,10 +3262,27 @@ class AgentLoop:
 
         started = time.monotonic()
         try:
-            result = await panel.run(Unit("reply", "panel"), inputs, revise if content and not _is_confirmation(content) else None)
+            try:
+                result = await panel.run(Unit("reply", "panel"), inputs, revise if content and not _is_confirmation(content) else None)
+                verdict, finding, delivered = result.verdict, result.finding, result.draft
+                if verdict == "unreviewed":
+                    finding = kept.reason or next((finding_text(f) for f in result.findings if f.tag == "NOTE"), "")
+            except asyncio.CancelledError:
+                asyncio.current_task().uncancel()
+                verdict, finding, delivered = "unreviewed", "", kept.draft
+            except Exception:  # noqa: BLE001 - a panel that breaks delivers the draft unreviewed
+                log.warning("the reply panel failed", exc_info=True)
+                verdict, finding, delivered = "unreviewed", _PANEL_FAILED, kept.draft
+            summary = _clean_summary(delivered)
         finally:
             self.exclude(time.monotonic() - started)
-        return _clean_summary(result.draft), result.verdict, result.finding
+        if action is not None:
+            update: dict[str, Any] = {"content": summary}
+            if kept.prompt or kept.completion:
+                update["prompt_tokens"] = (action.prompt_tokens or 0) + kept.prompt
+                update["completion_tokens"] = (action.completion_tokens or 0) + kept.completion
+            await asyncio.shield(self._bus.publish(action.model_copy(update=update)))
+        return summary, verdict, finding
 
     async def _revise_reply(self, session: Session, kept: "_Revision", draft: str, findings: tuple) -> str | None:
         """One tool-less, no-retry rewrite of the last assistant message; None, with the reason kept, when it cannot help."""
