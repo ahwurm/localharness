@@ -17,7 +17,7 @@ import yaml
 
 from localharness.agent.affordance import Affordances
 from localharness.agent.calibration import entry_state, labelled, measure, shipped_pins, write_entry
-from localharness.agent.task_record import TaskState
+from localharness.agent.context import ContentStore
 from localharness.cli.skill_session import LINE
 from localharness.config.skills import SkillSet
 from localharness.memory.resonance import EMBED_MAX_TOKENS
@@ -47,7 +47,7 @@ def skill_set(config_dir: Path) -> SkillSet:
 
 
 def warmed(skills: SkillSet, engine, record_dir: Path) -> Affordances:
-    holder = Affordances(skills, SimpleNamespace(embedder=lambda: engine), TaskState(), record_dir)
+    holder = Affordances(skills, SimpleNamespace(embedder=lambda: engine), ContentStore(), record_dir)
     holder.warm().join(timeout=300)
     assert holder._ready is not None, "the holder did not warm from the fresh measurement"
     return holder
