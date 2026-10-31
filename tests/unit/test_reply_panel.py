@@ -158,6 +158,20 @@ async def test_the_panel_judges_the_draft_the_person_would_receive(bus):
     assert inputs.critics == ("answer", "jtbd") and "hello" in inputs.brief
 
 
+async def test_the_panel_is_given_the_cleaned_draft_the_person_receives(bus):
+    panel = panel_of()
+    seen = []
+    real = panel.run
+
+    async def spy(unit, inputs, revise=None):
+        seen.append(inputs.draft)
+        return await real(unit, inputs, revise)
+
+    panel.run = spy
+    _, summary = await turn(loop_of(Llm(["Hello there.\n\n"]), bus, panel))
+    assert seen == ["Hello there."] and summary == "Hello there."
+
+
 async def test_a_sentinel_completions_draft_is_the_turns_last_answer_and_runs_without_revise(bus):
     panel = panel_of()
     seen = []
