@@ -1530,3 +1530,73 @@ async def test_no_manifest_contains_a_childs_raw_answer(tmp_path):
                  await flow.run("research"), await flow.run("plan", PLAN_TWO)]
     manifests += [await flow.run("step") for _ in range(3)]
     assert all(RAW not in m and "touch it" not in m for m in manifests) and RAW in flow.docs.read(1, "step-1.md")
+
+
+def test_note_with_no_task_is_empty(tmp_path):
+    flow, *_ = make_flow(tmp_path)
+    assert flow.note() == ""
+
+
+def test_note_while_paused_is_empty_even_with_a_revision_pending(tmp_path):
+    flow, *_ = make_flow(tmp_path)
+    flow.open("fix login", 1)
+    flow.revision_block = "a draft and its findings"
+    flow.record.paused = True
+    assert flow.note() == ""
+
+
+def test_note_an_open_new_with_no_doc_filed_adds_the_interview_sentence(tmp_path):
+    flow, *_ = make_flow(tmp_path)
+    flow.open("fix login", 1)
+    pointer, interview = flow.note().split("\n")
+    assert pointer == "t1 · new · next: new · file" and interview == runner.INTERVIEW_SENTENCE
+    assert interview == ('Ask the person what you need to know to write decisions.md, one question at a time, '
+                         'or if the objective is clear call task(stage="new", doc=...).')
+
+
+async def test_note_a_plan_stage_record_is_one_line_naming_task_stage_next_unit_and_verdict(tmp_path):
+    flow, *_ = await planned(tmp_path)
+    assert flow.note() == "t1 \u00b7 plan pass \u00b7 next: run \u00b7 step 1"
+    flow.record.filed[PLAN_ROW] = Row("d", "blocked")
+    assert flow.note() == "t1 \u00b7 plan blocked \u00b7 plan.md is blocked, blockers did not fall; the person decide"
+
+
+def test_note_the_pointer_line_is_cut_at_the_line_cap_at_every_task_number(tmp_path):
+    flow, *_ = make_flow(tmp_path)
+    flow.record = task(decisions="pass", plan="pass", steps=("blocked",), executed=(1,), stage="run")
+    flow.record.filed[("plan.md", "step-1")].counts.used = 1
+    for task_id in (3, 10, 100, 1000):
+        flow.record.id = task_id
+        pointer = flow.note()
+        assert "\n" not in pointer and len(pointer) <= Caps.LINE and pointer.startswith(f"t{task_id} \u00b7 run blocked")
+    assert len(pointer) == Caps.LINE
+
+
+async def test_note_follows_the_run_stage_to_the_step_and_the_done_stage_to_done(tmp_path):
+    flow, *_ = await planned(tmp_path)
+    await flow.run("step")
+    assert flow.note() == "t1 · run unreviewed · next: run · step 1 panel"
+    flow.record.stage = "done"
+    assert flow.note() == "t1 · done pass · next: done"
+
+
+def test_note_a_revision_block_over_the_cap_is_cut_to_it_and_follows_the_pointer(tmp_path):
+    flow, *_ = make_flow(tmp_path)
+    flow.open("fix login", 1)
+    flow.record.stage = "plan"
+    flow.revision_block = "d" * (Caps.BLOCK + 500)
+    pointer, block = flow.note().split("\n")
+    assert pointer.startswith("t1 · plan") and block == "d" * Caps.BLOCK
+
+
+def test_note_the_executors_provider_is_the_child_sentence_and_a_header_within_the_line_cap():
+    text = runner.executor_note("step 2/3 · edit src/x.py")()
+    assert text == f"{runner.CHILD_SENTENCE}\nstep 2/3 · edit src/x.py"
+    long = runner.executor_note("s\n" + "x" * 500)()
+    assert long.split("\n", 1)[0] == runner.CHILD_SENTENCE and len(long.split("\n", 1)[1]) <= Caps.LINE
+    assert "\n" not in long.split("\n", 1)[1]
+
+
+def test_note_the_child_sentence_is_spec_text_verbatim():
+    assert runner.CHILD_SENTENCE == ("Say in one line what you will produce, read what it depends on before you change "
+                                     "anything, do the work, and write your doc as your final answer.")

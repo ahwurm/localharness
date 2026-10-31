@@ -6,7 +6,7 @@ from typing import Any, Awaitable, Callable, Iterable
 from localharness.orchestrator.task_flow.filer import Docs
 from localharness.orchestrator.task_flow.panel import FlowCap, Panel, critic_names
 from localharness.orchestrator.task_flow.record import Record, clear_turn, limited, open_task, set_stage
-from localharness.orchestrator.task_flow.runner import run_unit
+from localharness.orchestrator.task_flow.runner import root_note, run_unit
 
 __all__ = ["TaskFlow"]
 
@@ -32,6 +32,9 @@ class TaskFlow:
 
     async def run(self, boundary: str, carried: str | None = None, by: str = "model") -> str:
         return await run_unit(self, boundary, carried, by)
+
+    def note(self) -> str:
+        return root_note(self)
 
     def end_turn(self) -> None:
         if self.record is not None:
