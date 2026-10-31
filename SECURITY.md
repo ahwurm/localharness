@@ -578,8 +578,8 @@ read and argue with. Each step below says what it does in `auto`.
      interpreter or a script file, a path held in a variable or a glob (`rm -r agents/*/tasks`) or reached
      after a `cd` the gate cannot follow, and a link an interpreter creates after the check, are not covered,
      and neither are the write forms that name no static target under those folders: `cp -r` of a folder that
-     holds a `tasks` or `sessions` entry into `agents/<name>`, `tar -x -C`, `rsync`, `git checkout` and `chmod`
-     aimed at `agents/<name>` or a folder above the two.
+     holds a `tasks` or `sessions` entry into `agents/<name>`, `tar -x -C`, `rsync`, `git checkout`
+     aimed at `agents/<name>` or a folder above the two, and a non-recursive `chmod` at any target.
    - **A system directory.** `/etc`, `/usr`, `/bin`, `/sbin`, `/lib` (and `/lib64`), `/boot`,
      `/var` except `/var/tmp`, `/opt`, `/root`, `/srv`, macOS `/System`, `/Library` and
      `/Applications`, Windows `C:\Windows`, `C:\Program Files*` and `C:\ProgramData`.
