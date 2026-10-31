@@ -552,10 +552,13 @@ def _words(unit: Unit) -> str:
 
 
 def next_line(record: Record, boundary: str, limits: Limits | None = None) -> str:
-    row = record.filed.get(_row_key(boundary, None))
-    if (out := _closed(record)) is None and row and row.verdict in ("pass", "accepted"):
-        out = Unit(STAGES[boundary].next, STAGES[STAGES[boundary].next].units[0])
-    out = out or next_unit(record, boundary, None, limits)
+    row = record.filed.get(_row_key(boundary, None)) if boundary in ("new", "research", "plan") else None
+    passed = row and (row.verdict in _PASSED or (boundary == "research" and row.verdict == "blocked"))
+    out = _closed(record)
+    if out is None and passed:
+        after = STAGES[boundary].next
+        out = next_unit(record, "step", None, limits) if after == "step" else Unit(after, STAGES[after].units[0])
+    out = out or next_unit(record, boundary, None, limits) or Unit(boundary, "file")
     if isinstance(out, Need):
         return f"next: {out.reason}" if out.reason in ("done", "halted") else out.model or out.reason
     return f"next: {STAGES[out.boundary].stage or 'run'} · {_words(out)}"
