@@ -103,6 +103,10 @@ def _cut(text: str) -> tuple[str, bool]:
     return (text, False) if len(raw) <= Caps.DOC else (raw[: Caps.DOC].decode(errors="ignore") + TRUNCATION_MARKER, True)
 
 
+def _clip(text: str, limit: int) -> str:
+    return text.encode()[:limit].decode(errors="ignore")
+
+
 def _slurp(fd: int, name: str) -> str | None:
     """The doc `name` inside `fd`, or None when it is missing or longer than a doc can be."""
     try:
@@ -232,10 +236,10 @@ class StepLog:
         called = ", ".join(f"{_flat(str(k))} x{v}" for k, v in tools.items())
         tail = "\n".join([
             *(["## stopped", f"stopped at {self.lines[-1] if self.lines else 'the start'} · {_flat(stopped)}"] if stopped else []),
-            *(["## final answer", _quote(final.strip()[:Caps.BLOCK])] if final.strip() else []),
+            *(["## final answer", _clip(_quote(final.strip()), Caps.BLOCK)] if final.strip() else []),
             "## runtime",
-            f"files written: {len(files)}" + (f": {', '.join(files)[:Caps.BLOCK // 4]}" if files else ""),
-            f"tools called: {called[:Caps.BLOCK // 4] or 'none'}",
+            f"files written: {len(files)}" + (f": {_clip(', '.join(files), Caps.BLOCK // 4)}" if files else ""),
+            f"tools called: {_clip(called, Caps.BLOCK // 4) or 'none'}",
             f"compactions: {int(runtime.get('compactions', 0))}"])
         kept = self.lines
         while kept and len("\n".join(["## log", *kept, tail]).encode()) > Caps.DOC:
@@ -250,7 +254,7 @@ def answered(answer: str) -> bool:
 
 def file_answer(text: str, n: int, question: str, explorer: str, answer: str, ended: str = "") -> str:
     """`research.md` with question `n`'s section written or replaced; `none`, `blocked` and empty leave it unanswered, an explorer that `ended` early files its reason and no answer."""
-    body = f"stopped: {_flat(ended)}" if ended else _quote(answer.strip()[:Caps.BLOCK // 4]) if answered(answer) else UNANSWERED
+    body = f"stopped: {_flat(ended)}" if ended else _clip(_quote(answer.strip()), Caps.BLOCK // 4) if answered(answer) else UNANSWERED
     section = "\n".join([f"## q{n} · {_flat(question)}", body, f"explorer: {_flat(explorer)}"])
     parts = [p.strip() for p in _SPLIT.split(text) if p.strip()]
     out = [section if p.startswith(f"## q{n} ·") else p for p in parts]

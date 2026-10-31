@@ -37,6 +37,7 @@ EXECUTOR_ROLE = ("Carry out the one step you are briefed with. When you cannot p
 _RUNS = ("new", "research", "plan", "step", "task")
 _FINDING = re.compile(r"- \[(BLOCKER|WARNING|NOTE)\] (.*?)(?: \(([a-z-]+)\))?")
 _CAPPED = "the flow cap is spent for this turn; the person continues"
+_TRUNCATED = ["truncated at the doc cap"]
 
 
 def _config(name: str, role: str, tools: ToolConfig) -> AgentConfig:
@@ -257,13 +258,13 @@ async def _explore(flow: TaskFlow, boundary: str, unit: Unit, carried: str | Non
         flow.cap.settle(granted, monotonic() - started)
         flow.reply_panel.set_phase(None)
     ended = _ended(result)
-    digest, _ = flow.docs.write(record.id, "research.md", file_answer(
+    digest, cut = flow.docs.write(record.id, "research.md", file_answer(
         flow.docs.read(record.id, "research.md") or "", n, carried, "explorer", result.raw, ended))
     record.questions.append(carried)
     file_doc(record, "research", ("research.md", None), digest)
     set_stage(record, "research")
     child = f"q{n}: explorer " + (f"stopped ({ended})" if ended else "answered" if answered(result.raw) else "returned none")
-    return _done(flow, boundary, unit, ("research.md",), child, notes=_research_changed(flow))
+    return _done(flow, boundary, unit, ("research.md",), child, notes=[*_research_changed(flow), *(_TRUNCATED if cut else [])])
 
 
 def _watch(bus: Any, log: StepLog, runtime: dict) -> list[Any]:
@@ -327,15 +328,16 @@ async def _execute(flow: TaskFlow, boundary: str, unit: Unit, carried: str | Non
         for artifact in result.artifacts:
             log.add(f"wrote {artifact}")
     ended = _ended(result)
-    digest, _ = flow.docs.write_step(record.id, n, log, result.raw, runtime, ended)
+    digest, cut = flow.docs.write_step(record.id, n, log, result.raw, runtime, ended)
     child = f"step {n}: {len(result.artifacts)} files written, {runtime['compactions']} compactions"
+    notes = _TRUNCATED if cut else []
     if ended:
         stop_step(record, n, "\n".join(log.lines))
-        return _done(flow, boundary, unit, (f"step-{n}.md",), f"{child}; the executor stopped ({ended})")
+        return _done(flow, boundary, unit, (f"step-{n}.md",), f"{child}; the executor stopped ({ended})", notes=notes)
     record.filed[(f"step-{n}.md", None)] = Row(digest)
     record.stopped_log = ""
     set_verdict(record, key, "unreviewed")
-    return _done(flow, boundary, unit, (f"step-{n}.md",), child)
+    return _done(flow, boundary, unit, (f"step-{n}.md",), child, notes=notes)
 
 
 _KINDS = {"file": _file, "explore": _explore, "execute": _execute, "revise": _execute, "panel": _review}
