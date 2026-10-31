@@ -12,9 +12,11 @@ from localharness.agent.subagent import DelegationResult
 from localharness.channels.base import notice
 from localharness.core import caps as caps_module
 from localharness.core.caps import Caps
+from localharness.core.types import human_message
 from localharness.orchestrator.task_flow import verbs
+from localharness.orchestrator.task_flow.filer import digest
 from localharness.orchestrator.task_flow.panel import FlowCap
-from localharness.orchestrator.task_flow.record import LINES, Unit, need
+from localharness.orchestrator.task_flow.record import LINES, Row, Unit, file_doc, need
 from tests.unit.test_task_flow_record import BLOCKER_LINE, PLAN_TWO, make_flow, planned
 
 RLO, ZWSP = chr(0x202E), chr(0x200B)
@@ -344,3 +346,96 @@ def test_a_stage_other_than_plan_gets_no_plan_extras():
     out = verbs.render("pass", LEVERS[STOP_WORDS[0]], task="t3", stage="new", verdict="pass", next="/task plan", bound=1,
                        reopened=(2,), decisions_unreviewed=True)
     assert out == notice("t3", "new pass", ["/task plan"], "up to 1 min")
+
+
+PLAN_UNFILED = ('Call task(stage="plan") to read the decisions and the plan\'s shape, '
+                'then call it again with doc= your plan.')
+DECISIONS = ("decisions.md", None)
+
+
+def command(flow, args, turn=2, levers=BOX):
+    return verbs.task_command(flow, args, turn=turn, running=False, levers=levers)
+
+
+def asked(*turns):
+    return [human_message(text, subtype, n) for n, subtype, text in turns]
+
+
+def test_task_command_new_opens_the_task_and_the_objective_is_the_typed_turn(tmp_path):
+    flow, *_ = make_flow(tmp_path)
+    reply = command(flow, "new fix the Login bug")
+    assert (flow.record.id, flow.record.objective, flow.record.turn) == (1, "fix the Login bug", 2)
+    assert reply.lines == ("◆ t1 interview open · /task plan (skips the questions)",)
+    assert reply.turn == ("fix the Login bug", "typed")
+    assert flow.armed is None and flow.said == set()
+
+
+def test_task_command_new_with_only_whitespace_is_bare_new_and_with_no_task_says_so(tmp_path):
+    flow, *_ = make_flow(tmp_path)
+    reply = command(flow, "new   ")
+    assert reply == verbs.Reply(("◆ task no task · /task new <objective>",))
+    assert flow.record is None
+
+
+def test_task_command_matches_the_verb_lower_cased_and_keeps_the_objective_as_typed(tmp_path):
+    flow, *_ = make_flow(tmp_path)
+    reply = command(flow, "NeW   Fix İt ΣΑΣ  now ")
+    assert reply.turn == ("Fix İt ΣΑΣ  now", "typed") and flow.record.objective == "Fix İt ΣΑΣ  now"
+
+
+def test_task_command_plan_files_the_skip_from_the_typed_turns_and_arms_the_plan(tmp_path):
+    messages = asked((2, "typed", "fix the Login bug"), (3, "typed", "use the existing session table"),
+                     (3, "steering", "and keep the cookie name"))
+    flow, *_ = make_flow(tmp_path, messages=messages)
+    flow.turn = lambda: 4
+    command(flow, "new fix the Login bug")
+    reply = command(flow, "plan", turn=4)
+    text = "fix the Login bug (turn 2)\nturn 3: use the existing session table\nturn 3: and keep the cookie name"
+    assert flow.docs.read(1, "decisions.md") == text
+    row = flow.record.filed[DECISIONS]
+    assert (row.verdict, row.digest, flow.record.filed_turn["new"]) == ("unreviewed", digest(text), 4)
+    assert reply.lines == ("◆ t1 decisions filed · from 3 turns", "◆ t1 plan armed · /task stop (after this unit) · cap 180 min")
+    assert reply.turn == (PLAN_UNFILED, "request")
+    assert flow.armed == "plan" and "cap" in flow.said and flow.record.paused is False
+
+
+def test_task_command_skip_counts_only_the_objective_when_nothing_else_was_typed(tmp_path):
+    flow, *_ = make_flow(tmp_path, messages=asked((2, "typed", "fix login"), (1, "typed", "before the task")))
+    command(flow, "new fix login")
+    reply = command(flow, "plan", turn=3)
+    assert flow.docs.read(1, "decisions.md") == "fix login (turn 2)"
+    assert reply.lines[0] == "◆ t1 decisions filed · from 1 turn"
+
+
+def test_task_command_armed_plan_with_decisions_filed_prints_no_skip_line_and_clears_the_pause(tmp_path):
+    flow, *_ = make_flow(tmp_path)
+    flow.open("fix login", 1)
+    flow.docs.write(1, "decisions.md", "d")
+    file_doc(flow.record, "new", DECISIONS, digest("d"))
+    flow.record.paused = True
+    reply = command(flow, "plan", levers=PHONE)
+    assert reply.lines == ("◆ t1 plan armed · stop (now) · cap 180 min",)
+    assert flow.docs.read(1, "decisions.md") == "d" and flow.record.paused is False
+
+
+@pytest.mark.parametrize(
+    ("keys", "newest"),
+    [((), None), (("decisions.md",), "decisions"), (("decisions.md", "research.md"), "research"),
+     (("decisions.md", "plan.md"), "plan"), (("plan.md", "step-2.md", "step-10.md"), "step-10"),
+     (("plan.md", "step-1.md", "review.md"), "review")])
+def test_task_command_new_closes_the_open_task_naming_its_newest_doc_and_opens_one_past_the_highest(tmp_path, keys, newest):
+    flow, *_ = make_flow(tmp_path)
+    flow.open("a", 1), flow.open("b", 1), flow.open("c", 1)
+    for key in keys:
+        flow.docs.write(3, key, "x")
+        flow.record.filed[(key, None)] = Row(digest("x"))
+    reply = command(flow, "new next one")
+    shown = f" · /task show t3/{newest}" * bool(newest)
+    assert reply.lines == (f"◆ t3 closed{shown} · not resumable, folder kept",
+                           "◆ t4 interview open · /task plan (skips the questions)")
+    assert flow.record.id == 4 and flow.docs.path(3, "").is_dir()
+    assert reply.turn == ("next one", "typed")
+
+
+def test_task_command_is_synchronous():
+    assert not asyncio.iscoroutinefunction(verbs.task_command)

@@ -1,6 +1,7 @@
 """The task flow's renderer: a LINES row filled with a channel's levers and printed through notice()."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from localharness.channels.base import notice
@@ -62,3 +63,13 @@ def progress(flow: Any, subject: str, state: str, commands: tuple[str, ...], tai
         flow.said |= {"cap"} if armed else {"typing", "cap"}
     fill = {"stop": levers[0], "cancel": levers[1]}
     return notice(subject, state, [_fill(c, fill) for c in commands], " · ".join(p for p in (*spoken, tail) if p))
+
+
+@dataclass(frozen=True)
+class Reply:
+    lines: tuple[str, ...] = ()
+    turn: tuple[str, str] | None = None
+
+
+def task_command(flow: Any, args: str, *, turn: int, running: bool, levers: Levers, phone: bool = False) -> Reply:
+    return Reply()
