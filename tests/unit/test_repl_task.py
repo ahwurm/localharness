@@ -722,7 +722,7 @@ def foreign_folder(flow, n=9, **docs):
     folder = flow.docs.state_dir / "agents" / "a" / "tasks" / f"t{n}"
     folder.mkdir(parents=True, exist_ok=True)
     for name, text in (docs or {"plan.md": "their plan"}).items():
-        (folder / name.replace("_", "-")).write_text(text)
+        (folder / name.replace("_md", ".md").replace("_", "-")).write_text(text)
     return folder
 
 
@@ -738,8 +738,8 @@ def test_show_a_blocked_plan_on_the_terminal_is_the_header_the_doc_then_the_last
 def test_show_a_blocked_plan_on_the_phone_is_one_notice_header_findings_then_the_doc(tmp_path):
     flow = shelf(tmp_path)
     (out,) = show(flow, "plan", phone=True)
-    head, findings, doc = out.split("\n", 2)
-    assert head == "plan.md · blocked, 2 blockers" and doc == PLAN_TWO
+    head, rest = out.split("\n", 1)
+    assert head == "plan.md · blocked, 2 blockers" and rest.endswith("\n" + PLAN_TWO)
     assert out.index("## round 1") < out.index("## Step 1") and "verdict: blocked" in out
 
 

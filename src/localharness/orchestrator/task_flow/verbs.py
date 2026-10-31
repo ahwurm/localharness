@@ -1,15 +1,16 @@
 """The task flow's renderer and the person's arming verbs: a LINES row printed through notice(), and /task new, research, plan and run."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
-from localharness.channels.base import notice
-from localharness.orchestrator.task_flow.filer import Refused
+from localharness.channels.base import notice, sanitize_for_display
+from localharness.orchestrator.task_flow.filer import NO_REVIEW, Refused, _cut, last_section
 from localharness.orchestrator.task_flow.panel import turns_block, typed_turns
 from localharness.orchestrator.task_flow.record import (
-    DOC_NAME, DOCS, LINES, Need, Record, Unit, _PASSED, _executed, _fill, _next_step, _sections, counts_of, file_doc, next_unit,
-    precondition, printed_bound, reopen, unit_minutes)
+    DOC_NAME, DOCS, LINES, PLAN_KEY, Need, Record, Unit, _PASSED, _executed, _fill, _next_step, _sections, counts_of, file_doc,
+    need, next_unit, pointed, precondition, printed_bound, reopen, review_of, unit_minutes)
 from localharness.orchestrator.task_flow.runner import INTERVIEW_SENTENCE
 
 Levers = tuple[str, str]
@@ -93,6 +94,13 @@ SENTENCES = {
 }
 
 
+_STEP = re.compile(r"step-([1-9][0-9]*)")
+_FOLDER_ARG = re.compile(r"t([1-9][0-9]{0,8})")
+SESSION_DOCS = {"reply": ("reply-review.md", NO_REVIEW), "job": ("jtbd.md", "no job yet")}
+FOREIGN = "not adopted · not made by this session"
+CLOSED = "closed · not resumable"
+
+
 @dataclass(frozen=True)
 class Reply:
     """Finished lines to print and the follow-up turn as (text, subtype), or none."""
@@ -135,6 +143,93 @@ def _refusal(record: Record | None, refused: Need) -> str:
         stem = doc.removesuffix(".md")
         commands = [c.replace(doc, stem) for c in commands] if DOC_NAME.fullmatch(stem) else []
     return notice(_label(record), refused.reason, commands, tail)
+
+
+def _key_of(stem: str) -> tuple[str, str | None]:
+    return ("plan.md", stem) if _STEP.fullmatch(stem) else PLAN_KEY if stem == "review" else (f"{stem}.md", None)
+
+
+def _blockers(flow: Any, boundary: str, step: int | None = None) -> int:
+    counts = counts_of(flow.record, boundary, step)
+    if counts and counts.blockers is not None:
+        return counts.blockers
+    review = flow.docs.read(flow.record.id, "research-review.md") if boundary == "research" else None
+    return last_section(review or "").count("- [BLOCKER]")
+
+
+def _head(flow: Any, stem: str) -> str:
+    """The doc's verdict header: `plan.md · blocked, 2 blockers`."""
+    row, step = flow.record.filed[_key_of(stem)], _STEP.fullmatch(stem)
+    boundary = "step" if step else {"decisions": "new", "research": "research"}.get(stem, "plan")
+    verdict = row.verdict or "unreviewed"
+    count = _put(", <n> blockers", {"n": _blockers(flow, boundary, step and int(step[1]))}) if verdict == "blocked" else ""
+    return f"{stem}.md · {verdict}{count}"
+
+
+def _page(head: str, body: str, findings: str, phone: bool) -> tuple[str, ...]:
+    """The terminal prints the header, the doc, then the findings; the phone one notice with the findings first and the doc cut."""
+    body, findings = sanitize_for_display(body), sanitize_for_display(findings)
+    if phone:
+        return ("\n".join(p for p in (head, findings, _cut(body)[0]) if p),)
+    return tuple(p for p in (head, body, findings) if p)
+
+
+def _parse(flow: Any, arg: str) -> tuple[str, int | None] | None:
+    """`(stem, folder)` for a doc name or `tN/<doc>`, the open task's own folder as None; None when the name is not a task doc."""
+    folder, slash, stem = arg.rpartition("/")
+    found = _FOLDER_ARG.fullmatch(folder)
+    if (slash and not found) or not DOC_NAME.fullmatch(stem):
+        return None
+    n = int(found[1]) if found else None
+    return stem, None if flow.record and n == flow.record.id else n
+
+
+def _alone(flow: Any, n: int, stem: str, phone: bool) -> tuple[str, ...]:
+    """A folder's doc printed with no row behind it, never trusted and never adopted."""
+    head = f"t{n}/{stem}.md · {CLOSED if n in flow.docs.adopted else FOREIGN}"
+    return _page(head, flow.docs.read(n, f"{stem}.md") or "", "", phone)
+
+
+def _show_open(flow: Any, stem: str, levers: Levers, phone: bool) -> tuple[str, ...]:
+    record, docs, step = flow.record, flow.docs, _STEP.fullmatch(stem)
+    name, task = f"{stem}.md", _label(flow.record)
+    if step and ("plan.md", stem) not in record.filed:
+        return (render("step not in the plan", levers, task=task, step=int(step[1])),)
+    if (name, None) not in record.filed:
+        stopped = step and record.stopped_log and int(step[1]) == _next_step(record) and docs.read(record.id, name)
+        if stopped:
+            return _page(f"{name} · stopped · not executed", stopped, "", phone)
+        return (render("step not executed", levers, task=task, step=int(step[1])) if step
+                else notice(task, f"{name} not filed", ["/task show"]),)
+    bad = next((k for k in ((name, None), *([("plan.md", stem)] * bool(step))) if not docs.verified(record, k)), None)
+    review = review_of(record, name)
+    findings = last_section(docs.read(record.id, review) or "") if review else ""
+    head = _refusal(record, need("edited since filed", doc=bad[0])) if bad else _head(flow, stem)
+    return _page(head, docs.read(record.id, name) or "", findings, phone)
+
+
+def _show(flow: Any, arg: str, levers: Levers, phone: bool) -> tuple[str, ...]:
+    record, docs = flow.record, flow.docs
+    if not arg:
+        if record:
+            if record.stage == "new" and DECISIONS not in record.filed:
+                return (notice(_label(record), "interview in progress", ["/task plan (skips the questions)"]),)
+            return _show_open(flow, pointed(record).removesuffix(".md"), levers, phone)
+        n = docs.highest()
+        names = docs.names(n) if n else []
+        return _alone(flow, n, names[-1], phone) if names else (render("no task", levers),)
+    target = _parse(flow, arg)
+    refused = (render("not a task doc", levers, task=_label(record)),)
+    if target is None:
+        return refused
+    stem, n = target
+    if n is not None:
+        return refused if stem in SESSION_DOCS or stem not in docs.names(n) else _alone(flow, n, stem, phone)
+    if stem in SESSION_DOCS:
+        name, empty = SESSION_DOCS[stem]
+        text = docs.read_session(name)
+        return _page(name, text if text.strip() else empty, "", phone)
+    return _show_open(flow, stem, levers, phone) if record else (render("no task", levers),)
 
 
 def _newest(record: Record) -> str | None:
@@ -201,9 +296,11 @@ def task_command(flow: Any, args: str, *, turn: int, running: bool, levers: Leve
     parts = args.split(maxsplit=1) or [""]
     verb, arg = parts[0].lower(), "".join(parts[1:]).strip()
     boundary, record = BOUNDARIES.get(verb), flow.record
-    if boundary is None:
+    if boundary is None and verb != "show":
         return Reply((USAGE,))
     try:
+        if verb == "show":
+            return Reply(_show(flow, arg, levers, phone))
         if verb == "new" and arg:
             return _open(flow, arg, turn, levers)
         if record and record.stage == "done":

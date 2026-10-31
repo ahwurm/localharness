@@ -24,6 +24,8 @@ _BOUND = Caps.DOC + len(TRUNCATION_MARKER.encode())
 _DIR = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
 _FOLDER = re.compile(r"t[0-9]+")
 _TASK_DOC = re.compile(r"(?:(?:decisions|research|plan|step-[1-9][0-9]*)(?:-review)?|review)\.md")
+_NAMEABLE = re.compile(r"(decisions|research|plan|step-([1-9][0-9]*)|review)\.md")
+_RANK = {"decisions": 0, "research": 1, "plan": 2, "review": 4}
 _ATTEMPTS = 8
 PLAN_SHAPE = ("plan.md needs `## Step N` headings numbered 1..n in order, each with `files:`, `depends_on:` "
               "(earlier steps only, or none) and `done:` lines")
@@ -303,6 +305,28 @@ class Docs:
                 self.adopted.add(n)
                 return n
         raise Refused("no free task folder")
+
+    def folders(self) -> list[int]:
+        """The task numbers on disk, in integer order."""
+        try:
+            with self._dir("tasks", create=False) as fd:
+                return sorted(int(n[1:]) for n in _listing(fd) if _FOLDER.fullmatch(n))
+        except FileNotFoundError:
+            return []
+
+    def highest(self) -> int:
+        return max(self.folders(), default=0)
+
+    def names(self, task: int) -> list[str]:
+        """The stems of a folder's task docs in pipeline order; review docs and every other name are left out."""
+        if not _FOLDER.fullmatch(f"t{task}"):
+            raise Refused(f"t{task} is not a task folder")
+        try:
+            with self._dir("tasks", f"t{task}", create=False) as fd:
+                found = [m for n in _listing(fd) if (m := _NAMEABLE.fullmatch(n))]
+        except FileNotFoundError:
+            return []
+        return [m[1] for m in sorted(found, key=lambda m: (_RANK.get(m[1], 3), int(m[2] or 0)))]
 
     def writable(self, task: int) -> None:
         """Refuses unless this session made the task folder and the walk to it still follows no link."""
