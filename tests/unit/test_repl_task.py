@@ -595,3 +595,89 @@ async def test_task_command_reopen_flag_is_cleared_when_the_turn_ends(tmp_path):
     command(flow, "plan")
     flow.end_turn()
     assert flow.record.flags == {"new": False, "plan": False} and flow.armed is None
+
+
+NO_TASK = verbs.Reply(("◆ task no task · /task new <objective>",))
+DONE = verbs.Reply(("◆ t1 done · /task show review · new <objective>",))
+UNSET = {"new": False, "plan": False}
+
+
+@pytest.mark.parametrize("args", ("research", "plan", "run", "new", "plan change it", "run now", "research why"))
+def test_task_command_no_task_every_verb_but_new_objective_prints_the_no_task_line(tmp_path, args):
+    flow, *_ = make_flow(tmp_path)
+    assert command(flow, args) == NO_TASK
+    assert flow.record is None and flow.armed is None and flow.said == set()
+
+
+@pytest.mark.parametrize("args", ("research", "plan", "run", "new", "plan change it", "run now"))
+def test_task_command_done_every_verb_but_new_objective_prints_the_done_line(tmp_path, args):
+    flow = staged(tmp_path, decisions="pass", plan="accepted", stage="done")
+    assert command(flow, args) == DONE
+    assert flow.armed is None and flow.said == set() and flow.record.flags == UNSET and flow.sentence == ""
+
+
+def test_task_command_done_new_objective_opens_the_next_task_without_a_closed_line(tmp_path):
+    flow = staged(tmp_path, decisions="pass", plan="accepted", stage="done")
+    reply = command(flow, "new the next job")
+    assert reply.lines == ("◆ t2 interview open · /task plan (skips the questions)",)
+    assert reply.turn == ("the next job", "typed")
+
+
+def test_task_command_need_decisions_blocked_refuses_plan_and_research(tmp_path):
+    flow = staged(tmp_path, decisions="blocked")
+    line = verbs.Reply(("◆ t1 decisions blocked · /task new (reopens) · accept",))
+    assert command(flow, "plan") == line and command(flow, "research") == line
+    assert flow.armed is None and flow.record.counts["new"].used == 3
+
+
+def test_task_command_need_research_closed_points_at_the_research_or_else_the_plan(tmp_path):
+    flow = staged(tmp_path, decisions="pass", plan="pass")
+    flow.record.filed[("step-1.md", None)] = Row("x")
+    assert command(flow, "research") == verbs.Reply(("◆ t1 research closed · /task show plan · new <objective> (closes t1)",))
+    flow.record.filed[("research.md", None)] = Row("r")
+    assert command(flow, "research") == verbs.Reply(("◆ t1 research closed · /task show research · new <objective> (closes t1)",))
+    assert flow.armed is None
+
+
+def test_task_command_need_run_without_a_plan_says_what_it_needs(tmp_path):
+    flow = staged(tmp_path, decisions="pass")
+    assert command(flow, "run") == verbs.Reply(("◆ t1 run needs a plan · /task plan",))
+    assert flow.armed is None and flow.said == set()
+
+
+@pytest.mark.parametrize(("stage", "blockers", "line"), [
+    ("plan", 2, "◆ t1 plan blocked · /task plan (reopens) · show plan · accept · 2 blockers"),
+    ("plan", 1, "◆ t1 plan blocked · /task plan (reopens) · show plan · accept · 1 blocker"),
+    ("task", 1, "◆ t1 review blocked · /task plan · show review · accept (ends t1) · 1 blocker")])
+def test_task_command_blocked_plan_refuses_run_with_its_row_and_the_count(tmp_path, stage, blockers, line):
+    flow = staged(tmp_path, decisions="pass", plan="blocked", stage=stage, blockers=blockers)
+    assert command(flow, "run") == verbs.Reply((line,))
+    assert flow.armed is None and flow.record.flags == UNSET and flow.record.counts["plan"].used == 3
+
+
+def test_task_command_stale_plan_names_the_file_and_the_accept_name(tmp_path):
+    flow = staged(tmp_path, decisions="pass", plan="pass")
+    assert command(flow, "run") == verbs.Reply(("◆ t1 plan.md edited since filed · /task accept plan (uses your edit)",))
+    assert flow.armed is None and flow.said == set() and flow.record.flags == UNSET
+
+
+def test_task_command_stale_doc_with_a_name_accept_cannot_take_suggests_no_accept(tmp_path):
+    flow = staged(tmp_path, decisions="pass", plan="pass")
+    line = verbs._refusal(flow.record, need("edited since filed", doc="odd name.md"), BOX)
+    assert line == "◆ t1 odd name.md edited since filed"
+
+
+def test_task_command_a_refused_folder_write_is_a_line_not_a_crash(tmp_path):
+    flow = staged(tmp_path)
+    flow.docs.adopted.clear()
+    reply = command(flow, "plan")
+    assert reply.turn is None and reply.lines == ("◆ t1 t1 was not made by this session; it is read-only",)
+    assert flow.armed is None
+
+
+def test_task_command_an_unknown_verb_and_a_bare_task_print_the_usage_line(tmp_path):
+    flow = staged(tmp_path)
+    for args in ("", "  ", "frobnicate", "show", "accept plan", "stop", "clear"):
+        assert command(flow, args) == verbs.Reply((verbs.USAGE,))
+    assert all(word in verbs.USAGE for word in ("new", "research", "plan", "run", "show", "accept", "stop", "clear"))
+    assert flow.armed is None and flow.record.flags == UNSET
