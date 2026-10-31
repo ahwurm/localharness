@@ -687,7 +687,7 @@ async def test_on_reasoning_of_a_child_between_root_generations_reaches_the_orig
 
     bus.subscribe(Action, child_thinks)
     await loop_of(llm, bus, panel_of(), await glob_registry()).run_turn("hello")
-    assert log == [("r", "child thought")]
+    assert log == [("r", "root thought"), ("r", "child thought")]
 
 
 async def test_in_flight_is_clear_after_a_provider_error_and_after_the_degenerate_retrys_first_abort(bus):
@@ -717,3 +717,96 @@ async def test_on_reasoning_is_never_read_or_written_without_a_panel(bus):
     llm.writes.clear()
     await loop_of(llm, bus).run_turn("hello")
     assert llm.writes == [] and llm.during == [original]
+
+
+def ordered(bus, log):
+    async def record(action):
+        if action.action_type == "llm_response":
+            log.append(("a", action.has_tool_calls))
+
+    bus.subscribe(Action, record)
+
+
+async def test_on_token_and_reasoning_of_a_tool_call_generation_flush_in_order_before_its_action(bus):
+    log, on_reasoning, on_token = recorder()
+    ordered(bus, log)
+    await streamed_turn(bus, [gen("Looking now.", ["think ", "more"], call=True), gen("Done.")], panel_of(),
+                        on_reasoning, on_token)
+    assert log[:5] == [("r", "think "), ("r", "more"), ("t", "Looking "), ("t", "now."), ("a", True)]
+    assert log[5:] == [("a", False)]
+
+
+async def test_on_token_pieces_of_a_tool_call_generation_wait_for_the_generation_to_return(bus):
+    log, on_reasoning, on_token = recorder()
+    llm = Streaming([gen("Looking now.", call=True), gen("Done.")], on_reasoning)
+    seen = []
+
+    async def probe(n):
+        seen.append(list(log))
+
+    llm.probe = probe
+    await loop_of(llm, bus, panel_of(), await glob_registry()).run_turn("hello", on_token=on_token)
+    assert seen[0] == [] and log == [("t", "Looking "), ("t", "now.")]
+
+
+async def test_on_token_and_reasoning_of_a_final_generation_are_discarded(bus):
+    log, on_reasoning, on_token = recorder()
+    _, loop, summary = await streamed_turn(bus, [gen("Hello there.", ["draft thought"])], panel_of(), on_reasoning, on_token)
+    assert summary == "Hello there." and log == [] and loop._held == []
+
+
+async def test_on_token_of_a_revised_reply_never_reaches_the_channel_either(bus):
+    log, on_reasoning, on_token = recorder()
+    panel = panel_of({"answer": [answered(BLOCKER), NONE]})
+    _, _, summary = await streamed_turn(bus, [gen("Draft reply.", ["a"]), gen("Fixed reply.", ["b"])], panel, on_reasoning, on_token)
+    assert summary == "Fixed reply." and log == []
+
+
+async def test_on_token_is_live_without_a_panel(bus):
+    log, on_reasoning, on_token = recorder()
+    llm = Streaming([gen("Hello there.", ["think"])], on_reasoning)
+    seen = []
+
+    async def probe(n):
+        seen.append(list(log))
+
+    llm.probe = probe
+    await loop_of(llm, bus).run_turn("hello", on_token=on_token)
+    assert seen == [[("r", "think"), ("t", "Hello "), ("t", "there.")]]
+    assert llm.requests[0]["on_token"] is on_token
+
+
+async def test_on_token_of_the_budget_summary_and_the_stuck_summary_is_discarded(bus):
+    from localharness.agent.loop import BudgetViolation
+
+    log, on_reasoning, on_token = recorder()
+    for call in ("budget", "stuck"):
+        llm = Streaming([gen("Found two files.")], on_reasoning)
+        loop = loop_of(llm, bus, panel_of())
+        session = Session(agent_id="reply-agent", session_id="s-exit", messages=[])
+        if call == "budget":
+            await loop._final_summary_on_budget(session, BudgetViolation("actions", 1, 1, "Action limit."), on_token)
+        else:
+            await loop._final_summary_on_stuck(session, 3, on_token)
+        assert llm.requests[0]["on_token"] is not on_token
+        assert log == []
+
+
+async def test_on_token_through_step_is_the_callers_own_even_with_a_panel(bus):
+    log, on_reasoning, on_token = recorder()
+    llm = Streaming([gen("Hello there.")], on_reasoning)
+    loop = loop_of(llm, bus, panel_of())
+    session = Session(agent_id="reply-agent", session_id="s-step", messages=[{"role": "user", "content": "hello"}])
+    await loop.step(session, on_token)
+    assert llm.requests[0]["on_token"] is on_token
+    assert log == [("t", "Hello "), ("t", "there.")]
+
+
+async def test_buffer_is_empty_after_a_provider_error_and_the_next_generation_starts_clean(bus):
+    from localharness.provider.client import ProviderDegenerateError
+
+    log, on_reasoning, on_token = recorder()
+    llm = Streaming([ProviderDegenerateError("loop", unit="x", repeats=9, chars=9), gen("Hello there.")], on_reasoning)
+    loop = loop_of(llm, bus, panel_of())
+    assert await loop.run_turn("hello", on_token=on_token) == "Hello there."
+    assert log == [] and loop._held == []

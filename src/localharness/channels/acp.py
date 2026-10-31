@@ -1172,6 +1172,8 @@ class AcpChannel(ChannelAdapter):
     async def on_action(self, event: Action) -> None:
         """`Action` → ACP `tool_call` (PRD §4). Kind comes from the tool's group, and a
         filesystem tool also reports its target so Zed can link to the file."""
+        if event.action_type == "llm_response" and event.has_tool_calls and not event.parent_id:
+            self._streamed_this_turn = False
         if event.action_type != "tool_call" or self._conn is None or self._session_id is None:
             return
         name = event.tool_name or ""

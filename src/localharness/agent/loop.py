@@ -2299,7 +2299,7 @@ class AgentLoop:
                     response_message, usage = await self._llm.stream_complete(
                         messages=request_messages,
                         tools=tool_schemas if tool_call_mode != "text" else None,
-                        on_token=on_token,
+                        on_token=self._held_sink(on_token),
                         **_cap_kwargs,
                     )
                 _latency_ms = _elapsed_ms(_t0)
@@ -2521,7 +2521,9 @@ class AgentLoop:
             )
             if self.reply_panel is not None and not tool_calls:
                 held.append(reply_action)
+                self._held.clear()
             else:
+                await self._flush_held()
                 await self._bus.publish(reply_action)
 
             # 8b. When the calls came from CONTENT (xml mode, or the native taught-XML
@@ -3256,6 +3258,19 @@ class AgentLoop:
         finally:
             self._in_flight = False
 
+    def _held_sink(self, on_token: Callable | None) -> Callable | None:
+        if self.reply_panel is None or on_token is None:
+            return on_token
+
+        async def held(piece: str) -> None:
+            self._held.append((on_token, piece))
+        return held
+
+    async def _flush_held(self) -> None:
+        pending, self._held = self._held, []
+        for sink, piece in pending:
+            await sink(piece)
+
     def _reasoning_gate(self, original: Callable | None) -> Callable:
         async def gate(piece: str) -> None:
             if original is None or self.reply_panel.status_text() is not None:
@@ -3436,7 +3451,7 @@ class AgentLoop:
             _absorb_commit(session, self._ctx)
             with self._generating():
                 response_message, usage = await self._llm.stream_complete(
-                    request_messages, tools=None, on_token=on_token,
+                    request_messages, tools=None, on_token=self._held_sink(on_token),
                 )
             if usage is not None:
                 session.input_tokens += getattr(usage, "prompt_tokens", 0) or 0
@@ -3478,7 +3493,7 @@ class AgentLoop:
             _absorb_commit(session, self._ctx)
             with self._generating():
                 response_message, usage = await self._llm.stream_complete(
-                    request_messages, tools=None, on_token=on_token,
+                    request_messages, tools=None, on_token=self._held_sink(on_token),
                 )
             if usage is not None:
                 session.input_tokens += getattr(usage, "prompt_tokens", 0) or 0
