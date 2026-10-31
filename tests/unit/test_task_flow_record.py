@@ -1618,11 +1618,27 @@ async def test_run_unit_a_doc_less_decisions_read_before_any_review_says_so(tmp_
     assert "doc:" not in text and "no review yet" in text and last(text) == "next: new · file" and script.calls == []
 
 
-async def test_run_unit_a_doc_over_the_cap_is_cut_and_the_manifest_says_so(tmp_path):
-    flow, _, _, _ = make_flow(tmp_path)
+async def test_run_unit_a_doc_over_the_cap_is_refused_and_nothing_is_written(tmp_path):
+    flow, script, _, _ = make_flow(tmp_path)
     flow.open("fix login", 1)
     text = await flow.run("new", "d" * (Caps.DOC + 10))
-    assert "note: truncated at the doc cap" in text and flow.docs.read(1, "decisions.md").endswith("[truncated]\n")
+    assert f"over {Caps.DOC} bytes" in text and flow.docs.read(1, "decisions.md") is None and script.calls == []
+    assert ("decisions.md", None) not in flow.record.filed
+
+
+async def test_run_unit_a_ten_kb_plan_is_refused_and_one_at_the_cap_files_and_verifies(tmp_path):
+    flow, script, _, _ = make_flow(tmp_path)
+    flow.open("fix login", 1)
+    await flow.run("new", "Objective: fix login")
+    calls = len(script.calls)
+    big = PLAN_TWO.replace("x1 changed", "x" * 10_000)
+    assert f"over {Caps.DOC} bytes" in await flow.run("plan", big)
+    assert flow.docs.read(1, "plan.md") is None and ("plan.md", None) not in flow.record.filed and len(script.calls) == calls
+    fits = PLAN_TWO.replace("x1 changed", "x" * (Caps.DOC - len(PLAN_TWO.encode()) + len("x1 changed")))
+    assert len(fits.encode()) == Caps.DOC
+    await flow.run("plan", fits)
+    assert flow.docs.read(1, "plan.md") == fits
+    assert all(flow.docs.verified(flow.record, ("plan.md", f"step-{n}")) for n in (1, 2))
 
 
 async def test_refile_a_changed_executed_step_is_reopened_and_named_in_the_manifest(tmp_path):
