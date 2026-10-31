@@ -1182,6 +1182,35 @@ def test_task_docs_doc_bites():
     assert len(check_task_docs_doc("## Nothing\n")) == len(TASK_DOCS_NEEDLES)
 
 
+TASK_RUN_NEEDLES = (
+    ("## Threat model: prompt injection", "The `task` tool declares its results untrusted, a label"),
+    ("## Threat model: prompt injection",
+     "`research.md`, `plan.md`, `decisions.md`, the step logs and a research `question` are written by the model from repository files"),
+    ("## Threat model: prompt injection",
+     "An executor's summarizer reads its own tool output into a harness-origin message, new on a child agent that holds host tools, the same class as the root's exposure"),
+    ("## Files the harness writes",
+     "A wake begins with no task: the sleep file carries no task record, and an unfinished task folder is named, never resumed"),
+    ("## Human approval gate",
+     "The session's state folder, a project's `.localharness/` when it has one, is on that list from start"))
+
+
+def check_task_run_doc(security_text: str) -> list[str]:
+    """SECURITY.md says, each in its section, what the task pipeline adds: the tool's label, the docs and summarizer paths, a wake with no task, and the state folder on the gate's list."""
+    bodies = {h: " ".join((section(security_text, h) or "").split()) for h, _ in TASK_RUN_NEEDLES}
+    return [f"SECURITY.md's {h} section does not say {n}" for h, n in TASK_RUN_NEEDLES if n not in bodies[h]]
+
+
+def test_task_run_doc_live():
+    assert check_task_run_doc(_read("SECURITY.md")) == []
+
+
+def test_task_run_doc_bites():
+    text = _read("SECURITY.md")
+    for heading, needle in TASK_RUN_NEEDLES:
+        assert check_task_run_doc(_swap(text, needle, "x")) == [f"SECURITY.md's {heading} section does not say {needle}"]
+    assert len(check_task_run_doc("## Nothing\n")) == len(TASK_RUN_NEEDLES)
+
+
 STUCK_TASK_NEEDLES = (
     "The `task` tool's results are declared untrusted, so its manifest counts as progress only through its last line, which the harness computes from the task record",
     "repeated `task` calls are bounded by the flow cap, `/task stop` and the action budget rather than by the identical-call ceiling")

@@ -73,6 +73,7 @@ class Resume:
     skipped_check: str = ""          # from the step: its first skipped row, when none failed
     step_stopped: bool = False       # the step was stopped (Ctrl-C, Ctrl-D, a refusal or an error)
     turn: int = 0                    # AgentLoop.turn: the rebuilt loop's next turn is this plus one
+    task: Any = None                 # the open task record, by reference; never written to the file, never read back
 
     @property
     def slept(self) -> bool:

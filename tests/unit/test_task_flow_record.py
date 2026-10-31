@@ -1288,14 +1288,24 @@ async def test_executor_receives_the_step_as_written_with_its_indented_code(tmp_
 
 
 @pytest.mark.parametrize("call", [("step",), ("research", "where is login"), ("task",)])
-async def test_a_resumed_record_with_no_adopted_folder_launches_no_child_and_says_read_only(tmp_path, call):
+async def test_a_record_with_no_adopted_folder_launches_no_child_and_says_read_only(tmp_path, call):
+    flow, script, _, _ = await planned(tmp_path)
+    again = TaskFlow(run_config_child=script, emit=lambda *row: None, exclude=lambda s: None,
+                     docs=Docs(tmp_path / "proj" / ".localharness", True, "a"), config=flow.config,
+                     root_tools=ROOT_TOOLS, messages=lambda: TYPED)
+    again.record = flow.record
+    calls = len(script.calls)
+    assert "read-only" in await again.run(*call) and len(script.calls) == calls
+    assert ("step-1.md", None) not in flow.record.filed
+
+
+async def test_a_record_handed_to_a_new_flow_has_its_folder_adopted(tmp_path):
     flow, script, _, _ = await planned(tmp_path)
     again = TaskFlow(run_config_child=script, emit=lambda *row: None, exclude=lambda s: None,
                      docs=Docs(tmp_path / "proj" / ".localharness", True, "a"), config=flow.config,
                      root_tools=ROOT_TOOLS, messages=lambda: TYPED, record=flow.record)
-    calls = len(script.calls)
-    assert "read-only" in await again.run(*call) and len(script.calls) == calls
-    assert ("step-1.md", None) not in flow.record.filed
+    assert again.record is flow.record and again.docs.adopted == {flow.record.id}
+    again.docs.writable(flow.record.id)
 
 
 async def test_a_multibyte_final_answer_is_cut_by_bytes_so_the_runtime_section_survives(tmp_path):

@@ -3682,3 +3682,80 @@ async def test_clamp_a_task_flow_value_out_of_range_prints_one_line_naming_the_c
     await _start_async(None, False, False, str(tmp_path))
     named = [line for line in printed if "task_flow.flow_cap_minutes" in line]
     assert len(named) == 1 and "using 360" in named[0]
+
+
+def _planted(tmp_path, folder, docs):
+    base = tmp_path / "agents" / "orchestrator" / "tasks" / folder
+    base.mkdir(parents=True)
+    for name, text in docs.items():
+        (base / name).write_text(text)
+
+
+async def test_rebuild_hands_the_record_by_reference_and_adopts_its_folder(tmp_path, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+    from localharness.orchestrator.task_flow.record import open_task
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    seen = _capture_start(monkeypatch)
+    record = open_task(3, "fix login", 1)
+    _planted(tmp_path, "t3", {"decisions.md": "d"})
+    await _start_async(None, False, False, str(tmp_path), resume=_resume_of(("enable", "x"), task=record))
+    flow = seen["repl"][0]["task_flow"]
+    assert flow.record is record and 3 in flow.docs.adopted
+    flow.docs.writable(3)
+
+
+async def test_wake_begins_with_no_task_even_when_the_handle_carries_one(tmp_path, monkeypatch):
+    from localharness.cli.session_resume import SLEEP_ACTION
+    from localharness.cli.start_cmd import _start_async
+    from localharness.orchestrator.task_flow.record import open_task
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    seen = _capture_start(monkeypatch)
+    _planted(tmp_path, "t3", {"plan.md": "p"})
+    await _start_async(None, False, False, str(tmp_path),
+                       resume=_resume_of(SLEEP_ACTION, task=open_task(3, "fix login", 1)))
+    flow = seen["repl"][0]["task_flow"]
+    assert flow.record is None and flow.docs.adopted == set()
+
+
+async def test_wake_names_the_highest_unfinished_folder_by_integer_in_place_of_the_resumed_line(tmp_path, monkeypatch):
+    from localharness.cli import start_cmd
+    from localharness.cli.session_resume import SLEEP_ACTION
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    printed = _capture_start_console(monkeypatch)
+    _planted(tmp_path, "t9", {"plan.md": "p"})
+    _planted(tmp_path, "t10", {"decisions.md": "d", "plan.md": "p"})
+    await start_cmd._start_async(None, False, False, str(tmp_path), resume=_resume_of(SLEEP_ACTION))
+    assert "◆ Awake again · t10 not carried over · /task show t10/plan · new <objective>" in printed
+    assert not any(line.startswith("Awake again, continuing") for line in printed)
+
+
+@pytest.mark.parametrize("docs", (None, {"plan.md": "p", "review.md": "x\nverdict: pass\n"}), ids=("no folder", "finished"))
+async def test_wake_prints_the_resumed_line_when_no_folder_is_unfinished(tmp_path, monkeypatch, docs):
+    from localharness.cli import start_cmd
+    from localharness.cli.session_resume import SLEEP_ACTION
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    printed = _capture_start_console(monkeypatch)
+    if docs:
+        _planted(tmp_path, "t4", docs)
+    await start_cmd._start_async(None, False, False, str(tmp_path), resume=_resume_of(SLEEP_ACTION))
+    assert start_cmd.RESUMED_LINE.format(previous="old") in printed
+    assert not any("not carried over" in line for line in printed)
+
+
+async def test_the_restart_constructor_carries_the_flows_record_and_the_loops_turn(tmp_path, monkeypatch):
+    from localharness.cli.session_resume import RELOAD_ACTION
+    from localharness.cli.start_cmd import _start_async
+
+    async def run(self):
+        self._flow.open("fix login", 1)
+        self._agent.turn = 7
+        self.restart_request = RELOAD_ACTION
+    _stub_start_boundaries(tmp_path, monkeypatch, repl_run=run)
+    seen = _capture_start(monkeypatch)
+    restart = await _start_async(None, False, False, str(tmp_path))
+    flow = seen["repl"][0]["task_flow"]
+    assert restart.resume.task is flow.record and flow.record.id == 1 and restart.resume.turn == 7

@@ -182,3 +182,17 @@ def test_reload_action_is_the_marker_and_nothing_else_is():
 
 def test_a_reload_resume_is_not_asleep():
     assert not _resume(action=RELOAD_ACTION).slept
+
+
+def test_a_task_the_handle_carries_is_never_written_or_read_back(tmp_path):
+    path = asleep_path(tmp_path / "sessions")
+    write_asleep(path, _resume(task=object()), workspace=HERE)
+    assert "task" not in json.loads(path.read_text())
+    assert take_asleep(path, workspace=HERE).task is None
+
+
+def test_the_turn_counter_round_trips_through_the_file_and_defaults_to_zero(tmp_path):
+    path = asleep_path(tmp_path / "sessions")
+    write_asleep(path, _resume(turn=12), workspace=HERE)
+    assert take_asleep(path, workspace=HERE).turn == 12
+    assert _resume().turn == 0 and _resume().task is None
