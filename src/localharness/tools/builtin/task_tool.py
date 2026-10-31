@@ -34,6 +34,13 @@ def _bad(stage: str, doc: Any, question: Any, extra: dict) -> str | None:
 class TaskTool(Tool):
     def __init__(self, flow: TaskFlow) -> None:
         self._flow = flow
+        self.timeout_s = flow.limits.flow_cap_minutes * 60  # one call is one unit, which the flow cap bounds; the registry must not cut it first
+
+    async def run(self, **kwargs: Any) -> ToolResult:
+        result = await super().run(**kwargs)
+        if result.error_type == "timeout_error":
+            self._flow.busy = False
+        return result
 
     def info(self) -> ToolSchema:
         return ToolSchema(
