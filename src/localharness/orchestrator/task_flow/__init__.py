@@ -24,6 +24,8 @@ class TaskFlow:
         self.cap = FlowCap(self.limits.flow_cap_minutes)
         self.reply_panel = Panel(run_config_child, self.limits, self.cap, docs)
         self.record, self.excluded, self.turn = record, 0.0, turn
+        if record is not None:
+            docs.adopted.add(record.id)
         self.called, self.said, self.sentence = set[str](), set[str](), ""
         self.armed: str | None = None
         self.unit: tuple[str, int] | None = None

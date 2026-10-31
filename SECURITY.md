@@ -570,7 +570,7 @@ read and argue with. Each step below says what it does in `auto`.
      a write, delete, move or link the gate can read whose target, or a link's or move's source, lands under
      `agents/<name>/tasks/` or `agents/<name>/sessions/` of a config directory the session uses, and the
      delete or move of `agents/<name>` itself (a name with a dot only when it is a folder, so `agents/a.yaml` stays
-     a file). The refusal says how to change the document instead:
+     a file). The session's state folder, a project's `.localharness/` when it has one, is on that list from start. The refusal says how to change the document instead:
      `/task plan` for a task's plan, or ask the person to edit it and then `/task accept` for any other task
      document. The target is judged as the entry it names and by where a symlink points. Nothing above those
      folders is refused: an agent's own `config.yaml` and `memory.db` and the `agents/` folder itself
@@ -1212,6 +1212,9 @@ wakes only in the folder it slept in. Every human-origin message in the file is 
 request and loses its turn number, so a wake holds no trusted subtype: nothing the file carries
 reaches the critics as the person's typed words.
 
+A wake begins with no task: the sleep file carries no task record, and an unfinished task folder is
+named, never resumed.
+
 **What this does NOT cover.** Pictures the image plugin generates are written at your umask. In a
 session with no project they sit in the owner-only config folder, which keeps other accounts out,
 but in a project they sit in its `.localharness/`, and a copy taken anywhere keeps that mode. The
@@ -1279,6 +1282,9 @@ tools may not fetch through an exec tool such as `bash_exec`. Built-in tools, MC
 wrapper declares them untrusted) and plugin tools are judged the same way, whatever scope they
 arrive in.
 
+The `task` tool declares its results untrusted, a label: the manifests and the docs it returns are
+written by the model and by child agents from repository files.
+
 A delegating model may narrow a specialist to a subset of its own tools for one call; narrowing only removes tools, and the grant gate and the floors judge the narrowed set.
 
 **A residual that is now closed.** Tool classification used to read tool names. A plugin tool that
@@ -1335,6 +1341,10 @@ influence: an agent with no host tools can read untrusted content and hand a sum
 to an agent that has them. Summarizing degrades an attacker's control but does not
 eliminate it. Closing this fully is a larger change, deferred until a live test shows
 it is exploitable on the target model.
+`research.md`, `plan.md`, `decisions.md`, the step logs and a research `question` are written by the
+model from repository files and read by explorers and executors that hold host tools, so the docs
+are this path too. An executor's summarizer reads its own tool output into a harness-origin message,
+new on a child agent that holds host tools, the same class as the root's exposure.
 
 **Critics check quality, not safety.** Before a reply reaches you, a panel of critic agents reads
 it, and a reply they block is revised once. A clean panel is a quality signal, never a security one:

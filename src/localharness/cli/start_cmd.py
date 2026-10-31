@@ -3184,6 +3184,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             docs=Docs(state_dir, workspace is not None, agent_config.name),
             config=agent_config, root_tools=(), llm=llm, token_counter=token_counter, bus=bus,
             messages=lambda: agent_loop.messages(), turn=lambda: agent_loop.turn,
+            record=resume.task if resume is not None and not resume.slept else None,
         )
         await tool_registry.register(TaskTool(flow), scope="global")
         warnings.extend(limited(agent_config.task_flow, known=critic_names())[1])
@@ -3333,7 +3334,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             if interactive and isinstance(channel, TerminalChannel):
                 channel.first_prompt_hint = _first_prompt_hint(is_returning)
         elif resume.slept:
-            console.print(Text(RESUMED_LINE.format(previous=resume.previous_sitting_id)), soft_wrap=True)
+            from localharness.orchestrator.task_flow.verbs import wake_line
+            console.print(Text(wake_line(flow.docs) or RESUMED_LINE.format(previous=resume.previous_sitting_id)),
+                          soft_wrap=True)
         elif is_reload(resume.action):
             console.print(Text(RESTARTED_RELOAD), soft_wrap=True)
         else:  # R3: no wordmark mid-conversation — one line, then the plugin lines and the status
@@ -3609,7 +3612,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             restart_request = Restart(request, Resume(
                 action=request, agent_name=agent_name_str, conversation=tuple(conversation),
                 prior_context=prior, eviction_store=eviction_store, queued=repl.queued,
-                gate_mode=gate.mode, previous_sitting_id=sitting_id, turn=agent_loop.turn))
+                gate_mode=gate.mode, previous_sitting_id=sitting_id, turn=agent_loop.turn, task=flow.record))
             if request == SLEEP_ACTION:
                 write_asleep(asleep_file, restart_request.resume, workspace=os.getcwd())
                 log.info("session %s asleep at %s", sitting_id, asleep_file)
