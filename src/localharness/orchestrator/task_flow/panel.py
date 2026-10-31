@@ -12,7 +12,8 @@ from localharness.channels.base import one_line
 from localharness.config.models import AgentConfig, BudgetConfig, ChildBudget, PermissionConfig, ToolConfig
 from localharness.core.caps import Caps
 from localharness.core.content import text_of
-from localharness.orchestrator.task_flow.record import SENSED, Limits, Unit, limited, panel_critics, printed_bound
+from localharness.orchestrator.task_flow.record import (SENSED, Limits, Unit, continue_revising, limited, panel_critics,
+                                                        panel_minutes, printed_bound)
 
 CRITIC_TOOLS = ("read", "glob", "grep", "git_read", "tool_result_get")
 FENCE = "```"
@@ -187,6 +188,15 @@ def _verdict(parsed: list[Parsed], finished: bool) -> str:
     return "pass" if parsed and all(p.readable for p in parsed) else "unreviewed"
 
 
+def _progress(phase: str, tally: str, name: str, bound: str) -> str:
+    """The status text, cut to `Caps.LINE` by dropping the critic's name, then the tally (which carries its own separator), then the bound."""
+    for parts in ((phase + tally, name, bound), (phase + tally, bound), (phase, bound), (phase,)):
+        text = " · ".join(p for p in parts if p)
+        if len(text) <= Caps.LINE:
+            return text
+    return text[:Caps.LINE]
+
+
 class Panel:
     """The one multi-agent unit: a boundary's critics run one after another and their findings read together."""
 
@@ -201,15 +211,23 @@ class Panel:
     def set_phase(self, text: str | None) -> None:
         self._phase = text
 
-    async def _once(self, inputs: PanelInputs, names: tuple[str, ...]) -> PanelRun:
+    def _bound(self, minutes: float) -> str:
+        return f"up to {printed_bound(minutes)} min"
+
+    async def _once(self, inputs: PanelInputs, names: tuple[str, ...], phase: str, later: int) -> PanelRun:
         parsed: list[Parsed] = []
         finished = False
         try:
             for i, name in enumerate(names, 1):
-                minutes = sum(self.limits.critic(n).minutes for n in names[i - 1:])
-                self._text = f"checking {i}/{len(names)} · {name} · up to {printed_bound(minutes)} min"
-                parsed.append(await run_critic(name, inputs.brief, self._child, self.limits.critic(name), inputs.handles))
-            finished = bool(names)
+                minutes = sum(self.limits.critic(n).minutes for n in names[i - 1:]) + later * panel_minutes(names, self.limits)
+                self._text = _progress(phase, f" {i}/{len(names)}", one_line(name), self._bound(minutes))
+                try:
+                    parsed.append(await run_critic(name, inputs.brief, self._child, self.limits.critic(name), inputs.handles))
+                except Exception:
+                    parsed.append(_unreadable(name))
+                    break
+            else:
+                finished = bool(names)
         finally:
             findings = tuple(f for p in parsed for f in p.findings)
             run = PanelRun(sum(f.tag == "BLOCKER" for f in findings), findings, _verdict(parsed, finished), finished)
@@ -218,9 +236,30 @@ class Panel:
                 inputs.on_run(run)
         return run
 
-    async def run(self, unit: Unit, inputs: PanelInputs) -> PanelResult:
+    async def run(self, unit: Unit, inputs: PanelInputs,
+                  revise: Callable[[str, tuple[Finding, ...]], Awaitable[str | None]] | None = None) -> PanelResult:
+        """One panel, or at the reply seam alone (`revise` set) panels with a revision between while the rule holds."""
         names = tuple(inputs.critics) if inputs.critics is not None else panel_critics(unit.boundary, self.limits)
-        run = await self._once(inputs, names)
+        limit = self.limits.revisions["reply"] if revise and unit.boundary == "reply" else 0
+        draft, used, previous = inputs.draft, 0, None
+        verdict = None
+        try:
+            run = await self._once(inputs, names, "checking", limit)
+            while revise and run.finished and continue_revising(run.blockers, used, limit, previous):
+                self._text = _progress("revising", f" · {run.blockers} blocker{'s' * (run.blockers != 1)}", "",
+                                       self._bound((limit - used) * panel_minutes(names, self.limits)))
+                try:
+                    revised = await revise(draft, run.findings)
+                except Exception:
+                    revised = None
+                if not (revised and revised.strip()):
+                    verdict = "unreviewed"
+                    break
+                draft, used, previous = revised, used + 1, run.blockers
+                run = await self._once(inputs, names, "rechecking", limit - used)
+        finally:
+            self._text = None
+        verdict = verdict or run.verdict
         first = next((f for f in run.findings if f.tag == "BLOCKER"), None)
-        return PanelResult(run.verdict, run.findings, run.blockers, run.finished, inputs.draft,
-                           finding_text(first) if first and run.verdict == "blocked" else "")
+        return PanelResult(verdict, run.findings, run.blockers, run.finished, draft,
+                           finding_text(first) if first and verdict == "blocked" else "")

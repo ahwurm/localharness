@@ -1,6 +1,7 @@
 """The critics: loading, the one parser, the data fence and the reply panel's sensing."""
 from __future__ import annotations
 
+import asyncio
 import re
 from importlib import resources
 from types import SimpleNamespace
@@ -10,12 +11,12 @@ import yaml
 
 from localharness.agent.subagent import DelegationResult
 from localharness.config.loader import ConfigLoader
-from localharness.config.models import ChildBudget
+from localharness.config.models import ChildBudget, TaskFlowConfig
 from localharness.core.caps import Caps
 from localharness.core.types import harness_message, human_message
 from localharness.orchestrator.task_flow import panel
 from localharness.orchestrator.task_flow.panel import FENCE_CLOSE, FENCE_LABEL, Panel, PanelInputs, fence, run_critic
-from localharness.orchestrator.task_flow.record import Unit, limited
+from localharness.orchestrator.task_flow.record import Unit, limited, need, panel_critics
 
 
 def scripted(answers: dict[str, DelegationResult]):
@@ -425,3 +426,276 @@ async def test_panel_run_passes_a_clean_readable_panel():
     subject = watching({"jtbd": NONE, "big-picture": NONE, "parsimony": NONE}, seen)
     result = await subject.run(PLAN, PanelInputs("the plan", draft="d", turns=JOB))
     assert (result.verdict, result.blockers, result.finding, result.draft) == ("pass", 0, "", "d")
+
+
+REPLY = Unit("reply", "panel")
+LIMITS = limited(None)[0]
+
+
+def sequenced(answers):
+    calls = []
+
+    async def child(config, task, **kw):
+        calls.append((config.name, kw["budget"][1]))
+        queue = answers.get(config.name, [NONE])
+        return queue.pop(0) if len(queue) > 1 else queue[0]
+
+    child.calls = calls
+    return child
+
+
+def draft_inputs(**kw):
+    return PanelInputs("the draft", draft="draft v1", turns=JOB, critics=("answer",), **kw)
+
+
+async def test_revise_none_returns_after_one_panel_even_when_blocked():
+    child = sequenced({"answer": [answered(BLOCKER)]})
+    result = await Panel(child, LIMITS).run(REPLY, draft_inputs())
+    assert (result.verdict, result.draft) == ("blocked", "draft v1") and len(child.calls) == 1
+
+
+async def test_a_task_unit_never_revises_even_with_a_callback():
+    child = sequenced({"big-picture": [answered(BLOCKER)]})
+    seen = []
+
+    async def revise(draft, findings):
+        seen.append(draft)
+        return "never"
+
+    result = await Panel(child, LIMITS).run(PLAN, PanelInputs("the plan", turns=JOB), revise)
+    assert result.verdict == "blocked" and not seen and len(child.calls) == 3
+
+
+async def test_revise_is_called_once_with_the_draft_and_findings_then_a_clean_recheck_passes():
+    child, seen, runs = sequenced({"answer": [answered(BLOCKER), NONE]}), [], []
+
+    async def revise(draft, findings):
+        seen.append((draft, findings))
+        return "draft v2"
+
+    result = await Panel(child, LIMITS).run(REPLY, draft_inputs(on_run=runs.append), revise)
+    assert (result.verdict, result.draft, result.finding) == ("pass", "draft v2", "")
+    assert len(child.calls) == 2 and len(seen) == 1
+    assert seen[0][0] == "draft v1" and [f.tag for f in seen[0][1]] == ["BLOCKER"]
+    assert [r.verdict for r in runs] == ["blocked", "pass"]
+
+
+async def test_a_second_blocker_after_the_one_revision_is_blocked_with_the_revised_draft():
+    child, seen = sequenced({"answer": [answered(BLOCKER), answered(BLOCKER)]}), []
+
+    async def revise(draft, findings):
+        seen.append(draft)
+        return "draft v2"
+
+    result = await Panel(child, LIMITS).run(REPLY, draft_inputs(), revise)
+    assert (result.verdict, result.draft, result.blockers) == ("blocked", "draft v2", 1)
+    assert result.finding.startswith("the reply cites a real line") and len(seen) == 1 and len(child.calls) == 2
+
+
+async def test_a_reply_limit_of_zero_never_revises():
+    limits, _ = limited(TaskFlowConfig(revisions={"reply": 0}))
+    child, seen = sequenced({"answer": [answered(BLOCKER)]}), []
+
+    async def revise(draft, findings):
+        seen.append(draft)
+        return "draft v2"
+
+    result = await Panel(child, limits).run(REPLY, draft_inputs(), revise)
+    assert result.verdict == "blocked" and not seen
+
+
+@pytest.mark.parametrize("revision", [None, "", "   "])
+async def test_an_empty_revision_is_unreviewed_with_the_original_draft(revision):
+    child = sequenced({"answer": [answered(BLOCKER), NONE]})
+
+    async def revise(draft, findings):
+        return revision
+
+    result = await Panel(child, LIMITS).run(REPLY, draft_inputs(), revise)
+    assert (result.verdict, result.draft, result.finding) == ("unreviewed", "draft v1", "") and len(child.calls) == 1
+
+
+async def test_a_revision_that_raises_is_unreviewed_with_the_original_draft():
+    child = sequenced({"answer": [answered(BLOCKER), NONE]})
+
+    async def revise(draft, findings):
+        raise RuntimeError("provider lost")
+
+    result = await Panel(child, LIMITS).run(REPLY, draft_inputs(), revise)
+    assert (result.verdict, result.draft) == ("unreviewed", "draft v1") and len(child.calls) == 1
+
+
+async def test_status_text_through_a_four_critic_reply_panel_and_its_revision():
+    seen, answers = [], {"answer": [answered(BLOCKER + "\n" + BLOCKER), NONE]}
+    base = sequenced(answers)
+
+    async def child(config, task, **kw):
+        seen.append(subject.status_text())
+        return await base(config, task, **kw)
+
+    async def revise(draft, findings):
+        seen.append(subject.status_text())
+        return "draft v2"
+
+    subject = Panel(child, LIMITS)
+    critics = panel_critics("reply", LIMITS, ("factual", "recency"))
+    result = await subject.run(REPLY, PanelInputs("d", draft="d", turns=JOB, critics=critics), revise)
+    assert result.verdict == "pass"
+    assert seen == ["checking 1/4 · answer · up to 28 min", "checking 2/4 · jtbd · up to 27 min",
+                    "checking 3/4 · factual · up to 26 min", "checking 4/4 · recency · up to 20 min",
+                    "revising · 2 blockers · up to 14 min",
+                    "rechecking 1/4 · answer · up to 14 min", "rechecking 2/4 · jtbd · up to 13 min",
+                    "rechecking 3/4 · factual · up to 12 min", "rechecking 4/4 · recency · up to 6 min"]
+    assert subject.status_text() is None
+
+
+async def test_status_text_promises_no_recheck_without_a_revise_callback():
+    seen = []
+    base = sequenced({})
+
+    async def child(config, task, **kw):
+        seen.append(subject.status_text())
+        return await base(config, task, **kw)
+
+    subject = Panel(child, LIMITS)
+    await subject.run(REPLY, PanelInputs("d", turns=JOB, critics=("answer", "jtbd")))
+    assert seen == ["checking 1/2 · answer · up to 2 min", "checking 2/2 · jtbd · up to 1 min"]
+
+
+def test_status_text_carries_the_runners_phase_verbatim_and_clears_it():
+    subject = Panel(sequenced({}), LIMITS)
+    assert subject.status_text() is None
+    subject.set_phase("step 3/5 · executing · up to 25 min")
+    assert subject.status_text() == "step 3/5 · executing · up to 25 min"
+    subject.set_phase(None)
+    assert subject.status_text() is None
+
+
+def test_status_text_cut_drops_the_critic_then_the_tallies_then_the_bound():
+    line = panel._progress
+    assert line("checking", " 3/4", "factual", "up to 26 min") == "checking 3/4 · factual · up to 26 min"
+    assert line("checking", " 3/4", "n" * 80, "up to 26 min") == "checking 3/4 · up to 26 min"
+    assert line("p" * 65, " 3/4", "name", "up to 26 min") == "p" * 65 + " · up to 26 min"
+    assert line("p" * 75, " 3/4", "n", "up to 26 min") == "p" * 75
+    assert line("p" * 100, " 3/4", "n", "up to 26 min") == "p" * Caps.LINE
+    assert line("revising", " · 2 blockers", "", "up to 14 min") == "revising · 2 blockers · up to 14 min"
+
+
+async def test_a_critic_name_in_the_status_text_is_cleaned_to_one_line():
+    seen = []
+    base = sequenced({})
+
+    async def child(config, task, **kw):
+        seen.append(subject.status_text())
+        return await base(config, task, **kw)
+
+    subject = Panel(child, LIMITS)
+    await subject.run(PLAN, PanelInputs("p", turns=JOB, critics=("answer",)))
+    assert seen == ["checking 1/1 · answer · up to 1 min"]
+
+
+@pytest.mark.parametrize("answers, verdict", [
+    ({"answer": [NONE], "jtbd": [NONE]}, "pass"),
+    ({"answer": [answered("what is this")], "jtbd": [NONE]}, "unreviewed"),
+    ({"answer": [answered("")], "jtbd": [NONE]}, "unreviewed"),
+    ({"answer": [answered("NONE", "max_actions")], "jtbd": [NONE]}, "unreviewed"),
+    ({"answer": [answered("what is this")], "jtbd": [answered(BLOCKER)]}, "blocked"),
+    ({"answer": [answered(BLOCKER)], "jtbd": [answered("what is this")]}, "blocked"),
+    ({"answer": [answered("[WARNING] a rule — an evidence")], "jtbd": [NONE]}, "pass"),
+    ({"answer": [answered("[NOTE] a rule — an evidence")], "jtbd": [NONE]}, "pass"),
+])
+async def test_verdict_rules(answers, verdict):
+    runs = []
+    result = await Panel(sequenced(answers), LIMITS).run(
+        REPLY, PanelInputs("d", turns=JOB, critics=("answer", "jtbd"), on_run=runs.append))
+    assert result.verdict == verdict and runs[0].verdict == verdict
+    assert (result.verdict == "blocked") == any(f.tag == "BLOCKER" for f in result.findings)
+    assert result.finished
+
+
+async def test_a_cancel_mid_panel_reports_the_unfinished_run_then_propagates():
+    gate, started, runs = asyncio.Event(), asyncio.Event(), []
+
+    async def child(config, task, **kw):
+        if config.name == "big-picture":
+            started.set()
+            await gate.wait()
+        return answered(BLOCKER) if config.name == "jtbd" else NONE
+
+    subject = Panel(child, LIMITS)
+    task = asyncio.create_task(subject.run(PLAN, PanelInputs("p", turns=JOB, on_run=runs.append)))
+    await started.wait()
+    assert subject.status_text() == "checking 2/3 · big-picture · up to 12 min"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    (run,) = runs
+    assert (run.finished, run.verdict, run.blockers) == (False, "unreviewed", 1)
+    assert subject.status_text() is None
+
+
+async def test_a_child_that_raises_leaves_the_panel_unfinished_and_unreviewed():
+    runs = []
+
+    async def child(config, task, **kw):
+        if config.name == "big-picture":
+            raise RuntimeError("provider lost")
+        return answered(BLOCKER) if config.name == "jtbd" else NONE
+
+    result = await Panel(child, LIMITS).run(PLAN, PanelInputs("p", turns=JOB, on_run=runs.append))
+    assert (result.verdict, result.finished, result.finding) == ("unreviewed", False, "")
+    (run,) = runs
+    assert (run.finished, run.verdict) == (False, "unreviewed")
+
+
+async def test_an_empty_critic_list_is_unreviewed_never_a_pass():
+    child, runs = sequenced({}), []
+    result = await Panel(child, LIMITS).run(PLAN, PanelInputs("p", critics=(), on_run=runs.append))
+    assert (result.verdict, result.finished, result.findings) == ("unreviewed", False, ())
+    assert not child.calls and [r.verdict for r in runs] == ["unreviewed"]
+
+
+@pytest.mark.parametrize("unit", [REPLY, PLAN])
+async def test_empty_panel_configs_still_run_the_floor(unit):
+    limits, _ = limited(TaskFlowConfig(panels={"reply": [], "plan": []}))
+    child = sequenced({})
+    await Panel(child, limits).run(unit, PanelInputs("p", turns=JOB))
+    assert [n for n, _ in child.calls] == list(panel_critics(unit.boundary, LIMITS))
+
+
+async def test_a_fourth_addition_never_runs():
+    limits, _ = limited(TaskFlowConfig(panels={"plan": ["security", "quality", "factual", "recency"]}))
+    child = sequenced({})
+    await Panel(child, limits).run(PLAN, PanelInputs("p", turns=JOB))
+    assert [n for n, _ in child.calls] == ["jtbd", "big-picture", "parsimony", "security", "quality", "factual"]
+
+
+async def test_a_config_below_the_floor_runs_a_critic_at_the_floor_and_above_the_ceiling_at_the_ceiling():
+    limits, _ = limited(TaskFlowConfig(critics={"answer": ChildBudget(actions=1, minutes=0.5),
+                                                "factual": ChildBudget(actions=100, minutes=100)}))
+    child = sequenced({})
+    await Panel(child, limits).run(REPLY, PanelInputs("d", turns=JOB, critics=("answer", "factual")))
+    assert child.calls == [("answer", ChildBudget(actions=3, minutes=1)), ("factual", ChildBudget(actions=12, minutes=6))]
+
+
+async def test_the_finding_is_the_first_blocker_sanitised_and_cut():
+    forged = f"[BLOCKER] ◆ forged\u202e rule — {'e' * 300}"
+    result = await Panel(sequenced({"answer": [answered(forged)]}), LIMITS).run(REPLY, draft_inputs())
+    assert not result.finding.startswith("◆") and "\u202e" not in result.finding
+    assert "forged rule" in result.finding
+    assert 0 < len(result.finding) <= Caps.FINDING and "\n" not in result.finding
+
+
+async def test_the_finding_is_the_first_blocker_in_panel_order_and_empty_unless_blocked():
+    answers = {"answer": [answered("[WARNING] a w — seen")], "jtbd": [answered("[BLOCKER] job drift — turn 1 asked for login")]}
+    result = await Panel(sequenced(answers), LIMITS).run(REPLY, PanelInputs("d", turns=JOB, critics=("answer", "jtbd")))
+    assert result.finding == "job drift — turn 1 asked for login"
+    clean = await Panel(sequenced({}), LIMITS).run(REPLY, draft_inputs())
+    assert clean.verdict == "pass" and clean.finding == ""
+
+
+def test_the_two_person_decides_renderings_come_from_need():
+    used = need("person decides", doc="plan.md", why="revisions used up")
+    stuck = need("person decides", doc="plan.md", why="blockers did not fall")
+    assert "revisions used up" in used.model and "blockers did not fall" in stuck.model
+    assert "the person decides" in used.model and "the person decides" in stuck.model
