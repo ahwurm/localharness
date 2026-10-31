@@ -225,6 +225,10 @@ async def test_a_followup_carries_its_own_subtype():
     assert repl._slash_followup is None
 
 
+# modules that only read a subtype, never stamp one
+READERS = {"orchestrator/task_flow/panel.py"}
+
+
 def _count_in_source(literal):
     import re
     from pathlib import Path
@@ -232,6 +236,8 @@ def _count_in_source(literal):
     root = Path(__import__("localharness").__file__).parent
     found = {}
     for path in root.rglob("*.py"):
+        if path.relative_to(root).as_posix() in READERS:
+            continue
         n = len(re.findall(re.escape(literal), path.read_text()))
         if n:
             found[path.relative_to(root).as_posix()] = n
