@@ -418,10 +418,10 @@ def test_a_section_runs_to_the_next_heading_and_a_deeper_heading_stays_inside():
     assert "### notes" in sections[0].text and "## Step 2" not in sections[0].text
 
 
-def test_a_section_is_whitespace_normalised():
+def test_a_sections_digest_is_whitespace_normalised_and_its_text_is_as_written():
     base = parse_plan(step(1))[0]
     spaced = parse_plan("## Step 1\n\n    files:   f1.py\n\n\ndepends_on:  none\n  done: d1  \n\n")[0]
-    assert spaced.digest == base.digest and spaced.text == base.text
+    assert spaced.digest == base.digest and spaced.text == "## Step 1\n\n    files:   f1.py\n\n\ndepends_on:  none\n  done: d1"
     assert parse_plan(step(1).replace("d1", "d2"))[0].digest != base.digest
 
 
