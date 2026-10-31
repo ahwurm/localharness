@@ -263,7 +263,7 @@ def manifest(filed: Iterable[str], child: str = "", verdict: str = "", doc: str 
     """What the root reads from a unit: filed names, counts, verdicts and fenced findings, never a child's output."""
     names = ", ".join(filed)
     parts = (f"filed: {names}" if names else "", _flat(child, Caps.FINDING), _flat(verdict, Caps.FINDING),
-             f"doc:\n{doc.strip()[:Caps.DOC]}" if doc.strip() else "", findings,
+             f"doc:\n{doc.strip()}" if doc.strip() else "", findings,
              *(f"note: {_flat(n, Caps.FINDING)}" for n in notes), next_line)
     return "\n".join(p for p in parts if p)
 

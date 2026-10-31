@@ -105,10 +105,10 @@ def finding_text(finding: Finding) -> str:
     return _flat(" — ".join(p for p in (finding.rule, finding.evidence) if p))
 
 
-def fence(findings: Iterable[Finding], stopped_log: str = "") -> str:
+def fence(findings: Iterable[Finding], text: str = "", cap: int = Caps.BLOCK) -> str:
     lines = [f"{f.critic}: [{f.tag}] {finding_text(f)}" for f in findings]
-    body = "\n".join([*lines, *([_bare(stopped_log)] if stopped_log else [])])
-    return f"{(FENCE + FENCE_LABEL + chr(10) + body)[:Caps.BLOCK]}\n{FENCE}\n{FENCE_CLOSE}"
+    body = "\n".join([*lines, *([_bare(text)] if text else [])])
+    return f"{(FENCE + FENCE_LABEL + chr(10) + body)[:cap]}\n{FENCE}\n{FENCE_CLOSE}"
 
 
 async def _ask(name: str, brief: str, run_child: Callable[..., Awaitable[Any]], budget: ChildBudget,

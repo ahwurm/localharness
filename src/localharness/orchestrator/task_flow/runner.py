@@ -193,8 +193,9 @@ def _read(flow: TaskFlow, boundary: str) -> str:
         return stale
     review = review_of(record, doc)
     section = last_section(flow.docs.read(record.id, review) or "") if review else last_section("")
-    return manifest((), doc=flow.docs.read(record.id, doc) or "", findings=section,
-                    next_line=next_line(record, boundary, flow.limits))
+    text = flow.docs.read(record.id, doc) or ""
+    shown = fence((), text, Caps.DOC) if boundary == "research" and text else text
+    return manifest((), doc=shown, findings=fence((), section), next_line=next_line(record, boundary, flow.limits))
 
 
 async def _file(flow: TaskFlow, boundary: str, unit: Unit, carried: str | None) -> str:
