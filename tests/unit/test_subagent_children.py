@@ -361,3 +361,44 @@ def test_the_time_check_reads_budget_minutes_and_reports_elapsed_minutes():
 
 def test_excluded_seconds_defaults_to_zero():
     assert Session(agent_id="a", session_id="s", messages=[]).excluded_seconds == 0.0
+
+
+class _NoteCtx:
+    last_commit = None
+    _content_store = None
+    max_context_tokens = 0
+
+    def __init__(self, fits_note=True):
+        self.fits_note = fits_note
+        self._token_counter = type("TC", (), {"estimate_messages": staticmethod(lambda m: 0)})()
+
+    async def build_messages(self, messages, tools):
+        from localharness.agent.context import TokenBudget
+        return list(messages), TokenBudget(total_limit=100, current_usage=0, tool_schema_tokens=0)
+
+    def ensure_active_references(self, messages, tools=None, *, enforce_budget=False):
+        from localharness.agent.context import ActiveReferenceOverflow
+        if not self.fits_note and any(m.get("_lh", {}).get("subtype") == "request_note" for m in messages):
+            raise ActiveReferenceOverflow("full")
+        return messages
+
+
+def _note_loop(note, ctx):
+    loop = object.__new__(AgentLoop)
+    loop._request_note, loop._ctx, loop._task_context, loop._llm = note, ctx, None, object()
+    return loop
+
+
+async def test_a_failing_note_provider_sends_the_request_without_a_note():
+    def broken():
+        raise RuntimeError("boom")
+    packed, _ = await _note_loop(broken, _NoteCtx())._build_request([{"role": "user", "content": "hi"}], None)
+    assert [m["content"] for m in packed] == ["hi"]
+
+
+async def test_the_note_provider_is_called_once_per_request():
+    calls = []
+    loop = _note_loop(lambda: calls.append(1) or "step 1", _NoteCtx(fits_note=False))
+    packed, _ = await loop._build_request([{"role": "user", "content": "hi"}], None)
+    assert len(calls) == 1
+    assert [m["content"] for m in packed] == ["hi"], "a note that cannot fit is dropped, the turn is not blocked"
