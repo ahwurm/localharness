@@ -12,7 +12,7 @@ from localharness.channels.base import one_line
 from localharness.config.models import AgentConfig, BudgetConfig, ChildBudget, PermissionConfig, ToolConfig
 from localharness.core.caps import Caps
 from localharness.core.content import text_of
-from localharness.orchestrator.task_flow.record import SENSED, Limits, limited, panel_critics
+from localharness.orchestrator.task_flow.record import SENSED, Limits, Unit, limited, panel_critics, printed_bound
 
 CRITIC_TOOLS = ("read", "glob", "grep", "git_read", "tool_result_get")
 FENCE = "```"
@@ -148,3 +148,79 @@ def sense(calls: Iterable[tuple[str, str | None]], jtbd_stood: bool = False, lim
     skip = jtbd_stood and bool(calls) and all(name == "task" for name, _ in calls)
     names = panel_critics("reply", limits or limited()[0], tuple(c for c in SENSED if c in wanted))
     return tuple(n for n in names if not (skip and n == "jtbd"))
+
+
+@dataclass(frozen=True)
+class PanelRun:
+    blockers: int
+    findings: tuple[Finding, ...]
+    verdict: str
+    finished: bool
+
+
+@dataclass(frozen=True)
+class PanelInputs:
+    brief: str
+    draft: str = ""
+    turns: tuple[tuple[int, str], ...] = ()
+    handles: tuple[str, ...] = ()
+    critics: tuple[str, ...] | None = None
+    on_run: Callable[[PanelRun], None] | None = None
+
+
+@dataclass(frozen=True)
+class PanelResult:
+    verdict: str
+    findings: tuple[Finding, ...]
+    blockers: int
+    finished: bool
+    draft: str
+    finding: str = ""
+    job: str = ""
+
+
+def _verdict(parsed: list[Parsed], finished: bool) -> str:
+    if not finished:
+        return "unreviewed"
+    if any(f.tag == "BLOCKER" for p in parsed for f in p.findings):
+        return "blocked"
+    return "pass" if parsed and all(p.readable for p in parsed) else "unreviewed"
+
+
+class Panel:
+    """The one multi-agent unit: a boundary's critics run one after another and their findings read together."""
+
+    def __init__(self, run_child: Callable[..., Awaitable[Any]], limits: Limits) -> None:
+        self._child, self.limits = run_child, limits
+        self._text: str | None = None
+        self._phase: str | None = None
+
+    def status_text(self) -> str | None:
+        return self._text or self._phase
+
+    def set_phase(self, text: str | None) -> None:
+        self._phase = text
+
+    async def _once(self, inputs: PanelInputs, names: tuple[str, ...]) -> PanelRun:
+        parsed: list[Parsed] = []
+        finished = False
+        try:
+            for i, name in enumerate(names, 1):
+                minutes = sum(self.limits.critic(n).minutes for n in names[i - 1:])
+                self._text = f"checking {i}/{len(names)} · {name} · up to {printed_bound(minutes)} min"
+                parsed.append(await run_critic(name, inputs.brief, self._child, self.limits.critic(name), inputs.handles))
+            finished = bool(names)
+        finally:
+            findings = tuple(f for p in parsed for f in p.findings)
+            run = PanelRun(sum(f.tag == "BLOCKER" for f in findings), findings, _verdict(parsed, finished), finished)
+            self._text = None
+            if inputs.on_run:
+                inputs.on_run(run)
+        return run
+
+    async def run(self, unit: Unit, inputs: PanelInputs) -> PanelResult:
+        names = tuple(inputs.critics) if inputs.critics is not None else panel_critics(unit.boundary, self.limits)
+        run = await self._once(inputs, names)
+        first = next((f for f in run.findings if f.tag == "BLOCKER"), None)
+        return PanelResult(run.verdict, run.findings, run.blockers, run.finished, inputs.draft,
+                           finding_text(first) if first and run.verdict == "blocked" else "")
