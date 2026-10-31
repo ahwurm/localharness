@@ -8,10 +8,14 @@ import re
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING, Iterable
 
 from localharness.core.caps import Caps
 from localharness.core.private_files import PRIVATE_DIR_MODE, NotRegularFile, atomic_write_text, open_regular
-from localharness.orchestrator.task_flow.record import Record
+from localharness.orchestrator.task_flow.record import Counts, Record, Row
+
+if TYPE_CHECKING:
+    from localharness.orchestrator.task_flow.panel import Finding
 
 TRUNCATION_MARKER = "\n[truncated]\n"
 SESSION_DOCS = ("jtbd.md", "reply-review.md")
@@ -20,6 +24,14 @@ _DIR = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
 _FOLDER = re.compile(r"t[0-9]+")
 _TASK_DOC = re.compile(r"(?:(?:decisions|research|plan|step-[1-9][0-9]*)(?:-review)?|review)\.md")
 _ATTEMPTS = 8
+PLAN_SHAPE = ("plan.md needs `## Step N` headings numbered 1..n in order, each with `files:`, `depends_on:` "
+              "(earlier steps only, or none) and `done:` lines")
+NO_REVIEW = "no review yet"
+_HEADING = re.compile(r"## Step ([1-9][0-9]*)(?:[:\s].*)?")
+_FIELD = re.compile(r"(?:[-*] )?(files|depends_on|done):(.*)")
+_SPLIT = re.compile(r"(?m)^(?=##(?!#))")
+_STEP_KEY = re.compile(r"step-([1-9][0-9]*)")
+_REVIEW_DOC = re.compile(r"(?:[a-z0-9-]+-)?review\.md")
 
 
 class Refused(Exception):
@@ -108,6 +120,57 @@ def _slurp(fd: int, name: str) -> str | None:
         raise Refused(f"{name} is not UTF-8") from e
 
 
+@dataclass(frozen=True)
+class Section:
+    n: int
+    text: str
+    files: tuple[str, ...]
+    depends_on: tuple[int, ...]
+    done: str
+    digest: str
+
+
+def parse_plan(text: str) -> list[Section] | str:
+    """The `## Step N` sections of a plan, or `PLAN_SHAPE`."""
+    out: list[Section] = []
+    for i, chunk in enumerate(_SPLIT.split(text)[1:], 1):
+        head, *body = chunk.splitlines()
+        heading = _HEADING.fullmatch(head.rstrip())
+        fields = {m[1]: m[2].strip() for line in body if (m := _FIELD.fullmatch(line.strip()))}
+        if not heading or heading[1] != str(i) or len(fields) < 3:
+            return PLAN_SHAPE
+        deps = () if fields["depends_on"].lower() == "none" else tuple(int(c) for c in fields["depends_on"].split(","))
+        section = chunk.strip()
+        out.append(Section(i, section, tuple(f.strip() for f in fields["files"].split(",") if f.strip()), deps,
+                           fields["done"], digest(section)))
+    return out or PLAN_SHAPE
+
+
+def rerecord(record: Record, sections: list[Section]) -> list[int]:
+    """One row per section; returns the steps whose executed work a changed section voids."""
+    for s in sections:
+        record.filed[("plan.md", f"step-{s.n}")] = Row(s.digest, "unreviewed", Counts())
+    return []
+
+
+def render_section(round_n: int | None, findings: Iterable[Finding], verdict: str, blockers: int) -> str:
+    head = "## accepted by the person" if round_n is None else f"## round {round_n} · blockers {blockers}"
+    return "\n".join([head, *(f"- [{f.tag}] {f.rule} — {f.evidence} ({f.critic})" for f in findings), f"verdict: {verdict}"])
+
+
+def last_section(text: str) -> str:
+    parts = [p for p in _SPLIT.split(text) if p.startswith("##")]
+    return parts[-1].strip() if parts else NO_REVIEW
+
+
+def manifest(filed: Iterable[str], child: str = "", verdict: str = "", doc: str = "", findings: str = "",
+             notes: Iterable[str] = (), next_line: str = "") -> str:
+    """What the root reads from a unit: filed names, counts, verdicts and fenced findings, never a child's output."""
+    names = ", ".join(filed)
+    return "\n".join(p for p in (f"filed: {names}" if names else "", child, verdict, doc, findings,
+                                 *(f"note: {n}" for n in notes), next_line) if p)
+
+
 @dataclass
 class Docs:
     state_dir: Path
@@ -175,11 +238,22 @@ class Docs:
     def path(self, task: int, name: str) -> Path:
         return self.state_dir / "agents" / self.agent / "tasks" / f"t{task}" / name
 
+    def append_section(self, task: int, doc: str, section: str) -> str:
+        if not _REVIEW_DOC.fullmatch(doc):
+            raise Refused(f"{doc} is not a review doc")
+        old = (self.read(task, doc) or "").strip()
+        return self.write(task, doc, "\n\n".join(p for p in (old, section) if p) + "\n")[0]
+
     def verified(self, record: Record, key: tuple[str, str | None]) -> bool:
-        """A whole doc's current text still has the digest it was filed with."""
+        """A doc's, or a plan section's, current text still has the digest it was filed with."""
         row = record.filed.get(key)
         try:
             text = self.read(record.id, key[0])
         except Refused:
             return False
-        return bool(row and text is not None and digest(text) == row.digest)
+        if row is None or text is None:
+            return False
+        if key[1] is None:
+            return digest(text) == row.digest
+        n, plan = _STEP_KEY.fullmatch(key[1]), parse_plan(text)
+        return bool(n) and not isinstance(plan, str) and any(s.n == int(n[1]) and s.digest == row.digest for s in plan)

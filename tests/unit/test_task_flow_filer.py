@@ -9,8 +9,10 @@ import pytest
 
 from localharness.core.caps import Caps
 from localharness.orchestrator.task_flow import filer
-from localharness.orchestrator.task_flow.filer import SESSION_DOCS, TRUNCATION_MARKER, Docs, Refused, digest
-from localharness.orchestrator.task_flow.record import file_doc, open_task
+from localharness.orchestrator.task_flow.filer import (
+    NO_REVIEW, PLAN_SHAPE, SESSION_DOCS, TRUNCATION_MARKER, Docs, Refused, digest, last_section, manifest, parse_plan,
+    render_section, rerecord)
+from localharness.orchestrator.task_flow.record import Counts, file_doc, open_task
 
 BOUND = Caps.DOC + len(TRUNCATION_MARKER)
 
@@ -309,3 +311,53 @@ def test_verified_is_false_for_no_row_a_refused_read_and_a_stale_doc(tmp_path):
 def test_path_names_the_doc_without_opening_it(tmp_path):
     root, agent = tree(tmp_path)
     assert Docs(root, True, "a").path(1, "plan.md") == agent / "tasks" / "t1" / "plan.md"
+
+
+PLAN = """## Step 1
+files: src/a.py
+depends_on: none
+done: a exists
+
+## Step 2
+files: src/b.py, src/c.py
+depends_on: 1
+done: b and c exist
+"""
+
+
+def test_tracer_a_plan_is_parsed_recorded_verified_reviewed_and_reported(tmp_path):
+    docs = Docs(state(tmp_path), True, "a")
+    docs.new_task()
+    got, _ = docs.write(1, "plan.md", PLAN)
+    record = open_task(1, "objective", 1)
+    file_doc(record, "plan", ("plan.md", None), got)
+    sections = parse_plan(PLAN)
+    assert [(s.n, s.files, s.depends_on, s.done) for s in sections] == [
+        (1, ("src/a.py",), (), "a exists"), (2, ("src/b.py", "src/c.py"), (1,), "b and c exist")]
+    assert rerecord(record, sections) == []
+    for n in (1, 2):
+        row = record.filed[("plan.md", f"step-{n}")]
+        assert (row.verdict, row.counts, row.digest) == ("unreviewed", Counts(), sections[n - 1].digest)
+        assert docs.verified(record, ("plan.md", f"step-{n}"))
+    section = render_section(1, [], "pass", 0)
+    assert section.startswith("## round 1 · blockers 0") and section.endswith("verdict: pass")
+    docs.append_section(1, "plan-review.md", section)
+    assert last_section(docs.read(1, "plan-review.md")) == section
+    out = manifest(["plan.md"], verdict="plan.md · pass", next_line="next: run · step 1")
+    assert "plan.md" in out and out.endswith("next: run · step 1")
+
+
+def test_a_section_key_is_not_verified_when_the_plan_no_longer_parses(tmp_path):
+    docs = Docs(state(tmp_path), True, "a")
+    docs.new_task()
+    record = open_task(1, "o", 1)
+    docs.write(1, "plan.md", PLAN)
+    rerecord(record, parse_plan(PLAN))
+    docs.write(1, "plan.md", "not a plan")
+    assert not docs.verified(record, ("plan.md", "step-1"))
+    assert not docs.verified(record, ("plan.md", "step-9"))
+
+
+def test_a_review_doc_with_no_section_has_no_review_yet():
+    assert last_section("") == NO_REVIEW
+    assert PLAN_SHAPE
