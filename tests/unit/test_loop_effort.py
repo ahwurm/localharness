@@ -17,7 +17,7 @@ import pytest
 
 from localharness.agent.context import ContextManager
 from localharness.agent.loop import AgentLoop, Session
-from localharness.config.models import AgentConfig, EffortBudgetConfig, SelfCheckConfig
+from localharness.config.models import AgentConfig, EffortBudgetConfig
 from localharness.agent.permissions import PermissionEvaluator
 from tests.unit.effort_support import RecordingLLM
 
@@ -26,7 +26,7 @@ WINDOW = 131_072
 
 def _config(**kw: Any) -> AgentConfig:
     return AgentConfig(
-        name="test-agent", role="Test agent.", self_check=SelfCheckConfig(enabled=False), **kw
+        name="test-agent", role="Test agent.", **kw
     )
 
 

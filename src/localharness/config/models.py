@@ -1052,36 +1052,6 @@ class RecoveryInjectionConfig(BaseModel):
     )
 
 
-class SelfCheckConfig(BaseModel):
-    """Optional bounded self-review pass before finalizing (MECH-01).
-
-    A loop-structure mechanism: when enabled, the agent reviews its own
-    about-to-be-final answer once before returning it (an extra conditional
-    LLM round-trip + a re-entry into the agent loop). This is NOT a prompt
-    edit (the `role` string is untouched) and NOT a numeric hyperparameter
-    (it adds a control-flow branch). Addressable via the component registry
-    as `agent.self_check.{enabled,max_passes}`.
-    """
-    model_config = ConfigDict(frozen=False, extra="forbid")
-
-    enabled: bool = Field(
-        default=False,
-        description=(
-            "Run a bounded self-review pass before finalizing. "
-            "Mutable via `localharness components set agent.self_check.enabled <true|false>`."
-        ),
-    )
-    max_passes: int = Field(
-        default=1,
-        ge=1,
-        le=3,
-        description=(
-            "Max self-review passes before a forced finalize. "
-            "Bounded (ge=1, le=3) so the review step provably terminates."
-        ),
-    )
-
-
 class BatonGateConfig(BaseModel):
     """Deterministic baton gate at the loop's tool-less acceptance seam (issue #84).
 
@@ -1444,14 +1414,6 @@ class AgentConfig(BaseModel):
         description=(
             "Recovery message injected when StuckState.RECOVERING. "
             "Addressable via `agent.recovery_injection.message`."
-        ),
-    )
-
-    self_check: SelfCheckConfig = Field(
-        default_factory=SelfCheckConfig,
-        description=(
-            "Optional self-review step (loop-structure mechanism, MECH-01). "
-            "Addressable via `agent.self_check.{enabled,max_passes}`."
         ),
     )
 

@@ -123,10 +123,10 @@ def _tool_answer(call_id: str = "tc-1") -> tuple[Any, Any]:
 def _tool_loop(llm: Any, bus: Any, registry: Any, **kw: Any) -> AgentLoop:
     from localharness.agent.context import ContextManager
     from localharness.agent.permissions import PermissionEvaluator
-    from localharness.config.models import AgentConfig, PermissionConfig, SelfCheckConfig
+    from localharness.config.models import AgentConfig, PermissionConfig
 
     cfg = AgentConfig(
-        name="test-agent", role="Test agent.", self_check=SelfCheckConfig(enabled=False),
+        name="test-agent", role="Test agent.",
         permissions=PermissionConfig(mode="unattended"),
     )
     return AgentLoop(
@@ -408,10 +408,10 @@ def test_a_missing_knob_or_a_non_string_address_reads_as_off(bus):
 
 
 def _budgeted(minutes: float | None):
-    from localharness.config.models import AgentConfig, BudgetConfig, PermissionConfig, SelfCheckConfig
+    from localharness.config.models import AgentConfig, BudgetConfig, PermissionConfig
 
     return AgentConfig(
-        name="child-agent", role="Child.", self_check=SelfCheckConfig(enabled=False),
+        name="child-agent", role="Child.",
         permissions=PermissionConfig(budget=BudgetConfig(max_duration_minutes=minutes)),
     )
 

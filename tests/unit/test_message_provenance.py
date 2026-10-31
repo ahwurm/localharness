@@ -7,7 +7,6 @@ import pytest
 from localharness.agent.loop import (
     _ACT_GUARD_NUDGE,
     _BATON_ESCALATION_PREFIX,
-    _SELF_CHECK_NUDGE,
     _is_harness_nudge,
     _strip_sentinel_exchanges,
 )
@@ -16,7 +15,7 @@ from localharness.provider.client import LLMClient, LLMConfig
 
 
 @pytest.mark.parametrize("text", [
-    _SELF_CHECK_NUDGE, _ACT_GUARD_NUDGE,
+    _ACT_GUARD_NUDGE,
     _BATON_ESCALATION_PREFIX + '"Now let me check"',
     "[Harness control: self_check; not human feedback]\nCONFIRMED",
 ])
@@ -91,12 +90,12 @@ async def test_compaction_keeps_origin_lineage_and_frames_summarizer():
     from localharness.agent.context import (
         SummaryCompactionStage, TokenBudget, TokenCounter, render_summarizer_input,
     )
-    human = human_message(_SELF_CHECK_NUDGE, "steering")
-    control = harness_message(_SELF_CHECK_NUDGE, "self_check")
+    human = human_message(_ACT_GUARD_NUDGE, "steering")
+    control = harness_message(_ACT_GUARD_NUDGE, "self_check")
     rendered = render_summarizer_input([human, control])
     assert "[user; human:steering]" in rendered
     assert "[user; harness:self_check]" in rendered
-    assert rendered.count(_SELF_CHECK_NUDGE) == 2
+    assert rendered.count(_ACT_GUARD_NUDGE) == 2
 
     async def summarize(messages):
         assert human in messages and control in messages
