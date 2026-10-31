@@ -939,3 +939,124 @@ def test_precondition_reads_no_verdict_count():
             row.counts = None
         record.counts = {}
         assert answers(record) == counted
+
+
+def test_flag_a_doc_less_read_of_a_pass_plan_is_none_and_leaves_the_flag():
+    record = task(decisions="pass", plan="pass", steps=("pass",))
+    record.flags["plan"] = True
+    assert next_unit(record, "plan") is None
+    assert record.flags == {"new": False, "plan": True}
+
+
+def test_flag_a_doc_returns_file_and_next_unit_does_not_clear_it():
+    record = task(decisions="pass", plan="pass", steps=("pass",))
+    record.flags["plan"] = True
+    assert next_unit(record, "plan", "doc") == Unit("plan", "file", None)
+    assert record.flags["plan"] is True
+
+
+def test_flag_a_new_call_and_a_call_on_another_boundary_leave_the_plan_flag():
+    record = task(decisions="pass", plan="pass", steps=("pass",))
+    record.flags["plan"] = True
+    next_unit(record, "new", "doc")
+    next_unit(record, "research", "q")
+    next_unit(record, "step")
+    assert record.flags["plan"] is True
+
+
+def test_flag_a_refused_call_leaves_it():
+    record = task(decisions="blocked", plan="pass")
+    record.flags["plan"] = True
+    assert precondition("plan", record, "model", "doc").reason == "decisions blocked"
+    record.flags["plan"] = True
+    assert next_unit(task(decisions="pass", plan="pass", steps=("pass",)), "plan", "doc").reason == "nothing to revise"
+    assert record.flags["plan"] is True
+
+
+def test_flag_is_consumed_only_through_consume_flag_after_next_unit_read_it():
+    record = task(decisions="pass", plan="unreviewed", steps=("unreviewed",))
+    record.flags["plan"] = True
+    assert next_unit(record, "plan") == Unit("plan", "panel", None)
+    assert next_unit(record, "plan") == Unit("plan", "panel", None)
+    assert consume_flag(record, "plan") is True
+    assert next_unit(record, "plan").reason == "plan unreviewed"
+
+
+@pytest.mark.parametrize("boundary", ["new", "research", "plan", "step", "task"])
+@pytest.mark.parametrize(("halted", "model"), [
+    ("stopped", "halted by the person"),
+    ("cap", "the flow cap is spent for this turn; the person continues"),
+])
+def test_halted_refuses_every_boundary_before_any_kind(boundary, halted, model):
+    record = task(decisions="pass", plan="pass", steps=("unreviewed",))
+    record.halted = halted
+    refused = next_unit(record, boundary, "doc")
+    assert refused.reason == "halted" and refused.model == model
+
+
+def test_halted_is_checked_after_done_and_clear_turn_clears_it_and_both_flags():
+    record = task(decisions="pass", plan="accepted", steps=("pass",), stage="done")
+    record.halted = "stopped"
+    assert next_unit(record, "new").reason == "done"
+    record = task(decisions="pass")
+    record.halted, record.flags = "cap", {"new": True, "plan": True}
+    clear_turn(record)
+    assert next_unit(record, "plan", "doc") == Unit("plan", "file", None)
+    assert record.flags == {"new": False, "plan": False}
+
+
+def test_next_line_names_the_research_panel_for_an_unreviewed_answer():
+    assert next_line(task(decisions="pass", research="unreviewed"), "research") == "next: research · panel"
+
+
+@pytest.mark.parametrize("research", ["pass", "blocked", "accepted"])
+def test_next_line_after_a_research_panel_goes_on_to_the_plan(research):
+    assert next_line(task(decisions="pass", research=research), "research") == "next: plan · file"
+
+
+def test_next_line_after_a_plan_pass_names_the_first_step():
+    record = task(decisions="pass", plan="pass", steps=("unreviewed", "unreviewed"), stage="plan")
+    assert next_line(record, "plan") == "next: run · step 1"
+
+
+def test_next_line_after_an_accepted_decisions_row_names_the_plan_file():
+    assert next_line(task(decisions="accepted"), "new") == "next: plan · file"
+
+
+def test_next_line_names_each_step_unit():
+    record = task(decisions="pass", plan="pass", steps=("pass", "pass", "unreviewed"), executed=(1, 2, 3), stage="run")
+    assert next_line(record, "step") == "next: run · step 3 panel"
+    record = task(decisions="pass", plan="pass", steps=("pass", "blocked"), executed=(1, 2), stage="run")
+    assert next_line(record, "step") == "next: run · step 2 revise"
+
+
+def test_next_line_after_the_last_step_passes_names_the_task_panel():
+    record = task(decisions="pass", plan="pass", steps=("pass", "pass"), executed=(1, 2), stage="run")
+    assert next_line(record, "step") == "next: run · panel"
+    assert next_line(record, "task") == "next: run · panel"
+
+
+def test_next_line_from_the_step_boundary_on_an_unreviewed_plan_is_the_plan_panel():
+    assert next_line(task(decisions="pass", plan="unreviewed", steps=("unreviewed",)), "step") == "next: plan · panel"
+
+
+def test_next_line_on_a_blocked_plan_invites_a_revision():
+    record = task(decisions="pass", steps=("pass",))
+    doc(record, "plan", PLAN_ROW, "blocked", blockers=2)
+    assert next_line(record, "plan") == "next: plan · file"
+    record.stage = "task"
+    assert next_line(record, "task") == "next: plan · file"
+
+
+def test_next_line_at_done_and_halted():
+    assert next_line(task(decisions="pass", plan="accepted", steps=("pass",), stage="done"), "task") == "next: done"
+    record = task(decisions="pass", plan="pass", steps=("unreviewed",))
+    record.halted = "cap"
+    assert next_line(record, "step") == "next: halted"
+
+
+def test_next_line_renders_a_need_by_its_model_text():
+    assert next_line(task(decisions="unreviewed"), "new") == "panel unfinished; the person re-runs it"
+    record = task(decisions="pass", plan="pass", steps=("blocked",), executed=(1,), stage="run")
+    record.filed[("plan.md", "step-1")].counts.used = 1
+    assert next_line(record, "step") == "step-1.md is blocked, revisions used up; the person decides"
