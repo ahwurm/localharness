@@ -16,7 +16,7 @@ from localharness.config.models import ChildBudget, TaskFlowConfig
 from localharness.core.caps import Caps
 from localharness.core.types import harness_message, human_message
 from localharness.orchestrator.task_flow import panel
-from localharness.orchestrator.task_flow.filer import Docs
+from localharness.orchestrator.task_flow.filer import Docs, Refused
 from localharness.orchestrator.task_flow.panel import (
     FENCE_CLOSE, FENCE_LABEL, FlowCap, Panel, PanelInputs, apply_jtbd, fence, parse, run_critic, unit_floor)
 from localharness.orchestrator.task_flow.record import (
@@ -996,3 +996,30 @@ async def test_a_refused_session_walk_leaves_the_panel_unreviewed_not_raising(tm
     result = await Panel(sequenced({"jtbd": [job_answer("a job")]}), LIMITS, docs=store).run(
         REPLY, PanelInputs("d", turns=JOB, critics=("jtbd",)))
     assert result.verdict == "unreviewed" and not result.finished
+
+
+async def test_a_refusal_from_the_report_never_replaces_a_cancel():
+    started = asyncio.Event()
+
+    async def hang(config, task, **kw):
+        started.set()
+        await asyncio.sleep(3600)
+
+    def refuse(run):
+        raise Refused("t1 is read-only")
+
+    inputs = PanelInputs("brief", critics=("factual",), on_run=refuse)
+    running = asyncio.create_task(Panel(hang, LIMITS).run(Unit("plan", "panel"), inputs))
+    await started.wait()
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+
+async def test_a_refusal_from_the_report_on_the_normal_path_reaches_the_caller():
+    def refuse(run):
+        raise Refused("t1 is read-only")
+
+    child = sequenced({"factual": ["NONE"]})
+    with pytest.raises(Refused):
+        await Panel(child, LIMITS).run(Unit("plan", "panel"), PanelInputs("brief", critics=("factual",), on_run=refuse))

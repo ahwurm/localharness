@@ -356,6 +356,8 @@ async def run_unit(flow: TaskFlow, boundary: str, carried: str | None = None, by
         unit = next_unit(record, boundary, carried, flow.limits)
         if isinstance(unit, Need):
             return _text(unit)
+        if unit and unit.kind != "file":
+            flow.docs.writable(record.id)
         return await _KINDS[unit.kind](flow, boundary, unit, carried) if unit else _read(flow, boundary)
     except Refused as e:
         return str(e)

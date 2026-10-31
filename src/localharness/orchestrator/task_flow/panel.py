@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import re
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from importlib import resources
 from time import monotonic
@@ -14,6 +15,7 @@ from localharness.channels.base import one_line, sanitize_for_display
 from localharness.config.models import AgentConfig, BudgetConfig, ChildBudget, PermissionConfig, ToolConfig
 from localharness.core.caps import Caps
 from localharness.core.content import text_of
+from localharness.orchestrator.task_flow.filer import Refused
 from localharness.orchestrator.task_flow.record import (LIMITS, SENSED, Limits, Unit, continue_revising, limited,
                                                         panel_critics, panel_minutes, printed_bound)
 
@@ -340,13 +342,19 @@ class Panel:
                 job = new or job
             else:
                 finished = bool(names)
-        finally:
-            findings = tuple(f for p in parsed for f in p.findings)
-            run = PanelRun(sum(f.tag == "BLOCKER" for f in findings), findings, _verdict(parsed, finished), finished)
-            self._text = None
-            if inputs.on_run:
-                inputs.on_run(run)
-        return run, job
+        except BaseException:
+            with suppress(Refused):
+                self._settle(inputs, parsed, False)
+            raise
+        return self._settle(inputs, parsed, finished), job
+
+    def _settle(self, inputs: PanelInputs, parsed: list[Parsed], finished: bool) -> PanelRun:
+        findings = tuple(f for p in parsed for f in p.findings)
+        run = PanelRun(sum(f.tag == "BLOCKER" for f in findings), findings, _verdict(parsed, finished), finished)
+        self._text = None
+        if inputs.on_run:
+            inputs.on_run(run)
+        return run
 
     async def run(self, unit: Unit, inputs: PanelInputs,
                   revise: Callable[[str, tuple[Finding, ...]], Awaitable[str | None]] | None = None) -> PanelResult:

@@ -303,6 +303,13 @@ class Docs:
                 return n
         raise Refused("no free task folder")
 
+    def writable(self, task: int) -> None:
+        """Refuses unless this session made the task folder and the walk to it still follows no link."""
+        if task not in self.adopted:
+            raise Refused(f"t{task} was not made by this session; it is read-only")
+        with self._dir("tasks", f"t{task}", create=False):
+            pass
+
     def write(self, task: int, name: str, text: str) -> tuple[str, bool]:
         folder = _folder(task, name)
         if task not in self.adopted:
