@@ -50,8 +50,8 @@ CORE = [
     ("/pending", "Tool calls parked for you to answer"),
     ("/approve", "Run a parked call; /approve [N] (default: the oldest)"),
     ("/deny", "Drop a parked call; /deny [N] (default: the oldest)"),
-    ("/clear", "Start a fresh conversation; settings, memory and the task record stay"),
-    ("/task", "Show the working task record; /task clear to delete it"),
+    ("/clear", "Start a fresh conversation; settings and memory stay, an open task pauses"),
+    ("/task", "Run work in stages; /task new <objective>, research, plan [change], run, show [doc], accept [doc], stop, clear"),
     ("/instructions", "The project's instructions file (CLAUDE.md, AGENTS.md); /instructions off|on|show"),
     ("/image", "Attach a picture to your next message; /image <path>, /image (the clipboard), "
                "/image clear — or drop the file onto the terminal, or Ctrl+V"),
@@ -75,8 +75,8 @@ HELP_BEFORE = (
     "  /pending       Tool calls parked for you to answer\n"
     "  /approve       Run a parked call; /approve [N] (default: the oldest)\n"
     "  /deny          Drop a parked call; /deny [N] (default: the oldest)\n"
-    "  /clear         Start a fresh conversation; settings, memory and the task record stay\n"
-    "  /task          Show the working task record; /task clear to delete it\n"
+    "  /clear         Start a fresh conversation; settings and memory stay, an open task pauses\n"
+    "  /task          Run work in stages; /task new <objective>, research, plan [change], run, show [doc], accept [doc], stop, clear\n"
     "  /instructions  The project's instructions file (CLAUDE.md, AGENTS.md); /instructions off|on|show\n"
     "  /image         Attach a picture to your next message; /image <path>, /image (the clipboard), "
     "/image clear — or drop the file onto the terminal, or Ctrl+V\n"

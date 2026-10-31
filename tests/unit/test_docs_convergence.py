@@ -1136,6 +1136,28 @@ def test_typed_turn_doc_bites():
     assert len(check_typed_turn_doc("## Nothing\n")) == len(TYPED_TURN_NEEDLES)
 
 
+STOP_NEEDLES = (
+    "`/task stop` ends the run after the running unit",
+    "Ctrl+C, the phone's stop and ACP's cancel end the running unit at once and can leave its files half-edited",
+    "nothing reverts what the unit wrote")
+
+
+def check_stop_doc(security_text: str) -> list[str]:
+    """SECURITY.md's prompt-injection section says `/task stop` ends the run after the unit and a hard cancel can leave files half-edited."""
+    body = " ".join((section(security_text, "## Threat model: prompt injection") or "").split())
+    return [f"SECURITY.md's prompt-injection section does not say {n}" for n in STOP_NEEDLES if n not in body]
+
+
+def test_stop_doc_live():
+    assert check_stop_doc(_read("SECURITY.md")) == []
+
+
+def test_stop_doc_bites():
+    text = _read("SECURITY.md")
+    for needle in STOP_NEEDLES:
+        assert check_stop_doc(_swap(text, needle, "x")) == [f"SECURITY.md's prompt-injection section does not say {needle}"]
+    assert len(check_stop_doc("## Nothing\n")) == len(STOP_NEEDLES)
+
 TASK_DOCS_NEEDLES = (
     "`/task show` prints a task doc only after its digest matches what was filed",
     "A folder this session did not make is shown read-only, headed `not adopted · not made by this session`",

@@ -1277,6 +1277,9 @@ class FlowAgent:
     def stop_turn(self, task):
         task.cancel()
 
+    def clear(self):
+        self.cleared = True
+
     def push_user_nudge(self, text, subtype="request"):
         self.nudges.append(text)
 
@@ -1552,3 +1555,45 @@ async def test_repl_routed_messages_print_nothing_with_no_task_open(tmp_path):
     await repl._deliver_route("x", input_router.Decision(input_router.Route.QUEUE, "tier1", "r"))
     await repl._deliver_route("y", input_router.Decision(input_router.Route.NUDGE, "tier1", "r"))
     assert channel.notices == [] and agent.nudges == ["y"]
+
+
+CLEARED = "Conversation cleared; the next message starts fresh."
+
+
+async def test_repl_clear_with_an_open_task_pauses_it_and_prints_the_paused_row(tmp_path):
+    flow = await planned_flow(tmp_path)
+    repl, channel, agent = flow_repl(flow)
+    assert flow.note() != ""
+    assert await repl._handle_slash("/clear")
+    assert channel.sent == [CLEARED] and agent.cleared
+    assert channel.notices == ["◆ t1 paused · /task run · clear (deletes the folder)"]
+    assert flow.record.paused is True and flow.note() == ""
+
+
+async def test_repl_the_next_arming_verb_unpauses_a_paused_task(tmp_path):
+    flow = await planned_flow(tmp_path)
+    repl, channel, agent = flow_repl(flow)
+    await repl._handle_slash("/clear")
+    await repl._handle_slash("/task run")
+    assert flow.record.paused is False and flow.note() != ""
+    assert repl._slash_followup == (SENTENCE_FOR["run"], "request")
+
+
+async def test_repl_clear_with_no_task_or_a_done_one_prints_only_the_clear_line(tmp_path):
+    flow, *_ = make_flow(tmp_path)
+    repl, channel, agent = flow_repl(flow)
+    await repl._handle_slash("/clear")
+    assert channel.sent == [CLEARED] and channel.notices == []
+    flow = await planned_flow(tmp_path / "b")
+    flow.record.stage = "done"
+    repl, channel, agent = flow_repl(flow)
+    await repl._handle_slash("/clear")
+    assert channel.sent == [CLEARED] and channel.notices == [] and flow.record.paused is False
+
+
+async def test_repl_clear_while_a_turn_runs_pauses_nothing(tmp_path):
+    flow, repl, channel, agent = await running_repl(tmp_path)
+    await repl._handle_slash("/clear")
+    assert channel.sent == ["A turn is running; send /clear when it ends."] and channel.notices == []
+    assert flow.record.paused is False
+    await end(repl)
