@@ -28,6 +28,7 @@ from localharness.cli.plugins_cmd import CONSENT, THIRD_PARTY_CONFIRM
 from localharness.config.loader import (
     AGENT_CORE_GLOBAL_ONLY_SECTIONS, AGENT_GLOBAL_ONLY_FIELDS, ASK_GLOBAL_ONLY_FIELDS, HARNESS_GLOBAL_ONLY_FIELDS,
 )
+from localharness.config.models import TaskFlowConfig
 from localharness.config.plugin_sections import CORE_HARNESS_KEYS, global_only_paths
 from localharness.config.skills import MAX_ENTRIES, ORIGINS
 from localharness.config.trust import LAUNCH_KEYS, LAUNCH_MODEL_KEYS, LAUNCH_MODEL_KIND
@@ -1319,11 +1320,15 @@ def test_self_check_gone_bites():
 
 _VERBS = "src/localharness/orchestrator/task_flow/verbs.py"
 TASK_VERBS = tuple(part.split()[0] for part in _source_constant(_VERBS, "USAGE").removeprefix("usage: /task ").split(" · "))
-METAHARNESS_NEEDLES = tuple(f"`/task {verb}" for verb in TASK_VERBS)
+CRITIC_NAMES = tuple(sorted(p.stem for p in (SRC / "assets" / "critics").glob("*.yaml")))
+METAHARNESS_NEEDLES = (
+    *(f"`/task {verb}" for verb in TASK_VERBS), *(f"`{name}`" for name in CRITIC_NAMES),
+    *(f"`{field}`" for field in TaskFlowConfig.model_fields),
+    "a quality signal, never a security one", "not a barrier", "global files only", "begins with no task")
 
 
 def check_metaharness_doc(page: str) -> list[str]:
-    """docs/metaharness.md names every `/task` verb the code's usage line lists."""
+    """docs/metaharness.md names every `/task` verb, critic and `task_flow` key the code has, and keeps four honesty phrases."""
     flat = " ".join(page.split())
     return [f"docs/metaharness.md does not say {n}" for n in METAHARNESS_NEEDLES if n not in flat]
 
@@ -1337,4 +1342,4 @@ def test_metaharness_doc_bites():
     for needle in METAHARNESS_NEEDLES:
         assert check_metaharness_doc(_swap(page, needle, "x")) == [f"docs/metaharness.md does not say {needle}"]
     assert len(check_metaharness_doc("")) == len(METAHARNESS_NEEDLES)
-    assert len(TASK_VERBS) == 8
+    assert len(TASK_VERBS) == 8 and len(CRITIC_NAMES) == 9
