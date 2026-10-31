@@ -125,7 +125,7 @@ async def test_question_on_a_stage_that_takes_none_is_refused_naming_research(tm
     assert calls == []
 
 
-@pytest.mark.parametrize("question", [7, "", "q" * (Caps.LINE + 1), "a\nb", "a\x07b", "a\u202eb", "a\u200bb"])
+@pytest.mark.parametrize("question", [7, "", "   ", "q" * (Caps.LINE + 1), "a\nb", "a\x07b", "a\u202eb", "a\u200bb"])
 async def test_question_that_is_not_one_plain_line_is_refused(tmp_path, question):
     flow = opened(tmp_path)
     calls = spied(flow)

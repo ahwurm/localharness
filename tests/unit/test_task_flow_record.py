@@ -868,7 +868,7 @@ def test_done_still_admits_the_persons_next_objective_and_answers_a_bare_new_wit
     assert next_unit(record, "new").reason == "done"
 
 
-@pytest.mark.parametrize("q", [None, 3, "", "x" * (Caps.LINE + 1), "a\nb", "a\rb", "a\tb", "a\u202eb", "a\u200bb", "a\x1bb", "a\x9bb"])
+@pytest.mark.parametrize("q", [None, 3, "", "   ", "\u00a0", "x" * (Caps.LINE + 1), "a\nb", "a\rb", "a\tb", "a\u202eb", "a\u200bb", "a\x1bb", "a\x9bb"])
 def test_valid_question_refuses(q):
     assert not valid_question(q)
 
