@@ -564,83 +564,83 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
     # is today's pre-gate behaviour named honestly: the DENY tier still holds, every ASK
     # becomes ALLOW, and `asker=None` guarantees no bench run can ever block on a human.
     flow_dir = Path(tempfile.mkdtemp(prefix="bench-flow-")) if scenario.task_flow else None
-    bench_gate = PermissionGate(
-        boundary=Path.cwd(),
-        workspace=Path.cwd(),
-        grants=GrantStore(),
-        mode=BENCH_PERMISSION_MODE,
-        asker=None,
-        channel_name="bench",
-        has_review_surface=False,
-        # AgentLoop hands its own agent's deny tier in on every check; this is the fallback for
-        # anything else that consults the gate, so the DENY tier can never be skipped.
-        deny=deny_fn_from(perm_evaluator, getattr(agent_config, "permissions", None)),
-        settings=settings_from(getattr(agent_config, "permissions", None)),
-        bus=bus,
-        state_dirs=(flow_dir,) if flow_dir is not None else (),
-    )
-
-    # SUBAGENT-05 / J3: register the REAL delegation runner when 'agent' is in tools_allowed, built via
-    # the SAME module-level seam the live start path uses (make_explore_agent_runner) so the bench
-    # exercises PRODUCTION routing — crucially including the cruncher. The factory routes by agent_id:
-    # 'cruncher' -> dispatch_cruncher_subagent (faithful over-window reduce), 'explore' -> Explore, etc.
-    # The child runs a real AgentLoop on the SAME bus, so its Actions are counted (real delegation =>
-    # tool_call_count >= 2). parent_store=bench_store is the grant keystone: when the model delegates
-    # with grant_handles=[H], the child reads ONLY H through bench_store (where load_document retained
-    # it). PRIOR BUG: the bench hard-routed EVERY agent() to Explore (agent_id ignored), so a scored
-    # agent('cruncher') scenario silently ran Explore and the cruncher was UNREACHABLE from the bench —
-    # every "faithful over-window" claim rested on mocked unit tests with no scored regression signal.
-    _agent_runner = None
-    if "agent" in scenario.tools_allowed or scenario.task_flow:
-        from localharness.agent.subagent import make_explore_agent_runner
-        from localharness.config.paths import global_config_dir
-        from localharness.tools.builtin.agent_tool import AgentTool, BUILTIN_AGENT_NAMES
-
-        # No load_agent is wired here, so only the built-ins resolve.
-        _bench_agents = list(BUILTIN_AGENT_NAMES)
-        _agent_runner = make_explore_agent_runner(
-            llm=llm_client,
-            gate=bench_gate,
-            bus=bus,
-            base_registry=base_registry,
-            permission_evaluator=perm_evaluator,
-            # session_id is fixed for a bench run (no per-turn re-keying), so a constant getter matches
-            # the live path's late-read lambda without a not-yet-built loop reference.
-            get_parent_session_id=lambda: session_id,
-            # Children inherit the bench's exact /tokenize counter + the scenario's declared window
-            # (FIX 2: already clamped to the org ceiling above) so the cruncher's chunk sizing
-            # (_cruncher_chunk_chars) tracks the REAL served window, not an aspirational one.
-            token_counter=token_counter,
-            window=lambda: effective_max_context_tokens,
-            depth=0,
-            available_agents=_bench_agents,
-            parent_store=bench_store,
-            # cruncher exec policy (default off): the faithful reduce never needs host exec.
-            cruncher_config=agent_config.cruncher,
-            # Amendment #3: bench resolves the GLOBAL dir explicitly — a sibling worktree's
-            # .localharness/ must never steer a bench run.
-            config_dir=global_config_dir(),
-            state_dir=flow_dir,
-        )
-        if "agent" in scenario.tools_allowed:
-            tool_registry._tools["global"]["agent"] = AgentTool(
-                agent_runner=_agent_runner, available_agents=_bench_agents)
-            tool_registry._schemas["agent"] = tool_registry._tools["global"]["agent"].info()
-
-    # EVAL-01 / MEMP-05 (B1): memory ONLY for the seeded scenarios, keyed by scenario.name, built
-    # through the plan builder + plugin lifecycle under the loop's own agent_id (agent_config.name)
-    # so the slot's context resolves the seeded facts. Every other scenario: no plugin machinery,
-    # no memory, no agents/ dir.
     plugin_result = plugin_tmp = None
-    seeds = _MEMORY_SEEDS.get(scenario.name)
-    if seeds is not None:
-        plugin_result, plugin_tmp = await _start_bench_memory(
-            agent_config, scenario, seeds, bus=bus, llm_client=llm_client,
-            tool_registry=tool_registry, session_id=session_id,
-            context_tokens=effective_max_context_tokens)
-
     loop = None
     try:
+        bench_gate = PermissionGate(
+            boundary=Path.cwd(),
+            workspace=Path.cwd(),
+            grants=GrantStore(),
+            mode=BENCH_PERMISSION_MODE,
+            asker=None,
+            channel_name="bench",
+            has_review_surface=False,
+            # AgentLoop hands its own agent's deny tier in on every check; this is the fallback for
+            # anything else that consults the gate, so the DENY tier can never be skipped.
+            deny=deny_fn_from(perm_evaluator, getattr(agent_config, "permissions", None)),
+            settings=settings_from(getattr(agent_config, "permissions", None)),
+            bus=bus,
+            state_dirs=(flow_dir,) if flow_dir is not None else (),
+        )
+
+        # SUBAGENT-05 / J3: register the REAL delegation runner when 'agent' is in tools_allowed, built via
+        # the SAME module-level seam the live start path uses (make_explore_agent_runner) so the bench
+        # exercises PRODUCTION routing — crucially including the cruncher. The factory routes by agent_id:
+        # 'cruncher' -> dispatch_cruncher_subagent (faithful over-window reduce), 'explore' -> Explore, etc.
+        # The child runs a real AgentLoop on the SAME bus, so its Actions are counted (real delegation =>
+        # tool_call_count >= 2). parent_store=bench_store is the grant keystone: when the model delegates
+        # with grant_handles=[H], the child reads ONLY H through bench_store (where load_document retained
+        # it). PRIOR BUG: the bench hard-routed EVERY agent() to Explore (agent_id ignored), so a scored
+        # agent('cruncher') scenario silently ran Explore and the cruncher was UNREACHABLE from the bench —
+        # every "faithful over-window" claim rested on mocked unit tests with no scored regression signal.
+        _agent_runner = None
+        if "agent" in scenario.tools_allowed or scenario.task_flow:
+            from localharness.agent.subagent import make_explore_agent_runner
+            from localharness.config.paths import global_config_dir
+            from localharness.tools.builtin.agent_tool import AgentTool, BUILTIN_AGENT_NAMES
+
+            # No load_agent is wired here, so only the built-ins resolve.
+            _bench_agents = list(BUILTIN_AGENT_NAMES)
+            _agent_runner = make_explore_agent_runner(
+                llm=llm_client,
+                gate=bench_gate,
+                bus=bus,
+                base_registry=base_registry,
+                permission_evaluator=perm_evaluator,
+                # session_id is fixed for a bench run (no per-turn re-keying), so a constant getter matches
+                # the live path's late-read lambda without a not-yet-built loop reference.
+                get_parent_session_id=lambda: session_id,
+                # Children inherit the bench's exact /tokenize counter + the scenario's declared window
+                # (FIX 2: already clamped to the org ceiling above) so the cruncher's chunk sizing
+                # (_cruncher_chunk_chars) tracks the REAL served window, not an aspirational one.
+                token_counter=token_counter,
+                window=lambda: effective_max_context_tokens,
+                depth=0,
+                available_agents=_bench_agents,
+                parent_store=bench_store,
+                # cruncher exec policy (default off): the faithful reduce never needs host exec.
+                cruncher_config=agent_config.cruncher,
+                # Amendment #3: bench resolves the GLOBAL dir explicitly — a sibling worktree's
+                # .localharness/ must never steer a bench run.
+                config_dir=global_config_dir(),
+                state_dir=flow_dir,
+            )
+            if "agent" in scenario.tools_allowed:
+                tool_registry._tools["global"]["agent"] = AgentTool(
+                    agent_runner=_agent_runner, available_agents=_bench_agents)
+                tool_registry._schemas["agent"] = tool_registry._tools["global"]["agent"].info()
+
+        # EVAL-01 / MEMP-05 (B1): memory ONLY for the seeded scenarios, keyed by scenario.name, built
+        # through the plan builder + plugin lifecycle under the loop's own agent_id (agent_config.name)
+        # so the slot's context resolves the seeded facts. Every other scenario: no plugin machinery,
+        # no memory, no agents/ dir.
+        seeds = _MEMORY_SEEDS.get(scenario.name)
+        if seeds is not None:
+            plugin_result, plugin_tmp = await _start_bench_memory(
+                agent_config, scenario, seeds, bus=bus, llm_client=llm_client,
+                tool_registry=tool_registry, session_id=session_id,
+                context_tokens=effective_max_context_tokens)
+
         flow = None if flow_dir is None else TaskFlow(
             run_config_child=_agent_runner.run_config_child,
             emit=lambda unit, state, commands, tail: log.info("bench flow %s: %s", unit, state),

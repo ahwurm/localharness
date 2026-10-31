@@ -1268,6 +1268,22 @@ async def test_task_flow_build_removes_the_state_dir_when_loop_construction_fail
     assert not list(tmp_path.glob("bench-flow-*"))
 
 
+@pytest.mark.asyncio
+async def test_task_flow_build_removes_the_state_dir_when_the_agent_runner_build_fails(monkeypatch, tmp_path):
+    import tempfile
+    from localharness.bench import runner as bench_runner
+    from localharness.core.bus import EventBus
+
+    def _broken(**kw):
+        raise ValueError("runner build failed")
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr("localharness.agent.subagent.make_explore_agent_runner", _broken)
+    with pytest.raises(ValueError, match="runner build failed"):
+        await bench_runner._build_agent_loop(bus=EventBus(), llm_client=None, scenario=_flow_scen())
+    assert not list(tmp_path.glob("bench-flow-*"))
+
+
 def _hello_scenario():
     from localharness.bench.schema import load_scenario
     return load_scenario(Path(__file__).resolve().parents[2] / "bench" / "scenarios" / "train" / "26_reply_panel_hello.yaml")
