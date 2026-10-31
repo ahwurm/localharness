@@ -1315,3 +1315,26 @@ def test_self_check_gone_bites():
     assert check_self_check_gone(tree, _swap(loop, "let the critics judge the plan and each result", "x"), line) == [
         "agent/loop.py does not hold the root paragraph"]
     assert check_self_check_gone(tree, loop, line + " ") == ["config/migrate.py's SELF_CHECK_DROPPED differs from the spec's line"]
+
+
+_VERBS = "src/localharness/orchestrator/task_flow/verbs.py"
+TASK_VERBS = tuple(part.split()[0] for part in _source_constant(_VERBS, "USAGE").removeprefix("usage: /task ").split(" · "))
+METAHARNESS_NEEDLES = tuple(f"`/task {verb}" for verb in TASK_VERBS)
+
+
+def check_metaharness_doc(page: str) -> list[str]:
+    """docs/metaharness.md names every `/task` verb the code's usage line lists."""
+    flat = " ".join(page.split())
+    return [f"docs/metaharness.md does not say {n}" for n in METAHARNESS_NEEDLES if n not in flat]
+
+
+def test_metaharness_doc_live():
+    assert check_metaharness_doc(_read("docs/metaharness.md")) == []
+
+
+def test_metaharness_doc_bites():
+    page = _read("docs/metaharness.md")
+    for needle in METAHARNESS_NEEDLES:
+        assert check_metaharness_doc(_swap(page, needle, "x")) == [f"docs/metaharness.md does not say {needle}"]
+    assert len(check_metaharness_doc("")) == len(METAHARNESS_NEEDLES)
+    assert len(TASK_VERBS) == 8
