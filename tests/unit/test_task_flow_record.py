@@ -1243,6 +1243,17 @@ async def test_executor_runs_one_step_with_its_row_a_brief_and_files_the_step_do
     assert rows[-1][1] == "step 1 running"
 
 
+async def test_executor_receives_the_step_as_written_with_its_indented_code(tmp_path):
+    code = "    def login():\n        if x:\n            return 1\n\n    - nested item"
+    plan = PLAN_TWO.replace("done: x1 changed", f"done: x1 changed\n{code}")
+    flow, script, _, _ = make_flow(tmp_path)
+    flow.open("fix login", 1)
+    await flow.run("new", "Objective: fix login")
+    await flow.run("plan", plan)
+    await flow.run("step")
+    assert code in script.named("executor")[0].task
+
+
 async def test_executor_brief_carries_the_verified_depends_on_docs(tmp_path):
     answers = {"executor": [DelegationResult(text="x", raw="ONE-DONE"), DelegationResult(text="x", raw="TWO-DONE")]}
     flow, script, _, _ = await planned(tmp_path, answers)

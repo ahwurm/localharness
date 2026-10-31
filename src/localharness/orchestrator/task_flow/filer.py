@@ -127,7 +127,7 @@ def _slurp(fd: int, name: str) -> str | None:
 @dataclass(frozen=True)
 class Section:
     n: int
-    text: str
+    text: str  # as written; `digest` hashes the whitespace-normalised form
     files: tuple[str, ...]
     depends_on: tuple[int, ...]
     done: str
@@ -158,9 +158,8 @@ def parse_plan(text: str) -> list[Section] | str:
         deps = _depends(fields["depends_on"], i)
         if deps is None:
             return PLAN_SHAPE
-        section = "\n".join(lines)
-        out.append(Section(i, section, tuple(f.strip() for f in fields["files"].split(",") if f.strip()), deps,
-                           fields["done"], digest(section)))
+        out.append(Section(i, chunk.strip(), tuple(f.strip() for f in fields["files"].split(",") if f.strip()), deps,
+                           fields["done"], digest("\n".join(lines))))
     return out or PLAN_SHAPE
 
 
