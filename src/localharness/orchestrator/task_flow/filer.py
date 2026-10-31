@@ -130,27 +130,56 @@ class Section:
     digest: str
 
 
+def _normal(chunk: str) -> list[str]:
+    return [line for line in (" ".join(raw.split()) for raw in chunk.split("\n")) if line]
+
+
+def _depends(value: str, step: int) -> tuple[int, ...] | None:
+    if value.lower() == "none":
+        return ()
+    earlier = {str(k): k for k in range(1, step)}
+    deps = tuple(dict.fromkeys(earlier.get(c.strip()) for c in value.split(",")))
+    return None if None in deps else deps
+
+
 def parse_plan(text: str) -> list[Section] | str:
-    """The `## Step N` sections of a plan, or `PLAN_SHAPE`."""
+    """The `## Step N` sections of a plan, or `PLAN_SHAPE`; text before the first heading is no section."""
     out: list[Section] = []
     for i, chunk in enumerate(_SPLIT.split(text)[1:], 1):
-        head, *body = chunk.splitlines()
-        heading = _HEADING.fullmatch(head.rstrip())
-        fields = {m[1]: m[2].strip() for line in body if (m := _FIELD.fullmatch(line.strip()))}
-        if not heading or heading[1] != str(i) or len(fields) < 3:
+        head, *body = lines = _normal(chunk)
+        heading, found = _HEADING.fullmatch(head), [m for line in body if (m := _FIELD.fullmatch(line))]
+        if not heading or heading[1] != str(i) or sorted(m[1] for m in found) != ["depends_on", "done", "files"]:
             return PLAN_SHAPE
-        deps = () if fields["depends_on"].lower() == "none" else tuple(int(c) for c in fields["depends_on"].split(","))
-        section = chunk.strip()
+        fields = {m[1]: m[2].strip() for m in found}
+        deps = _depends(fields["depends_on"], i)
+        if deps is None:
+            return PLAN_SHAPE
+        section = "\n".join(lines)
         out.append(Section(i, section, tuple(f.strip() for f in fields["files"].split(",") if f.strip()), deps,
                            fields["done"], digest(section)))
     return out or PLAN_SHAPE
 
 
 def rerecord(record: Record, sections: list[Section]) -> list[int]:
-    """One row per section; returns the steps whose executed work a changed section voids."""
+    """A row per section: kept with its verdict and counts while its digest and every dependency are kept, else
+    reset and its step doc's row cleared; a dropped section's rows go. Returns the steps whose executed work is void."""
+    kept: set[int] = set()
+    reopened: list[int] = []
     for s in sections:
-        record.filed[("plan.md", f"step-{s.n}")] = Row(s.digest, "unreviewed", Counts())
-    return []
+        key = ("plan.md", f"step-{s.n}")
+        prior = record.filed.get(key)
+        if prior and prior.digest == s.digest and kept.issuperset(s.depends_on):
+            kept.add(s.n)
+            continue
+        record.filed[key] = Row(s.digest, "unreviewed", Counts())
+        if record.filed.pop((f"step-{s.n}.md", None), None):
+            reopened.append(s.n)
+    live = {f"step-{s.n}" for s in sections}
+    for key in [k for k in record.filed if k[0] == "plan.md" and k[1] and k[1] not in live]:
+        del record.filed[key]
+        record.filed.pop((f"{key[1]}.md", None), None)
+    record.stopped_log = ""
+    return reopened
 
 
 def render_section(round_n: int | None, findings: Iterable[Finding], verdict: str, blockers: int) -> str:
