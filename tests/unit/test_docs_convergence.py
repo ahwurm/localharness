@@ -1343,3 +1343,30 @@ def test_metaharness_doc_bites():
         assert check_metaharness_doc(_swap(page, needle, "x")) == [f"docs/metaharness.md does not say {needle}"]
     assert len(check_metaharness_doc("")) == len(METAHARNESS_NEEDLES)
     assert len(TASK_VERBS) == 8 and len(CRITIC_NAMES) == 9
+
+
+CHANNEL_DOC_NEEDLES = (
+    ("docs/zed.md", "A message that is only `/task <verb>` runs the verb as the terminal does"),
+    ("docs/zed.md", "There is no stop between units here"),
+    ("docs/mobile.md", "your own stop sends no notification"),
+    ("docs/mobile.md", "An open task does not come back"),
+    ("docs/mobile.md", "only what the deny class does not cover can still reach it"),
+    ("docs/mobile.md", "the phone has no stop between units"),
+)
+
+
+def check_channel_docs(texts: dict[str, str]) -> list[str]:
+    """The phone and Zed docs say what `/task` and each channel's stop do to a task."""
+    flat = {rel: " ".join(text.split()) for rel, text in texts.items()}
+    return [f"{rel} does not say {n}" for rel, n in CHANNEL_DOC_NEEDLES if n not in flat.get(rel, "")]
+
+
+def test_channel_docs_live():
+    assert check_channel_docs({rel: _read(rel) for rel in ("docs/zed.md", "docs/mobile.md")}) == []
+
+
+def test_channel_docs_bites():
+    texts = {rel: _read(rel) for rel in ("docs/zed.md", "docs/mobile.md")}
+    for rel, needle in CHANNEL_DOC_NEEDLES:
+        assert check_channel_docs({**texts, rel: _swap(texts[rel], needle, "x")}) == [f"{rel} does not say {needle}"]
+    assert len(check_channel_docs({rel: "" for rel in texts})) == len(CHANNEL_DOC_NEEDLES)
