@@ -205,6 +205,18 @@ def _split_budget_note(detail: str) -> tuple[str, str | None]:
     return detail[:start].strip(), why or None
 
 
+def with_status_text(snapshot: Callable[[], dict | None], panel: Any) -> Callable[[], dict | None]:
+    """The progress source a channel reads while a reply panel may be running: the client's snapshot plus the panel's text."""
+    def source() -> dict | None:
+        snap, text = snapshot(), panel.status_text()
+        if snap is None and text is None:
+            return None
+        prefix = panel.burst_prefix()
+        return {**(snap or {}), "text": text, **({"prefix": prefix} if prefix else {})}
+
+    return source
+
+
 class ChannelAdapter(ABC):
     """
     Abstract base for all channel adapters.
@@ -226,6 +238,12 @@ class ChannelAdapter(ABC):
     """
 
     channel_id: str  # must be set as class attribute in subclasses
+
+    stop_word = ""
+    """What the person says to stop a turn here; a reply panel's status text ends `<word> delivers it unchecked`."""
+
+    async def panel_started(self, line: str) -> None:
+        """The one line announcing a reply panel; a channel whose row or frame shows the status text keeps this no-op."""
 
     can_ask: bool = False
     """Can this channel put a permission question to a human? (PRD §3.5.)

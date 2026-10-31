@@ -24,7 +24,7 @@ from rich.prompt import IntPrompt
 from rich.table import Table
 from rich.text import Text
 
-from localharness.channels.base import one_line
+from localharness.channels.base import one_line, with_status_text
 from localharness.cli.theme import SITE_DIM, SITE_INK, SITE_TOOL, entity, entity_text
 from localharness.cli.workspace import (
     NO_INPUT_HELP,
@@ -48,6 +48,16 @@ if TYPE_CHECKING:
 console = Console()
 err_console = Console(stderr=True)
 log = logging.getLogger(__name__)
+
+def _wire_reply_panel(channel: Any, llm: Any, panel: Any) -> None:
+    """Hand a reply panel the channel's stop word and one-line sink, and compose the channel's progress source with its text."""
+    if panel is None:
+        return
+    panel.stop = getattr(channel, "stop_word", "")
+    panel.announce = getattr(channel, "panel_started", None)
+    if hasattr(channel, "progress_source"):
+        channel.progress_source = with_status_text(llm.stream_snapshot, panel)
+
 
 def _gguf(runtime: object) -> bool:
     row = row_of(runtime)
@@ -3328,6 +3338,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             channel.progress_source = llm.stream_snapshot  # phase + live token tallies
             from localharness.cli.model_switch import short_label
             channel.model_source = lambda: short_label(llm.config.model)  # footer model chip, swap-safe
+        _wire_reply_panel(channel, llm, agent_loop.reply_panel)
 
         # --- Startup summary line ---
         # Entity-typed per the localharness.dev architecture plates (cli/theme.py): the

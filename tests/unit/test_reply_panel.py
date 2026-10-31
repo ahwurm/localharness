@@ -810,3 +810,130 @@ async def test_buffer_is_empty_after_a_provider_error_and_the_next_generation_st
     loop = loop_of(llm, bus, panel_of())
     assert await loop.run_turn("hello", on_token=on_token) == "Hello there."
     assert log == [] and loop._held == []
+
+
+# --- channels: the composed progress source, the status row, the wiring ---
+
+def fake_panel(text=None, prefix=None):
+    return SimpleNamespace(status_text=lambda: text, burst_prefix=lambda: prefix)
+
+
+def box_channel():
+    from io import StringIO
+
+    from rich.console import Console
+
+    from localharness.channels.terminal import TERMINAL_THEME, TerminalChannel
+    from localharness.core.bus import EventBus
+
+    ch = TerminalChannel(EventBus(), {})
+    ch._console = Console(file=StringIO(), force_terminal=True, width=120, theme=TERMINAL_THEME, highlight=False)
+    ch._box_active = True
+    ch.box_notify_working(True)
+    return ch
+
+
+def row(ch) -> str:
+    return "".join(t for _s, t in ch._box_status_frags())
+
+
+def test_progress_source_is_none_when_the_snapshot_and_the_text_are_both_none():
+    from localharness.channels.base import with_status_text
+
+    assert with_status_text(lambda: None, fake_panel())() is None
+
+
+def test_progress_source_with_a_snapshot_and_no_text_carries_text_none():
+    from localharness.channels.base import with_status_text
+
+    assert with_status_text(lambda: {"phase": "writing"}, fake_panel())() == {"phase": "writing", "text": None}
+
+
+def test_progress_source_with_text_and_no_snapshot_is_the_text_alone_and_adds_the_prefix_only_when_set():
+    from localharness.channels.base import with_status_text
+
+    assert with_status_text(lambda: None, fake_panel("checking reply"))() == {"text": "checking reply"}
+    assert with_status_text(lambda: {"phase": "writing"}, fake_panel("step 3/5 · read", "step 3/5"))() == {
+        "phase": "writing", "text": "step 3/5 · read", "prefix": "step 3/5"}
+
+
+def test_status_row_shows_the_text_with_silent_recomputed_from_the_snapshot():
+    ch = box_channel()
+    ch.progress_source = lambda: {"phase": "writing", "silent": 14.0, "elapsed": 90.0, "text": "checking reply · cancel"}
+    assert row(ch).endswith("checking reply · cancel · silent 14s ")
+    ch.progress_source = lambda: {"phase": "writing", "silent": 1.0, "elapsed": 90.0, "text": "checking reply"}
+    assert "checking reply · 1m30s" in row(ch)
+
+
+def test_status_row_text_is_ahead_of_an_open_burst_and_below_provider_lost():
+    ch = box_channel()
+    ch.progress_source = lambda: {"text": "checking reply · answer 1/2 · Ctrl+C delivers it unchecked"}
+    ch._burst = SimpleNamespace(tools=["read"], done=0, calls=1)
+    assert "checking reply · answer 1/2" in row(ch) and "read" not in row(ch)
+    ch._provider_lost_text = "provider lost"
+    assert "provider lost" in row(ch) and "checking reply" not in row(ch)
+
+
+def test_status_row_prefixes_an_execution_burst_with_the_texts_head():
+    ch = box_channel()
+    ch.progress_source = lambda: {"text": "step 3/5 · read", "prefix": "step 3/5"}
+    ch._burst = SimpleNamespace(tools=["read", "edit"], done=2, calls=3)
+    assert "step 3/5 · read · edit · 2/3" in row(ch)
+
+
+def test_status_row_with_no_text_is_the_working_row_as_before():
+    ch = box_channel()
+    ch.progress_source = lambda: {"phase": "writing", "answer_tokens": 410, "elapsed": 5.0, "text": None}
+    with_none = row(ch)
+    ch.progress_source = lambda: {"phase": "writing", "answer_tokens": 410, "elapsed": 5.0}
+    assert with_none == row(ch) and "writing 410" in with_none
+    ch._burst = SimpleNamespace(tools=["read"], done=0, calls=1)
+    ch.progress_source = lambda: {"phase": "writing", "text": None, "prefix": None}
+    assert "read · 0/1" in row(ch)
+
+
+def test_wire_reply_panel_with_no_panel_changes_nothing():
+    from localharness.cli.start_cmd import _wire_reply_panel
+
+    ch = box_channel()
+    ch.progress_source = source = lambda: None
+    _wire_reply_panel(ch, SimpleNamespace(stream_snapshot=lambda: None), None)
+    assert ch.progress_source is source
+
+
+@pytest.mark.parametrize("channel_class,word", [("terminal", "Ctrl+C"), ("acp", "cancel")])
+def test_wire_reply_panel_hands_the_panel_the_stop_word_and_the_sink_and_composes_the_source(channel_class, word):
+    from localharness.cli.start_cmd import _wire_reply_panel
+
+    ch = {"terminal": box_channel,
+          "acp": lambda: SimpleNamespace(stop_word="cancel", panel_started=Chan().panel_started)}[channel_class]()
+    panel = panel_of()
+    _wire_reply_panel(ch, SimpleNamespace(stream_snapshot=lambda: {"phase": "writing"}), panel)
+    assert panel.stop == word and panel.announce == ch.panel_started
+    if hasattr(ch, "progress_source"):
+        panel._parts, panel._reply = ("checking reply", " 1/2", "answer", "up to 4 min"), True
+        assert ch.progress_source()["text"].endswith(f"{word} delivers it unchecked")
+
+
+def test_wire_reply_panel_leaves_a_channel_without_a_progress_source_to_the_stop_word_and_the_sink():
+    from localharness.cli.start_cmd import _wire_reply_panel
+
+    ch = SimpleNamespace(stop_word="cancel", panel_started=lambda line: None)
+    panel = panel_of()
+    _wire_reply_panel(ch, SimpleNamespace(stream_snapshot=lambda: None), panel)
+    assert not hasattr(ch, "progress_source") and panel.stop == "cancel"
+
+
+async def test_classic_path_prints_the_start_line_once_and_the_box_prints_nothing():
+    ch = box_channel()
+    ch._box_active = False
+    await ch.panel_started("checking reply · 2 critics · up to 4 min · Ctrl+C delivers it unchecked")
+    assert ch._console.file.getvalue().count("checking reply") == 1
+    boxed = box_channel()
+    boxed._box_app = object()
+    await boxed.panel_started("checking reply")
+    assert boxed._console.file.getvalue() == ""
+
+
+async def test_a_channel_with_no_override_prints_nothing_when_a_panel_starts():
+    assert await Chan().panel_started("checking reply") is None and Chan().stop_word == ""
