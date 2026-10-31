@@ -78,16 +78,16 @@ async def test_registered_builtins_match_the_ruled_taxonomy():
 
 
 @pytest.mark.parametrize("name", ["python_exec", "cruncher_exec", "agent", "task", "git_read"])
-def test_the_conditionally_registered_tools_name_a_group(name):
+def test_the_conditionally_registered_tools_name_a_group(name, tmp_path):
     """python_exec, cruncher_exec and agent are wired by the subagent/start paths rather than by
     `register_builtin_tools`, so the sweep above cannot see them. They carry the same obligation.
     git_read is registered by `register_builtin_tools` only when handed a boundary (start does)."""
-    from localharness.agent.task_record import TaskState
     from localharness.tools.builtin.agent_tool import AgentTool
     from localharness.tools.builtin.cruncher_exec import CruncherExecTool
     from localharness.tools.builtin.git_read_tool import GitReadTool
     from localharness.tools.builtin.python_tool import PythonExecTool
     from localharness.tools.builtin.task_tool import TaskTool
+    from tests.unit.test_task_flow_record import make_flow
 
     async def _runner(*args, **kwargs):  # pragma: no cover - never invoked
         return ""
@@ -96,7 +96,7 @@ def test_the_conditionally_registered_tools_name_a_group(name):
         "python_exec": PythonExecTool(),
         "cruncher_exec": CruncherExecTool(seed={}),
         "agent": AgentTool(agent_runner=_runner),
-        "task": TaskTool(TaskState()),
+        "task": TaskTool(make_flow(tmp_path)[0]),
         "git_read": GitReadTool(Path(".")),
     }
     schema = tools[name].info()

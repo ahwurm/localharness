@@ -3154,15 +3154,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             project_agents_dir=loader.agents_dir("project"),
         )
         await tool_registry.register(agent_tool, scope="global")
-        # The working task record (0.16.5): root only, loaded from this agent's folder; children
-        # and bench never hold it. No record = no packet and no file.
-        from localharness.agent.task_record import TaskState
         from localharness.tools.builtin.skill_tool import SkillTool
-        from localharness.tools.builtin.task_tool import TaskTool
-        task_state, task_notice = TaskState.load(agent_dir / "task.json", workspace=os.getcwd())
-        if task_notice:
-            console.print(f"[yellow]{task_notice}[/yellow]")
-        await tool_registry.register(TaskTool(task_state), scope="global")
         if skill_set.skills:
             await tool_registry.register(
                 SkillTool(skill_set, eviction_store, result_cap=lambda: tool_registry.result_size_cap_chars),
@@ -3222,7 +3214,6 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # PAPI-04: the memory slot — the lifecycle's; its occupant (the memory plugin) feeds the
             # prompt's memory section.
             memory_slot=memory_slot,
-            task_context=task_state,
             template_margin_ratio=harness.autosense.template_margin_ratio,
             effort=(_effort_level, _effort_rung),
             effort_ratios=_effort_ratios,

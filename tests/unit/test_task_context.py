@@ -8,7 +8,7 @@ from localharness.agent.loop import AgentLoop, Session
 from localharness.agent.permissions import PermissionEvaluator
 from localharness.agent.task_context import Requirement, TaskContext
 from localharness.config.models import AgentConfig
-from localharness.core.events import Observation, TaskComplete
+from localharness.core.events import TaskComplete
 from localharness.tools.base import ToolResult
 
 
@@ -229,15 +229,14 @@ async def test_xml_injection_is_counted_at_final_boundary(tmp_path, bus):
 # --- 0.16.5 slice 3/5: delegation entries open before dispatch; replies keep their words -------
 
 class DelegatingRegistry:
-    """`task` -> a real TaskTool, `agent` -> a real AgentTool over a spy runner."""
+    """`agent` -> a real AgentTool over a spy runner."""
 
     def __init__(self, state):
         from unittest.mock import AsyncMock
 
         from localharness.tools.builtin.agent_tool import AgentTool
-        from localharness.tools.builtin.task_tool import TaskTool
         self.runner = AsyncMock(return_value="SUBAGENT RUN COMPLETE. reviewed.")
-        self.tools = {"task": TaskTool(state), "agent": AgentTool(self.runner, ["reviewer"])}
+        self.tools = {"agent": AgentTool(self.runner, ["reviewer"])}
 
     def get_tools_for_agent(self, *args):
         return {}
@@ -255,34 +254,6 @@ def _script(mock_llm_client, *steps):
     return scripted(mock_llm_client, *steps)
 
 
-START = ("task", {"action": "start", "objective": "Review the draft", "assignment": "Review"})
-
-
-@pytest.mark.asyncio
-async def test_delegation_opens_entry_before_dispatch_without_refusal(tmp_path, bus, mock_llm_client):
-    from localharness.agent.task_record import TaskState
-
-    state = TaskState(tmp_path / "task.json", workspace=str(tmp_path))
-    reg = DelegatingRegistry(state)
-    during = []
-
-    async def runner(*args):
-        during.append([(d.id, d.status) for d in state.current.delegations])
-        return "SUBAGENT RUN COMPLETE. reviewed."
-    reg.runner.side_effect = runner
-    llm = _script(mock_llm_client, START, "Ready.",
-                  ("agent", {"agent_id": "reviewer", "task": "Review draft.md"}), "Delegated.")
-    loop = make_loop(llm, bus, tmp_path, state, reg)
-    await loop.run_turn("Review the draft")
-    reply = await loop.run_turn("now delegate the review")
-    reg.runner.assert_awaited_once()
-    assert during == [[("d1", "running")]]  # the entry exists while the child runs
-    assert state.current.delegations[0].status == "completed"
-    obs = [e for e in bus.history(event_types=[Observation]) if e.tool_name == "agent"]
-    assert len(obs) == 1 and obs[0].error is None and "[tool error]" not in (obs[0].output or "")
-    assert reply == "Delegated."
-
-
 @pytest.mark.asyncio
 async def test_delegation_without_record_is_unchanged(tmp_path, bus, mock_llm_client):
     from localharness.agent.task_record import TaskState
@@ -294,22 +265,3 @@ async def test_delegation_without_record_is_unchanged(tmp_path, bus, mock_llm_cl
     await make_loop(llm, bus, tmp_path, state, reg).run_turn("Review the draft")
     reg.runner.assert_awaited_once_with("reviewer", "Review draft.md", None)
     assert state.current is None and not (tmp_path / "task.json").exists()
-
-
-@pytest.mark.asyncio
-async def test_aside_keeps_its_words_and_gets_the_evidence_line(tmp_path, bus, mock_llm_client):
-    from localharness.agent.task_record import TaskState
-
-    state = TaskState(tmp_path / "task.json", workspace=str(tmp_path))
-    reg = DelegatingRegistry(state)
-    check = ("task", {"action": "check", "key": "lint", "description": "Lint passes",
-                      "tool": "bash_exec", "arguments": {"command": "lint"},
-                      "result_field": "exit_code", "expected": 0})
-    llm = _script(mock_llm_client, START, check, ("bash_exec", {"command": "lint"}), "Set up.",
-                  "A tide pool is a rocky pool.",
-                  ("read", {"path": "x"}), "Finished the report.")
-    loop = make_loop(llm, bus, tmp_path, state, reg)
-    await loop.run_turn("Write the report")
-    assert await loop.run_turn("what is a tide pool?") == "A tide pool is a rocky pool."
-    assert any(m.get("content") == "A tide pool is a rocky pool." for m in loop._conversation)
-    assert await loop.run_turn("continue") == "Finished the report."
