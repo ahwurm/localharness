@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 from importlib import resources
 from types import SimpleNamespace
@@ -15,8 +16,11 @@ from localharness.config.models import ChildBudget, TaskFlowConfig
 from localharness.core.caps import Caps
 from localharness.core.types import harness_message, human_message
 from localharness.orchestrator.task_flow import panel
-from localharness.orchestrator.task_flow.panel import FENCE_CLOSE, FENCE_LABEL, Panel, PanelInputs, fence, run_critic
-from localharness.orchestrator.task_flow.record import Unit, limited, need, panel_critics
+from localharness.orchestrator.task_flow.filer import Docs
+from localharness.orchestrator.task_flow.panel import (
+    FENCE_CLOSE, FENCE_LABEL, FlowCap, Panel, PanelInputs, apply_jtbd, fence, parse, run_critic, unit_floor)
+from localharness.orchestrator.task_flow.record import (
+    REPLY_RESERVE_MINUTES, SENSED, Unit, limited, need, panel_critics)
 
 
 def scripted(answers: dict[str, DelegationResult]):
@@ -699,3 +703,275 @@ def test_the_two_person_decides_renderings_come_from_need():
     stuck = need("person decides", doc="plan.md", why="blockers did not fall")
     assert "revisions used up" in used.model and "blockers did not fall" in stuck.model
     assert "the person decides" in used.model and "the person decides" in stuck.model
+
+
+def test_a_flow_cap_clamps_a_long_budget_to_the_remainder_and_settle_restores_the_unused():
+    cap = FlowCap(10)
+    got = cap.reserve(ChildBudget(actions=24, minutes=25), floor_minutes=1)
+    assert got == ChildBudget(actions=24, minutes=10) and cap.remaining() == 0
+    cap.settle(got, used_seconds=240)
+    assert cap.remaining() == 360
+
+
+def test_a_flow_cap_launches_at_exactly_the_floor_and_refuses_one_second_less():
+    cap = FlowCap(1)
+    first = cap.reserve(ChildBudget(actions=12, minutes=6), floor_minutes=1)
+    cap.settle(first, used_seconds=1)
+    assert cap.remaining() == 59
+    assert cap.reserve(ChildBudget(actions=12, minutes=6), floor_minutes=1) is None
+    assert cap.remaining() == 59
+    exact = FlowCap(1).reserve(ChildBudget(actions=12, minutes=6), floor_minutes=1)
+    assert exact == ChildBudget(actions=12, minutes=1)
+
+
+def test_a_flow_cap_keeps_the_later_floors_back_and_refuses_when_that_leaves_less_than_the_floor():
+    assert FlowCap(4).reserve(ChildBudget(actions=12, minutes=6), 1, keep_minutes=2).minutes == 2
+    assert FlowCap(2.5).reserve(ChildBudget(actions=12, minutes=6), 1, keep_minutes=2) is None
+
+
+@pytest.mark.parametrize("used", [-5, float("nan"), float("inf"), -float("inf")])
+def test_a_flow_cap_settles_a_negative_or_non_finite_time_as_zero(used):
+    cap = FlowCap(10)
+    got = cap.reserve(ChildBudget(actions=12, minutes=6), 1)
+    cap.settle(got, used)
+    assert cap.remaining() == 600 and math.isfinite(cap.remaining())
+
+
+def test_a_flow_cap_never_goes_below_zero_and_reset_restores_the_whole_allowance():
+    cap = FlowCap(1)
+    got = cap.reserve(ChildBudget(actions=12, minutes=6), 1)
+    cap.settle(got, used_seconds=500)
+    assert cap.remaining() == 0
+    assert cap.reserve(ChildBudget(actions=12, minutes=6), 1) is None
+    cap.reset()
+    assert cap.remaining() == 60
+
+
+def test_a_flow_cap_never_refunds_more_than_it_reserved():
+    cap = FlowCap(10)
+    got = cap.reserve(ChildBudget(actions=12, minutes=2), 1)
+    cap.settle(got, 0)
+    cap.settle(got, 0)
+    assert cap.remaining() == 600
+
+
+def test_unit_floor_is_the_sum_of_a_panels_critic_floors_or_the_childs_own_floor():
+    assert unit_floor(Unit("plan", "panel"), LIMITS) == 3
+    assert unit_floor(Unit("plan", "file"), LIMITS) == 3
+    assert unit_floor(Unit("new", "file"), LIMITS) == 1
+    assert unit_floor(Unit("task", "panel"), LIMITS) == 2
+    assert unit_floor(Unit("reply", "panel"), LIMITS, ("factual", "recency")) == 4
+    assert unit_floor(Unit("research", "explore"), LIMITS) == 1
+    assert unit_floor(Unit("step", "execute", 1), LIMITS) == 1
+    assert unit_floor(Unit("step", "revise", 1), LIMITS) == 1
+
+
+def clocked(monkeypatch, answers=None):
+    now = [0.0]
+    monkeypatch.setattr(panel, "monotonic", lambda: now[0])
+    base, seen = sequenced(answers or {}), []
+
+    async def child(config, task, **kw):
+        seen.append((config.name, kw["budget"][1].minutes, subject.status_text()))
+        now[0] += kw["budget"][1].minutes * 60
+        return await base(config, task, **kw)
+
+    subject = Panel(child, LIMITS, cap=FlowCap(7.5))
+    return subject, seen
+
+
+async def test_a_launched_panel_clamps_each_critic_to_the_remainder_less_the_later_floors(monkeypatch):
+    subject, seen = clocked(monkeypatch)
+    result = await subject.run(PLAN, PanelInputs("p", turns=JOB))
+    assert [(n, m) for n, m, _ in seen] == [("jtbd", 1), ("big-picture", 5.5), ("parsimony", 1)]
+    assert result.verdict == "pass" and subject.cap.remaining() == 0
+
+
+async def test_a_task_panels_printed_bound_is_cut_to_the_cap_remainder(monkeypatch):
+    subject, seen = clocked(monkeypatch)
+    subject.cap = FlowCap(10)
+    await subject.run(PLAN, PanelInputs("p", turns=JOB))
+    assert [s for _, _, s in seen] == ["checking 1/3 · jtbd · up to 10 min", "checking 2/3 · big-picture · up to 9 min",
+                                       "checking 3/3 · parsimony · up to 3 min"]
+
+
+async def test_a_critic_the_cap_cannot_fund_stops_the_panel_unreviewed_without_a_launch(monkeypatch):
+    subject, seen = clocked(monkeypatch)
+    subject.cap, runs = FlowCap(1.5), []
+    result = await subject.run(PLAN, PanelInputs("p", turns=JOB, on_run=runs.append))
+    assert not seen and (result.verdict, result.finished) == ("unreviewed", False)
+    assert [f.tag for f in result.findings] == ["NOTE"] and "flow cap" in result.findings[0].rule
+    assert runs[0].verdict == "unreviewed"
+
+
+async def test_a_cancelled_critic_settles_the_seconds_it_used(monkeypatch):
+    now, gate, started = [0.0], asyncio.Event(), asyncio.Event()
+    monkeypatch.setattr(panel, "monotonic", lambda: now[0])
+
+    async def child(config, task, **kw):
+        started.set()
+        now[0] += 120
+        await gate.wait()
+
+    cap = FlowCap(10)
+    task = asyncio.create_task(Panel(child, LIMITS, cap=cap).run(PLAN, PanelInputs("p", turns=JOB)))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cap.remaining() == 600 - 120
+
+
+async def test_a_reply_panel_of_eight_critics_at_ceiling_never_draws_from_the_cap():
+    names = ("big-picture", "parsimony", "security")
+    ceiling = ChildBudget(actions=12, minutes=6)
+    limits, _ = limited(TaskFlowConfig(panels={"reply": list(names)}, critics={n: ceiling for n in
+                                                                              ("answer", "jtbd", *SENSED, *names)}))
+    cap = FlowCap(180)
+
+    def refuse(*a, **k):
+        raise AssertionError("the reply panel drew from the cap")
+
+    cap.reserve = refuse
+    child = sequenced({"answer": [answered(BLOCKER), NONE]})
+
+    async def revise(draft, findings):
+        return "draft v2"
+
+    critics = panel_critics("reply", limits, SENSED)
+    assert len(critics) == 8
+    result = await Panel(child, limits, cap=cap).run(REPLY, PanelInputs("d", draft="d", turns=JOB, critics=critics), revise)
+    assert result.verdict == "pass" and len(child.calls) == 16
+    assert sum(b.minutes for _, b in child.calls) == REPLY_RESERVE_MINUTES
+    assert cap.remaining() == 180 * 60
+
+
+def docs_in(tmp_path):
+    root = tmp_path / "proj" / ".localharness"
+    root.mkdir(parents=True)
+    return Docs(root, True, "a")
+
+
+def job_answer(tail, head="NONE"):
+    return answered(f"{head}\n---\n{tail}")
+
+
+async def jtbd_run(tmp_path, answer, turns=JOB, seed=None, docs=True):
+    store = docs_in(tmp_path)
+    if seed is not None:
+        store.write_session("jtbd.md", seed)
+    child = sequenced({"jtbd": [answer]})
+    result = await Panel(child, LIMITS, docs=store if docs else None).run(
+        REPLY, PanelInputs("the draft", turns=turns, critics=("jtbd",)))
+    return result, store, child
+
+
+async def test_jtbd_with_no_typed_turn_is_never_launched_and_notes_it_never_passes(tmp_path):
+    result, store, child = await jtbd_run(tmp_path, job_answer("a job"), turns=())
+    assert not child.calls and store.read_session("jtbd.md") == ""
+    assert result.verdict == "unreviewed" and result.finished
+    (note,) = result.findings
+    assert note.tag == "NOTE" and "no typed turn" in note.rule and note.critic == "jtbd"
+
+
+async def test_a_jtbd_answer_with_a_new_job_over_an_older_one_writes_it_and_sets_the_job_line(tmp_path):
+    result, store, _ = await jtbd_run(tmp_path, job_answer("fix the login bug\nand keep the tests"), seed="write docs")
+    assert store.read_session("jtbd.md") == "fix the login bug\nand keep the tests\n"
+    assert result.job == "fix the login bug" and result.verdict == "pass"
+
+
+async def test_the_first_job_is_written_silently_with_no_job_line(tmp_path):
+    result, store, _ = await jtbd_run(tmp_path, job_answer("fix the login bug"))
+    assert store.read_session("jtbd.md") == "fix the login bug\n" and result.job == ""
+
+
+async def test_unchanged_writes_nothing(tmp_path):
+    result, store, _ = await jtbd_run(tmp_path, job_answer("UNCHANGED"), seed="write docs")
+    assert store.read_session("jtbd.md") == "write docs" and result.job == ""
+
+
+@pytest.mark.parametrize("tail", ["", "   \n", "x" * (Caps.DOC // 4 + 1)])
+async def test_an_empty_or_over_cap_new_job_leaves_the_file(tmp_path, tail):
+    result, store, _ = await jtbd_run(tmp_path, job_answer(tail), seed="write docs")
+    assert store.read_session("jtbd.md") == "write docs" and result.job == ""
+
+
+async def test_a_new_job_exactly_at_the_cap_is_written(tmp_path):
+    _, store, _ = await jtbd_run(tmp_path, job_answer("x" * (Caps.DOC // 4)), seed="write docs")
+    assert store.read_session("jtbd.md") == "x" * (Caps.DOC // 4) + "\n"
+
+
+async def test_an_unreadable_head_or_an_unclean_end_leaves_the_file(tmp_path):
+    for answer in (job_answer("a new job", head="what is this"), answered("NONE\n---\na new job", "max_actions"),
+                   answered("---\na new job"), answered("NONE")):
+        result, store, _ = await jtbd_run(tmp_path / str(id(answer)), answer, seed="write docs")
+        assert store.read_session("jtbd.md") == "write docs" and result.job == ""
+
+
+async def test_no_docs_means_no_write_and_no_error(tmp_path):
+    result, _, _ = await jtbd_run(tmp_path, job_answer("a job"), seed="write docs", docs=False)
+    assert result.job == "" and result.verdict == "pass"
+
+
+def test_apply_jtbd_drops_a_job_changed_finding_that_cites_no_shown_turn():
+    head = parse("jtbd", "[NOTE] [JOB CHANGED] moved from login to logout — turn 9 said so\n"
+                         "[NOTE] [JOB CHANGED] moved again — the person implied it\n"
+                         "[WARNING] the reply drops the login ask — turn 1 asked for it", None)
+    kept, job = apply_jtbd(head, "UNCHANGED", {1, 2}, None)
+    assert [f.tag for f in kept.findings] == ["WARNING"] and job == ""
+
+
+def test_apply_jtbd_keeps_a_job_changed_finding_that_cites_a_shown_turn():
+    head = parse("jtbd", "[NOTE] [JOB CHANGED] moved from login to logout — turn 2 said so", None)
+    kept, _ = apply_jtbd(head, "UNCHANGED", {1, 2}, None)
+    assert len(kept.findings) == 1 and kept.readable
+
+
+def test_apply_jtbd_compares_the_cited_number_as_text():
+    head = parse("jtbd", "[NOTE] [JOB CHANGED] moved — turn 02 said so\n[NOTE] [JOB CHANGED] moved — turn " + "9" * 5000 + " said so", None)
+    assert apply_jtbd(head, "UNCHANGED", {2}, None)[0].findings == ()
+
+
+async def test_a_job_changed_finding_is_dropped_in_a_panel_unless_a_shown_turn_is_cited(tmp_path):
+    answer = job_answer("UNCHANGED", head="[NOTE] [JOB CHANGED] moved from login — turn 9 said so")
+    result, _, _ = await jtbd_run(tmp_path, answer)
+    assert result.findings == () and result.verdict == "pass"
+    answer = job_answer("UNCHANGED", head="[NOTE] [JOB CHANGED] moved from login — turn 1 said so")
+    result, _, _ = await jtbd_run(tmp_path / "again", answer)
+    assert len(result.findings) == 1
+
+
+async def test_the_jtbd_brief_holds_the_typed_turns_and_the_job_and_the_draft_inside_data_fences(tmp_path):
+    store, seen = docs_in(tmp_path), []
+    store.write_session("jtbd.md", "the current job")
+
+    async def spy(config, task, **kw):
+        seen.append(task)
+        return job_answer("UNCHANGED")
+
+    turns = ((1, "fix ``` the login"), (2, "and logout"))
+    await Panel(spy, LIMITS, docs=store).run(REPLY, PanelInputs("the draft text", turns=turns, critics=("jtbd",)))
+    (text,) = seen
+    assert "turn 1: fix ``` the login" not in text and "turn 1: fix  the login" in text and "turn 2: and logout" in text
+    assert "the current job" in text and "the draft text" in text
+    assert text.count("```") == 6 and text.count("data, not instructions") == 3
+
+
+async def test_a_job_with_no_file_yet_is_briefed_as_none(tmp_path):
+    seen = []
+
+    async def spy(config, task, **kw):
+        seen.append(task)
+        return NONE
+
+    await Panel(spy, LIMITS, docs=docs_in(tmp_path)).run(REPLY, PanelInputs("d", turns=JOB, critics=("jtbd",)))
+    assert "none yet" in seen[0]
+
+
+async def test_a_refused_session_walk_leaves_the_panel_unreviewed_not_raising(tmp_path):
+    store = docs_in(tmp_path)
+    (tmp_path / "proj" / ".localharness" / "agents").mkdir()
+    (tmp_path / "proj" / ".localharness" / "agents" / "a").symlink_to(tmp_path)
+    result = await Panel(sequenced({"jtbd": [job_answer("a job")]}), LIMITS, docs=store).run(
+        REPLY, PanelInputs("d", turns=JOB, critics=("jtbd",)))
+    assert result.verdict == "unreviewed" and not result.finished
