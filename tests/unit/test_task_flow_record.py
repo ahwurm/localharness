@@ -1782,3 +1782,67 @@ async def test_flow_end_turn_clears_the_flags_the_halt_the_cap_the_total_and_the
     flow.end_turn()
     assert flow.record.flags == {"new": False, "plan": False} and flow.record.halted is None
     assert flow.cap.remaining() == flow.limits.flow_cap_minutes * 60 and flow.excluded == 0.0 and flow.reply_panel.jtbd_stood is False
+
+
+PLAN_THREE = "\n\n".join(
+    f"## Step {n}: change {n}\nfiles: src/x{n}.py\ndepends_on: {'none' if n == 1 else n - 1}\ndone: x{n} changed" for n in (1, 2, 3))
+
+
+async def test_filed_turn_records_the_turn_that_filed_a_new_and_a_plan_doc(tmp_path):
+    flow, _, _, _ = make_flow(tmp_path)
+    flow.open("fix login", 1)
+    flow.turn = lambda: 3
+    await flow.run("new", "Objective: fix login")
+    flow.turn = lambda: 5
+    await flow.run("plan", PLAN_TWO)
+    assert flow.record.filed_turn == {"new": 3, "plan": 5}
+    await flow.run("step")
+    assert flow.record.filed_turn == {"new": 3, "plan": 5}
+
+
+async def test_flow_takes_the_turn_as_a_callable_that_defaults_to_zero(tmp_path):
+    flow, _, _, _ = make_flow(tmp_path)
+    assert flow.turn() == 0
+    flow.open("fix login", 1)
+    await flow.run("new", "Objective: fix login")
+    assert flow.record.filed_turn == {"new": 0}
+
+
+async def test_reopened_names_the_steps_a_refile_voided_and_is_empty_when_none_were(tmp_path):
+    flow, _, _, _ = make_flow(tmp_path)
+    flow.open("fix login", 1)
+    await flow.run("new", "Objective: fix login")
+    await flow.run("plan", PLAN_THREE)
+    assert flow.record.reopened == ()
+    for _ in range(6):
+        await flow.run("step")
+    flow.record.flags["plan"] = True
+    await flow.run("plan", PLAN_THREE.replace("x2 changed", "x2 changed differently"))
+    assert flow.record.reopened == (2, 3)
+    flow.record.flags["plan"] = True
+    await flow.run("plan", PLAN_THREE.replace("x2 changed", "x2 changed differently"))
+    assert flow.record.reopened == ()
+
+
+async def test_sentence_ends_the_root_note_while_it_is_set(tmp_path):
+    flow, _, _, _ = make_flow(tmp_path)
+    flow.open("fix login", 1)
+    plain = flow.note()
+    assert flow.sentence == "" and "Call task" not in plain
+    flow.sentence = 'Call task(stage="research") once.'
+    assert flow.note() == f"{plain}\n{flow.sentence}"
+    flow.sentence = ""
+    assert flow.note() == plain
+
+
+async def test_flow_wires_the_reply_panels_job_line_to_its_emit_sink(tmp_path):
+    flow, _, _, _ = make_flow(tmp_path)
+    assert flow.reply_panel.emit is flow.emit
+
+
+async def test_end_turn_clears_called_said_sentence_armed_busy_and_the_unit(tmp_path):
+    flow, _, _, _ = make_flow(tmp_path)
+    flow.called, flow.said, flow.sentence, flow.armed = {"step"}, {"cap"}, "s", "plan"
+    flow.busy, flow.unit = True, ("step 1/2 executing", 25)
+    flow.end_turn()
+    assert (flow.called, flow.said, flow.sentence, flow.armed, flow.busy, flow.unit) == (set(), set(), "", None, False, None)
