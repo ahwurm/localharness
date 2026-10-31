@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -535,3 +536,184 @@ async def test_an_exception_escaping_the_panel_delivers_the_draft_unreviewed(bus
     (done,) = events(bus, TaskComplete)
     assert summary == "Hello there." and (done.verdict, done.finding) == ("unreviewed", "the panel failed")
     assert [a.content for a in tool_less(bus)] == ["Hello there."]
+
+
+class Streaming(Llm):
+    """A client that streams scripted generations of (text, reasoning pieces, call a tool) and reads on_reasoning at each stream."""
+
+    def __init__(self, gens, on_reasoning=None):
+        super().__init__([])
+        self.gens, self.writes, self.during, self.probe = list(gens), [], [], None
+        self.on_reasoning = on_reasoning
+        self.writes.clear()
+
+    @property
+    def on_reasoning(self):
+        return self._on_reasoning
+
+    @on_reasoning.setter
+    def on_reasoning(self, value):
+        self._on_reasoning = value
+        self.writes.append(value)
+
+    async def stream_complete(self, messages=None, tools=None, on_token=None):
+        self.requests.append({"messages": list(messages), "tools": tools, "on_token": on_token})
+        gen = self.gens[min(len(self.requests), len(self.gens)) - 1]
+        if isinstance(gen, BaseException):
+            raise gen
+        text, reasoning, call = gen
+        sink = self.on_reasoning
+        self.during.append(sink)
+        for piece in reasoning:
+            if sink is not None:
+                await sink(piece)
+        for piece in re.findall(r"\S+\s*", text):
+            if on_token is not None:
+                await on_token(piece)
+        if self.probe is not None:
+            await self.probe(len(self.requests))
+        calls = [{"id": f"c{len(self.requests)}", "type": "function",
+                  "function": {"name": "glob", "arguments": '{"pattern": "*.zzz"}'}}] if call else None
+        return SimpleNamespace(content=text, tool_calls=calls, finish_reason="stop"), None
+
+
+def gen(text, reasoning=(), call=False):
+    return text, tuple(reasoning), call
+
+
+def recorder():
+    log: list[tuple[str, str]] = []
+
+    async def on_reasoning(piece):
+        log.append(("r", piece))
+
+    async def on_token(piece):
+        log.append(("t", piece))
+
+    return log, on_reasoning, on_token
+
+
+async def streamed_turn(bus, gens, panel=None, on_reasoning=None, on_token=None, tools=True):
+    llm = Streaming(gens, on_reasoning)
+    loop = loop_of(llm, bus, panel, await glob_registry() if tools else None)
+    return llm, loop, await loop.run_turn("hello", on_token=on_token)
+
+
+async def test_on_reasoning_is_the_loops_closure_for_the_turn_and_the_original_is_back_after(bus):
+    _, original, _ = recorder()
+    llm, _, summary = await streamed_turn(bus, [gen("Hello there.", ["think"])], panel_of(), original)
+    assert summary == "Hello there."
+    assert llm.during[0] is not original and llm.on_reasoning is original
+    assert len(llm.writes) == 2
+
+
+async def test_on_reasoning_is_restored_after_a_provider_error(bus):
+    from localharness.provider.client import ProviderTimeoutError
+
+    _, original, _ = recorder()
+    llm, _, summary = await streamed_turn(bus, [ProviderTimeoutError("slow")], panel_of(), original)
+    assert llm.during == [] and llm.on_reasoning is original
+
+
+async def test_on_reasoning_is_restored_after_a_cancel_before_the_generation_returns(bus):
+    _, original, _ = recorder()
+    llm = Streaming([gen("unused")], original)
+    started = asyncio.Event()
+
+    async def hang(messages=None, tools=None, on_token=None):
+        started.set()
+        await asyncio.Event().wait()
+
+    llm.stream_complete = hang
+    task = asyncio.create_task(loop_of(llm, bus, panel_of()).run_turn("hello"))
+    await started.wait()
+    assert llm.on_reasoning is not original
+    task.cancel()
+    await asyncio.wait({task})
+    assert task.cancelled() and llm.on_reasoning is original
+
+
+async def test_on_reasoning_is_restored_after_a_cancel_mid_panel(bus):
+    _, original, _ = recorder()
+    gate = Gate()
+    llm = Streaming([gen("Hello there.")], original)
+    task = asyncio.create_task(loop_of(llm, bus, Panel(gate, LIMITS)).run_turn("hello"))
+    await gate.started.wait()
+    assert llm.on_reasoning is not original
+    task.cancel()
+    assert await task == "Hello there." and llm.on_reasoning is original
+
+
+async def test_on_reasoning_with_no_original_installs_the_closure_and_restores_none(bus):
+    llm, _, summary = await streamed_turn(bus, [gen("Hello there.", ["think"])], panel_of(), None)
+    assert summary == "Hello there." and callable(llm.during[0])
+    assert llm.on_reasoning is None
+
+
+async def test_on_reasoning_is_dropped_during_a_critic_and_during_the_revision(bus):
+    log, original, _ = recorder()
+    llm = Streaming([gen("Draft reply.", ["draft thought"]), gen("Fixed reply.", ["revision thought"])], original)
+
+    async def critic(config, task, **kw):
+        await llm.on_reasoning("critic thought")
+        return answered(BLOCKER) if config.name == "answer" and "Fixed" not in task else NONE
+
+    summary = await loop_of(llm, bus, Panel(critic, LIMITS)).run_turn("hello")
+    assert summary == "Fixed reply." and len(llm.requests) == 2
+    assert log == []
+
+
+async def test_on_reasoning_of_the_roots_own_generation_is_held_not_passed(bus):
+    log, original, _ = recorder()
+    llm = Streaming([gen("Hello there.", ["one ", "two"])], original)
+    held = []
+
+    async def probe(_):
+        held.append((list(log), list(loop._held)))
+
+    llm.probe = probe
+    loop = loop_of(llm, bus, panel_of())
+    await loop.run_turn("hello")
+    assert held == [([], [(original, "one "), (original, "two")])]
+
+
+async def test_on_reasoning_of_a_child_between_root_generations_reaches_the_original_live(bus):
+    log, original, _ = recorder()
+    llm = Streaming([gen("Looking.", ["root thought"], call=True), gen("Done.")], original)
+
+    async def child_thinks(action):
+        if action.has_tool_calls:
+            await llm.on_reasoning("child thought")
+
+    bus.subscribe(Action, child_thinks)
+    await loop_of(llm, bus, panel_of(), await glob_registry()).run_turn("hello")
+    assert log == [("r", "child thought")]
+
+
+async def test_in_flight_is_clear_after_a_provider_error_and_after_the_degenerate_retrys_first_abort(bus):
+    from localharness.provider.client import ProviderDegenerateError, ProviderTimeoutError
+
+    log, original, _ = recorder()
+    llm = Streaming([ProviderDegenerateError("loop", unit="x", repeats=9, chars=9), gen("Hello there.")], original)
+    seen = []
+
+    async def after_abort(action):
+        if action.finish_reason == "degenerate":
+            seen.append(loop._in_flight)
+            await llm.on_reasoning("after the abort")
+
+    bus.subscribe(Action, after_abort)
+    loop = loop_of(llm, bus, panel_of())
+    assert await loop.run_turn("hello") == "Hello there."
+    assert seen == [False] and log == [("r", "after the abort")]
+    failing = loop_of(Streaming([ProviderTimeoutError("slow")], original), bus, panel_of())
+    await failing.run_turn("hello")
+    assert failing._in_flight is False
+
+
+async def test_on_reasoning_is_never_read_or_written_without_a_panel(bus):
+    _, original, _ = recorder()
+    llm = Streaming([gen("Hello there.", ["think"])], original)
+    llm.writes.clear()
+    await loop_of(llm, bus).run_turn("hello")
+    assert llm.writes == [] and llm.during == [original]

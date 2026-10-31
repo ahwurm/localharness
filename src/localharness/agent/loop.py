@@ -5,6 +5,7 @@ ReAct while-loop execution engine for LocalHarness agents.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import hashlib
 import inspect
@@ -1386,6 +1387,8 @@ class AgentLoop:
         self._budget_labels = budget_labels or BudgetLabels()
         self._unattended_max_actions = unattended_max_actions
         self._live_turn: tuple[Session, BudgetTracker] | None = None
+        self._in_flight = False
+        self._held: list[tuple[Callable, str]] = []
         # PAPI-04's consumer seam: the memory slot, asked for its per-turn section right after the
         # guardrails. It is the loop's ONLY memory path — the loop never holds a store; recall
         # scope, writes and traces are the occupant's. None or an empty slot adds no section.
@@ -1876,9 +1879,16 @@ class AgentLoop:
         if self._affordances is not None:
             self._affordances.turn_started()
         try:
+            original = None
             try:
+                if self.reply_panel is not None:
+                    original = getattr(self._llm, "on_reasoning", None)
+                    self._llm.on_reasoning = self._reasoning_gate(original)
                 summary = await self._execute_loop(session, task, on_token, images, subtype)
             finally:
+                if self.reply_panel is not None:
+                    self._llm.on_reasoning = original
+                    self._held.clear()
                 # Back at the caller's depth BEFORE the turn's ending is published: a TurnFailed or
                 # TurnCompleted handler (or a task it creates, which copies the context) that starts a
                 # root turn must be read as a root turn, not as a child of the turn that just ended.
@@ -2285,12 +2295,13 @@ class AgentLoop:
             _req_model = _request_model_name(self._llm)
             _t0 = time.monotonic()
             try:
-                response_message, usage = await self._llm.stream_complete(
-                    messages=request_messages,
-                    tools=tool_schemas if tool_call_mode != "text" else None,
-                    on_token=on_token,
-                    **_cap_kwargs,
-                )
+                with self._generating():
+                    response_message, usage = await self._llm.stream_complete(
+                        messages=request_messages,
+                        tools=tool_schemas if tool_call_mode != "text" else None,
+                        on_token=on_token,
+                        **_cap_kwargs,
+                    )
                 _latency_ms = _elapsed_ms(_t0)
             except ProviderDegenerateError as exc:
                 _latency_ms = _elapsed_ms(_t0)
@@ -3236,6 +3247,25 @@ class AgentLoop:
                     handles.append(store.put(bodies[call["id"]], origin or "untrusted"))
         return calls, written, handles
 
+    @contextlib.contextmanager
+    def _generating(self):
+        self._held.clear()
+        self._in_flight = True
+        try:
+            yield
+        finally:
+            self._in_flight = False
+
+    def _reasoning_gate(self, original: Callable | None) -> Callable:
+        async def gate(piece: str) -> None:
+            if original is None or self.reply_panel.status_text() is not None:
+                return
+            if self._in_flight:
+                self._held.append((original, piece))
+            else:
+                await original(piece)
+        return gate
+
     async def _publish_held(self, held: "list[Action]") -> None:
         while held:
             await self._bus.publish(held.pop())
@@ -3291,7 +3321,8 @@ class AgentLoop:
         note = "\n\n".join(part for part in (self._current_note(), revision_block(draft, findings)) if part)
         try:
             request, _ = await self._pack_request(session.messages[:-1], None, note, compact=False)
-            response, usage = await self._llm.stream_complete(request, tools=None, on_token=None)
+            with self._generating():
+                response, usage = await self._llm.stream_complete(request, tools=None, on_token=None)
         except ActiveReferenceOverflow:
             kept.reason = _REVISION_NO_FIT
             return None
@@ -3403,9 +3434,10 @@ class AgentLoop:
                 session.messages + [harness_message(instruction, "budget_summary")], None
             )
             _absorb_commit(session, self._ctx)
-            response_message, usage = await self._llm.stream_complete(
-                request_messages, tools=None, on_token=on_token,
-            )
+            with self._generating():
+                response_message, usage = await self._llm.stream_complete(
+                    request_messages, tools=None, on_token=on_token,
+                )
             if usage is not None:
                 session.input_tokens += getattr(usage, "prompt_tokens", 0) or 0
                 session.output_tokens += getattr(usage, "completion_tokens", 0) or 0
@@ -3444,9 +3476,10 @@ class AgentLoop:
                 session.messages + [harness_message(instruction, "stuck_summary")], None
             )
             _absorb_commit(session, self._ctx)
-            response_message, usage = await self._llm.stream_complete(
-                request_messages, tools=None, on_token=on_token,
-            )
+            with self._generating():
+                response_message, usage = await self._llm.stream_complete(
+                    request_messages, tools=None, on_token=on_token,
+                )
             if usage is not None:
                 session.input_tokens += getattr(usage, "prompt_tokens", 0) or 0
                 session.output_tokens += getattr(usage, "completion_tokens", 0) or 0
