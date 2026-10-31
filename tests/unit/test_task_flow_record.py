@@ -1254,6 +1254,35 @@ async def test_executor_brief_carries_the_verified_depends_on_docs(tmp_path):
     assert "step-1.md (done before you):" in second.task and "ONE-DONE" in second.task and "## Step 2" in second.task
 
 
+@pytest.mark.parametrize("status,reason", [("budget_exhausted", "budget_actions"), ("error", "provider_error"), ("failed", None)])
+async def test_an_explorer_that_did_not_finish_is_filed_as_stopped_with_its_reason_and_no_answer(tmp_path, status, reason):
+    ended = DelegationResult(text="x", raw="PARTIAL-CLAIM src/a.py:1", status=status, terminated_reason=reason)
+    flow, _, _, _ = make_flow(tmp_path, {"explorer": ended})
+    flow.open("fix login", 1)
+    await flow.run("new", "Objective: fix login")
+    text = await flow.run("research", "where is login")
+    doc = flow.docs.read(1, "research.md")
+    assert f"stopped: {reason or status}" in doc and "PARTIAL-CLAIM" not in doc and "unanswered" not in doc
+    assert f"q1: explorer stopped ({reason or status})" in text and "answered" not in text
+
+
+@pytest.mark.parametrize("status,reason", [("budget_exhausted", "budget_actions"), ("killed", "kill_file"), ("stuck", "stuck")])
+async def test_an_executor_that_did_not_finish_files_a_stopped_step_and_runs_again_with_its_log(tmp_path, status, reason):
+    bus = Bus()
+
+    async def halfway(config, task):
+        bus.publish(observed("write"))
+        return DelegationResult(text="x", raw="HALF-DONE", status=status, terminated_reason=reason, artifacts=["src/x1.py"])
+
+    flow, script, _, _ = await planned(tmp_path, {"executor": [halfway, "done"]}, bus=bus)
+    text = await flow.run("step")
+    assert f"stopped at write · {reason}" in flow.docs.read(1, "step-1.md")
+    assert ("step-1.md", None) not in flow.record.filed and flow.record.stopped_log == "write"
+    assert f"the executor stopped ({reason})" in text and "HALF-DONE" not in text
+    await flow.run("step")
+    assert FENCE_LABEL in script.named("executor")[1].task and ("step-1.md", None) in flow.record.filed
+
+
 async def test_executor_a_blocked_step_runs_revise_with_the_fenced_findings_and_the_bit_set_at_launch(tmp_path):
     seen = []
 

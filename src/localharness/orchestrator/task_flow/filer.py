@@ -228,11 +228,11 @@ class StepLog:
     def add(self, line: str) -> None:
         self.lines.append(_flat(line))
 
-    def render(self, final: str, runtime: dict, stopped: bool = False) -> str:
+    def render(self, final: str, runtime: dict, stopped: str = "") -> str:
         files, tools = [_flat(str(f)) for f in runtime.get("files", ())], runtime.get("tools", {})
         called = ", ".join(f"{_flat(str(k))} x{v}" for k, v in tools.items())
         tail = "\n".join([
-            *(["## stopped", f"stopped at {self.lines[-1] if self.lines else 'the start'}"] if stopped else []),
+            *(["## stopped", f"stopped at {self.lines[-1] if self.lines else 'the start'} · {_flat(stopped)}"] if stopped else []),
             *(["## final answer", _quote(final.strip()[:Caps.BLOCK])] if final.strip() else []),
             "## runtime",
             f"files written: {len(files)}" + (f": {', '.join(files)[:Caps.BLOCK // 4]}" if files else ""),
@@ -249,9 +249,9 @@ def answered(answer: str) -> bool:
     return answer.strip().lower() not in ("", "none", "blocked")
 
 
-def file_answer(text: str, n: int, question: str, explorer: str, answer: str) -> str:
-    """`research.md` with question `n`'s section written or replaced; `none`, `blocked` and empty leave it unanswered."""
-    body = _quote(answer.strip()[:Caps.BLOCK // 4]) if answered(answer) else UNANSWERED
+def file_answer(text: str, n: int, question: str, explorer: str, answer: str, ended: str = "") -> str:
+    """`research.md` with question `n`'s section written or replaced; `none`, `blocked` and empty leave it unanswered, an explorer that `ended` early files its reason and no answer."""
+    body = f"stopped: {_flat(ended)}" if ended else _quote(answer.strip()[:Caps.BLOCK // 4]) if answered(answer) else UNANSWERED
     section = "\n".join([f"## q{n} · {_flat(question)}", body, f"explorer: {_flat(explorer)}"])
     parts = [p.strip() for p in _SPLIT.split(text) if p.strip()]
     out = [section if p.startswith(f"## q{n} ·") else p for p in parts]
@@ -342,7 +342,7 @@ class Docs:
         body = _newest([f"{p.strip()}\n\n" for p in _SPLIT.split(text) if p.strip()])
         return self.write(task, doc, body.rstrip() + "\n")[0]
 
-    def write_step(self, task: int, n: int, log: StepLog, final: str, runtime: dict, stopped: bool = False) -> tuple[str, bool]:
+    def write_step(self, task: int, n: int, log: StepLog, final: str, runtime: dict, stopped: str = "") -> tuple[str, bool]:
         return self.write(task, f"step-{n}.md", log.render(final, runtime, stopped))
 
     def verified(self, record: Record, key: tuple[str, str | None]) -> bool:
