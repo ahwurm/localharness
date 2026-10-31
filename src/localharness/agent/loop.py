@@ -1876,6 +1876,7 @@ class AgentLoop:
         if self._affordances is not None:
             self._affordances.turn_started()
         try:
+            self._person_stop = False
             original = None
             try:
                 if self.reply_panel is not None:
