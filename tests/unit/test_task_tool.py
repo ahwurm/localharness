@@ -215,7 +215,14 @@ async def test_done_closes_a_task_finished_before_any_plan_once_decisions_passed
     assert (await tool._execute(stage="done", doc="the note is at scratch/note.md")).output == "decisions.md must be filed first"
     flow.record.filed[("decisions.md", None)] = Row("d", "blocked")
     out = (await tool._execute(stage="done", doc="the note is at scratch/note.md")).output
-    assert out == "t1 done · /task show review" and flow.record.stage == "done"
+    assert out.startswith("t1 closing") and flow.record.closing == "the note is at scratch/note.md" and flow.record.stage == "new"
+    said = []
+    flow.emit = lambda *a: said.append(a)
+    flow.settle_close("blocked")
+    assert flow.record.closing is None and flow.record.stage == "new" and said and said[0][1] == "not closed"
+    flow.record.closing = "the note is at scratch/note.md"
+    flow.settle_close("pass")
+    assert flow.record.stage == "done" and flow.record.closing is None
     assert flow.docs.read(1, "review.md") == "the note is at scratch/note.md" and flow.record.filed[("review.md", None)].verdict == "pass"
     assert (await tool._execute(stage="done", doc="again")).output == "a task past its plan ends through its steps"
 

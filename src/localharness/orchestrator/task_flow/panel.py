@@ -91,6 +91,7 @@ _HARNESS_NOTE = re.compile(r"^\[Budget limit reached:.*$", re.M)
 _BLOCK_WORD = re.compile(r"^[\W\d]{0,6}(BLOCKER|BLOCK)\b\W{0,4}", re.I)
 _TAG_WORD = re.compile(r"^[\W\d]{0,6}(WARNING|NOTE)\b\W{0,4}", re.I)
 _NONE = re.compile(r"[\W\d]{0,6}NONE\W{0,6}", re.I)
+_TAG_NONE = re.compile(r"[\W\d]{0,6}(BLOCKER|BLOCK|WARNING|NOTE)\W{0,4}(none|nothing|no findings)\W{0,4}(NONE)?\W{0,4}", re.I)
 
 
 def _loose(critic: str, line: str) -> Finding | None:
@@ -106,12 +107,15 @@ def _loose(critic: str, line: str) -> Finding | None:
     else:
         tag, rest = "NOTE", line
     rule, _, evidence = rest.partition(" — ")
+    if re.sub(r"\W+", " ", rule).strip().casefold() in ("none", "none none", "nothing", "n a", "no findings"):
+        return None
     return Finding(tag, flat(rule, Caps.FINDING), flat(evidence, Caps.FINDING), tag == "NOTE" and bool(_DECISION.search(rule)), critic) if rule.strip() else None
 
 
 def parse(critic: str, raw: str, terminated_reason: str | None) -> Parsed:
     """What a critic wrote, read as it comes: exact lines when it kept the shape, loose lines when it did not, and NONE alone as a clean pass."""
     lines = [line.strip() for line in _HARNESS_NOTE.sub("", raw).split("\n") if line.strip()]
+    lines = ["NONE" if _TAG_NONE.fullmatch(line) else line for line in lines]
     if not lines:
         return _unreadable(critic)
     if all(_NONE.fullmatch(line) for line in lines):
@@ -355,6 +359,7 @@ class Panel:
         self.announce: Callable[[str], Awaitable[None]] | None = None
         self.emit: Callable[[str, str, tuple, str], None] | None = None
         self.round = 1
+        self.on_delivered: Callable[[str | None], None] | None = None
 
     def _tail(self) -> str:
         if not self._reply:

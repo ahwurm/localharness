@@ -1135,12 +1135,12 @@ def test_status_paused_ends_the_line_with_paused_and_the_second_row_names_the_co
                           "◆ t1 paused · /task run (retries) · clear (deletes the folder)")
 
 
-def test_status_with_no_task_is_the_no_task_row_and_an_unadopted_folder_and_an_old_record_add_one_line_each(tmp_path):
+def test_status_with_no_task_is_the_no_task_row_or_one_line_naming_the_folder_on_disk_and_an_old_record_adds_one(tmp_path):
     flow, *_ = make_flow(tmp_path)
     assert bare(flow) == NO_TASK.lines
     foreign_folder(flow, 5, plan_md="old", decisions_md="d")
     (flow.docs.state_dir / "agents" / "a" / "task.json").write_text("{}")
-    assert bare(flow) == (*NO_TASK.lines, "◆ t5 not adopted · /task show t5/plan", "◆ task old task.json · /task clear (removes it)")
+    assert bare(flow) == ("◆ task none open · t5 on disk, not carried over · /task show t5/plan", "◆ task old task.json · /task clear (removes it)")
     flow.open("fix login", 1)
     assert bare(flow) == ("t6 · fix login · interview open", "◆ t6 interview open · /task plan (skips the questions)",
                           "◆ t5 not adopted · /task show t5/plan", "◆ task old task.json · /task clear (removes it)")
@@ -1226,7 +1226,7 @@ def wake(tmp_path, **folders):
 
 def test_wake_line_names_the_highest_folder_as_an_integer_and_its_newest_doc(tmp_path):
     line = wake(tmp_path, t9={"plan_md": "p", "review_md": "## round 1\nverdict: pass\n"}, t10={"plan_md": "p", "step_2_md": "s", "plan_review_md": "r"})
-    assert line == "◆ Awake again · t10 not carried over · /task show t10/step-2 · new <objective>"
+    assert line == "◆ task t10 on disk, not carried over · /task show t10/step-2 · new <objective>"
 
 
 @pytest.mark.parametrize("verdict", ("pass", "accepted"))
@@ -1235,8 +1235,8 @@ def test_wake_line_is_none_when_the_highest_folders_review_ends_pass_or_accepted
 
 
 def test_wake_line_stays_for_a_review_that_blocked_and_for_a_folder_with_no_docs(tmp_path):
-    assert "t3 not carried over · /task show t3/review" in wake(tmp_path, t3={"review_md": "verdict: blocked\n"})
-    assert wake(tmp_path / "b", t3={"notes_md": "x"}) == "◆ Awake again · t3 not carried over · new <objective>"
+    assert "t3 on disk, not carried over · /task show t3/review" in wake(tmp_path, t3={"review_md": "verdict: blocked\n"})
+    assert wake(tmp_path / "b", t3={"notes_md": "x"}) == "◆ task t3 on disk, not carried over · new <objective>"
 
 
 def test_wake_line_is_none_with_no_tasks_folder_or_a_linked_one(tmp_path):

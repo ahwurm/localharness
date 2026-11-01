@@ -1073,3 +1073,11 @@ async def test_push_a_childs_task_complete_never_sets_the_verdict_and_the_next_r
                                     duration_seconds=TURN_PUSH_MIN_S + 30, summary="later"))
     await channel.flush_push()
     assert [p.title for p in recorder.sent] == ["reply blocked", "turn finished"]
+
+
+async def test_the_delivered_verdict_reaches_the_panels_on_delivered_hook(bus):
+    panel = panel_of()
+    got = []
+    panel.on_delivered = got.append
+    await turn(loop_of(Llm(["Hello there."]), bus, panel))
+    assert got == ["pass"]
