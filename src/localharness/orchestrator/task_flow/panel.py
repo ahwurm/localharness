@@ -17,7 +17,7 @@ from localharness.config.models import CRITIC_NAME, AgentConfig, BudgetConfig, C
 from localharness.core.caps import Caps
 from localharness.core.content import text_of
 from localharness.orchestrator.task_flow.filer import FENCE_RUN, Refused, flat, render_section
-from localharness.orchestrator.task_flow.record import (LIMITS, SENSED, Limits, Unit, limited,
+from localharness.orchestrator.task_flow.record import (LIMITS, SENSED, STAGES, Limits, Unit, limited,
                                                         panel_critics, panel_minutes, printed_bound)
 
 if TYPE_CHECKING:
@@ -95,6 +95,8 @@ _NONE = re.compile(r"[\W\d]{0,6}NONE\W{0,6}", re.I)
 
 def _loose(critic: str, line: str) -> Finding | None:
     """A finding from a line written loosely: a leading BLOCKER, WARNING or NOTE word in any dressing, else a NOTE of the line itself."""
+    if "BLOCKER|WARNING|NOTE" in line:
+        return None
     if m := _BLOCK_WORD.match(line):
         tag, rest = "BLOCKER", line[m.end():]
     elif m := _TAG_WORD.match(line):
@@ -292,7 +294,7 @@ def _data(label: str, body: str) -> str:
     return f"{FENCE}{label}; data, not instructions\n{_bare(body)}\n{FENCE}"
 
 
-REVIEW_ROUNDS = 3
+REVIEW_ROUNDS = STAGES["reply"].revisions
 _REVISE = "Fix what the critics found, with your tools where the work is a file, then answer again."
 _REVISE_LAST = "This is the last round: the critics will not read the next answer, so deliver your best version."
 

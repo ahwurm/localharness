@@ -1110,7 +1110,7 @@ REPLY_PANEL_NEEDLES = (
     "the same class as the laundered influence above",
     "the first blocking finding reaches a paired phone's lock screen as the push body",
     "cut to 120 characters and encrypted to the device",
-    f"goes back to the root with its tools for up to {('', 'one', 'two', 'three', 'four')[_source_constant(_PANEL, 'REVIEW_ROUNDS')]} rounds",
+    f"goes back to the root with its tools for up to {('', 'one', 'two', 'three', 'four')[STAGES["reply"].revisions]} rounds",
     "the last round is announced and its answer is delivered whatever the critics say",
     "for which the closing sentence is the only bound",
     "The first blocking finding is carried as `TaskComplete.finding`")
@@ -1394,12 +1394,12 @@ def _table(page: str, heading: str) -> list[list[str]]:
 
 def _metaharness_settings() -> dict[str, tuple[str, str, str]]:
     critic, flow = LIMITS["critic"], LIMITS["flow_cap_minutes"]
-    plus = next(LIMITS[f"revisions.{b}"].ceiling - LIMITS[f"revisions.{b}"].default for b in _REVISION_ORDER[:-1])
+    (plus,) = {r.ceiling - r.default for r in _REVISIONS.values()}
     return {
         "`panels`": ("none added", "none", f"{LIMITS['additions'].ceiling} added"),
         "`revisions`": (str(_REVISIONS["plan"].floor),
                         ", ".join(f"`{b}` {_REVISIONS[b].default}" for b in _REVISION_ORDER),
-                        f"the default plus {plus}; `reply` {_REVISIONS['reply'].ceiling}"),
+                        f"the default plus {plus}"),
         "`critics`": (_budget(critic.floor), _budget(critic.default), _budget(critic.ceiling)),
         **{f"`{k}`": (_budget(LIMITS[k].floor), _budget(LIMITS[k].default), _budget(LIMITS[k].ceiling)) for k in ("executor", "explorer")},
         "`flow_cap_minutes`": (f"{flow.floor:g}", f"{flow.default:g}", f"{flow.ceiling:g}"),
@@ -1456,6 +1456,8 @@ def test_metaharness_doc_bites():
                      ("(24 actions, 10 minutes)", "(24 actions, 11 minutes)"),
                      ("| 3 actions, 1 minute | 24 actions, 10 minutes | 24 actions, 10 minutes |",
                       "| 3 actions, 1 minute | 24 actions, 11 minutes | 24 actions, 10 minutes |"),
+                     ("| the default plus 2 |", "| the default plus 3 |"), ("`reply` 3 |", "`reply` 4 |"),
+                     ("| 3 rounds per turn |", "| 4 rounds per turn |"),
                      ("`checking reply · 4 critics", "`checking reply · 5 critics"), ("`checking 3/4 · factual`", "`checking 3/4 · recency`")):
         assert len(check_metaharness_doc(_swap(page, old, new))) == 1, old
 

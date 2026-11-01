@@ -42,6 +42,8 @@ Only you open a task, with `/task new <objective>`. After that the root drives. 
 
 Every unit is one `task` call: one child or one panel. The call returns a manifest that names what was filed, the verdict, the findings and `next:`, and the root calls again until the task is done, blocked or halted. Between units you steer with the verbs below, or with a message where the channel reads input mid-turn. No call runs longer than one child or one panel, so neither the root nor you is out of the loop for longer than that.
 
+A task the root finishes while filing `decisions.md` can end there: a `done` call files its result as `review.md`, the task is done, and the critics read the reply as the result.
+
 | Stage | Writes | Floor panel | Revisions |
 |-------|--------|-------------|-----------|
 | `new` | `decisions.md` | `jtbd` | 1 |
@@ -49,7 +51,7 @@ Every unit is one `task` call: one child or one panel. The call returns a manife
 | `plan` | `plan.md` | `jtbd`, `big-picture`, `parsimony` | 3 |
 | each step (`run`) | `step-N.md` | `spec-compliance` | 1 per step |
 | the task review | `review.md` | `jtbd`, `big-picture` | 0 |
-| a reply | nothing | `answer`, `jtbd` and the critics the turn senses | 1 per turn |
+| a reply | nothing | `answer`, `jtbd` and the critics the turn senses | 3 rounds per turn |
 
 A blocked doc is revised up to its stage's revisions, and only while its blockers fall. Past that it is yours to decide: `/task accept` it, or `/task plan <change>`. Every line the harness prints for a task unit names the bound of the unit it describes, a panel's the sum of its critics' minute ceilings and a child's its own minute ceiling, never more than the flow cap has left; at the defaults a plan panel is up to 30 minutes and an executor up to 25. One flow cap per turn limits child time (default 180 minutes, ceiling 360): when what is left is under the next unit's floor the run halts at a unit boundary, and `/task run` continues in the next turn. It bounds unattended child time; it does not promise that a task fits one turn.
 
@@ -102,7 +104,7 @@ task_flow:
 | Key | Sets | Floor | Default | Ceiling |
 |-----|------|-------|---------|---------|
 | `panels` | critics a boundary's panel adds to its floor, by boundary | none added | none | 3 added |
-| `revisions` | revisions a boundary allows before it asks you | 0 | `new` 1, `plan` 3, `step` 1, `reply` 1 | the default plus 2; `reply` 1 |
+| `revisions` | revisions a boundary allows before it asks you | 0 | `new` 1, `plan` 3, `step` 1, `reply` 3 | the default plus 2 |
 | `critics` | one critic's own budget, by name | 3 actions, 1 minute | 24 actions, 10 minutes | 24 actions, 10 minutes |
 | `executor` | the executor's budget | 3 actions, 1 minute | 24 actions, 25 minutes | 48 actions, 40 minutes |
 | `explorer` | an explorer's budget | 3 actions, 1 minute | 12 actions, 6 minutes | 24 actions, 10 minutes |

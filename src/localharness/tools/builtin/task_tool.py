@@ -9,13 +9,14 @@ from localharness.orchestrator.task_flow.record import STAGES, TOOL_STAGES, vali
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 
 BOUNDARY = {row.stage: boundary for boundary, row in STAGES.items() if row.stage}
-TAKES = {"new": "doc", "plan": "doc", "research": "question"}
+TAKES = {"new": "doc", "plan": "doc", "research": "question", "done": "doc"}
 TAKEN_BY = {"doc": "new and plan", "question": "research"}
 DESCRIPTION = "\n".join([
     f"Each call runs one unit of the open task and names the next; only the person opens a task. A doc is at most {Caps.DOC} bytes.",
     "Files the task produces go under the scratch folder your note names, or the project; the task folder is not yours to write.",
     *(f"{stage}: reads {', '.join(STAGES[BOUNDARY[stage]].reads)}, writes {', '.join(STAGES[BOUNDARY[stage]].writes)}; "
       f"takes {TAKES.get(stage, 'nothing')}" for stage in TOOL_STAGES),
+    "done: closes a task you finished before any plan, once decisions.md is filed; the critics then read your reply as the result; takes doc (the result in a few lines, filed as review.md)",
 ])
 
 
@@ -51,7 +52,7 @@ class TaskTool(Tool):
             parameters={
                 "type": "object",
                 "properties": {
-                    "stage": {"type": "string", "enum": list(TOOL_STAGES)},
+                    "stage": {"type": "string", "enum": [*TOOL_STAGES, "done"]},
                     "doc": {"type": "string", "description": f"new, plan: the doc to file, at most {Caps.DOC} bytes"},
                     "question": {"type": "string", "maxLength": Caps.LINE, "description": "research: one question"},
                 },
@@ -62,9 +63,11 @@ class TaskTool(Tool):
         )
 
     async def _execute(self, stage: Any = None, doc: Any = None, question: Any = None, **extra: Any) -> ToolResult:
-        if stage not in TOOL_STAGES:
-            return self.err(f"stage must be one of {', '.join(TOOL_STAGES)}", error_type="validation_error")
+        if stage not in (*TOOL_STAGES, "done"):
+            return self.err(f"stage must be one of {', '.join((*TOOL_STAGES, 'done'))}", error_type="validation_error")
         if bad := _bad(stage, doc, question, extra):
             return self.err(bad, error_type="validation_error")
+        if stage == "done":
+            return ToolResult(output=self._flow.close(doc)) if doc else self.err("done takes doc: the result in a few lines", error_type="validation_error")
         carried = doc if doc is not None else question
         return ToolResult(output=await self._flow.run(BOUNDARY[stage], carried, by="model"))

@@ -5,7 +5,7 @@ import pytest
 
 from localharness.agent.subagent import _config_child_allowed
 from localharness.core.caps import Caps
-from localharness.orchestrator.task_flow.record import STAGES, TOOL_STAGES
+from localharness.orchestrator.task_flow.record import STAGES, TOOL_STAGES, Row
 from localharness.tools.builtin.task_tool import TaskTool
 from localharness.tools import base
 from tests.unit.test_task_flow_record import make_flow, planned
@@ -35,7 +35,7 @@ def test_info_declares_the_labels_and_enumerates_the_tool_stages(tmp_path):
     info = TaskTool(make_flow(tmp_path)[0]).info()
     assert (info.name, info.group, info.gate_family, info.ingest, info.host, info.result_origin) == (
         "task", "task", "allow", "none", "safe", "untrusted")
-    assert info.parameters["properties"]["stage"]["enum"] == list(TOOL_STAGES)
+    assert info.parameters["properties"]["stage"]["enum"] == [*TOOL_STAGES, "done"]
     assert info.parameters["required"] == ["stage"]
 
 
@@ -157,9 +157,10 @@ async def test_unknown_argument_is_refused(tmp_path):
 def test_description_is_one_line_per_stage_in_tool_stage_order_the_same_every_call(tmp_path):
     tool = TaskTool(make_flow(tmp_path)[0])
     text = tool.info().description
-    head, where, *lines = text.splitlines()
+    head, where, *lines, done = text.splitlines()
     assert str(Caps.DOC) in head and "one unit" in head and "next" in head
     assert "scratch folder" in where and "not yours to write" in where
+    assert done.startswith("done:") and "review.md" in done and tool.info().parameters["properties"]["stage"]["enum"][-1] == "done"
     assert [line.split(":")[0] for line in lines] == list(TOOL_STAGES)
     for line in lines:
         row = STAGES[next(b for b, r in STAGES.items() if r.stage == line.split(":")[0])]
@@ -205,3 +206,20 @@ async def test_a_unit_the_registry_cuts_still_settles_its_reservation_and_leaves
     result = await tool.run(stage="run")
     assert started.is_set() and result.error_type == "timeout_error"
     assert flow.busy is False and flow.cap.unspent() == pytest.approx(cap, abs=1.0)
+
+
+async def test_done_closes_a_task_finished_before_any_plan_once_decisions_passed(tmp_path):
+    flow = opened(tmp_path)
+    tool = TaskTool(flow)
+    refused(await tool._execute(stage="done"), "doc")
+    assert (await tool._execute(stage="done", doc="the note is at scratch/note.md")).output == "decisions.md must be filed first"
+    flow.record.filed[("decisions.md", None)] = Row("d", "blocked")
+    out = (await tool._execute(stage="done", doc="the note is at scratch/note.md")).output
+    assert out == "t1 done · /task show review" and flow.record.stage == "done"
+    assert flow.docs.read(1, "review.md") == "the note is at scratch/note.md" and flow.record.filed[("review.md", None)].verdict == "pass"
+    assert (await tool._execute(stage="done", doc="again")).output == "a task past its plan ends through its steps"
+
+
+async def test_done_with_no_task_open_says_so(tmp_path):
+    flow = make_flow(tmp_path)[0]
+    assert (await TaskTool(flow)._execute(stage="done", doc="x")).output == "no task is open"
