@@ -35,23 +35,23 @@ def default_sigint():
 
 @pytest.fixture(autouse=True)
 def _isolate_memory_logger():
-    """#20: the interactive REPL routes the memory subsystem's logs to a file via
-    start_cmd._route_memory_logs_to_file — a deliberate mutation of the shared
-    'localharness.memory' logger (file handler + propagate=False). Tests that drive the
-    real _start_async trip that mutation; without isolation it leaks into later
-    caplog-based memory tests (which need those records to propagate to root). Snapshot
-    and restore the logger around every test."""
-    lg = logging.getLogger("localharness.memory")
-    saved = (lg.handlers[:], lg.level, lg.propagate)
+    """#20: the interactive REPL routes the memory subsystem's logs, and the context manager's, to a file via
+    start_cmd._route_memory_logs_to_file and _route_context_logs — a deliberate mutation of the shared
+    'localharness.memory' and 'localharness.agent.context' loggers (file handler, level; memory also
+    propagate=False). Tests that drive the real _start_async trip that mutation; without isolation it
+    leaks into later caplog-based tests. Snapshot and restore the loggers around every test."""
+    loggers = [logging.getLogger(n) for n in ("localharness.memory", "localharness.agent.context")]
+    saved = [(lg.handlers[:], lg.level, lg.propagate) for lg in loggers]
     try:
         yield
     finally:
-        for h in lg.handlers[:]:
-            if h not in saved[0]:
-                h.close()  # release the tmp memory.log fd a _start_async drive opened
-        lg.handlers[:] = saved[0]
-        lg.setLevel(saved[1])
-        lg.propagate = saved[2]
+        for lg, (handlers, level, propagate) in zip(loggers, saved):
+            for h in lg.handlers[:]:
+                if h not in handlers:
+                    h.close()  # release the tmp log fd a _start_async drive opened
+            lg.handlers[:] = handlers
+            lg.setLevel(level)
+            lg.propagate = propagate
 
 
 @pytest.fixture(autouse=True)

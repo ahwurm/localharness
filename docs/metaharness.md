@@ -8,13 +8,13 @@ The reasoning is plain. A model grading its own answer finds little, so stranger
 
 There is nothing to set up. A reply the model wrote without using a tool goes to you as written: a hello costs no critic. When the turn used a tool, critics read the reply before you see it: `answer` and `jtbd`, plus the ones the turn's calls sense (see below), each with a full turn (24 actions, 10 minutes) unless `task_flow.critics` sets a lower one. There is no off switch for such a turn. (`jtbd` stands down only for a turn of nothing but `task` calls when one of them ran a passing panel that already included it.)
 
-A reply with a standing blocker is revised once, in one generation with no tools, and checked again. What you see:
+A reply with a standing blocker goes back to the root, with its tools, for up to three rounds and is checked again after each; the critics' findings reach it as quoted data, the last round is announced, and its answer is delivered whatever the critics say. What you see:
 
 - A passing reply is delivered, then `◆ reply pass · /task show reply`, with `· 2 notes` when the critics left warnings or notes. A reply no critic read prints nothing.
 - A blocked reply is delivered, then `◆ reply blocked · /task show reply · 3 blockers`; the line counts and names the command, and `/task show reply` prints the findings.
 - A panel that could not finish delivers the reply, then `◆ reply unreviewed · /task show reply · <why>`. Nothing prints after your own stop.
 
-While a reply is held, the status row and the phone show the running critic and its bound, for example `checking 3/4 · factual`; the classic path and ACP print one line, such as `checking reply · 4 critics · Ctrl+C delivers it unchecked`. A reply panel prints no bound; the lines of a task unit do. Each critic's findings print as they land, one line per finding (`◆ answer blocker the reply cites a real line · README.md:41 does not say that`) or `◆ answer pass` for a clean one, and `◆ root revising · 1 blocker` before a revision. The channel's stop word during the check delivers the draft unchecked. `/task show reply` prints the last reply review, and `/task show job` prints what the `jtbd` critic takes the session's job to be; `◆ job now: … · turn N` appears when it changes.
+While a reply is held, the status row and the phone show the running critic and its bound, for example `checking 3/4 · factual`; the classic path and ACP print one line, such as `checking reply · 4 critics · Ctrl+C delivers it unchecked`. A reply panel prints no bound; the lines of a task unit do. Each critic's findings print as they land, one line per finding (`◆ answer blocker the reply cites a real line · README.md:41 does not say that`) or `◆ answer pass` for a clean one, and `◆ root revising · 1 blocker` before each round, `◆ root revising · last round · 1 blocker` before the third. The channel's stop word during the check delivers the draft unchecked. `/task show reply` prints the last reply review, and `/task show job` prints what the `jtbd` critic takes the session's job to be; `◆ job now: … · turn N` appears when it changes.
 
 ## Which critics run
 

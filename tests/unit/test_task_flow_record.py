@@ -1123,6 +1123,27 @@ async def test_flow_tracer_one_new_call_files_decisions_reviews_it_and_names_the
     assert [c.name for c in script.calls] == ["jtbd"]
 
 
+def test_open_makes_the_tasks_private_scratch_folder_under_the_scratchpad(tmp_path):
+    flow, *_ = make_flow(tmp_path)
+    flow.open("fix login", 1)
+    scratch = flow.docs.scratch(1)
+    assert scratch == flow.docs.state_dir / "scratchpad" / "a" / "t1" and scratch.is_dir()
+    assert scratch.stat().st_mode & 0o777 == 0o700 and "tasks" not in scratch.parts
+
+
+async def test_the_executor_and_every_critic_brief_name_the_scratch_folder(tmp_path):
+    flow, script, *_ = await planned(tmp_path)
+    await flow.run("step")
+    where = runner.scratch_line(flow)
+    assert str(flow.docs.scratch(1)) in where
+    assert all(where in c.task for c in script.calls if c.name != "executor") and script.named("executor")
+    assert where in script.named("executor")[0].task
+
+
+def test_the_plan_shape_puts_a_steps_files_under_the_scratch_folder_or_the_project():
+    assert "`files:` (under the task's scratch folder or the project, never the task folder)" in PLAN_SHAPE
+
+
 BLOCKER_LINE = "[BLOCKER] the step did the step — src/x1.py was never touched — example fix: touch it"
 RAW = "RAWANSWER-the-child-said-this"
 
@@ -1676,17 +1697,18 @@ def test_note_while_paused_is_empty(tmp_path):
 def test_note_an_open_new_with_no_doc_filed_adds_the_interview_sentence(tmp_path):
     flow, *_ = make_flow(tmp_path)
     flow.open("fix login", 1)
-    pointer, interview = flow.note().split("\n")
+    pointer, interview, where = flow.note().split("\n")
     assert pointer == "t1 · new · next: new · file" and interview == runner.INTERVIEW_SENTENCE
+    assert where == runner.scratch_line(flow) and str(flow.docs.scratch(1)) in where
     assert interview == ('Ask the person what you need to know to write decisions.md, one question at a time, '
                          'or if the objective is clear call task(stage="new", doc=...).')
 
 
 async def test_note_a_plan_stage_record_is_one_line_naming_task_stage_next_unit_and_verdict(tmp_path):
     flow, *_ = await planned(tmp_path)
-    assert flow.note() == "t1 \u00b7 plan pass \u00b7 next: run \u00b7 step 1"
+    assert flow.note().split("\n")[0] == "t1 \u00b7 plan pass \u00b7 next: run \u00b7 step 1"
     flow.record.filed[PLAN_ROW] = Row("d", "blocked")
-    assert flow.note() == "t1 \u00b7 plan blocked \u00b7 plan.md is blocked, blockers did not fall; the person decide"
+    assert flow.note().split("\n") == ["t1 \u00b7 plan blocked \u00b7 plan.md is blocked, blockers did not fall; the person decide", runner.scratch_line(flow)]
 
 
 def test_note_the_pointer_line_is_cut_at_the_line_cap_at_every_task_number(tmp_path):
@@ -1695,17 +1717,17 @@ def test_note_the_pointer_line_is_cut_at_the_line_cap_at_every_task_number(tmp_p
     flow.record.filed[("plan.md", "step-1")].counts.used = 1
     for task_id in (3, 10, 100, 1000):
         flow.record.id = task_id
-        pointer = flow.note()
-        assert "\n" not in pointer and len(pointer) <= Caps.LINE and pointer.startswith(f"t{task_id} \u00b7 run blocked")
+        pointer = flow.note().split("\n")[0]
+        assert len(pointer) <= Caps.LINE and pointer.startswith(f"t{task_id} \u00b7 run blocked")
     assert len(pointer) == Caps.LINE
 
 
 async def test_note_follows_the_run_stage_to_the_step_and_the_done_stage_to_done(tmp_path):
     flow, *_ = await planned(tmp_path)
     await flow.run("step")
-    assert flow.note() == "t1 · run unreviewed · next: run · step 1 panel"
+    assert flow.note().split("\n")[0] == "t1 · run unreviewed · next: run · step 1 panel"
     flow.record.stage = "done"
-    assert flow.note() == "t1 · done pass · next: done"
+    assert flow.note().split("\n")[0] == "t1 · done pass · next: done"
 
 
 def test_note_the_executors_provider_is_the_child_sentence_and_a_header_within_the_line_cap():

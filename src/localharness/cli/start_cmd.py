@@ -1267,6 +1267,18 @@ def _route_memory_logs_to_file(agent_dir: Path) -> Path:
     mem_log.propagate = False         # …and nothing bubbles to root/lastResort (the stderr leak)
     return log_path
 
+def _route_context_logs(agent_dir: Path) -> Path:
+    """Interactive REPL only: the context manager's floor and compaction records go to `<agent_dir>/context.log`, not the terminal."""
+    log_path = agent_dir / "context.log"
+    ctx_log = logging.getLogger("localharness.agent.context")
+    if not any(isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", None) == str(log_path) for h in ctx_log.handlers):
+        touch_private(log_path)
+        handler = logging.FileHandler(log_path, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+        ctx_log.addHandler(handler)
+    ctx_log.setLevel(logging.DEBUG)
+    return log_path
+
 
 async def _probe_llm(
     llm: Any, max_retries: int = 3, delay: float = 2.0
@@ -2706,6 +2718,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # #20: keep background consolidation/mining logs off the interactive terminal (file only)
     # — otherwise their stdlib WARNING/EXCEPTION records leak onto the REPL via lastResort.
     _route_memory_logs_to_file(agent_dir)
+    _route_context_logs(agent_dir)
     sitting_id = str(uuid.uuid4())  # SESS-01: one session per SITTING, minted once
     if resume is not None:  # a rebuild is a new sitting: memory's sessions.id is a primary key
         log.info("session %s resumes %s after %s", sitting_id, resume.previous_sitting_id,

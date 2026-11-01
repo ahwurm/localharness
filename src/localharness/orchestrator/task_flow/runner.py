@@ -79,7 +79,12 @@ def root_note(flow: TaskFlow) -> str:
     head = " ".join(p for p in (record.stage, _verdict(record)) if p)
     pointer = one_line(f"t{record.id} \u00b7 {head} \u00b7 {next_line(record, boundary, flow.limits)}")[:Caps.LINE]
     interview = INTERVIEW_SENTENCE if record.stage == "new" and ("decisions.md", None) not in record.filed else ""
-    return "\n".join(p for p in (pointer, interview, flow.sentence) if p)
+    return "\n".join(p for p in (pointer, interview, scratch_line(flow), flow.sentence) if p)
+
+
+def scratch_line(flow: TaskFlow) -> str:
+    """Where the task's output files go; the task folder itself is the harness's and refuses the agent's writes."""
+    return f"Files this task produces go under {flow.docs.scratch(flow.record.id)} or the project; the task folder is not yours to write." if flow.record else ""
 
 
 def _exclude(flow: TaskFlow, seconds: float) -> None:
@@ -125,13 +130,14 @@ def _brief(flow: TaskFlow, unit: Unit) -> str:
     def here(doc: str) -> str:
         return f"{doc} ({flow.docs.path(record.id, doc)})"
 
+    where = f" {scratch_line(flow)}"
     if unit.boundary == "step":
-        return f"Review step {unit.step}: its section of {here('plan.md')} against {here(f'step-{unit.step}.md')}."
+        return f"Review step {unit.step}: its section of {here('plan.md')} against {here(f'step-{unit.step}.md')}.{where}"
     steps = sum(1 for k in record.filed if k[0] == "plan.md" and k[1])
     reads = {"research": ["decisions.md"], "plan": ["decisions.md", "research.md"],
              "task": [f"step-{n}.md" for n in range(1, steps + 1)]}.get(unit.boundary, [])
     named = ", ".join(here(d) for d in reads if (d, None) in record.filed)
-    return f"Review {here(DOCS[unit.boundary])}." + (f" Read also: {named}." if named else "")
+    return f"Review {here(DOCS[unit.boundary])}." + (f" Read also: {named}." if named else "") + where
 
 
 def _ended(result: Any) -> str:
@@ -298,7 +304,7 @@ async def _execute(flow: TaskFlow, boundary: str, unit: Unit, carried: str | Non
     if stale := _stale(flow, key, *deps):
         return stale
     header = f"step {n}/{len(plan)} · {section.done}"
-    parts = [CHILD_SENTENCE, f"Step {n} of {len(plan)}:", section.text,
+    parts = [CHILD_SENTENCE, scratch_line(flow), f"Step {n} of {len(plan)}:", section.text,
              *(f"step-{d}.md (done before you):\n{flow.docs.read(record.id, f'step-{d}.md') or ''}" for d in section.depends_on)]
     revise = unit.kind == "revise"
     findings = _findings(last_section(flow.docs.read(record.id, f"step-{n}-review.md") or "")) if revise else []

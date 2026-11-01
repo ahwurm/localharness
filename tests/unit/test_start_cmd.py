@@ -70,6 +70,31 @@ def test_app_registers_agent_subcommand():
 # #20: interactive REPL routes memory-subsystem logs to a file, not the terminal
 # ---------------------------------------------------------------------------
 
+def test_context_logs_routed_to_a_file_and_still_propagate(tmp_path):
+    """The context manager's floor and compaction records go to `<agent_dir>/context.log`; propagation stays so a caller's own handler still sees them."""
+    import logging
+    from io import StringIO
+
+    from localharness.cli.start_cmd import _route_context_logs
+
+    ctx = logging.getLogger("localharness.agent.context")  # conftest restores the shared logger afterwards
+    before, propagate = len(ctx.handlers), ctx.propagate
+    sink = StringIO()
+    root_h = logging.StreamHandler(sink)
+    root_h.setLevel(logging.DEBUG)
+    logging.getLogger().addHandler(root_h)
+    try:
+        log_path = _route_context_logs(tmp_path)
+        assert _route_context_logs(tmp_path) == log_path and len(ctx.handlers) == before + 1
+        ctx.info("emergency floor reached")
+        for h in ctx.handlers:
+            h.flush()
+        assert log_path == tmp_path / "context.log" and "emergency floor reached" in log_path.read_text(encoding="utf-8")
+        assert ctx.propagate is propagate and "emergency floor reached" in sink.getvalue()
+    finally:
+        logging.getLogger().removeHandler(root_h)
+
+
 def test_memory_logs_routed_to_file_not_repl_console(tmp_path):
     """The real emitter behind #20: consolidation/mining use stdlib logging, and the
     interactive start path configures no handler, so their log.warning/exception records

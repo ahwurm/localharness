@@ -121,6 +121,7 @@ class Session:
     # config.baton_gate.max_nudges. Was a bool (one nudge, hardcoded); now a counter so the
     # bound is configurable while the default (max_nudges=1) reproduces the original behavior.
     baton_nudges_used: int = 0
+    review_rounds: int = 0
     truncated_tool_calls: int = 0  # #77: tool calls suppressed for output-ceiling truncation
     # #152: one corrective nudge per turn is spent on a degenerate (one-line-repeated) candidate
     # answer; the next degenerate reply fails the turn instead of shipping the repetition.
@@ -911,19 +912,7 @@ def _budget_note(session: Session, budget: BudgetTracker) -> str:
     return note
 
 
-_REVISION_NO_FIT = "the revision did not fit the window"
-_REVISION_FAILED = "the revision failed"
-_REVISION_EMPTY = "the revision came back empty"
 _PANEL_FAILED = "the panel failed"
-
-
-@dataclass
-class _Revision:
-    """What the reply seam keeps across a panel run: the latest good draft, why a revision could not help, the revision's tokens."""
-    draft: str
-    reason: str = ""
-    prompt: int = 0
-    completion: int = 0
 
 
 def _clean_summary(text: str) -> str:
@@ -2798,7 +2787,24 @@ class AgentLoop:
                     summary = _clean_summary(_format_completion_summary(session, content))
                     verdict, finding, blockers, notes = None, "", 0, 0
                 else:
-                    summary, verdict, finding, blockers, notes = await self._review_reply(session, task, content, held)
+                    from localharness.orchestrator.task_flow.panel import REVIEW_ROUNDS, revision_request
+                    try:
+                        summary, verdict, finding, blockers, notes, findings = await self._review_reply(session, task, content)
+                    except BaseException:
+                        if held:
+                            await asyncio.shield(self._bus.publish(held.pop().model_copy(
+                                update={"content": _clean_summary(_format_completion_summary(session, content))})))
+                        raise
+                    if verdict == "blocked" and session.review_rounds < REVIEW_ROUNDS:
+                        session.review_rounds += 1
+                        last = session.review_rounds == REVIEW_ROUNDS
+                        self.reply_panel.say_revising(blockers, last)
+                        if held:
+                            held.pop()
+                        session.push(harness_message(revision_request(summary, findings, last), "critic_findings"))
+                        continue
+                if held:
+                    await asyncio.shield(self._bus.publish(held.pop().model_copy(update={"content": summary})))
                 await self._bus.publish(TaskComplete(
                     agent_id=session.agent_id,
                     session_id=session.session_id,
@@ -3240,83 +3246,39 @@ class AgentLoop:
         while held:
             await self._bus.publish(held.pop())
 
-    async def _review_reply(
-        self, session: Session, task: str, content: str | None, held: "list[Action]",
-    ) -> tuple[str, str | None, str, int, int]:
-        """The reply panel's judgment of a draft the turn's tool calls shaped: (the summary to deliver, the verdict, the finding); a draft written with no tool call goes as it is."""
+    async def _review_reply(self, session: Session, task: str, content: str | None) -> tuple[str, str | None, str, int, int, tuple]:
+        """The reply panel's judgment of a draft the turn's tool calls shaped: (the summary to deliver, the verdict, the finding, blockers, notes, the findings); a draft written with no tool call goes as it is."""
         from localharness.orchestrator.task_flow.panel import PanelInputs, finding_text, reply_brief, sense, typed_turns
         from localharness.orchestrator.task_flow.record import Unit
         panel = self.reply_panel
-        draft = _clean_summary(_format_completion_summary(session, content))
-        kept = _Revision(draft)
-        summary = draft
-
-        async def revise(shown: str, findings: tuple) -> str | None:
-            return await self._revise_reply(session, kept, shown, findings)
-
+        summary = _clean_summary(_format_completion_summary(session, content))
         started = time.monotonic()
         try:
             try:
                 calls, written, handles = self._turn_evidence(session)
                 if not calls:
-                    return summary, None, "", 0, 0
+                    return summary, None, "", 0, 0, ()
                 inputs = PanelInputs(
-                    brief=reply_brief(task, written, handles), draft=draft, turns=tuple(typed_turns(session.messages)),
+                    brief=reply_brief(task, written, handles), draft=summary, turns=tuple(typed_turns(session.messages)),
                     handles=tuple(handles), critics=sense(calls, panel.jtbd_stood, panel.limits),
                 )
-                result = await panel.run(Unit("reply", "panel"), inputs, revise if content and not _is_confirmation(content) else None)
-                verdict, finding, delivered = result.verdict, result.finding, result.draft
+                result = await panel.run(Unit("reply", "panel"), inputs)
+                verdict, finding, findings = result.verdict, result.finding, result.findings
                 blockers, notes = result.blockers, len(result.findings) - result.blockers
                 if verdict == "unreviewed":
-                    finding = kept.reason or next((finding_text(f) for f in result.findings if f.tag == "NOTE"), "")
+                    finding = next((finding_text(f) for f in result.findings if f.tag == "NOTE"), "")
             except asyncio.CancelledError:
                 if not self._person_stop:
                     raise
                 self._person_stop = False
                 asyncio.current_task().uncancel()
-                verdict, finding, delivered, blockers, notes = "unreviewed", "", kept.draft, 0, 0
+                verdict, finding, blockers, notes, findings = "unreviewed", "", 0, 0, ()
             except Exception:  # noqa: BLE001 - a panel that breaks delivers the draft unreviewed
                 log.warning("the reply panel failed", exc_info=True)
-                verdict, finding, delivered, blockers, notes = "unreviewed", _PANEL_FAILED, kept.draft, 0, 0
-            summary = _clean_summary(delivered)
+                verdict, finding, blockers, notes, findings = "unreviewed", _PANEL_FAILED, 0, 0, ()
         finally:
             self.exclude(time.monotonic() - started)
-            if held:
-                action = held.pop()
-                update: dict[str, Any] = {"content": summary}
-                if kept.prompt or kept.completion:
-                    update["prompt_tokens"] = (action.prompt_tokens or 0) + kept.prompt
-                    update["completion_tokens"] = (action.completion_tokens or 0) + kept.completion
-                await asyncio.shield(self._bus.publish(action.model_copy(update=update)))
-        return summary, verdict, finding, blockers, notes
-
-    async def _revise_reply(self, session: Session, kept: "_Revision", draft: str, findings: tuple) -> str | None:
-        """One tool-less, no-retry rewrite of the last assistant message; None, with the reason kept, when it cannot help."""
-        from localharness.orchestrator.task_flow.panel import revision_block
-        from localharness.provider.fn_call import strip_thinking_tags
-        note = "\n\n".join(part for part in (self._current_note(), revision_block(draft, findings)) if part)
-        try:
-            request, _ = await self._pack_request(session.messages[:-1], None, note, compact=False)
-            with self._generating():
-                response, usage = await self._llm.stream_complete(request, tools=None, on_token=None)
-        except ActiveReferenceOverflow:
-            kept.reason = _REVISION_NO_FIT
-            return None
-        except Exception:  # noqa: BLE001 - a failed revision delivers the draft unreviewed
-            log.warning("the reply revision failed", exc_info=True)
-            kept.reason = _REVISION_FAILED
-            return None
-        if usage is not None:
-            kept.prompt += getattr(usage, "prompt_tokens", 0) or 0
-            kept.completion += getattr(usage, "completion_tokens", 0) or 0
-            session.input_tokens += getattr(usage, "prompt_tokens", 0) or 0
-            session.output_tokens += getattr(usage, "completion_tokens", 0) or 0
-        text = strip_thinking_tags(getattr(response, "content", None) or "").strip()
-        if not _clean_summary(text):
-            kept.reason = _REVISION_EMPTY
-            return None
-        session.messages[-1]["content"] = kept.draft = text
-        return text
+        return summary, verdict, finding, blockers, notes, findings
 
     async def _build_request(self, messages: list[Message], tools: list | None):
         note = self._current_note()

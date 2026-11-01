@@ -13,6 +13,7 @@ TAKES = {"new": "doc", "plan": "doc", "research": "question"}
 TAKEN_BY = {"doc": "new and plan", "question": "research"}
 DESCRIPTION = "\n".join([
     f"Each call runs one unit of the open task and names the next; only the person opens a task. A doc is at most {Caps.DOC} bytes.",
+    "Files the task produces go under the scratch folder your note names, or the project; the task folder is not yours to write.",
     *(f"{stage}: reads {', '.join(STAGES[BOUNDARY[stage]].reads)}, writes {', '.join(STAGES[BOUNDARY[stage]].writes)}; "
       f"takes {TAKES.get(stage, 'nothing')}" for stage in TOOL_STAGES),
 ])

@@ -1110,14 +1110,14 @@ REPLY_PANEL_NEEDLES = (
     "the same class as the laundered influence above",
     "the first blocking finding reaches a paired phone's lock screen as the push body",
     "cut to 120 characters and encrypted to the device",
-    "one generation with no tools offered, no retry and no compaction",
-    "is delivered as text and never run",
+    f"goes back to the root with its tools for up to {('', 'one', 'two', 'three', 'four')[_source_constant(_PANEL, 'REVIEW_ROUNDS')]} rounds",
+    "the last round is announced and its answer is delivered whatever the critics say",
     "for which the closing sentence is the only bound",
     "The first blocking finding is carried as `TaskComplete.finding`")
 
 
 def check_reply_panel_doc(security_text: str) -> list[str]:
-    """SECURITY.md's prompt-injection section says a clean panel is no security signal, names the fenced findings paths with the shipped fence, `TaskComplete.finding` and the tool-less revision."""
+    """SECURITY.md's prompt-injection section says a clean panel is no security signal, names the fenced findings paths with the shipped fence, `TaskComplete.finding` and the rounds."""
     body = " ".join((section(security_text, "## Threat model: prompt injection") or "").split())
     return [f"SECURITY.md's prompt-injection section does not say {n}" for n in REPLY_PANEL_NEEDLES if n not in body]
 

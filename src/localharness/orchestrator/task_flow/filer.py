@@ -30,8 +30,8 @@ _NAMEABLE = re.compile(r"(decisions|research|plan|step-([1-9][0-9]*)|review)\.md
 _RANK = {"decisions": 0, "research": 1, "plan": 2, "review": 4}
 _ATTEMPTS = 8
 OLD_RECORD = "task.json"
-PLAN_SHAPE = ("plan.md needs `## Step N` headings numbered 1..n in order, each with `files:`, `depends_on:` "
-              "(earlier steps only, or none) and `done:` lines")
+PLAN_SHAPE = ("plan.md needs `## Step N` headings numbered 1..n in order, each with `files:` (under the task's scratch folder "
+              "or the project, never the task folder), `depends_on:` (earlier steps only, or none) and `done:` lines")
 NO_REVIEW = "no review yet"
 _HEADING = re.compile(r"## Step ([1-9][0-9]*)(?:[:\s].*)?")
 _FIELD = re.compile(r"(?:[-*] )?(files|depends_on|done):(.*)")
@@ -406,6 +406,10 @@ class Docs:
 
     def path(self, task: int, name: str) -> Path:
         return self.state_dir / "agents" / self.agent / "tasks" / f"t{task}" / name
+
+    def scratch(self, task: int) -> Path:
+        """Where a task's own output files go: the agent may write here, never in the task folder."""
+        return self.state_dir / "scratchpad" / self.agent / f"t{task}"
 
     def append_section(self, task: int, doc: str, section: str) -> str:
         if not _REVIEW_DOC.fullmatch(doc):
