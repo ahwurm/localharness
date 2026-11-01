@@ -354,6 +354,7 @@ class Panel:
         self.stop = ""
         self.announce: Callable[[str], Awaitable[None]] | None = None
         self.emit: Callable[[str, str, tuple, str], None] | None = None
+        self.round = 1
 
     def _tail(self) -> str:
         if not self._reply:
@@ -479,13 +480,13 @@ class Panel:
         if job and self.emit and unit.boundary == "reply" and inputs.turns:
             tail = f"turn {inputs.turns[-1][0]}"
             try:
-                self.emit("job", f"now: {job[:Caps.LINE - len(f'◆ job now:  · {tail}')]}", (), tail)
+                self.emit("job", f"now: {job.lstrip('# ')[:Caps.LINE - len(f'◆ job now:  · {tail}')]}", (), tail)
             except Exception:
                 log.warning("the job line failed", exc_info=True)
         verdict = verdict or run.verdict
         if self.docs and unit.boundary == "reply":
             with suppress(Refused, OSError):
-                self.docs.write_session("reply-review.md", render_section(used + 1, run.findings, verdict, run.blockers) + "\n")
+                self.docs.write_session("reply-review.md", render_section(self.round, run.findings, verdict, run.blockers) + "\n")
         first = next((f for f in run.findings if f.tag == "BLOCKER"), None)
         return PanelResult(verdict, run.findings, run.blockers, run.finished, draft,
                            finding_text(first) if first and verdict == "blocked" else "", job)

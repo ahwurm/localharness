@@ -160,7 +160,8 @@ def _blockers(flow: Any, boundary: str, step: int | None = None) -> int:
 
 def _head(flow: Any, stem: str) -> str:
     """The doc's verdict header: `plan.md · blocked, 2 blockers`."""
-    row, step = flow.record.filed[_key_of(stem)], _STEP.fullmatch(stem)
+    filed, step = flow.record.filed, _STEP.fullmatch(stem)
+    row = filed.get(_key_of(stem)) or filed[(f"{stem}.md", None)]
     boundary = "step" if step else {"decisions": "new", "research": "research"}.get(stem, "plan")
     verdict = row.verdict or "unreviewed"
     count = _put(", <n> blockers", {"n": _blockers(flow, boundary, step and int(step[1]))}) if verdict == "blocked" else ""
