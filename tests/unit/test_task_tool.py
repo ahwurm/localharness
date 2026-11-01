@@ -157,8 +157,9 @@ async def test_unknown_argument_is_refused(tmp_path):
 def test_description_is_one_line_per_stage_in_tool_stage_order_the_same_every_call(tmp_path):
     tool = TaskTool(make_flow(tmp_path)[0])
     text = tool.info().description
-    head, *lines = text.splitlines()
+    head, where, *lines = text.splitlines()
     assert str(Caps.DOC) in head and "one unit" in head and "next" in head
+    assert "scratch folder" in where and "not yours to write" in where
     assert [line.split(":")[0] for line in lines] == list(TOOL_STAGES)
     for line in lines:
         row = STAGES[next(b for b, r in STAGES.items() if r.stage == line.split(":")[0])]

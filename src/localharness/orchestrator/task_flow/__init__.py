@@ -1,5 +1,6 @@
 """The task flow: a table-driven pipeline of fresh children run one unit per call."""
 from __future__ import annotations
+from contextlib import suppress
 
 from typing import Any, Awaitable, Callable, Iterable
 
@@ -35,6 +36,8 @@ class TaskFlow:
     def open(self, objective: str, turn: int) -> Record:
         self.record = open_task(self.docs.new_task(), objective, turn)
         set_stage(self.record, "opened")
+        with suppress(OSError):
+            self.docs.scratch(self.record.id).mkdir(parents=True, exist_ok=True, mode=0o700)
         return self.record
 
     async def run(self, boundary: str, carried: str | None = None, by: str = "model") -> str:

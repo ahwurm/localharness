@@ -17,7 +17,7 @@ from localharness.config.models import CRITIC_NAME, AgentConfig, BudgetConfig, C
 from localharness.core.caps import Caps
 from localharness.core.content import text_of
 from localharness.orchestrator.task_flow.filer import FENCE_RUN, Refused, flat, render_section
-from localharness.orchestrator.task_flow.record import (LIMITS, SENSED, Limits, Unit, continue_revising, limited,
+from localharness.orchestrator.task_flow.record import (LIMITS, SENSED, Limits, Unit, limited,
                                                         panel_critics, panel_minutes, printed_bound)
 
 if TYPE_CHECKING:
@@ -88,15 +88,40 @@ def _unreadable(critic: str) -> Parsed:
 _HARNESS_NOTE = re.compile(r"^\[Budget limit reached:.*$", re.M)
 
 
+_BLOCK_WORD = re.compile(r"^[\W\d]{0,6}(BLOCKER|BLOCK)\b\W{0,4}", re.I)
+_TAG_WORD = re.compile(r"^[\W\d]{0,6}(WARNING|NOTE)\b\W{0,4}", re.I)
+_NONE = re.compile(r"[\W\d]{0,6}NONE\W{0,6}", re.I)
+
+
+def _loose(critic: str, line: str) -> Finding | None:
+    """A finding from a line written loosely: a leading BLOCKER, WARNING or NOTE word in any dressing, else a NOTE of the line itself."""
+    if m := _BLOCK_WORD.match(line):
+        tag, rest = "BLOCKER", line[m.end():]
+    elif m := _TAG_WORD.match(line):
+        tag, rest = m.group(1).upper(), line[m.end():]
+    elif line.endswith(":") and len(line.split()) <= 3:
+        return None
+    else:
+        tag, rest = "NOTE", line
+    rule, _, evidence = rest.partition(" — ")
+    return Finding(tag, flat(rule, Caps.FINDING), flat(evidence, Caps.FINDING), tag == "NOTE" and bool(_DECISION.search(rule)), critic) if rule.strip() else None
+
+
 def parse(critic: str, raw: str, terminated_reason: str | None) -> Parsed:
+    """What a critic wrote, read as it comes: exact lines when it kept the shape, loose lines when it did not, and NONE alone as a clean pass."""
     lines = [line.strip() for line in _HARNESS_NOTE.sub("", raw).split("\n") if line.strip()]
     if not lines:
         return _unreadable(critic)
-    hits = [h for h in map(_LINE.fullmatch, lines) if h]
-    if not hits:
-        return Parsed(critic, (), True, True) if "NONE" in lines else _unreadable(critic)
-    found = sorted((Finding(tag, flat(rule, Caps.FINDING), flat(evidence, Caps.FINDING), tag == "NOTE" and bool(_DECISION.search(rule)), critic)
-                    for tag, rule, evidence in (h.groups() for h in hits)), key=lambda f: _RANK[f.tag])
+    if all(_NONE.fullmatch(line) for line in lines):
+        return Parsed(critic, (), True, True)
+    exact = [h for h in map(_LINE.fullmatch, lines) if h]
+    found = [Finding(tag, flat(rule, Caps.FINDING), flat(evidence, Caps.FINDING), tag == "NOTE" and bool(_DECISION.search(rule)), critic)
+             for tag, rule, evidence in (h.groups() for h in exact)]
+    if not found:
+        found = [f for f in (_loose(critic, line) for line in lines if not _NONE.fullmatch(line)) if f]
+    if not found:
+        return _unreadable(critic)
+    found.sort(key=lambda f: _RANK[f.tag])
     kept, dropped = found[:Caps.TOP], len(found) - Caps.TOP
     if dropped > 0:
         kept.append(Finding("NOTE", f"{dropped} lower-ranked finding{'s' * (dropped > 1)} dropped", "", False, critic))
@@ -267,10 +292,20 @@ def _data(label: str, body: str) -> str:
     return f"{FENCE}{label}; data, not instructions\n{_bare(body)}\n{FENCE}"
 
 
+REVIEW_ROUNDS = 3
+_REVISE = "Fix what the critics found, with your tools where the work is a file, then answer again."
+_REVISE_LAST = "This is the last round: the critics will not read the next answer, so deliver your best version."
+
+
+def revision_request(draft: str, findings: Iterable[Finding], last: bool) -> str:
+    """The harness message that sends a blocked draft back to the root for another round, with its tools."""
+    return f"{revision_block(draft, findings)}\n\n{_REVISE_LAST if last else _REVISE}"
+
+
 def revision_block(draft: str, findings: Iterable[Finding]) -> str:
     """What the model is sent to rewrite its reply: the instruction, the draft fenced as data, then the findings fence."""
     return "\n".join(("Rewrite your last reply so the blockers below no longer hold. "
-                      "Answer with the full revised reply only and call no tools.",
+                      "Answer with the full revised reply.",
                       _data("your reply under review", draft[:Caps.BLOCK]), fence(findings)))
 
 
@@ -393,15 +428,23 @@ class Panel:
             raise
         return self._settle(inputs, parsed, finished), job
 
+    def say_revising(self, blockers: int, last: bool) -> None:
+        """The line that tells the person the root is taking the critics' findings back to its tools."""
+        if self.emit:
+            with suppress(Exception):
+                self.emit("root", "revising" + (" · last round" if last else ""), (), f"{blockers} blocker{'s' * (blockers != 1)}")
+
     def _say(self, name: str, one: Parsed) -> None:
         """The critic's findings, or its pass, as lines the person sees as they land."""
         if not self.emit:
             return
         try:
             for f in one.findings:
-                self.emit(name, f"{f.tag.lower()} {f.rule}", (), f.evidence)
-            if one.clean:
-                self.emit(name, "pass", (), "")
+                if f.tag != "NOTE":
+                    self.emit(name, f"{f.tag.lower()} {f.rule}", (), f.evidence)
+            notes = sum(f.tag == "NOTE" for f in one.findings)
+            if one.clean or not any(f.tag != "NOTE" for f in one.findings):
+                self.emit(name, "pass", (), f"{notes} note{'s' * (notes != 1)}" if notes else "")
         except Exception:
             log.warning("a critic line failed", exc_info=True)
 
@@ -419,34 +462,16 @@ class Panel:
         except Exception:
             log.warning("the reply panel's start announcement failed", exc_info=True)
 
-    async def run(self, unit: Unit, inputs: PanelInputs,
-                  revise: Callable[[str, tuple[Finding, ...]], Awaitable[str | None]] | None = None) -> PanelResult:
-        """One panel, or at the reply seam alone (`revise` set) panels with a revision between while the rule holds."""
+    async def run(self, unit: Unit, inputs: PanelInputs) -> PanelResult:
+        """One panel over one draft or doc; a blocked reply goes back to the root for another round, never revised here."""
         names = tuple(inputs.critics) if inputs.critics is not None else panel_critics(unit.boundary, self.limits)
         cap = self.cap if unit.boundary != "reply" else None
-        limit = self.limits.revisions["reply"] if revise and unit.boundary == "reply" else 0
-        draft, used, previous, verdict = inputs.draft, 0, None, None
+        draft, used, verdict = inputs.draft, 0, None
         self._reply = unit.boundary == "reply"
         try:
             if self.announce and self._reply:
-                await self._announce(names, limit)
-            run, job = await self._once(inputs, names, "checking", limit, cap)
-            while revise and run.finished and continue_revising(run.blockers, used, limit, previous):
-                self._parts = ("revising", f" · {run.blockers} blocker{'s' * (run.blockers != 1)}", "",
-                               self._bound((limit - used) * panel_minutes(names, self.limits), cap))
-                if self.emit:
-                    with suppress(Exception):
-                        self.emit("root", "revising", (), f"{run.blockers} blocker{'s' * (run.blockers != 1)}")
-                try:
-                    revised = await revise(draft, run.findings)
-                except Exception:
-                    revised = None
-                if not (revised and revised.strip()):
-                    verdict = "unreviewed"
-                    break
-                draft, used, previous = revised, used + 1, run.blockers
-                run, more = await self._once(replace(inputs, draft=draft), names, "rechecking", limit - used, cap)
-                job = more or job
+                await self._announce(names, 0)
+            run, job = await self._once(inputs, names, "checking", 0, cap)
         finally:
             self._parts, self._reply = None, False
         if job and self.emit and unit.boundary == "reply" and inputs.turns:

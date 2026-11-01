@@ -1,4 +1,4 @@
-"""The reply panel at the loop's acceptance seam: the seam, the verdict, the revision, publishing, the cancel."""
+"""The reply panel at the loop's acceptance seam: the seam, the verdict, the rounds, publishing, the cancel."""
 from __future__ import annotations
 
 import asyncio
@@ -15,7 +15,7 @@ from localharness.channels.base import ChannelAdapter
 from localharness.config.models import AgentConfig
 from localharness.core.caps import Caps
 from localharness.core.events import Action, TaskComplete
-from localharness.orchestrator.task_flow.panel import FENCE_CLOSE, FENCE_LABEL, Panel, PanelInputs
+from localharness.orchestrator.task_flow.panel import FENCE_CLOSE, FENCE_LABEL, REVIEW_ROUNDS, Panel, PanelInputs
 from localharness.cli.repl import OrchestratorREPL
 from localharness.orchestrator.task_flow.record import Unit, limited
 from tests.unit.test_subagent_children import FakeLoop, config_child, make_runner
@@ -200,20 +200,20 @@ async def test_the_panel_is_given_the_cleaned_draft_the_person_receives(bus):
     assert seen == ["Hello there."] and summary == "Hello there."
 
 
-async def test_a_sentinel_completions_draft_is_the_turns_last_answer_and_runs_without_revise(bus):
+async def test_a_sentinel_completions_draft_is_the_turns_last_answer(bus):
     panel = panel_of()
     seen = []
     real = panel.run
 
-    async def spy(unit, inputs, revise=None):
-        seen.append((inputs, revise))
-        return await real(unit, inputs, revise)
+    async def spy(unit, inputs):
+        seen.append(inputs)
+        return await real(unit, inputs)
 
     panel.run = spy
     llm, session, summary = await sentinel_turn(bus, panel)
     assert summary == "The answer is 42."
-    (inputs, revise), = seen
-    assert inputs.draft == "The answer is 42." and revise is None
+    (inputs,) = seen
+    assert inputs.draft == "The answer is 42."
     assert events(bus, TaskComplete)[0].verdict == "pass"
 
 
@@ -280,77 +280,58 @@ async def test_a_config_child_and_an_explore_child_get_no_reply_panel(loops):
     assert all(loop.kw.get("reply_panel") is None for loop in loops)
 
 
-def note_messages(messages):
-    return [m for m in messages if isinstance(m.get("_lh"), dict) and m["_lh"].get("subtype") == "request_note"]
-
-
 def blocked_then(*after, llm_replies=("Draft reply.", "Fixed reply.")):
     return panel_of({"answer": [answered(BLOCKER), *after]}), Llm(llm_replies)
 
 
-async def test_revision_is_one_tool_less_request_with_the_fenced_block_in_place_of_the_draft(bus):
-    panel, llm = blocked_then(NONE)
-    session, summary = await turn(loop_of(llm, bus, panel))
-    first, revision = llm.requests
-    assert revision["tools"] is None and revision["on_token"] is None
-    assert len(llm.requests) == 2
-    (note,) = note_messages(revision["messages"])
-    assert revision["messages"][-1] is note
-    assert FENCE_LABEL in note["content"] and "Draft reply." in note["content"]
-    assert note["content"].rstrip().endswith(FENCE_CLOSE) and "README.md:41" in note["content"]
-    assert not any(m["role"] == "assistant" and "Draft reply." in str(m["content"]) for m in revision["messages"][:-1])
-    assert (session.messages[-1]["role"], session.messages[-1]["content"]) == ("assistant", "Fixed reply.")
+def findings_messages(messages):
+    return [m for m in messages if isinstance(m.get("_lh"), dict) and m["_lh"].get("subtype") == "critic_findings"]
+
+
+def said_by_root(panel):
+    lines = []
+    panel.emit = lambda name, verdict, details, count: lines.append((verdict, count)) if name == "root" else None
+    return lines
+
+
+async def test_a_blocked_reply_goes_back_to_the_root_with_its_tools_and_the_findings_as_quoted_data(bus):
+    llm = Streaming([gen("Looking.", call=True), gen("Draft reply."), gen("Fixed reply.")])
+    panel = panel_of({"answer": [answered(BLOCKER), NONE]})
+    session, summary = await turn(loop_of(llm, bus, panel, await glob_registry(), evidence=None))
+    assert len(llm.requests) == 3 and llm.requests[-1]["tools"]
+    (found,) = findings_messages(session.messages)
+    assert found["role"] == "user" and found["content"].rstrip().endswith("then answer again.")
+    assert FENCE_LABEL in found["content"] and FENCE_CLOSE in found["content"]
+    assert "Draft reply." in found["content"] and "README.md:41" in found["content"]
+    assert [m["content"] for m in session.messages if m["role"] == "assistant"][-2:] == ["Draft reply.", "Fixed reply."]
+    assert session.messages.index(found) == len(session.messages) - 2
     (done,) = events(bus, TaskComplete)
-    assert (done.verdict, done.finding, summary) == ("pass", "", "Fixed reply.")
-    assert done.summary == "Fixed reply."
+    assert (done.verdict, done.finding, done.summary, summary) == ("pass", "", "Fixed reply.", "Fixed reply.")
+    assert session.review_rounds == 1
 
 
-async def test_revision_block_is_cleared_when_the_attempt_returns(bus):
-    panel, llm = blocked_then(NONE, llm_replies=("Draft reply.", "Fixed reply.", "Next reply."))
-    loop = loop_of(llm, bus, panel)
-    session, _ = await turn(loop)
-    assert note_messages(session.messages) == []
-    assert not any(FENCE_CLOSE in str(m.get("content")) for m in session.messages)
-    await loop._execute_loop(session, "and again", None, subtype="typed")
-    assert note_messages(llm.requests[-1]["messages"]) == []
-    assert "Fixed reply." in str(llm.requests[-1]["messages"])
+async def test_the_third_round_is_announced_as_the_last_and_its_answer_is_delivered_whatever_the_verdict(bus):
+    panel = panel_of({"answer": [answered(BLOCKER)]})
+    spoken = said_by_root(panel)
+    llm = Streaming([gen("Looking.", call=True), *(gen(f"Reply {n}.") for n in range(1, REVIEW_ROUNDS + 2))])
+    session, summary = await turn(loop_of(llm, bus, panel, await glob_registry(), evidence=None))
+    assert len(llm.requests) == REVIEW_ROUNDS + 2 and panel.calls.count("answer") == REVIEW_ROUNDS + 1
+    assert session.review_rounds == REVIEW_ROUNDS
+    assert ["This is the last round" in m["content"] for m in findings_messages(session.messages)] == [False, False, True]
+    assert spoken == [("revising", "1 blocker")] * 2 + [("revising · last round", "1 blocker")]
+    (done,) = events(bus, TaskComplete)
+    assert (done.verdict, done.summary, summary) == ("blocked", "Reply 4.", "Reply 4.")
+    assert [a.content for a in tool_less(bus)] == ["Reply 4."]
 
 
-class Stub:
-    def __init__(self):
-        self.llm_runs = 0
-
-    async def run_deterministic(self, messages, budget):
-        return messages, False
-
-    async def run_llm(self, messages, budget):
-        self.llm_runs += 1
-        return messages, False
-
-
-async def test_revision_runs_no_summary_compaction_on_a_session_over_the_trigger(bus):
-    stub = Stub()
-    panel, llm = blocked_then(NONE)
-    loop = loop_of(llm, bus, panel, context=ContextManager(max_context_tokens=1400, pipeline=stub))
-    session, summary = await turn(loop, task="word " * 700)
-    assert stub.llm_runs == 1 and summary == "Fixed reply." and len(llm.requests) == 2
-
-
-async def test_revision_that_does_not_fit_the_window_is_never_sent(bus):
-    panel, llm = blocked_then(NONE)
-    loop = loop_of(llm, bus, panel)
-    real = loop._pack_request
-
-    async def refusing(messages, tools, note, *, compact=True):
-        if not compact:
-            raise ActiveReferenceOverflow("no room")
-        return await real(messages, tools, note)
-
-    loop._pack_request = refusing
-    session, summary = await turn(loop)
-    assert len(llm.requests) == 1 and summary == "Draft reply."
-    assert session.messages[-1]["content"] == "Draft reply."
-    assert events(bus, TaskComplete)[0].verdict == "unreviewed"
+@pytest.mark.parametrize("answers, verdict", [({}, "pass"), ({"answer": [answered("")]}, "unreviewed")])
+async def test_a_pass_or_an_unreviewed_verdict_delivers_at_once_with_no_round(bus, answers, verdict):
+    llm = Llm(["Hello there."])
+    session, summary = await turn(loop_of(llm, bus, panel_of(answers)))
+    assert summary == "Hello there." and len(llm.requests) == 1 and session.review_rounds == 0
+    assert findings_messages(session.messages) == []
+    assert events(bus, TaskComplete)[0].verdict == verdict
+    assert [a.content for a in tool_less(bus)] == ["Hello there."]
 
 
 def test_revision_without_compaction_raises_where_the_floor_would_truncate():
@@ -360,44 +341,6 @@ def test_revision_without_compaction_raises_where_the_floor_would_truncate():
         asyncio.run(cm.build_messages(big, None, compact=False))
     packed, _ = asyncio.run(cm.build_messages(big, None))
     assert packed
-
-
-@pytest.mark.parametrize("second", ["  \n ", RuntimeError("boom")], ids=["whitespace", "raises"])
-async def test_revision_that_comes_back_empty_or_raises_delivers_the_draft_unreviewed(bus, second):
-    panel, llm = blocked_then(llm_replies=("Draft reply.", second))
-    session, summary = await turn(loop_of(llm, bus, panel))
-    assert len(llm.requests) == 2 and summary == "Draft reply."
-    assert session.messages[-1]["content"] == "Draft reply."
-    assert events(bus, TaskComplete)[0].verdict == "unreviewed"
-
-
-async def test_revision_in_xml_mode_is_delivered_as_prose_and_never_run(bus):
-    panel, llm = blocked_then(NONE, llm_replies=(
-        "Draft reply.", 'Revised. <tool_call>{"name": "glob", "arguments": {"pattern": "*"}}</tool_call>'))
-    llm.config.tool_call_mode = "xml"
-    session, summary = await turn(loop_of(llm, bus, panel))
-    assert summary == "Revised." and len(llm.requests) == 2
-    assert llm.requests[-1]["tools"] is None
-    assert [a for a in events(bus, Action) if a.action_type == "tool_call"] == []
-    assert events(bus, TaskComplete)[0].verdict == "pass"
-
-
-async def test_revision_then_a_second_blocker_delivers_the_revised_reply_blocked(bus):
-    panel, llm = blocked_then(answered(BLOCKER))
-    _, summary = await turn(loop_of(llm, bus, panel))
-    (done,) = events(bus, TaskComplete)
-    assert summary == "Fixed reply." and done.verdict == "blocked"
-    assert done.finding == "the reply cites a real line — README.md:41 does not say that"
-    assert len(llm.requests) == 2
-
-
-async def test_revision_note_joins_the_providers_note_before_the_block(bus):
-    panel, llm = blocked_then(NONE)
-    loop = loop_of(llm, bus, panel)
-    loop._request_note = lambda: "provider note"
-    await turn(loop)
-    (note,) = note_messages(llm.requests[1]["messages"])
-    assert note["content"].startswith("provider note") and FENCE_LABEL in note["content"]
 
 
 def tool_less(bus):
@@ -417,12 +360,12 @@ async def test_action_a_draft_rejected_by_the_baton_gate_is_published_at_its_exi
     assert order == sorted(order)
 
 
-async def test_action_the_delivered_reply_is_published_once_after_the_verdict_with_the_revisions_usage_folded_in(bus):
+async def test_action_a_blocked_draft_is_dropped_and_the_delivered_reply_is_published_once_after_the_verdict(bus):
     panel, llm = blocked_then(NONE, llm_replies=(("Draft reply.", (100, 10)), ("Fixed reply.", (40, 5))))
     loop = loop_of(llm, bus, panel)
     session, _ = await turn(loop)
     (action,) = tool_less(bus)
-    assert (action.content, action.prompt_tokens, action.completion_tokens) == ("Fixed reply.", 140, 15)
+    assert (action.content, action.prompt_tokens, action.completion_tokens) == ("Fixed reply.", 40, 5)
     (done,) = events(bus, TaskComplete)
     assert action.seq < done.seq and done.verdict == "pass"
     assert session.input_tokens >= 140
@@ -533,7 +476,7 @@ async def test_cancel_during_a_critic_prints_no_turn_cancelled_and_acp_answers_e
     assert chan.sent == []
 
 
-async def test_cancel_during_the_recheck_after_a_revision_delivers_the_revised_reply(bus):
+async def test_cancel_during_the_review_of_the_second_answer_delivers_it_unreviewed(bus):
     gate = Gate(blocks_on=3, first=answered(BLOCKER))
     task, loop, llm = await cancelled_during_a_critic(bus, gate, ("Draft reply.", "Fixed reply."))
     session, summary = await task
@@ -599,20 +542,10 @@ async def test_an_exception_before_the_panel_starts_still_publishes_the_held_act
 
 
 async def test_the_panel_that_cannot_finish_says_why_with_the_first_note(bus):
-    panel = panel_of({"answer": [answered("this is not findings")]})
+    panel = panel_of({"answer": [answered("")]})
     await turn(loop_of(Llm(["Hello there."]), bus, panel))
     (done,) = events(bus, TaskComplete)
     assert done.verdict == "unreviewed" and done.finding == "critic answer returned nothing readable"
-
-
-async def test_a_failed_revision_says_why_in_the_finding(bus):
-    panel, llm = blocked_then(llm_replies=("Draft reply.", RuntimeError("boom")))
-    await turn(loop_of(llm, bus, panel))
-    assert events(bus, TaskComplete)[0].finding == "the revision failed"
-    panel, llm = blocked_then(llm_replies=("Draft reply.", "  "))
-    other = type(bus)()
-    await turn(loop_of(llm, other, panel))
-    assert events(other, TaskComplete)[0].finding == "the revision came back empty"
 
 
 async def test_an_exception_escaping_the_panel_delivers_the_draft_unreviewed(bus):
