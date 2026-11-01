@@ -3758,7 +3758,7 @@ async def test_wake_names_the_highest_unfinished_folder_by_integer_after_the_res
 
 
 @pytest.mark.parametrize("docs", (None, {"plan.md": "p", "review.md": "x\nverdict: pass\n"}), ids=("no folder", "finished"))
-async def test_wake_prints_the_resumed_line_when_no_folder_is_unfinished(tmp_path, monkeypatch, docs):
+async def test_wake_prints_the_resumed_line_and_names_a_folder_on_disk_finished_or_not(tmp_path, monkeypatch, docs):
     from localharness.cli import start_cmd
     from localharness.cli.session_resume import SLEEP_ACTION
 
@@ -3768,7 +3768,7 @@ async def test_wake_prints_the_resumed_line_when_no_folder_is_unfinished(tmp_pat
         _planted(tmp_path, "t4", docs)
     await start_cmd._start_async(None, False, False, str(tmp_path), resume=_resume_of(SLEEP_ACTION))
     assert start_cmd.RESUMED_LINE.format(previous="old") in printed
-    assert not any("not carried over" in line for line in printed)
+    assert any("t4 on disk, not carried over" in line for line in printed) == bool(docs)
 
 
 async def test_the_restart_constructor_carries_the_flows_record_and_the_loops_turn(tmp_path, monkeypatch):
