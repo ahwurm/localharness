@@ -108,6 +108,6 @@ def test_bench_slice_holdout_lists_only_holdout_fixtures():
     )
     assert all(s.slice == "train" for s in train)
 
-    # --slice all is the no-op bypass: 35 fixtures total.
+    # --slice all is the no-op bypass: every fixture on disk.
     full = _filter_scenarios_by_slice(all_scens, "all")
-    assert len(full) == 35, f"expected 35 total fixtures, got {len(full)}"
+    assert len(full) == len(all_scens) == on_disk + len(holdout), f"expected {on_disk + len(holdout)} total fixtures, got {len(full)}"
