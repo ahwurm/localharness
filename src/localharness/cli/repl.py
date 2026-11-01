@@ -1800,9 +1800,15 @@ class OrchestratorREPL:
         if self._flow is None:
             await self._notice(render("no task", levers))
             return
-        reply = task_command(
-            self._flow, args, turn=getattr(self._agent, "turn", 0) + 1, running=self._turn_running(),
-            levers=levers, phone=getattr(self._channel, "channel_id", "") == "mobile")
+        try:
+            reply = task_command(
+                self._flow, args, turn=getattr(self._agent, "turn", 0) + 1, running=self._turn_running(),
+                levers=levers, phone=getattr(self._channel, "channel_id", "") == "mobile")
+        except Exception as exc:  # noqa: BLE001 - a verb that breaks must not end the session
+            from localharness.channels.base import notice, one_line
+            log.warning("/task %s failed", args, exc_info=True)
+            await self._notice(notice("task", "failed", (), one_line(str(exc))[:40]))
+            return
         await self._notice(*reply.lines)
         self._slash_followup = reply.turn
 

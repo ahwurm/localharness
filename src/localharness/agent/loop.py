@@ -2789,6 +2789,7 @@ class AgentLoop:
                 else:
                     from localharness.orchestrator.task_flow.panel import REVIEW_ROUNDS, revision_request
                     try:
+                        self.reply_panel.round = session.review_rounds + 1
                         summary, verdict, finding, blockers, notes, findings = await self._review_reply(session, task, content)
                     except BaseException:
                         if held:
@@ -3248,7 +3249,7 @@ class AgentLoop:
 
     async def _review_reply(self, session: Session, task: str, content: str | None) -> tuple[str, str | None, str, int, int, tuple]:
         """The reply panel's judgment of a draft the turn's tool calls shaped: (the summary to deliver, the verdict, the finding, blockers, notes, the findings); a draft written with no tool call goes as it is."""
-        from localharness.orchestrator.task_flow.panel import PanelInputs, finding_text, reply_brief, sense, typed_turns
+        from localharness.orchestrator.task_flow.panel import CLASSLESS_TOOLS, PanelInputs, finding_text, reply_brief, sense, typed_turns
         from localharness.orchestrator.task_flow.record import Unit
         panel = self.reply_panel
         summary = _clean_summary(_format_completion_summary(session, content))
@@ -3256,7 +3257,7 @@ class AgentLoop:
         try:
             try:
                 calls, written, handles = self._turn_evidence(session)
-                if not calls:
+                if all(name in CLASSLESS_TOOLS for name, _ in calls):
                     return summary, None, "", 0, 0, ()
                 inputs = PanelInputs(
                     brief=reply_brief(task, written, handles), draft=summary, turns=tuple(typed_turns(session.messages)),

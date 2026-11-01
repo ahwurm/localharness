@@ -82,11 +82,11 @@ async def glob_registry():
     return ToolRegistry.from_allowed(["glob"], base_registry=full)
 
 
-USED_A_TOOL = ([("task", None)], [], [])
+USED_A_TOOL = ([("glob", None)], [], [])
 
 
 def loop_of(llm, bus, panel=None, registry=None, evidence=USED_A_TOOL, context=None) -> AgentLoop:
-    """The loop under test; the turn reports `evidence` (a classless tool call by default) unless it is None, which reads the session."""
+    """The loop under test; the turn reports `evidence` (a read call by default) unless it is None, which reads the session."""
     loop = AgentLoop(
         config=AgentConfig.model_validate({"name": "reply-agent", "role": "Test agent."}),
         llm=llm, bus=bus, context_manager=context or ContextManager(), tool_registry=registry,
@@ -133,7 +133,7 @@ async def test_a_turn_that_used_a_tool_passes_the_panel_and_the_verdict_rides_ta
     loop = loop_of(Llm(["Hello there."]), bus, panel)
     session, summary = await turn(loop)
     assert summary == "Hello there."
-    assert panel.calls == ["answer", "jtbd"]
+    assert panel.calls == ["answer", "jtbd", "factual"]
     (done,) = events(bus, TaskComplete)
     assert (done.verdict, done.finding, done.stage, done.step) == ("pass", "", None, None)
     assert done.summary == "Hello there." and done.success
@@ -183,7 +183,7 @@ async def test_the_panel_judges_the_draft_the_person_would_receive(bus):
     (unit, inputs, _), = seen
     assert (unit.boundary, unit.kind) == ("reply", "panel")
     assert inputs.draft == "Hello there." and inputs.turns == ((0, "hello"),)
-    assert inputs.critics == ("answer", "jtbd") and "hello" in inputs.brief
+    assert inputs.critics == ("answer", "jtbd", "factual") and "hello" in inputs.brief
 
 
 async def test_the_panel_is_given_the_cleaned_draft_the_person_receives(bus):
@@ -477,7 +477,7 @@ async def test_cancel_during_a_critic_prints_no_turn_cancelled_and_acp_answers_e
 
 
 async def test_cancel_during_the_review_of_the_second_answer_delivers_it_unreviewed(bus):
-    gate = Gate(blocks_on=3, first=answered(BLOCKER))
+    gate = Gate(blocks_on=4, first=answered(BLOCKER))
     task, loop, llm = await cancelled_during_a_critic(bus, gate, ("Draft reply.", "Fixed reply."))
     session, summary = await task
     assert summary == "Fixed reply." and session.messages[-1]["content"] == "Fixed reply."
