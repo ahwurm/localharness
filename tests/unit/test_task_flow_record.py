@@ -62,7 +62,7 @@ from localharness.orchestrator.task_flow.record import (
 def test_stages_are_keyed_by_the_six_boundaries_with_eight_fields_each():
     assert list(STAGES) == list(BOUNDARIES) == ["reply", "new", "research", "plan", "step", "task"]
     assert all(len(row) == 8 for row in STAGES.values())
-    assert [row.revisions for row in STAGES.values()] == [1, 1, 0, 3, 1, 0]
+    assert [row.revisions for row in STAGES.values()] == [3, 1, 0, 3, 1, 0]
     assert [row.next for row in STAGES.values()] == [None, "plan", "plan", "step", "task", "done"]
 
 
@@ -102,10 +102,10 @@ def test_every_limit_row_orders_floor_default_ceiling():
     assert {"critic", "executor", "explorer", "additions", "flow_cap_minutes"} <= set(LIMITS)
 
 
-def test_revisions_limit_rows_derive_from_the_stage_table_with_the_reply_ceiling_one():
+def test_revisions_limit_rows_derive_from_the_stage_table_with_the_ceiling_two_past_the_default():
     rows = {k.removeprefix("revisions."): v for k, v in LIMITS.items() if k.startswith("revisions.")}
-    assert {b: r.ceiling for b, r in rows.items()} == {"reply": 1, "new": 3, "plan": 5, "step": 3}
-    assert all(r.floor == 0 and r.default == STAGES[b].revisions for b, r in rows.items())
+    assert set(rows) == {b for b, row in STAGES.items() if row.revisions}
+    assert all(r.floor == 0 and r.default == STAGES[b].revisions and r.ceiling == r.default + 2 for b, r in rows.items())
 
 
 def test_limit_budgets_are_the_shipped_numbers():
@@ -132,7 +132,7 @@ def test_bound_of_every_unit_at_the_defaults_is_computed_from_the_table():
     assert minutes("step", "execute", 1) == minutes("step", "revise", 1) == executor
     assert minutes("step", "panel", 1) == len(STAGES["step"].floor) * critic
     assert minutes("task", "panel") == len(STAGES["task"].floor) * critic
-    assert minutes("reply", "panel", sensed=("factual", "recency")) == (len(STAGES["reply"].floor) + 2) * 2 * critic
+    assert minutes("reply", "panel", sensed=("factual", "recency")) == (len(STAGES["reply"].floor) + 2) * (1 + STAGES["reply"].revisions) * critic
 
 
 def test_bound_of_a_three_step_task_sums_the_units_the_table_names():
@@ -165,7 +165,7 @@ def test_limited_without_a_config_or_with_every_field_unset_gives_the_defaults()
     for cfg in (None, unset):
         limits, notes = limited(cfg)
         assert notes == ()
-        assert limits.revisions == {"reply": 1, "new": 1, "plan": 3, "step": 1}
+        assert limits.revisions == {b: row.revisions for b, row in STAGES.items() if row.revisions}
         assert limits.flow_cap_minutes == 180
         assert limits.additions == {} and limits.critics == {}
 
@@ -183,8 +183,8 @@ def test_limited_raises_a_critic_budget_below_the_floor_and_cannot_lower_it():
 
 
 def test_limited_revisions_clamp_to_the_ceiling_and_drop_a_boundary_with_none():
-    limits, notes = limited(SimpleNamespace(revisions={"plan": 9, "reply": 3, "research": 1}))
-    assert limits.revisions["plan"] == 5 and limits.revisions["reply"] == 1
+    limits, notes = limited(SimpleNamespace(revisions={"plan": 9, "reply": 9, "research": 1}))
+    assert all(limits.revisions[b] == LIMITS[f"revisions.{b}"].ceiling for b in ("plan", "reply"))
     assert len(notes) == 3 and any("research" in n and "dropped" in n for n in notes)
 
 

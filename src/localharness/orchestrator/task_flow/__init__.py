@@ -6,7 +6,7 @@ from typing import Any, Awaitable, Callable, Iterable
 
 from localharness.orchestrator.task_flow.filer import Docs
 from localharness.orchestrator.task_flow.panel import FlowCap, Panel, critic_names
-from localharness.orchestrator.task_flow.record import Record, clear_turn, limited, open_task, set_stage
+from localharness.orchestrator.task_flow.record import Record, Row, clear_turn, limited, open_task, set_stage
 from localharness.orchestrator.task_flow.runner import root_note, run_unit
 
 __all__ = ["TaskFlow"]
@@ -39,6 +39,20 @@ class TaskFlow:
         with suppress(OSError):
             self.docs.scratch(self.record.id).mkdir(parents=True, exist_ok=True, mode=0o700)
         return self.record
+
+    def close(self, doc: str) -> str:
+        """The model closes a task it finished before any plan: the result is filed as review.md and the task ends done."""
+        record = self.record
+        if record is None:
+            return "no task is open"
+        if record.stage not in ("new", "research", "plan"):
+            return "a task past its plan ends through its steps"
+        if ("decisions.md", None) not in record.filed:
+            return "decisions.md must be filed first"
+        digest, _ = self.docs.write(record.id, "review.md", doc)
+        record.filed[("review.md", None)] = Row(digest, "pass")
+        set_stage(record, "task pass")
+        return f"t{record.id} done \u00b7 /task show review"
 
     async def run(self, boundary: str, carried: str | None = None, by: str = "model") -> str:
         return await run_unit(self, boundary, carried, by)

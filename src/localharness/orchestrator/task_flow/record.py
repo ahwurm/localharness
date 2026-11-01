@@ -25,7 +25,7 @@ class Stage(NamedTuple):
 
 
 STAGES: dict[str, Stage] = {
-    "reply": Stage(None, ("draft",), (), ("panel", "revise", "panel"), ("answer", "jtbd"), 1, "seam", None),
+    "reply": Stage(None, ("draft",), (), ("panel", "revise", "panel"), ("answer", "jtbd"), 3, "seam", None),
     "new": Stage("new", ("turns", "instructions"), ("decisions.md",), ("file", "panel"), ("jtbd",), 1, "person", "plan"),
     "research": Stage("research", ("decisions.md",), ("research.md",), ("explore", "panel"),
                       ("jtbd", "factual"), 0, "root", "plan"),
@@ -55,7 +55,7 @@ LIMITS: dict[str, Limit] = {
     "explorer": Limit(_FLOOR, ChildBudget(actions=12, minutes=6), ChildBudget(actions=24, minutes=10)),
     "additions": Limit(0, 0, 3),
     "flow_cap_minutes": Limit(1.0, 180.0, 360.0),
-    **{f"revisions.{b}": Limit(0, row.revisions, 1 if b == "reply" else row.revisions + 2)
+    **{f"revisions.{b}": Limit(0, row.revisions, row.revisions + 2)
        for b, row in STAGES.items() if row.revisions},
 }
 REPLY_RESERVE_MINUTES = ((len(STAGES["reply"].floor) + len(SENSED) + LIMITS["additions"].ceiling)
