@@ -2818,6 +2818,11 @@ class AgentLoop:
                     blockers=blockers,
                     notes=notes,
                 ))
+                if self.reply_panel is not None and self.reply_panel.on_delivered and verdict is not None:
+                    try:
+                        self.reply_panel.on_delivered(verdict)
+                    except Exception:  # noqa: BLE001 - settling a task never loses the reply
+                        log.warning("settling the task after the reply failed", exc_info=True)
                 session.terminated_reason = "complete"
                 self._conversation = _strip_sentinel_exchanges(session.messages)
                 return summary

@@ -370,10 +370,21 @@ def _unadopted(flow: Any, levers: Levers) -> list[str]:
     return [*lines, *([notice("task", "old task.json", ["/task clear (removes it)"])] if docs.old_record() else [])]
 
 
+def _none_open(flow: Any, levers: Levers) -> tuple[str, ...]:
+    """One line: no task is open, and the highest folder on disk this session never adopted, with the way to read it."""
+    docs = flow.docs
+    found = [n for n in docs.folders() if n not in docs.adopted]
+    if not found:
+        return (render("no task", levers),)
+    names = docs.names(found[-1])
+    show = [f"/task show t{found[-1]}/{names[-1]}"] if names else []
+    return (notice("task", f"none open · t{found[-1]} on disk, not carried over", [*show, "new <objective>"]),)
+
+
 def _bare(flow: Any, levers: Levers) -> tuple[str, ...]:
     record = flow.record
     if record is None:
-        return (render("no task", levers), *_unadopted(flow, levers))
+        return (*_none_open(flow, levers), *([notice("task", "old task.json", ["/task clear (removes it)"])] if flow.docs.old_record() else []))
     key, fields = _status(flow)
     command = _put(LINES[key].commands[0], fields) if LINES[key].commands else "/task show"
     head = " · ".join([f"t{record.id}", one_line(record.objective)[:Caps.LINE // 2], _put(LINES[key].state, fields),
@@ -481,7 +492,7 @@ def wake_line(docs: Any) -> str | None:
     except Refused:
         return None
     show = [f"/task show t{n}/{names[-1]}"] if names else []
-    return notice("", "Awake again", [f"t{n} not carried over", *show, "new <objective>"])
+    return notice("task", f"t{n} on disk, not carried over", [*show, "new <objective>"])
 
 
 def _newest(record: Record) -> str | None:

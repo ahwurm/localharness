@@ -3744,7 +3744,7 @@ async def test_wake_begins_with_no_task_even_when_the_handle_carries_one(tmp_pat
     assert flow.record is None and flow.docs.adopted == set()
 
 
-async def test_wake_names_the_highest_unfinished_folder_by_integer_in_place_of_the_resumed_line(tmp_path, monkeypatch):
+async def test_wake_names_the_highest_unfinished_folder_by_integer_after_the_resumed_line(tmp_path, monkeypatch):
     from localharness.cli import start_cmd
     from localharness.cli.session_resume import SLEEP_ACTION
 
@@ -3753,8 +3753,8 @@ async def test_wake_names_the_highest_unfinished_folder_by_integer_in_place_of_t
     _planted(tmp_path, "t9", {"plan.md": "p"})
     _planted(tmp_path, "t10", {"decisions.md": "d", "plan.md": "p"})
     await start_cmd._start_async(None, False, False, str(tmp_path), resume=_resume_of(SLEEP_ACTION))
-    assert "◆ Awake again · t10 not carried over · /task show t10/plan · new <objective>" in printed
-    assert not any(line.startswith("Awake again, continuing") for line in printed)
+    assert "◆ task t10 on disk, not carried over · /task show t10/plan · new <objective>" in printed
+    assert any(line.startswith("Awake again, continuing") for line in printed)
 
 
 @pytest.mark.parametrize("docs", (None, {"plan.md": "p", "review.md": "x\nverdict: pass\n"}), ids=("no folder", "finished"))

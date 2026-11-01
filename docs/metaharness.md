@@ -42,7 +42,7 @@ Only you open a task, with `/task new <objective>`. After that the root drives. 
 
 Every unit is one `task` call: one child or one panel. The call returns a manifest that names what was filed, the verdict, the findings and `next:`, and the root calls again until the task is done, blocked or halted. Between units you steer with the verbs below, or with a message where the channel reads input mid-turn. No call runs longer than one child or one panel, so neither the root nor you is out of the loop for longer than that.
 
-A task the root finishes while filing `decisions.md` can end there: a `done` call files its result as `review.md`, the task is done, and the critics read the reply as the result.
+A task the root finishes while filing `decisions.md` can end there: a `done` call marks it closing, the critics read the reply as the result, and when they pass it the result is filed as `review.md` and the task is done; a blocked reply leaves it open, and the line says so.
 
 | Stage | Writes | Floor panel | Revisions |
 |-------|--------|-------------|-----------|
@@ -139,7 +139,7 @@ Then, in the session:
 1. Type `/task new Prepare the Acme Analytics customer profile following INSTRUCTIONS.md. Discuss the angle first.` The task opens with that line as its objective, and the root asks about the angle in ordinary replies. Answer it, for example "Use the second angle."
 2. The root files `decisions.md`, checked by `jtbd`, then plans the outline, the draft and the lint as steps in `plan.md`, checked by `jtbd`, `big-picture` and `parsimony`. `/task show plan` reads it.
 3. The root runs each step with a fresh executor, each checked by `spec-compliance`. `/task show step-2` reads a step's log. In box mode `/task stop` ends the run after the running step and `/task run` continues it.
-4. Exit and run `localharness start` again. The task is not carried over, its folder stays, and `/task show t1/plan` reads the plan.
+4. Exit and run `localharness start` again. The task is not carried over; the first screen says so in one line naming the folder on disk, `/task` says the same, and `/task show t1/plan` reads the plan.
 
 What happens at each step depends on the model; the docs show what it filed and what the critics found.
 

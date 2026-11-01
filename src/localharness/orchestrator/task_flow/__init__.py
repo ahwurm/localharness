@@ -32,6 +32,7 @@ class TaskFlow:
         self.unit: tuple[str, int] | None = None
         self.busy = False
         self.reply_panel.emit = emit
+        self.reply_panel.on_delivered = self.settle_close
 
     def open(self, objective: str, turn: int) -> Record:
         self.record = open_task(self.docs.new_task(), objective, turn)
@@ -49,10 +50,22 @@ class TaskFlow:
             return "a task past its plan ends through its steps"
         if ("decisions.md", None) not in record.filed:
             return "decisions.md must be filed first"
+        record.closing = doc
+        return f"t{record.id} closing \u00b7 the critics read your reply as the result; it ends done when they pass it"
+
+    def settle_close(self, verdict: str | None) -> None:
+        """After the reply the critics read: a closing task ends done on a pass and stays open otherwise."""
+        record = self.record
+        if record is None or record.closing is None:
+            return
+        doc, record.closing = record.closing, None
+        if verdict != "pass":
+            if self.emit:
+                self.emit(f"t{record.id}", "not closed", ("task(stage=\"done\") again once the reply passes",), f"the reply was {verdict or 'unreviewed'}")
+            return
         digest, _ = self.docs.write(record.id, "review.md", doc)
         record.filed[("review.md", None)] = Row(digest, "pass")
         set_stage(record, "task pass")
-        return f"t{record.id} done \u00b7 /task show review"
 
     async def run(self, boundary: str, carried: str | None = None, by: str = "model") -> str:
         return await run_unit(self, boundary, carried, by)

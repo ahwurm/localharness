@@ -3346,9 +3346,13 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             ))
             if interactive and isinstance(channel, TerminalChannel):
                 channel.first_prompt_hint = _first_prompt_hint(is_returning)
+            from localharness.orchestrator.task_flow.verbs import wake_line
+            if flow is not None and (folder := wake_line(flow.docs)):
+                console.print(Text(folder), soft_wrap=True)
         elif resume.slept:
             from localharness.orchestrator.task_flow.verbs import wake_line
-            console.print(Text(wake_line(flow.docs) or RESUMED_LINE.format(previous=resume.previous_sitting_id)),
+            console.print(Text(RESUMED_LINE.format(previous=resume.previous_sitting_id)), soft_wrap=True)
+            console.print(Text(wake_line(flow.docs) or ""),
                           soft_wrap=True)
         elif is_reload(resume.action):
             console.print(Text(RESTARTED_RELOAD), soft_wrap=True)
