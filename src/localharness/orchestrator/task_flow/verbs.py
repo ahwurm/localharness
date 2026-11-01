@@ -483,11 +483,11 @@ def _clear(flow: Any) -> tuple[str, ...]:
 
 
 def wake_line(docs: Any) -> str | None:
-    """The line a wake prints when the highest task folder on disk was never finished, or None."""
+    """The line a start prints when a task folder on disk was not carried over, finished or not; None with no folder."""
     try:
         n = docs.highest()
         names = docs.names(n) if n else []
-        if not n or (docs.read(n, "review.md") or "").rstrip().endswith(("verdict: pass", "verdict: accepted")):
+        if not n:
             return None
     except Refused:
         return None

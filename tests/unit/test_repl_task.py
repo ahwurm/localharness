@@ -1230,8 +1230,8 @@ def test_wake_line_names_the_highest_folder_as_an_integer_and_its_newest_doc(tmp
 
 
 @pytest.mark.parametrize("verdict", ("pass", "accepted"))
-def test_wake_line_is_none_when_the_highest_folders_review_ends_pass_or_accepted(tmp_path, verdict):
-    assert wake(tmp_path, t3={"plan_md": "p", "review_md": f"## round 1 · blockers 0\nverdict: {verdict}\n"}) is None
+def test_wake_line_names_a_finished_folder_too(tmp_path, verdict):
+    assert wake(tmp_path, t3={"plan_md": "p", "review_md": f"## round 1 · blockers 0\nverdict: {verdict}\n"}) == "◆ task t3 on disk, not carried over · /task show t3/review · new <objective>"
 
 
 def test_wake_line_stays_for_a_review_that_blocked_and_for_a_folder_with_no_docs(tmp_path):
