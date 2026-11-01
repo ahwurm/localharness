@@ -1447,13 +1447,13 @@ def _spy(llm):
 
 
 @pytest.mark.asyncio
-async def test_task_plan_two_steps_passes_with_the_plan_panels_critics_and_the_replys_answer_critic_and_one_typed_turn(mock_llm_client, tmp_path):
+async def test_task_plan_two_steps_passes_with_the_plan_panels_critics_and_no_reply_critic_and_one_typed_turn(mock_llm_client, tmp_path):
     from localharness.bench.runner import execute_one_run
     from localharness.orchestrator.task_flow.record import STAGES
 
     llm = _task_plan_queue(mock_llm_client)
     seen = _spy(llm)
-    scen = _expecting(_train_scenario("27_task_plan_two_steps.yaml"), critic_children=len(STAGES["plan"].floor) + 1,
+    scen = _expecting(_train_scenario("27_task_plan_two_steps.yaml"), critic_children=len(STAGES["plan"].floor),
                       task_docs_missing=0)
     completed = await execute_one_run(scen, "m", tmp_path / "t.jsonl", llm)
     assert completed.success is True
@@ -1561,7 +1561,7 @@ async def test_claimed_without_work_blocks_the_step_with_a_critic_child_per_pane
     from localharness.core.events import TurnCompleted
 
     run_path = tmp_path / "c.jsonl"
-    scen = _expecting(_train_scenario("28_claimed_without_work.yaml"), critic_children=len(STAGES["plan"].floor) + len(STAGES["step"].floor) + 1,
+    scen = _expecting(_train_scenario("28_claimed_without_work.yaml"), critic_children=len(STAGES["plan"].floor) + len(STAGES["step"].floor),
                      task_docs_missing=0, stuck_recoveries=0)
     completed = await execute_one_run(scen, "m", run_path, _claimed_queue(mock_llm_client))
     assert completed.success is True
