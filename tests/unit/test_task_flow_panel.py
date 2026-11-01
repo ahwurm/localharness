@@ -446,7 +446,7 @@ def test_sense_with_no_calls_is_answer_and_jtbd():
 
 @pytest.mark.parametrize("tool,added", [
     ("read", ("factual",)), ("glob", ("factual",)), ("grep", ("factual",)), ("git_read", ("factual",)),
-    ("load_document", ("factual",)), ("tool_result_get", ("factual",)), ("agent", ("factual",)),
+    ("load_document", ("factual",)), ("tool_result_get", ("factual",)), ("agent", ("factual", "recency")),
     ("web_search", ("recency",)), ("web_fetch", ("recency",)), ("web_page_query", ("recency",)),
     ("browser_fetch", ("recency",)), ("write", ("spec-compliance",)), ("edit", ("spec-compliance",)),
     ("task", ()), ("skill", ()),
