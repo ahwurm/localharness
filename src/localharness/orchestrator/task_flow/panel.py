@@ -191,7 +191,7 @@ def sense(calls: Iterable[tuple[str, str | None]], jtbd_stood: bool = False, lim
     for name, origin in calls:
         if name in CLASSLESS_TOOLS:
             continue
-        if name not in READ_TOOLS | WEB_TOOLS | WRITE_TOOLS | {"agent"} or (origin == "untrusted" and name not in WEB_TOOLS):
+        if name == "agent" or name not in READ_TOOLS | WEB_TOOLS | WRITE_TOOLS or (origin == "untrusted" and name not in WEB_TOOLS):
             wanted |= {"factual", "recency"}
         else:
             wanted.add("recency" if name in WEB_TOOLS else "spec-compliance" if name in WRITE_TOOLS else "factual")
