@@ -4,6 +4,39 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.27.0] — 2026-11-01
+
+**Critics that read what a tool-using turn wrote, and a task that closes itself.** A reply the model writes without using a tool goes to you as written; when the turn used a tool, the critics read the reply with a full turn each, their findings print as they land, and a blocked reply goes back to the model with its tools for up to three rounds. The task pipeline keeps its output files in a scratch folder, and a small task the model finishes while filing its decisions can close with `done` once the critics pass the result. Two days of live sessions driven as a person shaped every item below.
+
+### Added
+- **`done`** — a task the root finishes before any plan closes with `task(stage="done", doc=…)`: the critics read the reply as the result, and when they pass it the result is filed as `review.md` and the task is done; a blocked reply leaves it open and says so.
+- **the scratch folder** — a task's output files go under `.localharness/scratchpad/<agent>/t<n>/`, named in the root's note, the worker's brief and the critics' brief; the task folder itself stays the harness's.
+- **the exchange on screen** — each critic's blockers and warnings print as they land, its notes as a count, and `◆ root revising · N blockers` before each round; the closing line reads `reply pass · N notes · /task show reply` or `reply blocked · N blockers · /task show reply`.
+- **the web pair for the fact critics** — `factual` and `recency` open the web on a reply, so a sourced answer is checked against its sources rather than against the critic's lack of access.
+- **a folder on disk** — a fresh start and a wake print one line naming the highest task folder never carried over, whether it finished or not, and `/task` with nothing open prints that line.
+- **a ux-emulator role** — `subagents/ux-emulator.yaml`, a person at the terminal that drives a live session and reports what the screen gave them.
+
+### Changed
+- A reply the model wrote with no tool call, or with only the `task` or `skill` tools, is delivered as written: no critics, no verdict line. Any other tool call, memory included, brings the critics, chosen by what the turn used; a delegated agent brings both fact critics, since the delegate may have used the web.
+- Every critic gets a full turn (24 actions, 10 minutes by default); the floor pair no longer runs at the floor budget, and a critic's text survives a budget stop.
+- The tool-less rewrite is gone: on a block the findings return to the root as quoted data and it answers again with its tools, the third round announced as the last and its answer delivered whatever the critics say.
+- A review is read as written: tagged lines when the critic kept the shape, otherwise each line by its leading word, prose as notes, `NONE` in any dressing as a clean pass, and a tag followed by `none` likewise.
+- Every critic judges the work as the person who asked for it would, against what they typed: a plan's own numbers bind only where the person's words do, another critic's review is never evidence, and length, word counts and formatting are not the critic's to judge.
+- The reply panel prints no budget countdown. Task-stage panels keep their bound from the flow cap.
+- `PROTOCOL_VERSION` is 12: `TaskComplete` carries `blockers` and `notes`; additive.
+- The reply's revisions are three rounds in the stage table, and the `revisions.<boundary>` ceilings are uniform (the default plus two).
+- `/task show` on a task closed by `done` heads the doc with its review row; a `/task` verb that breaks prints one line and the session goes on.
+- The context manager's floor and compaction records go to `<agent_dir>/context.log`, not the terminal.
+
+### Known limitations
+- The critics are a local model reading another local model: they still mention word counts as warnings, occasionally tag a confirmation as a blocker, and once in a while find nothing readable in their own answer. Warnings never block.
+- A stuck model hunting a number with repeated shell calls ends the turn with the stuck detector's line instead of a reply.
+- The task pipeline runs every stage in one turn until it needs the person or finishes; there is no pause between stages to steer unless the model asks.
+- The shell gate's unattended mode runs a command it cannot classify, so a model can start a program through it; a workspace `deny_patterns` list is the refusal available today.
+- A vague ask ("fix the bug") in unattended mode can lead the model to edit files before it asks what you meant; `permissions.mode: read-only` for the project is the refusal available today.
+- A request to remember a fact can end in a project file: in one live run the model said the `remember` tool was unavailable though the memory plugin was listed.
+- No live run of the phone or an editor backs the channel sentences; the terminal runs are the live evidence.
+
 ## [0.26.0] — 2026-10-31
 
 **Critics on every answer, and a task pipeline of fresh agents.** Before a reply reaches you, critic agents check it and a reply they block is revised once; `/task new <objective>` runs bigger work as decisions, research, a plan and its steps, each by a fresh agent and checked by critics, with the root calling one unit at a time while you steer.

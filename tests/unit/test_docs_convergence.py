@@ -879,6 +879,39 @@ def test_the_0_26_0_changelog_entry_bites():
     assert check_0_26_0_entry("## Nothing\n") == missing
 
 
+RELEASE_0_27_0_HEADER = "## [0.27.0] — 2026-11-01"
+RELEASE_0_27_0_NEEDLES = (
+    "### Added", "### Changed", "### Known limitations",
+    "`done`", ".localharness/scratchpad/<agent>/t<n>/", "whether it finished or not",
+    "`blockers`", "`notes`", "`PROTOCOL_VERSION` is 12", "three rounds", "read as written",
+    "the web pair", "a full turn",
+    "word counts as warnings", "stuck detector's line", "`deny_patterns` list is the refusal available today",
+    "`permissions.mode: read-only`", "No live run of the phone or an editor",
+)
+
+
+def check_0_27_0_entry(text: str) -> list[str]:
+    """CHANGELOG's 0.27.0 entry exists, names `done`, the scratch folder, protocol 12, the web pair and the recorded limitations."""
+    found = re.search(rf"^{re.escape(RELEASE_0_27_0_HEADER)}\n.*?(?=^## \[|\Z)", text, re.M | re.S)
+    if not found:
+        return [f"CHANGELOG has no {RELEASE_0_27_0_HEADER} entry"]
+    flat = " ".join(found.group(0).split())
+    return [f"CHANGELOG's 0.27.0 entry does not say {n}" for n in RELEASE_0_27_0_NEEDLES if n not in flat]
+
+
+def test_the_0_27_0_changelog_entry_live():
+    assert check_0_27_0_entry(_read("CHANGELOG.md")) == []
+
+
+def test_the_0_27_0_changelog_entry_bites():
+    good = _read("CHANGELOG.md")
+    for needle in RELEASE_0_27_0_NEEDLES:
+        assert check_0_27_0_entry(_swap(good, needle, "x")) == [f"CHANGELOG's 0.27.0 entry does not say {needle}"], needle
+    missing = [f"CHANGELOG has no {RELEASE_0_27_0_HEADER} entry"]
+    assert check_0_27_0_entry(_swap(good, RELEASE_0_27_0_HEADER, "## [0.27.0] — 2026-11-02")) == missing
+    assert check_0_27_0_entry("## Nothing\n") == missing
+
+
 def _good_changelog() -> str:
     return (
         "# Changelog\n\n## [Unreleased]\n\nThis release adds plugins.\n\n### Added\n"
