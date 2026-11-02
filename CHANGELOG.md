@@ -4,6 +4,30 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.27.2] — 2026-11-02
+
+**Critics that score, and a task the model can open.** Every critic now breaks the work into numbered items, scores each out of 10 and names the change that would take it to 9; a reply goes back only for items under 8, with a score card, and stops revising when the scores stop rising. The model may open a task itself when your message asks for work of several steps. A live session on a long web-research reply shaped every item below.
+
+### Added
+- **scored critics** — one shared contract (`assets/critics/contract.md`) heads every critic's role; each critic file holds only its breakdown and its anchors. A line reads `A1 4/10 <item> — <evidence> — to 9: <fix>`, and `?` marks an item the critic could not check, with what would let it.
+- **the round index** — each reviewed reply is written whole to `sessions/reply-draft.md`, and `sessions/reply-review.md` keeps every round with its per-critic scores and a diff stat against the round before.
+- **the model opens a task** — `task(stage="new", doc=…)` with no task open, or after a finished one, opens a task on the message you typed that turn, at most once a turn, announced as `◆ tN opened by the model` with `/task clear` to remove it.
+- **a provenance line** — a delegated agent's result, and the reply critics' brief, carry one measured line naming the stretches of text that share almost no 8-word run with any tool output read.
+
+### Changed
+- The `answer` critic is gone: its question goes to `jtbd`, which scores each of your asks, and its honesty check to `factual`, which scores each claim against the source it opens. The reply floor is `jtbd`.
+- Critics read the whole reply through a content handle, not its first 4,000 characters, and the brief carries today's date.
+- A blocked reply returns with a score card and only the items under 8, told to fix those and keep the rest; the closing sentence lets the root read the files and fetch the pages a finding cites.
+- A critic's first answer stands: the nudge that pushed a tool-less verdict into tool calls no longer applies to critics, and an unreadable answer is asked once more.
+- `factual` and `recency` on a reply hold the web-researcher's web tools: `web_page_query`, and the browser when its plugin is on.
+- Re-fetching a page whose result was evicted from context no longer counts as a repeated call in the stuck detector; it still counts toward the per-turn ceiling.
+
+### Known limitations
+- Scores come from a local model reading another: anchors are applied loosely, and a critic may still score an item it did not open.
+- The provenance line measures word runs, so a faithful paraphrase reads as the writer's own words; it is a measure for the critics, never a gate.
+- The task a model opens takes your latest message as its objective, so a short confirmation ("yes, the second one") becomes the objective; `decisions.md` carries the model's reading.
+- A reply that used the web and wrote a file runs four critics a round on the local model; the live gate's research-and-write request ran 25 minutes without finishing. Review dials are the next release.
+
 ## [0.27.1] — 2026-11-01
 
 **What the harness prints after `/model` now reads like the harness.** Its own lines print dim and wrap under themselves, a model swap is told as short steps instead of one long sentence, and the `/model` list is one row to a model. What a swap does is unchanged.
@@ -22,6 +46,7 @@ All notable changes to LocalHarness are documented here. The format follows
 - No swap was watched on a real server. The swap lines were rendered through the real terminal channel from the REPL's own swap code, with the server and its processes stubbed, and the `/model` list was watched in a live session; a swap's four lines have not been seen on a real screen.
 - The tool calls, results and errors printed around these lines are unchanged: they keep their own colors and indent and do not hang under themselves.
 - `localharness model` prints the new rows as plain text, without dim or speed colors. No live run of the phone or an editor backs the new lines.
+||||||| Stash base
 
 ## [0.27.0] — 2026-11-01
 
