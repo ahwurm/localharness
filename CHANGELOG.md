@@ -4,6 +4,19 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.27.3] — 2026-11-02
+
+**`localharness start` runs on Windows again.** 0.27.x crashed at start on Windows with `PermissionError: [Errno 13] Permission denied: '<workspace>\.localharness'` before the first prompt.
+
+### Fixed
+- **the task flow's filer on Windows** — the filer walked to an agent's task folders by opening each folder as a descriptor (`os.open` with `dir_fd`), which Windows does not support: opening a folder there always fails with EACCES. On Windows the walk now checks each component by path with the same follow rules (the workspace layer follows no link; the machine layer follows only its root and `agents`), and refuses a junction as it does a symlink. POSIX keeps the descriptor walk unchanged.
+- Task docs written on Windows are written byte for byte: no `\n` to `\r\n` translation, so a doc's digest and size cap hold as on POSIX.
+- The start line about a task folder left on disk no longer stops a start when the folder cannot be read.
+
+### Known limitations
+- On Windows the walk checks a path and then uses it, so a folder swapped for a link between the check and the use is not caught as it is through a descriptor on POSIX. Making a symlink there needs the symlink privilege or Developer Mode; a junction does not.
+- The unit suite still has POSIX-only tests (mode bits, FIFOs, symlinks without privilege) that fail on Windows; CI runs on Linux only.
+
 ## [0.27.2] — 2026-11-02
 
 **Critics that score, and a task the model can open.** Every critic now breaks the work into numbered items, scores each out of 10 and names the change that would take it to 9; a reply goes back only for items under 8, with a score card, and stops revising when the scores stop rising. The model may open a task itself when your message asks for work of several steps. A live session on a long web-research reply shaped every item below.
@@ -46,7 +59,6 @@ All notable changes to LocalHarness are documented here. The format follows
 - No swap was watched on a real server. The swap lines were rendered through the real terminal channel from the REPL's own swap code, with the server and its processes stubbed, and the `/model` list was watched in a live session; a swap's four lines have not been seen on a real screen.
 - The tool calls, results and errors printed around these lines are unchanged: they keep their own colors and indent and do not hang under themselves.
 - `localharness model` prints the new rows as plain text, without dim or speed colors. No live run of the phone or an editor backs the new lines.
-||||||| Stash base
 
 ## [0.27.0] — 2026-11-01
 
