@@ -105,3 +105,11 @@ async def test_the_loop_learns_which_calls_sit_behind_an_eviction_stub():
     loop._llm = SimpleNamespace(config=SimpleNamespace(tool_call_mode="native"))
     await loop._pack_request([], None, "")
     assert loop._evicted_calls == frozenset({sig})
+
+
+def test_a_blocker_line_on_screen_carries_its_fix():
+    rows = []
+    panel = Panel(None, limited(TaskFlowConfig())[0])
+    panel.emit = lambda *row: rows.append(row)
+    panel._say("jtbd", parse("jtbd", "A1 4/10 ask — seen — to 9: do it\nSCORE 4/10", None))
+    assert rows[0][1] == "blocker A1 4/10 ask" and rows[0][3] == "seen — to 9: do it"
