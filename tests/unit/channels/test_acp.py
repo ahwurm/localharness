@@ -1657,7 +1657,7 @@ async def test_reply_line_follows_a_blocked_reply_whether_or_not_the_answer_stre
     ch = _speaking(tmp_path)
     await ch.on_task_complete(blocked)
     assert ch._conn.texts == ["The answer is 42.", reply_line(blocked)]
-    assert reply_line(blocked) == "◆ reply blocked · 2 blockers · /task show reply"
+    assert reply_line(blocked) == "◆ reply with caveats · 2 blockers · /task show reply"
     ch = _speaking(tmp_path)
     await ch._on_token("The answer is 42.")
     await ch.on_task_complete(blocked)

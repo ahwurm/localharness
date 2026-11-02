@@ -207,6 +207,7 @@ class TaskComplete(BaseEvent):
     )
     blockers: int = Field(default=0, description="Blockers the reply panel found; 0 at a task unit or with no panel.")
     notes: int = Field(default=0, description="Warnings and notes the reply panel found; 0 at a task unit or with no panel.")
+    caveats: str = Field(default="", description="The reply panel's open items, shown after the reply; never part of the summary.")
     trail: str = Field(default="", description="What the reviewed turn did, shown before the reply; never part of the summary.")
 
 

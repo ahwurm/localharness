@@ -837,7 +837,7 @@ async def test_reply_line_a_blocked_or_unreviewed_reply_pushes_its_line_after_th
     await bus.publish(blocked)
     rows = _drain(client)
     assert [r[0] for r in rows] == ["TaskComplete", "Notice"]
-    assert rows[1][2]["text"] == reply_line(blocked) == "◆ reply blocked · 2 blockers · /task show reply"
+    assert rows[1][2]["text"] == reply_line(blocked) == "◆ reply with caveats · 2 blockers · /task show reply"
     await bus.publish(done(verdict="unreviewed", finding="the critics ran out of time"))
     assert _notices(client) == [reply_line(done(verdict="unreviewed", finding="the critics ran out of time"))]
     for quiet in (done(verdict="unreviewed", finding=""), done(),

@@ -170,7 +170,7 @@ def reply_line(event: Any) -> str | None:
         return None
     commands = ("/task show reply",)
     if verdict == "blocked":
-        return notice("reply", f"blocked · {event.blockers} blocker{'s' * (event.blockers != 1)}", commands, "")
+        return notice("reply", f"with caveats · {event.blockers} blocker{'s' * (event.blockers != 1)}", commands, "")
     if verdict == "pass":
         return notice("reply", f"pass · {event.notes} note{'s' * (event.notes != 1)}" if event.notes else "pass", commands, "")
     room = Caps.LINE - len(notice("reply", verdict, commands, "x")) + 1
@@ -582,7 +582,7 @@ class ChannelAdapter(ABC):
         if getattr(event, "parent_id", None):
             return
         await self.send_message(
-            content=getattr(event, "trail", "") + event.summary,
+            content=getattr(event, "trail", "") + event.summary + getattr(event, "caveats", ""),
             agent_id=event.agent_id,
         )
         if line := reply_line(event):
