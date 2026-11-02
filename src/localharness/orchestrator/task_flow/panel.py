@@ -503,7 +503,7 @@ class Panel:
         try:
             for f in one.findings:
                 if f.tag != "NOTE":
-                    self.emit(name, f"{f.tag.lower()} {f.rule}", (), f.evidence)
+                    self.emit(name, f"{f.tag.lower()} {f.rule}", (), " — to 9: ".join(p for p in (f.evidence, f.fix) if p))
             notes = sum(f.tag == "NOTE" for f in one.findings)
             if one.clean or not any(f.tag != "NOTE" for f in one.findings):
                 self.emit(name, "pass", (), f"{notes} note{'s' * (notes != 1)}" if notes else "")
