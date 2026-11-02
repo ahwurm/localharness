@@ -165,6 +165,6 @@ def test_open_items_become_a_caveat_section_after_the_reply_and_notes_stay_out()
     block = Finding("BLOCKER", "A1 2/10 the count", "seen", False, "jtbd", 2, "count the list")
     warn = Finding("WARNING", "B1 6/10 subnets", "seen", False, "factual", 6, "")
     note = Finding("NOTE", "C1 9/10 tone", "fine", False, "jtbd", 9, "")
-    assert caveats((block, warn, note)) == ("\n\n---\n\n**Reviewer caveats**\n- jtbd: A1 2/10 the count — to 9: count the list\n"
-                                            "- factual: B1 6/10 subnets")
+    assert caveats((block, warn, note)) == ("\n\n---\n\n**Reviewer caveats**\n- jtbd: A1 2/10 the count — seen — to 9: count the list\n"
+                                            "- factual: B1 6/10 subnets — seen")
     assert caveats((note,)) == ""

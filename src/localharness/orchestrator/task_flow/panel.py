@@ -267,7 +267,7 @@ def trail(task: str, messages: Iterable[dict[str, Any]], rounds: list[str], verd
 
 def caveats(findings: Iterable[Finding]) -> str:
     """The items still under the pass score when the reply goes out, as a section after it."""
-    rows = [f"- {f.critic}: {f.rule}" + (f" — to 9: {f.fix}" if f.fix else "") for f in findings if f.tag != "NOTE"]
+    rows = [f"- {f.critic}: {finding_text(f)}" for f in findings if f.tag != "NOTE"]
     return "\n\n---\n\n**Reviewer caveats**\n" + "\n".join(r.replace("`", "'") for r in rows[:Caps.TOP]) if rows else ""
 
 
