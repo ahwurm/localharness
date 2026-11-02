@@ -150,7 +150,7 @@ def test_create_switch_persist_resolve(components_home, mock_llm_client):
     assert harness.provider.default_model == "model-a"
     channel, magent = _model_switch(home, harness, "model-b")
     assert magent._llm.config.model == "model-b"  # live hot-swap happened in-session
-    assert any("Switched to model-b" in m for m in channel.messages)
+    assert any(m.startswith("◆ model switched model-b ·") for m in channel.messages)
 
     # Overlay written atomically; provider+org set; available_models UNION-merged, not clobbered.
     overlay = load_overlay(home / "overrides.yaml")

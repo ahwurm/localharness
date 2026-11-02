@@ -16,7 +16,7 @@ from pydantic import SecretStr
 
 from localharness.cli import model_ops
 from localharness.cli.model_switch import ModelSwitch
-from localharness.cli.repl import GPU_HOLDER_CLAUSE, PERSIST_SELECTION_FAILED
+from localharness.cli.repl import PERSIST_SELECTION_FAILED
 from localharness.cli.workspace import MachineTrust
 from localharness.config.loader import load_overlay
 from localharness.provider import lifecycle
@@ -169,11 +169,12 @@ async def test_a_cold_swap_stops_the_primary_launches_the_peer_says_who_held_the
 
     assert [e.split(":")[0] for e in rig.events] == ["stop", "start", "wait"]
     assert "/x/m.gguf" in rig.events[1] and rig.events[2] == f"wait:{PEER_URL}"
-    launching = next(m for m in channel.messages if m.startswith("Launching flash-next"))
-    assert "the swap can take several minutes..." in launching
-    assert GPU_HOLDER_CLAUSE.format(holder="qwen-primary") in launching
-    assert launching.index("several minutes...") < launching.index("was stopped to free the GPU.")
-    assert channel.messages[-1].startswith("Switched to flash-next on flash-next")
+    steps = [m for m in channel.messages if m.startswith("◆ model")]
+    assert steps == ["◆ model launching flash-next · a few minutes",
+                     "◆ model stopped qwen-primary · GPU freed",
+                     "◆ model ready flash-next · window: served — · trained — · fits — (not verified)",
+                     f"◆ model switched · {PEER_URL} · tool calling native"]
+    assert channel.messages[-1] == steps[-1]
     assert repl._active_heavy == (peer.lifecycle, PEER_URL)
     assert agent._llm.config.base_url == PEER_URL
     # persisted through persist_landed: the selection, the ledger entry, the pending preset gone

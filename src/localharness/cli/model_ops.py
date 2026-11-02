@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -1361,10 +1362,43 @@ def not_offered_reason(sentence: str, name: str) -> str:
 
 STRATA_AVAILABLE = " · Strata available: /model {name}"
 STRATA_OFFER = "Strata is built for this model; localharness doctor shows how to install it beside your shards."
+LINE_CAP = 120
+"""The width a not-offered row's advice and a reason with no short form are cut to, with a `…`."""
+
+
+def _cut(text: str, cap: int = LINE_CAP) -> str:
+    return text if len(text) <= cap else text[:cap - 1].rstrip() + "…"
+
+
+_CANNOT_RUN = " cannot run here: "
+_FIELD_SHAPES = {"need": r"[\d.,]+", "free": r"[\d.,]+", "window": r"[^—]*?"}
+"""What a numeric field of a refusal template can hold, so reading one back never crosses into a name's words."""
+
+
+def _read_back(template: str, body: str) -> dict[str, str] | None:
+    """The fields a refusal template (from its ` cannot run here: ` on) was filled with, read back from the sentence it made; None for any other."""
+    shaped = re.sub(r"\\\{(\w+)\\\}", lambda f: f"(?P<{f[1]}>{_FIELD_SHAPES.get(f[1], '.*?')})", re.escape(template))
+    found = re.fullmatch(shaped, body)
+    return found.groupdict() if found else None
+
+
+def refusal_rows(sentence: str, name: str) -> tuple[str, str]:
+    """What a not-offered row says and, under it, what to do. The two templates that carry numbers (RAM and GPU memory) split at
+    their ` — ` seam into a short fact, the same fields without the prose, and their remedy; every other reason is the fact whole,
+    cut at ``LINE_CAP``, with no advice. The sentence itself stays whole where a person asks for that model (`Entries.pick`).
+    What names the model (or the file) comes before the last ` cannot run here: ` and is not read, only the words the harness wrote."""
+    from localharness.provider import autosense
+
+    _, found, body = sentence.rpartition(_CANNOT_RUN)
+    for template, short in ((autosense.RAM_REFUSAL, "needs {need} GiB RAM, {free} GiB free"),
+                            (autosense.VRAM_REFUSAL, "needs {need} GiB GPU memory{window}, {free} GiB free")):
+        if found and (fields := _read_back(template.partition(_CANNOT_RUN)[2], body)) is not None:
+            return short.format_map(fields), body.partition(" — ")[2].rstrip(".")
+    return _cut(not_offered_reason(sentence, name)), ""
 
 
 def entry_lines(entries: Entries) -> list[str]:
-    """The list as the lines both surfaces print; every name and URL passes ``visible_text``."""
+    """The list as the lines both surfaces print, one row to a model: `name · clause · …`; every name and URL passes ``visible_text``."""
     from localharness.cli.workspace import visible_text as vt
 
     lines, n = ["Models:"], 0
@@ -1372,22 +1406,23 @@ def entry_lines(entries: Entries) -> list[str]:
         lines.append(f"▸ {vt(group.header)}")
         for e in group.entries:
             if e.kind == "live":
-                detail = "(serving)" + ("  ● [active]" if e.active else "")
+                clauses = ["serving", *(["active"] if e.active else [])]
             else:
-                detail = _runtime_label(e.runtime)
-                detail += " · experts in RAM" if e.where == "experts in RAM" else ""
-                detail += f" · {e.window:,}" if e.window is not None else ""
-                detail += " (not set up)" if e.kind == "setup" else ""
-                detail += STRATA_AVAILABLE.format(name=vt(e.strata)) if e.strata else ""
+                clauses = [_runtime_label(e.runtime), *(["experts in RAM"] if e.where == "experts in RAM" else []),
+                           *([f"{e.window:,} window"] if e.window is not None else []),
+                           *(["not set up"] if e.kind == "setup" else [])]
             if group.numbered:
                 n += 1
                 lead = f"  {n}. "
             else:
                 lead = "     "
-            lines.append(f"{lead}{vt(e.name)}  {detail}" + (f"  [{e.rate}]" if e.rate else ""))
+            lines.append(f"{lead}{vt(e.name)}" + "".join(f" · {c}" for c in clauses)
+                         + (STRATA_AVAILABLE.format(name=vt(e.strata)) if e.strata else "") + (f" · {e.rate}" if e.rate else ""))
     for e in sorted(entries.not_offered, key=lambda e: e.name):
-        lines.append(f"  not offered: {vt(e.name)} — {vt(not_offered_reason(e.refusal or '', e.name))}"
-                     + (STRATA_AVAILABLE.format(name=vt(e.strata)) if e.strata else ""))
+        fact, advice = refusal_rows(e.refusal or "", e.name)
+        lines.append(f"  –  {vt(e.name)} · not offered · {vt(fact)}" + (STRATA_AVAILABLE.format(name=vt(e.strata)) if e.strata else ""))
+        if advice:
+            lines.append(_cut(f"     {vt(advice)}"))
     lines.extend(f"  · {vt(note)}" for note in entries.notes)
     return lines
 

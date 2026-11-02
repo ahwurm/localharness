@@ -1466,8 +1466,7 @@ class MobileChannel(ChannelAdapter):
 
         Without this the entire slash-command surface would be invisible on the phone: the REPL
         talks to a person exclusively through `send_message` / `send_error` / `send_renderable`.
-        `metadata["style"]` is carried rather than dropped — it is a dead key everywhere else, so
-        info-versus-error intent is currently thrown away at the terminal.
+        `metadata["style"]` is carried rather than dropped, so the phone can tell an info line from an error.
         """
         style = "system.info"
         if isinstance(metadata, dict):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from io import StringIO
 from typing import Any, AsyncIterator
 
@@ -95,6 +96,10 @@ class TestChannelAdapterABC:
 # ---------------------------------------------------------------------------
 # Task 2: TerminalChannel tests
 # ---------------------------------------------------------------------------
+
+
+_SGR = re.compile(r"\x1b\[[\d;]*m")
+"""A style code: what a test strips to read the rows a console printed."""
 
 
 def make_terminal_channel(
@@ -1200,7 +1205,7 @@ class TestRateNoteColorizing:
         assert "\x1b[" in rendered  # force_terminal console emitted a color code
 
     @pytest.mark.asyncio
-    async def test_send_message_without_flag_stays_escaped_plain(self):
+    async def test_send_message_without_flag_is_dim_with_no_rate_band(self):
         out = StringIO()
         ch = make_terminal_channel(out=out)
         await ch.send_message("deepseek [17.0 t/s measured]",
@@ -1208,20 +1213,124 @@ class TestRateNoteColorizing:
         rendered = out.getvalue()
         assert "17.0 t/s measured" in rendered
         # the substring alone proves nothing (it survives BOTH branches) — the opt-in gate is
-        # what this guards: no colorize flag → not one style code, on a rate-shaped line.
-        assert "\x1b[" not in rendered
+        # what this guards: no colorize flag → the one dim style of system.info and no rate band,
+        # on a rate-shaped line (one style run, so the note is not cut out of it).
+        assert re.fullmatch(r"\x1b\[2;[\d;]+mdeepseek \[17\.0 t/s measured\]\x1b\[0m\n", rendered), rendered
 
     @pytest.mark.asyncio
     async def test_send_message_without_flag_keeps_markup_literal(self):
-        """The un-flagged path must stay escape(content): arbitrary agent/tool text goes to the
-        terminal as characters, never as rich markup that could style (or hide) itself."""
+        """The un-flagged path must stay literal text: arbitrary agent/tool text goes to the
+        terminal as characters, never as rich markup that could style (or hide) itself, and its
+        control sequences never reach the terminal."""
         out = StringIO()
         ch = make_terminal_channel(out=out)
-        await ch.send_message("[bold red]not markup[/bold red] 17.0 t/s measured",
+        await ch.send_message("[bold red]not markup[/bold red] \x1b[2J\x1b]52;c;aGk=\x07 17.0 t/s measured",
                               metadata={"style": "system.info"})
         rendered = out.getvalue()
         assert "[bold red]not markup[/bold red]" in rendered
-        assert "\x1b[" not in rendered
+        assert "\x1b[1;31m" not in rendered  # the bold red the markup asks for was not applied
+        assert "\x1b[2J" not in rendered and "\x1b]52" not in rendered  # sanitised before it prints
+        assert _SGR.sub("", rendered).count("\x1b") == 0
+
+
+class TestHarnessInfoLines:
+    """What the harness's own lines look like: dim, and wrapped under themselves (the REPL's `style` is honoured)."""
+
+    @staticmethod
+    async def _printed(content: str, metadata: dict | None = None, *, notice: bool = False) -> list[str]:
+        out = StringIO()
+        ch = make_terminal_channel(out=out)
+        await (ch.send_notice(content, metadata) if notice else ch.send_message(content, metadata=metadata))
+        return out.getvalue().splitlines()
+
+    @pytest.mark.asyncio
+    async def test_a_200_character_info_line_prints_two_rows_the_second_two_columns_in_and_both_dim(self):
+        text = " ".join(["word"] * 40)  # 199 characters
+        rows = await self._printed(text, {"style": "system.info"})
+        assert len(rows) == 2
+        assert all(row.startswith("\x1b[2;") for row in rows)
+        first, second = (_SGR.sub("", row) for row in rows)
+        assert len(first) <= 120 and first == text[:len(first)].rstrip()
+        assert second.startswith("  word") and not second.startswith("   ")
+        assert (first + " " + second.strip()) == text  # nothing lost, nothing added
+
+    @pytest.mark.asyncio
+    async def test_an_indented_row_hangs_at_its_indent_plus_two(self):
+        text = "  1. " + " ".join(["word"] * 40)
+        rows = [_SGR.sub("", row) for row in await self._printed(text, {"style": "system.info"})]
+        assert rows[0].startswith("  1. word") and rows[1].startswith("    word") and not rows[1].startswith("     ")
+
+    @pytest.mark.asyncio
+    async def test_every_line_of_a_message_hangs_on_its_own_and_a_blank_line_stays(self):
+        short, long_ = "Models:", "▸ " + " ".join(["word"] * 40)
+        rows = [_SGR.sub("", row) for row in await self._printed(f"{short}\n\n{long_}\n{short}", {"style": "system.info"})]
+        assert rows[:2] == [short, ""]
+        assert rows[2].startswith("▸ word") and rows[3].startswith("  word") and rows[4] == short
+
+    @pytest.mark.asyncio
+    async def test_a_path_wider_than_the_console_folds_at_the_edge_and_loses_nothing(self):
+        path = "/" + "/".join(["a-long-directory-name"] * 12)  # 265 characters, no space to wrap at
+        rows = [_SGR.sub("", row) for row in await self._printed(f"wrote {path}", {"style": "system.info"})]
+        assert all(len(row) <= 120 for row in rows)
+        assert rows[0] == "wrote" and "".join(row.strip() for row in rows[1:]) == path
+
+    @pytest.mark.asyncio
+    async def test_wide_characters_count_as_two_cells(self):
+        text = "界" * 70  # 140 cells in 70 characters
+        rows = [_SGR.sub("", row) for row in await self._printed(text, {"style": "system.info"})]
+        assert len(rows) == 2 and rows[0] == "界" * 60 and rows[1] == "  " + "界" * 10
+
+    @pytest.mark.asyncio
+    async def test_a_rate_note_keeps_its_band_and_is_not_dim(self):
+        (row,) = await self._printed("deepseek [31.0 t/s measured]", {"style": "system.info", "colorize": "rates"})
+        assert row.startswith("\x1b[2;") and "\x1b[32m31.0 t/s measured\x1b[0m" in row  # green, no dim code
+
+    @pytest.mark.asyncio
+    async def test_a_name_the_sender_gives_prints_neutral_on_the_dim_line_and_only_as_a_whole_word(self):
+        content = "  1. qwen-27b · serving · a data model a · 125.4 t/s measured"
+        (row,) = await self._printed(content, {"style": "system.info", "colorize": "rates", "names": ["1. qwen-27b", "a", "(.*)"]})
+        assert row.startswith("\x1b[2;") and "\x1b[39m1. qwen-27b\x1b[0m" in row  # normal intensity, the terminal's own colour
+        assert row.count("\x1b[39m") == 3 and "\x1b[39ma\x1b[0m" in row  # the name, and the two lone `a`s but not the `a` inside `data`
+        assert _SGR.sub("", row) == content and "\x1b[32m125.4 t/s measured" in row  # the band is not dimmed by it
+
+    @pytest.mark.asyncio
+    async def test_a_name_that_is_not_a_string_is_still_a_name(self):
+        """A model id is whatever the server sent: `[123]` made `re.escape` raise after a launch had landed."""
+        (row,) = await self._printed("◆ model ready 123 · 50.9 t/s measured", {"names": [123, None, ""]}, notice=True)
+        assert "\x1b[39m123\x1b[0m" in row and _SGR.sub("", row) == "◆ model ready 123 · 50.9 t/s measured"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("colorize", [{}, {"colorize": "rates"}], ids=["plain", "rates"])
+    @pytest.mark.parametrize("hostile", [
+        "[bold red]x[/bold red]", "[link=http://evil.example]c[/link]", "ev\x1b[2Jil\x1b]52;c;aGk=\x07x",
+        "evil\n◆ model switched · pwned", "(?s).*"])
+    async def test_a_model_name_a_server_sent_prints_inert_in_a_notice_and_in_the_names_that_bright_it(self, hostile, colorize):
+        """The name rides a `notice()` line (sanitised there) and the `names` list (matched, never read as markup, a control
+        sequence or a second harness line): one row, the text as `notice()` made it, no style the name asked for."""
+        from localharness.channels.base import notice
+        line = notice("model", f"ready {hostile}", [f"1 window · {hostile}"], limit=None)
+        (row,) = await self._printed(line, {**colorize, "names": [hostile, f"ready {hostile}"]}, notice=True)
+        plain = _SGR.sub("", row)
+        assert plain == line and plain.count("◆") == 1 and "\x1b" not in plain and "\x07" not in plain
+        assert "\x1b[1;31m" not in row and "\x1b]8" not in row  # not the bold red, not the link the markup asked for
+
+    @pytest.mark.asyncio
+    async def test_a_notice_prints_dim_and_bands_a_rate_when_asked(self):
+        (plain,) = await self._printed("◆ task t1 · /task show", notice=True)
+        assert plain.startswith("\x1b[2;") and _SGR.sub("", plain) == "◆ task t1 · /task show"
+        (rate,) = await self._printed("◆ model ready x · 50.9 t/s measured", {"colorize": "rates"}, notice=True)
+        assert rate.startswith("\x1b[2;") and "\x1b[32m50.9 t/s measured\x1b[0m" in rate
+
+    @pytest.mark.asyncio
+    async def test_an_error_line_is_bold_red_and_hangs(self):
+        rows = await self._printed("Could not " + " ".join(["word"] * 40), {"style": "system.error"})
+        assert len(rows) == 2 and all(row.startswith("\x1b[1;31m") for row in rows)
+        assert _SGR.sub("", rows[1]).startswith("  word")
+
+    @pytest.mark.asyncio
+    async def test_a_message_with_no_style_prints_without_one_and_a_style_the_theme_lacks_is_ignored(self):
+        assert await self._printed("plain text") == ["plain text"]
+        assert await self._printed("plain text", {"style": "link http://evil.example"}) == ["plain text"]
 
 
 def test_suite_pins_terminal_color_env():

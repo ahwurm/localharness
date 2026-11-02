@@ -343,7 +343,8 @@ async def test_a_cold_launch_takes_the_lock_once_and_holds_it_while_the_server_s
     assert watch.entries == 1 and watch.opens == 1
     assert watch.held_at_start == [{watch.key}]
     assert lifecycle._HELD == {}
-    assert any(m.startswith("Switched to qwen-gguf on llamacpp-local") for m in channel.messages)
+    assert any(m.startswith("◆ model ready qwen-gguf") for m in channel.messages)
+    assert any(m.startswith(f"◆ model switched · {PEER_URL}") for m in channel.messages)
 
 
 @pytest.mark.asyncio
@@ -442,7 +443,8 @@ async def test_a_lock_held_by_another_process_makes_the_swap_wait_and_say_so_onc
 
     assert channel.messages.count(lifecycle.LAUNCH_LOCK_WAIT_LINE) == 1
     assert len(boundaries.cmds) == 1  # then the launch went ahead
-    assert any(m.startswith("Switched to qwen-gguf") for m in channel.messages)
+    assert any(m.startswith("◆ model ready qwen-gguf") for m in channel.messages)
+    assert any(m.startswith("◆ model switched · ") for m in channel.messages)
 
 
 @pytest.mark.asyncio

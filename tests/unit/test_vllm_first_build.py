@@ -201,12 +201,12 @@ def _repl_peer():
 async def _cold_heads(tmp_path):
     _, repl, channel, _ = _session(tmp_path, _repl_peer())
     await repl._handle_slash(f"/model {PEER}")
-    return [m for m in channel.messages if m.startswith(f"Launching {PEER}")]
+    return [m for m in channel.messages if m.startswith(f"◆ model launching {PEER}")]
 
 
 async def test_the_repl_cold_head_warns_once_and_the_next_session_does_not(tmp_path, boundaries):  # noqa: F811
     (first,) = await _cold_heads(tmp_path)
-    assert first.endswith(f" ({start_serving.FIRST_BUILD_CLAUSE})")
+    assert first.endswith(f" · {start_serving.FIRST_BUILD_CLAUSE} · a few minutes")
     (second,) = await _cold_heads(tmp_path)
     assert "compiles kernels" not in second
 
@@ -214,8 +214,8 @@ async def test_the_repl_cold_head_warns_once_and_the_next_session_does_not(tmp_p
 async def test_the_repl_restart_line_carries_the_clause_on_a_first_launch(tmp_path, boundaries):  # noqa: F811
     _, repl, channel, _ = _session(tmp_path, _launchable_peer(), live=PRIMARY_DOWN)
     await repl._handle_slash("/model model-a")
-    (line,) = [m for m in channel.messages if m.startswith("Restarting managed vLLM with model-a")]
-    assert f" ({start_serving.FIRST_BUILD_CLAUSE})" in line
+    (line,) = [m for m in channel.messages if m.startswith("◆ model launching model-a · managed vLLM")]
+    assert f" · {start_serving.FIRST_BUILD_CLAUSE} · " in line
 
 
 @pytest.mark.parametrize(("cpus", "jobs"), [(24, "12"), (3, "1"), (1, "1"), (None, "1")])

@@ -140,7 +140,7 @@ async def test_a_refused_cold_launch_announces_nothing(tmp_path, boundaries):
 
     await repl._handle_slash("/model qwen-gguf")
 
-    assert not any("Launching" in m for m in channel.messages)
+    assert not any("◆ model launching" in m for m in channel.messages)
     assert not any("Could not free" in m for m in channel.messages)
 
 
@@ -153,7 +153,7 @@ async def test_an_exposed_cold_launch_announces_its_posture_once(tmp_path, bound
     exposed = [m for m in channel.messages if "every interface, no key" in m]
     assert len(exposed) == 1
     assert exposed[0].startswith(
-        "Launching llamacpp-local (every interface, no key) — the swap can take several minutes...")
+        "◆ model launching llamacpp-local · every interface, no key · a few minutes")
 
 
 @pytest.mark.asyncio
@@ -164,7 +164,7 @@ async def test_a_keyed_cold_launch_carries_no_exposure_phrase(tmp_path, boundari
     await repl._handle_slash("/model qwen-gguf")
 
     assert not any("every interface, no key" in m for m in channel.messages)
-    assert any(m.startswith("Launching llamacpp-local — the swap can take") for m in channel.messages)
+    assert any(m.startswith("◆ model launching llamacpp-local · a few minutes") for m in channel.messages)
 
 
 @pytest.mark.asyncio
@@ -440,7 +440,7 @@ async def test_a_llama_cpp_restart_names_the_runtime(tmp_path, boundaries, monke
     await repl._handle_slash(f"/model {PRIMARY_SERVED}")
 
     assert any(m.startswith(
-        f"Restarting managed llama.cpp with {PRIMARY_SERVED} — model load can take several minutes...")
+        f"◆ model launching {PRIMARY_SERVED} · managed llama.cpp · a few minutes")
         for m in channel.messages)
 
 
@@ -450,9 +450,8 @@ async def test_a_vllm_restart_announcement_is_unchanged(tmp_path, boundaries, mo
 
     await repl._handle_slash("/model model-a")
 
-    assert any(m.startswith(
-        "Restarting managed vLLM with model-a — model load can take several minutes...")
-        for m in channel.messages)
+    assert any(m.startswith("◆ model launching model-a · managed vLLM · ") and m.endswith(" · a few minutes")
+               for m in channel.messages)
     assert not any("every interface" in m for m in channel.messages)
 
 
@@ -614,7 +613,7 @@ async def test_a_non_ascii_served_name_is_returned_and_matched_verbatim(tmp_path
     await repl._handle_slash(f"/model {name}")
 
     assert boundaries.cmds, channel.messages
-    assert any(m.startswith("Launching flash") for m in channel.messages)
+    assert any(m.startswith("◆ model launching flash") for m in channel.messages)
 
 
 @pytest.mark.asyncio
@@ -765,7 +764,7 @@ async def test_the_first_cold_launch_prints_the_pending_line_once_before_its_ann
 
     assert [m for m in channel.messages if m == LINE] == [LINE]
     assert channel.messages.index(LINE) < next(
-        i for i, m in enumerate(channel.messages) if m.startswith("Launching llamacpp-local"))
+        i for i, m in enumerate(channel.messages) if m.startswith("◆ model launching llamacpp-local"))
     assert [started for text, started in sent if text == LINE] == [0]  # before activate
     assert repl._pending_launch_lines == []
 
@@ -778,7 +777,7 @@ async def test_a_repl_built_without_the_keyword_prints_nothing_extra(tmp_path, b
 
     assert repl._pending_launch_lines == []
     assert not any("not applied" in m for m in channel.messages)
-    assert any(m.startswith("Launching llamacpp-local") for m in channel.messages)
+    assert any(m.startswith("◆ model launching llamacpp-local") for m in channel.messages)
 
 
 @pytest.mark.asyncio
@@ -792,7 +791,8 @@ async def test_a_swap_back_that_is_the_sessions_first_launch_prints_the_line_onc
 
     assert channel.messages.count(LINE) == 1
     assert channel.messages.index(LINE) < next(
-        i for i, m in enumerate(channel.messages) if m.startswith("Restarting managed llama.cpp"))
+        i for i, m in enumerate(channel.messages)
+        if m.startswith(f"◆ model launching {PRIMARY_SERVED} · managed llama.cpp"))
     assert [started for text, started in sent if text == LINE] == [0]
     assert repl._pending_launch_lines == []
 
@@ -822,7 +822,7 @@ async def test_the_sessions_second_launch_prints_none_of_the_lines(tmp_path, bou
     await repl._restore_incumbent((primary, PRIMARY_URL))  # and a restore: the third
 
     assert channel.messages.count(LINE) == 1
-    assert any(m.startswith("Restarting managed llama.cpp") for m in channel.messages)
+    assert any(m.startswith(f"◆ model launching {PRIMARY_SERVED} · managed llama.cpp") for m in channel.messages)
 
 
 @pytest.mark.asyncio
@@ -862,7 +862,7 @@ async def test_a_launch_with_no_pending_lines_sends_no_extra_message(tmp_path, b
 
     await repl._handle_slash("/model qwen-gguf")
 
-    first = next(i for i, m in enumerate(channel.messages) if m.startswith("Launching llamacpp-local"))
+    first = next(i for i, m in enumerate(channel.messages) if m.startswith("◆ model launching llamacpp-local"))
     assert first == 0
 
 

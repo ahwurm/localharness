@@ -291,6 +291,25 @@ def _colorize_rate_notes(content: str) -> Text:
     return text
 
 
+def _hanging(console: Console, text: Text, hang: int = 2) -> Text:
+    """`text` as the rows it prints in: each logical line runs to the console's edge and its continuation
+    rows start `hang` columns past that line's own indent, never at column 0. An unbreakable run folds at the edge."""
+    rows = []
+    for line in text.split("\n", allow_blank=True):
+        line.expand_tabs()
+        pad = min(len(line.plain) - len(line.plain.lstrip(" ")) + hang, console.width // 2)
+        first = line.wrap(console, console.width, overflow="fold")[0]
+        rest = line[len(first.plain):]
+        rest = rest[len(rest.plain) - len(rest.plain.lstrip()):]
+        tail = rest.wrap(console, max(console.width - pad, 1), overflow="fold") if rest.plain else []
+        for n, row in enumerate([first, *tail]):
+            row.rstrip()
+            if n:
+                row.pad_left(pad)
+            rows.append(row)
+    return Text("\n").join(rows)
+
+
 class SlashCommandCompleter(Completer):
     """Complete REPL slash commands when the buffer is a single leading-slash token. Prefix match
     (case-insensitive) against the slash table (`all_rows()`: core rows, then plugin rows) — the
@@ -1330,9 +1349,9 @@ class TerminalChannel(ChannelAdapter):
         the terminal verbatim."""
         await self._say(sanitize_for_display(content), agent_id, metadata)
 
-    async def send_notice(self, line: str) -> None:
+    async def send_notice(self, line: str, metadata: dict[str, Any] | None = None) -> None:
         """Prints a finished `notice()` line with its own mark, which `send_message` would neutralise."""
-        await self._say(line, None, None)
+        await self._say(line, None, {"style": "system.info", **(metadata or {})})
 
     def has_status_row(self) -> bool:
         return self._box_app is not None and self._box_active
@@ -1352,12 +1371,21 @@ class TerminalChannel(ChannelAdapter):
                     title=f"[agent.name]{escape(agent_id)}[/agent.name]",
                     border_style="cyan",
                 ))
-            elif metadata and metadata.get("colorize") == "rates":
-                # Trusted-shape opt-in from the REPL's /model surfaces: style the rate notes
-                # by band via Text spans (never markup — content stays injection-proof).
-                self._console.print(_colorize_rate_notes(content))
             else:
-                self._console.print(_markup_escape(content))
+                meta = metadata or {}
+                # Text, never markup: the content stays literal whatever it holds. The REPL's `style`, when the theme
+                # has the name, wears the whole message (system.info is dim, system.error bold red); its `colorize`
+                # opt-in bands each rate note by speed and its `names` stay neutral, bright spans on a dim line.
+                text = _colorize_rate_notes(content) if meta.get("colorize") == "rates" else Text(content)
+                for span in list(text.spans):
+                    text.stylize("not dim", span.start, span.end)
+                for name in map(str, [n for n in meta.get("names") or () if n][:200]):  # a model id is whatever the server sent; a list that long is no list
+                    for found in re.finditer(rf"(?<!\w){re.escape(name)}(?!\w)", text.plain):
+                        text.stylize("not dim default", found.start(), found.end())
+                style = meta.get("style")
+                if isinstance(style, str) and style in TERMINAL_THEME.styles:
+                    text.style = style
+                self._console.print(_hanging(self._console, text), soft_wrap=True)
 
     async def panel_started(self, line: str) -> None:
         if not self.has_status_row():

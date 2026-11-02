@@ -31,7 +31,7 @@ from tests.unit.unit_strategy_support import PEER_URLS, PRIMARY, PRIMARY_URL, UN
 
 fcntl = pytest.importorskip("fcntl")
 DOCKER_URL = "http://127.0.0.1:8090/v1"
-OUTSIDE = lifecycle.RUNS_OUTSIDE_AUTOSTART
+OUTSIDE = lifecycle.RUNS_OUTSIDE_AUTOSTART.strip("()")  # the launching line carries it as a clause
 
 
 class StyledChannel(FakeChannel):
@@ -193,7 +193,8 @@ async def test_a_cold_model_swap_under_the_unit_restarts_the_unit_with_the_verbs
     # the same ordered verbs and the same unit-target as `start --preset flash-next` in this world
     assert rw.verbs == [("reset-failed", UNIT), ("restart", UNIT)]
     assert units.read_target(w.g) == "flash-next"
-    assert channel.messages[-1].startswith("Switched to flash-next on flash-next")
+    assert channel.messages[-2].startswith("◆ model ready flash-next")
+    assert channel.messages[-1].startswith(f"◆ model switched · {PEER_URLS['flash-next']}")
     assert agent._llm.config.base_url == PEER_URLS["flash-next"]
     assert OUTSIDE not in " ".join(channel.messages)
     assert (rw.seam_calls, rw.own_calls) == (0, 0)
@@ -365,9 +366,9 @@ async def test_a_cold_docker_peer_under_the_unit_says_the_next_boot_serves_nothi
 
     await repl._handle_slash("/model vllm-box")
 
-    launching = next(m for m in channel.messages if m.startswith("Launching vllm-box"))
-    assert OUTSIDE in launching
-    assert launching.index("several minutes...") < launching.index(OUTSIDE)
+    launching = next(m for m in channel.messages if m.startswith("◆ model launching vllm-box"))
+    assert f" · {OUTSIDE} · " in launching
+    assert launching.index(OUTSIDE) < launching.index("a few minutes")
     assert seen == [{"target": None, "peer": "vllm-box"}]         # unit-target taken away before its own launch
     assert units.read_target(w.g) is None
     assert w.manager.verbs == []                                  # the unit was not touched
@@ -382,9 +383,10 @@ async def test_the_same_docker_peer_without_a_unit_carries_no_clause(rw):
 
     await repl._handle_slash("/model vllm-box")
 
-    launching = next(m for m in channel.messages if m.startswith("Launching vllm-box"))
+    launching = next(m for m in channel.messages if m.startswith("◆ model launching vllm-box"))
     assert OUTSIDE not in launching
-    assert channel.messages[-1].startswith("Switched to vllm-box")
+    assert channel.messages[-2].startswith("◆ model ready vllm-box")
+    assert channel.messages[-1].startswith(f"◆ model switched · {DOCKER_URL}")
 
 
 # ============================================================ free, stop and restore reach the unit

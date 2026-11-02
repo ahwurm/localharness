@@ -26,6 +26,7 @@ from tests.unit.test_launch_paths_repl import (
 )
 
 FIT_LINE = "window: served 14,950 · trained 262,144 · fits 14,950 (free 6.0 GiB of 32.6; weights 18.5 GiB)"
+FIT_READY = f"◆ model ready qwen · {FIT_LINE}"  # the report rides the swap's ready line
 
 
 def _report(**over) -> WindowReport:
@@ -72,7 +73,10 @@ def _live(window: WindowReport | None, served: str = "qwen") -> LiveEndpoint:
 
 
 def _window_lines(channel) -> list[str]:
-    return [m for m in channel.messages if m.startswith("window:") or m.lstrip().startswith("→")]
+    """A window report wherever it rides: the ready line (`N window` / `window: …`), a line of its
+    own (`window: …`, the relaunch's), or an undo line (D-36)."""
+    return [m for m in channel.messages if (m.startswith("◆ model ready ") and " window" in m)
+            or m.startswith("window:") or m.lstrip().startswith("→")]
 
 
 def _ledger(tmp_path, ptype, model):
@@ -90,10 +94,10 @@ async def test_a_cold_launch_sends_its_one_window_line_after_launching_and_recor
 
     await repl._handle_slash("/model qwen-gguf")
 
-    launching = next(i for i, m in enumerate(channel.messages) if m.startswith("Launching "))
-    assert channel.messages[launching + 1:].count(FIT_LINE) == 1
-    assert channel.messages.index(FIT_LINE) > launching
-    assert not any(m.lstrip().startswith("→") for m in channel.messages)  # D-36: one line
+    launching = next(i for i, m in enumerate(channel.messages) if m.startswith("◆ model launching "))
+    assert channel.messages[launching + 1:].count(FIT_READY) == 1
+    assert channel.messages.index(FIT_READY) > launching
+    assert _window_lines(channel) == [FIT_READY]  # D-36: one line — no undo line, none of its own
     rec = _ledger(tmp_path, "llamacpp", "qwen")
     assert (rec.served, rec.trained, rec.fits) == (14950, 262144, 14950)
 
@@ -105,8 +109,8 @@ async def test_the_window_line_precedes_the_switched_line(tmp_path, fake):
 
     await repl._handle_slash("/model qwen-gguf")
 
-    at = channel.messages.index(FIT_LINE)
-    assert channel.messages[at + 1].startswith("Switched to qwen on llamacpp-local")
+    at = channel.messages.index(FIT_READY)
+    assert channel.messages[at + 1].startswith(f"◆ model switched · {PEER_URL} · ")
 
 
 @pytest.mark.asyncio
@@ -135,7 +139,7 @@ async def test_a_stand_in_harness_without_autosense_launches_with_none(tmp_path,
     await repl._handle_slash("/model qwen-gguf")
 
     assert fake.activations[-1]["autosense"] is None
-    assert any(m.startswith("Switched to qwen") for m in channel.messages)
+    assert any(m.startswith("◆ model switched") for m in channel.messages)
 
 
 @pytest.mark.asyncio
@@ -145,10 +149,10 @@ async def test_a_launch_with_an_unverified_window_ends_not_verified_and_complete
 
     await repl._handle_slash("/model qwen-gguf")
 
-    line = next(m for m in channel.messages if m.startswith("window:"))
+    line = next(m for m in channel.messages if m.startswith("◆ model ready "))
     assert line.endswith(" (not verified)")
     assert not any("failed" in m for m in channel.messages)
-    assert any(m.startswith("Switched to qwen") for m in channel.messages)
+    assert any(m.startswith("◆ model switched") for m in channel.messages)
 
 
 @pytest.mark.asyncio
@@ -159,10 +163,10 @@ async def test_a_launch_that_served_less_than_asked_names_what_was_asked_and_com
 
     await repl._handle_slash("/model qwen-gguf")
 
-    line = next(m for m in channel.messages if m.startswith("window:"))
+    line = next(m for m in channel.messages if m.startswith("◆ model ready "))
     assert line.endswith(" (asked 14,950)")
     assert not any("failed" in m.lower() for m in channel.messages)
-    assert any(m.startswith("Switched to qwen") for m in channel.messages)
+    assert any(m.startswith("◆ model switched") for m in channel.messages)
 
 
 @pytest.mark.asyncio
@@ -173,6 +177,7 @@ async def test_a_launch_without_a_window_sends_no_line_and_writes_no_ledger(tmp_
     await repl._handle_slash("/model qwen-gguf")
 
     assert _window_lines(channel) == []
+    assert "◆ model ready qwen" in channel.messages  # ready carries the model alone
     assert not default_speed_stats_path(tmp_path).exists()
 
 
@@ -189,7 +194,7 @@ async def test_a_launch_that_learned_nothing_keeps_the_recorded_baseline(tmp_pat
 
     rec = _ledger(tmp_path, "llamacpp", "qwen")
     assert (rec.served, rec.trained, rec.fits) == (65536, 262144, 114688)
-    assert any(m.startswith("Switched to qwen") for m in channel.messages)
+    assert any(m.startswith("◆ model switched") for m in channel.messages)
 
 
 @pytest.mark.asyncio
@@ -205,8 +210,8 @@ async def test_a_ledger_write_error_never_breaks_the_swap(tmp_path, fake, monkey
 
     await repl._handle_slash("/model qwen-gguf")
 
-    assert FIT_LINE in channel.messages
-    assert any(m.startswith("Switched to qwen") for m in channel.messages)
+    assert FIT_READY in channel.messages
+    assert any(m.startswith("◆ model switched") for m in channel.messages)
     assert not any("failed" in m.lower() for m in channel.messages)
 
 
@@ -237,9 +242,10 @@ async def test_a_fit_by_server_restart_sends_its_line_and_records_it(tmp_path, f
 
     await repl._handle_slash(f"/model {served}")
 
-    expected = "window: served by llama-server's --fit · served 65,536"
+    expected = f"◆ model ready {served} · window: served by llama-server's --fit · served 65,536"
     assert channel.messages.count(expected) == 1
-    restarting = next(i for i, m in enumerate(channel.messages) if m.startswith("Restarting managed"))
+    restarting = next(i for i, m in enumerate(channel.messages)
+                      if m.startswith(f"◆ model launching {served} · managed "))
     assert channel.messages.index(expected) > restarting
     assert fake.activations[-1]["autosense"] is harness.autosense
     rec = _ledger(tmp_path, harness.provider.provider_type, served)
@@ -254,6 +260,7 @@ async def test_a_restart_with_no_window_sends_no_line(tmp_path, fake, monkeypatc
     await repl._handle_slash("/model model-a")
 
     assert _window_lines(channel) == []
+    assert "◆ model ready model-a" in channel.messages  # ready carries the model alone
     # no window was recorded; the landing's own `last_served` entry (persist_landed) may be in the file
     assert _ledger(tmp_path, harness.provider.provider_type, "model-a") is None
 

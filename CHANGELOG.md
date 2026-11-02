@@ -4,6 +4,25 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.27.1] — 2026-11-01
+
+**What the harness prints after `/model` now reads like the harness.** Its own lines print dim and wrap under themselves, a model swap is told as short steps instead of one long sentence, and the `/model` list is one row to a model. What a swap does is unchanged.
+
+### Changed
+- **The harness's own lines print dim and hang.** The answer to a slash command, the `◆` notices and the failure lines carry their style on the terminal now: info lines are dim, failures are bold red, a model's name stays bright, and the speed notes keep their green, yellow or red. A line longer than the window wraps two columns in under its first row, and a row that was already indented wraps two columns past its indent, instead of returning to the left edge. A path with no space in it folds at the edge and loses nothing.
+- **A swap prints one line per step, as the step happens, with the model named once to a line.** `◆ model launching <name> · a few minutes`, then `◆ model stopped <name> · GPU freed` when something held the GPU, `◆ model ready <name> · <window> window · <speed> t/s measured · <where it sits>`, and `◆ model switched · <url> · tool calling <mode> · context budget refit to <window>`. Nothing the old launch sentence said is dropped: who can reach the server (`every interface, no key`), a launch that runs outside autostart and a first build stay on `launching`, and the saved-default note stays on `switched`. The `Speed: A → B` arrow is gone; the speed prints once, on `ready`. A restart of the managed server says `managed llama.cpp` (or `managed vLLM`) on `launching`, and a swap back from a peer says which peer it stopped; a model already served and a peer already up end on the same `switched` line, which then names the model because no `ready` line did. No line is cut short: a model's name alone can be 57 characters. The window line a server printed after a crash and relaunch keeps its `window:` shape.
+- **`/model` is one row to a model.** `1. <name> · serving · active · 125.4 t/s measured` and `2. <name> · llama.cpp · 115,456 window · 104.2 t/s measured`. A model that cannot run reads `– <name> · not offered · needs 40.0 GiB RAM, 16.9 GiB free` with what to do about it on a row under it, and `/model <name>` still prints the whole sentence. The footer reads `/model <name or number> switches · Enter picks from the menu`.
+
+### Fixed
+- **A launch line no longer says a model is all on the GPU and has layers on the CPU.** The first claim was the price's plan and the second was the server's measured residency, and each was written without asking the other. The line now says the measured spill when the launched server holds less on the GPU than was priced, and `all on the GPU` with the free figure when it does not. `localharness start` prints the same line.
+- **A swap to a model named like its peer no longer prints the name twice in one sentence** (`Switched to X on X`). A name appears once to a line, and the closing line of a launch names none.
+- **A swap line shows no credentials from a URL.** A server address written as `https://user:password@host/v1` printed whole on the closing line of a peer switch and a peer launch; it prints as `https://host/v1` now, and on the closing line of every swap.
+
+### Known limitations
+- No swap was watched on a real server. The swap lines were rendered through the real terminal channel from the REPL's own swap code, with the server and its processes stubbed, and the `/model` list was watched in a live session; a swap's four lines have not been seen on a real screen.
+- The tool calls, results and errors printed around these lines are unchanged: they keep their own colors and indent and do not hang under themselves.
+- `localharness model` prints the new rows as plain text, without dim or speed colors. No live run of the phone or an editor backs the new lines.
+
 ## [0.27.0] — 2026-11-01
 
 **Critics that read what a tool-using turn wrote, and a task that closes itself.** A reply the model writes without using a tool goes to you as written; when the turn used a tool, the critics read the reply with a full turn each, their findings print as they land, and a blocked reply goes back to the model with its tools for up to three rounds. The task pipeline keeps its output files in a scratch folder, and a small task the model finishes while filing its decisions can close with `done` once the critics pass the result. Two days of live sessions driven as a person shaped every item below.
