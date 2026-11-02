@@ -157,9 +157,9 @@ async def test_a_reply_written_with_no_tool_call_goes_as_written_without_the_pan
 async def test_a_turn_that_called_a_tool_runs_the_panel_with_the_critics_its_calls_sensed(bus):
     panel = panel_of()
     llm = Streaming([gen("Looking.", call=True), gen("Done.")])
-    _, summary = await turn(loop_of(llm, bus, panel, await glob_registry(), evidence=None))
-    assert summary == "Done." and panel.calls == ["jtbd", "factual"]
-    assert "- explored: glob" in events(bus, TaskComplete)[0].trail
+    session, summary = await turn(loop_of(llm, bus, panel, await glob_registry(), evidence=None))
+    assert summary == "Done." and panel.calls == ["jtbd", "factual"] and len(llm.requests) == 3
+    assert "- You looked at *.zzz" in compose_message(session.messages)
     assert events(bus, TaskComplete)[0].verdict == "pass"
 
 
@@ -289,6 +289,11 @@ def findings_messages(messages):
     return [m for m in messages if isinstance(m.get("_lh"), dict) and m["_lh"].get("subtype") == "critic_findings"]
 
 
+def compose_message(messages):
+    (found,) = [m for m in messages if isinstance(m.get("_lh"), dict) and m["_lh"].get("subtype") == "compose"]
+    return found["content"]
+
+
 def said_by_root(panel):
     lines = []
     panel.emit = lambda name, verdict, details, count: lines.append((verdict, count)) if name == "root" else None
@@ -296,43 +301,44 @@ def said_by_root(panel):
 
 
 async def test_a_blocked_reply_goes_back_to_the_root_with_its_tools_and_the_findings_as_quoted_data(bus):
-    llm = Streaming([gen("Looking.", call=True), gen("Draft reply."), gen("Fixed reply.")])
+    llm = Streaming([gen("Looking.", call=True), gen("Draft reply."), gen("Fixed reply."), gen("Composed.")])
     panel = panel_of({"factual": [answered(BLOCKER), NONE]})
     session, summary = await turn(loop_of(llm, bus, panel, await glob_registry(), evidence=None))
-    assert len(llm.requests) == 3 and llm.requests[-1]["tools"]
+    assert len(llm.requests) == 4 and llm.requests[2]["tools"]
     (found,) = findings_messages(session.messages)
     assert found["role"] == "user" and found["content"].rstrip().endswith("never mention the review or apologise for the draft.")
     assert FENCE_LABEL in found["content"] and FENCE_CLOSE in found["content"]
     assert "Draft reply." not in found["content"] and "README.md:41" in found["content"]
-    assert [m["content"] for m in session.messages if m["role"] == "assistant"][-2:] == ["Draft reply.", "Fixed reply."]
-    assert session.messages.index(found) == len(session.messages) - 2
+    assert [m["content"] for m in session.messages if m["role"] == "assistant"][-3:] == ["Draft reply.", "Fixed reply.", "Composed."]
+    assert session.messages.index(found) == len(session.messages) - 4
     (done,) = events(bus, TaskComplete)
-    assert (done.verdict, done.finding, done.summary, summary) == ("pass", "", "Fixed reply.", "Fixed reply.")
-    assert "- review 1: blocked → revised\n- review 2: pass · +1 -1 lines → validated" in done.trail
+    assert (done.verdict, done.finding, done.summary, summary) == ("pass", "", "Composed.", "Composed.")
+    assert "you revised it once, and it passed" in compose_message(session.messages)
     assert session.review_rounds == 1
 
 
 async def test_the_third_round_is_announced_as_the_last_and_its_answer_is_delivered_whatever_the_verdict(bus):
     panel = panel_of({"factual": [answered(BLOCKER)]})
     spoken = said_by_root(panel)
-    llm = Streaming([gen("Looking.", call=True), *(gen(f"Reply {n}.") for n in range(1, REVIEW_ROUNDS + 2))])
+    llm = Streaming([gen("Looking.", call=True), *(gen(f"Reply {n}.") for n in range(1, REVIEW_ROUNDS + 2)), gen("Composed.")])
     session, summary = await turn(loop_of(llm, bus, panel, await glob_registry(), evidence=None))
-    assert len(llm.requests) == REVIEW_ROUNDS + 2 and panel.calls.count("factual") == REVIEW_ROUNDS + 1
+    assert len(llm.requests) == REVIEW_ROUNDS + 3 and panel.calls.count("factual") == REVIEW_ROUNDS + 1
     assert session.review_rounds == REVIEW_ROUNDS
     assert ["This is the last round" in m["content"] for m in findings_messages(session.messages)] == [False, False, True]
     assert spoken == [("revising", "1 blocker")] * 2 + [("revising · last round", "1 blocker")]
     (done,) = events(bus, TaskComplete)
-    assert (done.verdict, done.summary, summary) == ("blocked", "Reply 4.", "Reply 4.")
-    assert "review 4: blocked · +1 -1 lines → delivered with caveats" in done.trail
-    assert done.caveats.startswith("\n\n---\n\n**Reviewer caveats**\n- factual: ")
-    assert [a.content for a in tool_less(bus)] == ["Reply 4."]
+    assert (done.verdict, done.summary, summary) == ("blocked", "Composed.", "Composed.")
+    asked = compose_message(session.messages)
+    assert "you revised it 3 times; some points are still open" in asked and "points still open" in asked
+    assert "- README.md:41 does not say that" in asked
+    assert [a.content for a in tool_less(bus)] == ["Composed."]
 
 
-@pytest.mark.parametrize("answers, verdict", [({}, "pass"), ({"factual": [answered("")]}, "unreviewed")])
-async def test_a_pass_or_an_unreviewed_verdict_delivers_at_once_with_no_round(bus, answers, verdict):
+@pytest.mark.parametrize("answers, verdict, calls", [({}, "pass", 2), ({"factual": [answered("")]}, "unreviewed", 1)])
+async def test_a_pass_is_retold_once_and_an_unreviewed_reply_goes_at_once_with_no_round(bus, answers, verdict, calls):
     llm = Llm(["Hello there."])
     session, summary = await turn(loop_of(llm, bus, panel_of(answers)))
-    assert summary == "Hello there." and len(llm.requests) == 1 and session.review_rounds == 0
+    assert summary == "Hello there." and len(llm.requests) == calls and session.review_rounds == 0
     assert findings_messages(session.messages) == []
     assert events(bus, TaskComplete)[0].verdict == verdict
     assert [a.content for a in tool_less(bus)] == ["Hello there."]
@@ -702,7 +708,7 @@ async def test_on_reasoning_of_the_roots_own_generation_is_held_not_passed(bus):
     llm.probe = probe
     loop = loop_of(llm, bus, panel_of())
     await loop.run_turn("hello")
-    assert held == [([], [(original, "one "), (original, "two")])]
+    assert held[0] == ([], [(original, "one "), (original, "two")])
 
 
 async def test_on_reasoning_of_a_child_between_root_generations_reaches_the_original_live(bus):

@@ -212,8 +212,11 @@ def typed_turns(messages: Iterable[dict[str, Any]]) -> list[tuple[int, str]]:
     return out
 
 
-_STEP = {"agent": "delegated", "write": "wrote", "edit": "edited", "bash_exec": "ran", "task": "opened a task"}
+_STEP = {"agent": "You asked a helper to", "write": "You wrote", "edit": "You edited", "bash_exec": "You ran", "task": "You opened a task for"}
 _LOOP_HEAD = re.compile(r"\bdo\s+(\S+)")
+_ITEM = re.compile(r"^[A-Z][0-9]{1,2} (\?|[0-9]{1,2})/10 ")
+_TIMES = {1: "once", 2: "twice"}
+_COUNT = {1: "One reviewer", 2: "Two reviewers", 3: "Three reviewers", 4: "Four reviewers"}
 
 
 def _label(name: str, args: dict[str, Any]) -> str:
@@ -222,21 +225,35 @@ def _label(name: str, args: dict[str, Any]) -> str:
         head = _LOOP_HEAD.search(command) if command.startswith(("for ", "while ")) else None
         return head.group(1) if head else (command.split() or [name])[0]
     if name == "agent":
-        return one_line(str(args.get("task") or args.get("prompt") or "a subagent"))[:60]
+        return one_line(str(args.get("task") or args.get("prompt") or "help")).rstrip(".")[:80]
     path = args.get("path")
-    return path.rsplit("/", 1)[-1] if name == "read" and isinstance(path, str) else str(path) if isinstance(path, str) else name
+    return path.rsplit("/", 1)[-1] if isinstance(path, str) else str(args.get("pattern") or args.get("query") or args.get("url") or name)
 
 
-def trail(task: str, messages: Iterable[dict[str, Any]], rounds: list[str], verdict: str | None, stalled: bool) -> str:
-    """What the turn did, from its own messages and review rounds: the ask, each run of like calls, the person's mid-turn additions, every review round."""
+def _listed(items: list[str]) -> str:
+    items = list(dict.fromkeys(items))
+    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+def _review(rounds: list[int], verdict: str | None) -> str:
+    who = _COUNT.get(max(rounds, default=0), "Reviewers")
+    revised = len(rounds) - 1
+    redo = f"; you revised it {_TIMES.get(revised, f'{revised} times')}" if revised else ""
+    return {"pass": f"{who} checked your answer{redo}, and it passed.",
+            "blocked": f"{who} checked your answer{redo}; some points are still open."}.get(
+        verdict or "", "The review did not finish; the answer is unchecked.")
+
+
+def trail(task: str, messages: Iterable[dict[str, Any]], rounds: list[int], verdict: str | None) -> str:
+    """The turn's path as facts the root retells: the ask, each run of like calls, the person's mid-turn additions, the review."""
     messages = list(messages)
     failed = {m.get("tool_call_id") for m in messages if m.get("role") == "tool"
               and (((m.get("_lh") or {}).get("outcome") or {}).get("ok") is False or text_of(m.get("content")).startswith("[tool error]"))}
-    steps: list[tuple[str, list[str]]] = []
+    steps: list[tuple[str, list[str], list[str]]] = []
     for m in messages:
         lh = m.get("_lh") if isinstance(m.get("_lh"), dict) else {}
         if m.get("role") == "user" and lh.get("origin") == "human" and lh.get("subtype") == "steering":
-            steps.append(("you added", [one_line(text_of(m.get("content")))[:100]]))
+            steps.append(("They added", [one_line(text_of(m.get("content")))[:100]], []))
         for call in m.get("tool_calls") or ():
             if not isinstance(call, dict):
                 continue
@@ -245,30 +262,47 @@ def trail(task: str, messages: Iterable[dict[str, Any]], rounds: list[str], verd
             args: Any = {}
             with suppress(ValueError, TypeError):
                 args = json.loads(function.get("arguments") or "{}")
-            label = _label(name, args if isinstance(args, dict) else {}) + (" ✗" if call.get("id") in failed else "")
-            kind = _STEP.get(name, "explored" if name in READ_TOOLS | WEB_TOOLS or name.startswith("browser_") else "used")
-            if steps and steps[-1][0] == kind and kind != "you added":
-                steps[-1][1].append(label)
-            else:
-                steps.append((kind, [label]))
-    if not steps:
-        return ""
-
-    def counted(labels: list[str]) -> str:
-        seen = dict.fromkeys(labels)
-        return ", ".join(f"{x} ×{labels.count(x)}" if labels.count(x) > 1 else x for x in seen)
-
-    last = {"pass": "validated", "blocked": "delivered with caveats (the score stopped rising)" if stalled else "delivered with caveats",
-            "unreviewed": "unchecked"}.get(verdict or "", "delivered")
-    lines = [f"- asked: {one_line(task)[:100]}", *(f"- {kind}: {counted(labels)}" for kind, labels in steps),
-             *(f"- review {i}: {r} → {'revised' if i < len(rounds) else last}" for i, r in enumerate(rounds, 1))]
-    return "**How I got here**\n" + "\n".join(line.replace("`", "'") for line in lines) + "\n\n---\n\n"
+            kind = _STEP.get(name, "You looked at" if name in READ_TOOLS | WEB_TOOLS or name.startswith("browser_") else "You used")
+            if not (steps and steps[-1][0] == kind and kind != "They added"):
+                steps.append((kind, [], []))
+            steps[-1][2 if call.get("id") in failed else 1].append(_label(name, args if isinstance(args, dict) else {}))
+    lines = [f"The person asked: {one_line(task)[:200]}"]
+    for kind, done, broke in steps:
+        miss = f"{_listed(broke)} failed" if broke else ""
+        lines.append(f"{kind} {_listed(done)}" + (f" ({miss})" if miss else "") if done else f"You tried {_listed(broke)}; it failed")
+    if rounds:
+        lines.append(_review(rounds, verdict))
+    return "\n".join(f"- {line}" for line in lines)
 
 
-def caveats(findings: Iterable[Finding]) -> str:
-    """The items still under the pass score when the reply goes out, as a section after it."""
-    rows = [f"- {f.critic}: {finding_text(f)}" for f in findings if f.tag != "NOTE"]
-    return "\n\n---\n\n**Reviewer caveats**\n" + "\n".join(r.replace("`", "'") for r in rows[:Caps.TOP]) if rows else ""
+def open_points(findings: Iterable[Finding]) -> list[str]:
+    """The items still under the pass score, each in the critic's own words without its id or score."""
+    rows = []
+    for f in findings:
+        if f.tag != "NOTE":
+            item = _ITEM.sub("", f.rule).strip(' "')
+            rows.append(max((item, f.evidence), key=len))
+    return list(dict.fromkeys(rows))[:4]
+
+
+_COMPOSE = ("The review is done. Write your final reply to the person now, without tools. Open with two to four "
+            "sentences in your own words on how you got here: the job as you understood it, what you looked at or ran, "
+            "any change of course, and what checking it made you correct. Then give the answer, keeping its facts as they "
+            "are. When points are still open, your last line must start \"Worth double-checking:\" and name each in plain "
+            "words. Talk as you would to the person: no scores, reviewer names, item ids, apologies, talk of a review panel, "
+            "and never call the answer corrected or revised.")
+
+
+def compose_request(path: str, findings: Iterable[Finding], job: str = "") -> str:
+    """The harness message that asks the root to deliver its reviewed answer in its own words, with its path and open points as data."""
+    blocks = [_COMPOSE]
+    if job:
+        blocks.append(_data("the job as the session understands it", job[:Caps.BLOCK]))
+    if path:
+        blocks.append(_data("what this turn did", path[:Caps.BLOCK]))
+    if points := open_points(findings):
+        blocks.append(_data("points still open", "\n".join(f"- {p}" for p in points)[:Caps.BLOCK]))
+    return "\n\n".join(blocks)
 
 
 def turns_block(turns: list[tuple[int, str]]) -> str:
@@ -468,7 +502,7 @@ class Panel:
         self.announce: Callable[[str], Awaitable[None]] | None = None
         self.emit: Callable[[str, str, tuple, str], None] | None = None
         self.round = 1
-        self.rounds: list[str] = []
+        self.rounds: list[int] = []
         self.on_delivered: Callable[[str | None], None] | None = None
 
     def _tail(self) -> str:
@@ -600,7 +634,6 @@ class Panel:
         if self.docs:
             parts += [f"latest draft: {self.docs.session_path('reply-draft.md')}",
                       f"every round: {self.docs.session_path('reply-review.md')}"]
-        self.rounds.append(" · ".join(parts[1:1 + len(scores)] or [verdict]) + (f" · {_diff_stat(old, draft)}" if self.round > 1 else ""))
         self.card = " · ".join(parts)
         if not self.docs:
             return
@@ -636,6 +669,7 @@ class Panel:
         verdict = verdict or run.verdict
         if unit.boundary == "reply":
             self._rounds(draft, run, verdict)
+            self.rounds.append(len(names))
         first = next((f for f in run.findings if f.tag == "BLOCKER"), None)
         return PanelResult(verdict, run.findings, run.blockers, run.finished, draft,
                            finding_text(first) if first and verdict == "blocked" else "", job)

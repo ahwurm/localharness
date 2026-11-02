@@ -138,7 +138,7 @@ def test_a_revision_carries_warnings_with_the_blockers():
     assert "A1 2/10" in text and "B1 6/10" in text and "never mention the review" in text
 
 
-def test_the_trail_retraces_the_turn_from_its_own_calls_additions_and_rounds():
+def test_the_path_retells_the_turn_from_its_own_calls_additions_and_rounds():
     from localharness.orchestrator.task_flow.panel import trail
 
     def call(i, name, **args):
@@ -151,20 +151,18 @@ def test_the_trail_retraces_the_turn_from_its_own_calls_additions_and_rounds():
                 call("4", "bash_exec", command="ping -c 1 10.0.0.1"),
                 {"role": "user", "content": "only the wifi", "_lh": {"origin": "human", "subtype": "steering"}},
                 call("5", "agent", task="list wifi clients"), call("6", "write", path="scratchpad/plan.md")]
-    text = trail("count the devices", messages, ["jtbd 2/10", "jtbd 9/10 · +3 -2 lines"], "pass", False)
-    assert text.splitlines()[:8] == ["**How I got here**", "- asked: count the devices", "- ran: ip, nmap ✗, ping ×2",
-                                     "- you added: only the wifi", "- delegated: list wifi clients",
-                                     "- wrote: scratchpad/plan.md", "- review 1: jtbd 2/10 → revised",
-                                     "- review 2: jtbd 9/10 · +3 -2 lines → validated"]
-    assert text.endswith("\n---\n\n") and trail("hi", [], [], "pass", False) == ""
+    assert trail("count the devices", messages, [3, 3], "pass").splitlines() == [
+        "- The person asked: count the devices", "- You ran ip and ping (nmap failed)", "- They added only the wifi",
+        "- You asked a helper to list wifi clients", "- You wrote plan.md",
+        "- Three reviewers checked your answer; you revised it once, and it passed."]
 
 
-
-def test_open_items_become_a_caveat_section_after_the_reply_and_notes_stay_out():
-    from localharness.orchestrator.task_flow.panel import caveats
-    block = Finding("BLOCKER", "A1 2/10 the count", "seen", False, "jtbd", 2, "count the list")
-    warn = Finding("WARNING", "B1 6/10 subnets", "seen", False, "factual", 6, "")
+def test_the_compose_request_carries_the_job_the_path_and_the_open_points_in_plain_words():
+    from localharness.orchestrator.task_flow.panel import compose_request
+    block = Finding("BLOCKER", "A1 2/10 the count", "the list has 7, the reply says 6", False, "jtbd", 2, "count")
     note = Finding("NOTE", "C1 9/10 tone", "fine", False, "jtbd", 9, "")
-    assert caveats((block, warn, note)) == ("\n\n---\n\n**Reviewer caveats**\n- jtbd: A1 2/10 the count — seen — to 9: count the list\n"
-                                            "- factual: B1 6/10 subnets — seen")
-    assert caveats((note,)) == ""
+    text = compose_request("- You ran ip", (block, note), "Count the devices on the wifi")
+    assert text.startswith("The review is done.") and "no scores, reviewer names, item ids" in text
+    assert "Count the devices on the wifi" in text and "- You ran ip" in text
+    assert "- the list has 7, the reply says 6" in text and "tone" not in text and "2/10" not in text
+    assert "points still open" not in compose_request("", (note,))

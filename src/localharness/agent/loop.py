@@ -122,6 +122,7 @@ class Session:
     # bound is configurable while the default (max_nudges=1) reproduces the original behavior.
     baton_nudges_used: int = 0
     review_rounds: int = 0
+    reviewed: tuple | None = None
     truncated_tool_calls: int = 0  # #77: tool calls suppressed for output-ceiling truncation
     # #152: one corrective nudge per turn is spent on a degenerate (one-line-repeated) candidate
     # answer; the next degenerate reply fails the turn instead of shipping the repetition.
@@ -2787,11 +2788,10 @@ class AgentLoop:
                     session.push(harness_message(_SENTINEL_REPROMPT_NUDGE, "sentinel_retry"))
                     continue
 
-                from localharness.orchestrator.task_flow.panel import REVIEW_ROUNDS, caveats, revision_request
-                findings: tuple = ()
-                if self.reply_panel is None:
+                from localharness.orchestrator.task_flow.panel import REVIEW_ROUNDS, compose_request, revision_request
+                if self.reply_panel is None or session.reviewed is not None:
                     summary = _clean_summary(_format_completion_summary(session, content))
-                    verdict, finding, blockers, notes = None, "", 0, 0
+                    verdict, finding, blockers, notes, _ = session.reviewed or (None, "", 0, 0, ())
                 else:
                     try:
                         self.reply_panel.round = session.review_rounds + 1
@@ -2809,6 +2809,12 @@ class AgentLoop:
                             held.pop()
                         session.push(harness_message(revision_request(findings, last, self.reply_panel.card), "critic_findings"))
                         continue
+                    if verdict in ("pass", "blocked"):
+                        session.reviewed = (verdict, finding, blockers, notes, findings)
+                        if held:
+                            held.pop()
+                        session.push(harness_message(self._compose(session, task, verdict, findings), "compose"))
+                        continue
                 if held:
                     await asyncio.shield(self._bus.publish(held.pop().model_copy(update={"content": summary})))
                 await self._bus.publish(TaskComplete(
@@ -2822,8 +2828,6 @@ class AgentLoop:
                     finding=finding,
                     blockers=blockers,
                     notes=notes,
-                    trail=self._trail(session, task, verdict),
-                    caveats=caveats(findings) if self.reply_panel is not None and verdict is not None else "",
                 ))
                 if self.reply_panel is not None and self.reply_panel.on_delivered and verdict is not None:
                     try:
@@ -3192,15 +3196,16 @@ class AgentLoop:
         if self._live_turn is not None and math.isfinite(seconds) and seconds > 0:
             self._live_turn[0].excluded_seconds += seconds
 
-    def _trail(self, session: Session, task: str, verdict: str | None) -> str:
-        if self.reply_panel is None or verdict is None:
-            return ""
-        from localharness.orchestrator.task_flow.panel import trail
+    def _compose(self, session: Session, task: str, verdict: str, findings: tuple) -> str:
+        from localharness.orchestrator.task_flow.panel import compose_request, trail
+        panel = self.reply_panel
         try:
-            return trail(task, session.messages[session.turn_start_idx:], self.reply_panel.rounds, verdict, self.reply_panel.stalled)
-        except Exception:  # noqa: BLE001 - the trail never costs the reply
-            log.warning("the reply trail failed", exc_info=True)
-            return ""
+            path = trail(task, session.messages[session.turn_start_idx:], panel.rounds, verdict)
+        except Exception:  # noqa: BLE001 - a missing path never costs the reply
+            log.warning("the reply path failed", exc_info=True)
+            path = ""
+        job = panel.docs.read_session("jtbd.md").strip() if panel.docs else ""
+        return compose_request(path, findings, job)
 
     def _turn_evidence(self, session: Session) -> tuple[list[tuple[str, str | None]], list[str], list[str]]:
         """This turn's tool calls as (name, origin), the paths its write and edit calls named, and its tool results put in the store as handles."""
