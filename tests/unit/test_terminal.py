@@ -85,8 +85,8 @@ def test_reply_line_of_a_blocked_root_reply_names_the_show_command_and_the_block
     from localharness.channels.base import reply_line
 
     assert reply_line(completed(verdict="blocked", finding="README.md:41 does not say that", blockers=3)) == \
-        "◆ reply blocked · 3 blockers · /task show reply"
-    assert reply_line(completed(verdict="blocked", finding="x", blockers=1)) == "◆ reply blocked · 1 blocker · /task show reply"
+        "◆ reply with caveats · 3 blockers · /task show reply"
+    assert reply_line(completed(verdict="blocked", finding="x", blockers=1)) == "◆ reply with caveats · 1 blocker · /task show reply"
 
 
 def test_reply_line_of_a_passed_reply_counts_its_notes_and_a_reply_no_panel_read_prints_nothing():
@@ -122,5 +122,5 @@ async def test_reply_line_follows_the_reply_on_the_terminal_with_its_mark():
     channel = make_terminal_channel(out, force_terminal=False)
     await channel.on_task_complete(completed(verdict="blocked", finding="README.md:41 does not say that", blockers=2))
     lines = [line.strip() for line in out.getvalue().splitlines() if line.strip()]
-    assert lines[-1] == "◆ reply blocked · 2 blockers · /task show reply"
+    assert lines[-1] == "◆ reply with caveats · 2 blockers · /task show reply"
     assert any("the answer" in line for line in lines[:-1])

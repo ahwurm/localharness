@@ -704,7 +704,7 @@ async def test_one_fan_out_opens_one_client_not_one_per_device(tmp_path):
 @pytest.mark.parametrize("verdict,finding,title,body", [
     ("pass", "", "reply ready", "the reply"),
     ("unreviewed", "no revision", "reply ready (unchecked)", "the reply"),
-    ("blocked", "[BLOCKER] x", "reply blocked", "[BLOCKER] x"),
+    ("blocked", "[BLOCKER] x", "reply ready (caveats)", "[BLOCKER] x"),
     (None, "", "turn finished", "the reply"),
 ])
 def test_a_finishing_turn_is_titled_from_the_replys_verdict(verdict, finding, title, body):

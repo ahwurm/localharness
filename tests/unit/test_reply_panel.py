@@ -323,7 +323,8 @@ async def test_the_third_round_is_announced_as_the_last_and_its_answer_is_delive
     assert spoken == [("revising", "1 blocker")] * 2 + [("revising · last round", "1 blocker")]
     (done,) = events(bus, TaskComplete)
     assert (done.verdict, done.summary, summary) == ("blocked", "Reply 4.", "Reply 4.")
-    assert "review 4: blocked · +1 -1 lines → delivered with blockers left" in done.trail
+    assert "review 4: blocked · +1 -1 lines → delivered with caveats" in done.trail
+    assert done.caveats.startswith("\n\n---\n\n**Reviewer caveats**\n- factual: ")
     assert [a.content for a in tool_less(bus)] == ["Reply 4."]
 
 
@@ -1044,7 +1045,7 @@ async def test_push_pass_is_titled_reply_ready_with_the_summary_cut_at_120(tmp_p
 
 async def test_push_blocked_carries_the_finding_cut_at_120(tmp_path):
     _, _, recorder = await finished_turn(tmp_path, "blocked", "[BLOCKER] " + "y" * 300)
-    assert [(p.title, p.body) for p in recorder.sent] == [("reply blocked", ("[BLOCKER] " + "y" * 300)[:120])]
+    assert [(p.title, p.body) for p in recorder.sent] == [("reply ready (caveats)", ("[BLOCKER] " + "y" * 300)[:120])]
 
 
 async def test_push_unreviewed_with_a_reason_is_titled_unchecked_and_carries_the_summary(tmp_path):
@@ -1075,7 +1076,7 @@ async def test_push_a_childs_task_complete_never_sets_the_verdict_and_the_next_r
     await bus.publish(TurnCompleted(session_id="s1", agent_id="orchestrator", iterations=1, elapsed_tokens=9,
                                     duration_seconds=TURN_PUSH_MIN_S + 30, summary="later"))
     await channel.flush_push()
-    assert [p.title for p in recorder.sent] == ["reply blocked", "turn finished"]
+    assert [p.title for p in recorder.sent] == ["reply ready (caveats)", "turn finished"]
 
 
 async def test_the_delivered_verdict_reaches_the_panels_on_delivered_hook(bus):

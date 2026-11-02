@@ -2787,11 +2787,12 @@ class AgentLoop:
                     session.push(harness_message(_SENTINEL_REPROMPT_NUDGE, "sentinel_retry"))
                     continue
 
+                from localharness.orchestrator.task_flow.panel import REVIEW_ROUNDS, caveats, revision_request
+                findings: tuple = ()
                 if self.reply_panel is None:
                     summary = _clean_summary(_format_completion_summary(session, content))
                     verdict, finding, blockers, notes = None, "", 0, 0
                 else:
-                    from localharness.orchestrator.task_flow.panel import REVIEW_ROUNDS, revision_request
                     try:
                         self.reply_panel.round = session.review_rounds + 1
                         summary, verdict, finding, blockers, notes, findings = await self._review_reply(session, task, content)
@@ -2822,6 +2823,7 @@ class AgentLoop:
                     blockers=blockers,
                     notes=notes,
                     trail=self._trail(session, task, verdict),
+                    caveats=caveats(findings) if self.reply_panel is not None and verdict is not None else "",
                 ))
                 if self.reply_panel is not None and self.reply_panel.on_delivered and verdict is not None:
                     try:

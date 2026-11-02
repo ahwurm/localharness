@@ -258,11 +258,17 @@ def trail(task: str, messages: Iterable[dict[str, Any]], rounds: list[str], verd
         seen = dict.fromkeys(labels)
         return ", ".join(f"{x} ×{labels.count(x)}" if labels.count(x) > 1 else x for x in seen)
 
-    last = {"pass": "validated", "blocked": "stopped: the score stopped rising" if stalled else "delivered with blockers left",
+    last = {"pass": "validated", "blocked": "delivered with caveats (the score stopped rising)" if stalled else "delivered with caveats",
             "unreviewed": "unchecked"}.get(verdict or "", "delivered")
     lines = [f"- asked: {one_line(task)[:100]}", *(f"- {kind}: {counted(labels)}" for kind, labels in steps),
              *(f"- review {i}: {r} → {'revised' if i < len(rounds) else last}" for i, r in enumerate(rounds, 1))]
     return "**How I got here**\n" + "\n".join(line.replace("`", "'") for line in lines) + "\n\n---\n\n"
+
+
+def caveats(findings: Iterable[Finding]) -> str:
+    """The items still under the pass score when the reply goes out, as a section after it."""
+    rows = [f"- {f.critic}: {f.rule}" + (f" — to 9: {f.fix}" if f.fix else "") for f in findings if f.tag != "NOTE"]
+    return "\n\n---\n\n**Reviewer caveats**\n" + "\n".join(r.replace("`", "'") for r in rows[:Caps.TOP]) if rows else ""
 
 
 def turns_block(turns: list[tuple[int, str]]) -> str:

@@ -58,7 +58,7 @@ a phone earns its notifications being switched off — and then the permission b
 nobody, which is the failure §5.5 exists to prevent.
 """
 
-REPLY_TITLES = {"pass": "reply ready", "unreviewed": "reply ready (unchecked)", "blocked": "reply blocked"}
+REPLY_TITLES = {"pass": "reply ready", "unreviewed": "reply ready (unchecked)", "blocked": "reply ready (caveats)"}
 
 NEEDS_YOU_COOLDOWN_S = MEASURED_LONG_TURN_S
 """One alerting "needs you" per session per window.
