@@ -101,7 +101,7 @@ def test_model_list_shows_served_and_active(components_home, monkeypatch):
     monkeypatch.setattr(model_ops, "list_live_models", _fake_live(["model-a", "model-b"]), raising=False)
     result = runner.invoke(app, ["model"])
     assert result.exit_code == 0, result.output
-    assert "model-a" in result.output and "[active]" in result.output
+    assert "  1. model-a · serving · active" in result.output
     assert "model-b" in result.output
 
 

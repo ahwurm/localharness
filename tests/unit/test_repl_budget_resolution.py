@@ -84,7 +84,7 @@ def test_unpinned_refit_takes_the_served_window_and_says_so(monkeypatch):
 
     assert ctxcfg.resolve_budget("new-model") == (CONFIGURED, False)
     assert ctx.max_context_tokens == SERVED
-    assert "served window" in note and f"{SERVED:,}" in note
+    assert f"context budget refit to {SERVED:,}" in note
 
 
 def test_no_context_config_falls_back_to_the_probe(monkeypatch):

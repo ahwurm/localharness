@@ -158,7 +158,7 @@ async def test_a_restart_that_serves_below_the_floor_is_a_failed_launch(tmp_path
 
     assert any(m.startswith("Model swap failed: Other-Q4 served a 4,096-token window, below the 15,360 the "
                             "harness needs") for m in channel.messages)
-    assert not any(m.startswith("Switched to") for m in channel.messages)
+    assert not any(m.startswith("◆ model ready") or m.startswith("◆ model switched") for m in channel.messages)
     assert boundaries.stops and primary.model == "/x/primary.gguf"
 
 

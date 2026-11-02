@@ -63,9 +63,9 @@ def test_a_serving_primary_and_a_cold_peer_are_one_list(world):
     assert model_ops.entry_lines(entries) == [
         "Models:",
         "▸ llama.cpp · 127.0.0.1:8080",
-        f"  1. {PRIMARY}  (serving)  ● [active]",
+        f"  1. {PRIMARY} · serving · active",
         "▸ this box can launch",
-        f"  2. flash-next  llama.cpp · {window:,}"]
+        f"  2. flash-next · llama.cpp · {window:,} window"]
     assert [e.name for e in entries.numbered()] == [PRIMARY, "flash-next"]
 
 
@@ -101,7 +101,7 @@ def test_localharness_model_prints_the_list_from_plan_entries(world, monkeypatch
 
     assert result.exit_code == 0, result.output
     assert "▸ this box can launch" in result.output
-    assert f"  2. flash-next  llama.cpp · {asked(world, 0, floor=None):,}" in result.output
+    assert f"  2. flash-next · llama.cpp · {asked(world, 0, floor=None):,} window" in result.output
     assert "start will launch it" not in result.output
 
 
@@ -164,7 +164,7 @@ def test_a_foreign_holder_leaves_the_launch_group_unnumbered_and_unpickable(worl
     assert [e.name for e in entries.numbered()] == [PRIMARY]
     assert model_ops.entry_lines(entries)[3:] == [
         "▸ available once llm.service is stopped",
-        f"     flash-next  llama.cpp · {entries.groups[1].entries[0].window:,}"]
+        f"     flash-next · llama.cpp · {entries.groups[1].entries[0].window:,} window"]
     assert entries.pick("flash-next") == sentence
     assert entries.pick("2") is None
 
@@ -301,7 +301,7 @@ def test_a_withheld_record_is_a_not_offered_line(world):
     entries = entries_of(world, SERVING)
 
     assert entries.numbered()[1:] == ()
-    assert model_ops.entry_lines(entries)[-1] == "  not offered: flash-next — its record has changes you have not confirmed"
+    assert model_ops.entry_lines(entries)[-1] == "  –  flash-next · not offered · its record has changes you have not confirmed"
 
 
 def test_a_plan_the_floor_refuses_is_a_not_offered_line(world, monkeypatch):
@@ -316,7 +316,7 @@ def test_a_plan_the_floor_refuses_is_a_not_offered_line(world, monkeypatch):
     entries = entries_of(world, SERVING)
 
     assert model_ops.entry_lines(entries)[-1] == (
-        "  not offered: flash-next — fits only a 9,216-token window here and the harness needs at least 13,824 — free GPU memory, or pick a smaller model")
+        "  –  flash-next · not offered · fits only a 9,216-token window here and the harness needs at least 13,824 — free GPU memory, or pick a smaller model")
     assert entries.pick("flash-next") == refusal
 
 
@@ -328,7 +328,7 @@ def test_one_record_that_cannot_be_planned_does_not_fail_the_list(world, monkeyp
 
     lines = model_ops.entry_lines(entries_of(world, SERVING))
 
-    assert lines[-1] == "  not offered: flash-next — could not plan it (OSError)"
+    assert lines[-1] == "  –  flash-next · not offered · could not plan it (OSError)"
 
 
 @pytest.mark.parametrize("serving", [True, False])

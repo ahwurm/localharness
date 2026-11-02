@@ -964,6 +964,8 @@ def _placement_line(r: WindowReport) -> str | None:
     if p.where == "experts in RAM":
         resident = "dense, projector and KV" if p.mmproj else "dense and KV"
         where = f"experts in RAM ({gib(p.experts_ram)} GiB) · {resident} on the GPU"
+    elif (spill := spilled_bytes(r)) is not None:
+        return f"window: {window:,} · {SPILL_CLAUSE.format(gib=gib(spill))}"  # what the launch held, not what the price planned
     else:
         where = "all on the GPU"
     return f"window: {window:,} · {where} ({share} of {gib(p.free_bytes)} GiB free)"
@@ -972,7 +974,7 @@ def _placement_line(r: WindowReport) -> str | None:
 # Swift 27B at 131,072 tokens on the RTX 5090 held 2.68 GiB beyond its priced share (25,960 MiB held, 24,338,688,192 B priced).
 SPILL_OVERHEAD = int(2.7 * 2**30)
 SPILL_MIN_GPU_BYTES = 10 * 2**30
-SPILL_CLAUSE = " — {gib} GiB of layers on the CPU, decode will be slow"
+SPILL_CLAUSE = "{gib} GiB of layers on the CPU, decode will be slow"
 
 
 def spilled_bytes(r: WindowReport) -> int | None:
@@ -1021,8 +1023,6 @@ def window_lines(report: WindowReport, ratios: Any, undo: str | None = None) -> 
     if r.retried and r.asked:
         flag = "--max-context" if r.placement is not None and r.placement.where == "strata" else "-c"
         line += f" (after one retry at {flag} {r.asked:,})"
-    if (spill := spilled_bytes(r)) is not None:
-        line += SPILL_CLAUSE.format(gib=gib(spill))
     if r.attached and undo in _UNDO:
         return [line, _UNDO[undo].format(fits=r.fits)]
     return [line]

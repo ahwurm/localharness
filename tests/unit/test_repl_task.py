@@ -98,6 +98,18 @@ def test_exact_cap_is_uncut_and_one_over_with_nothing_to_cut_is_whole():
     assert len(over) == Caps.LINE + 1
 
 
+def test_a_limit_of_none_cuts_nothing_and_a_number_cuts_there():
+    """A line whose clauses are all disclosures (a model swap's) lifts the trim; its parts still run through `one_line`."""
+    name = "m" * 57
+    clauses = ["every interface, no key", "first launch of this checkpoint compiles kernels", "a few minutes"]
+    whole = notice("model", f"launching {name}", clauses, limit=None)
+    assert whole == f"◆ model launching {name} · " + " · ".join(clauses) and len(whole) > Caps.LINE
+    assert notice("model", f"launching {name}", clauses) == f"◆ model launching {name} · {clauses[0]}"  # the default trim
+    assert notice("model", f"launching {name}", clauses, limit=len(whole) - 1) == whole.removesuffix(" · a few minutes")
+    hostile = notice("model", f"ready {RLO}x\x1b[2J\ny", [f"◆ {ZWSP}z"], "p · q", limit=None)
+    assert hostile == "◆ model ready x y · ◇ z · p · q"
+
+
 def test_exact_cap_with_a_tail_is_uncut_and_one_more_cuts_it():
     head = "◆ t3 " + "a" * 40
     tail = "b" * (Caps.LINE - len(head) - 3)

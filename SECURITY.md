@@ -1684,7 +1684,7 @@ cache holds runs the files in that cache, so the harness walks every entry of th
 `lstat`, at the listing and again at the launch: a link that leaves that repo's `blobs/` folder, or
 an entry that is neither a regular file, a folder nor such a link, makes the snapshot unlisted.
 `config.json` and `tokenizer_config.json` are read under a size cap with `json.loads` only, and an
-`auto_map` in either makes the checkpoint `not offered: needs trust_remote_code`; the harness never
+`auto_map` in either makes the checkpoint `not offered · needs trust_remote_code`; the harness never
 passes `--trust-remote-code`, and vLLM without it refuses custom code, which covers the one case the
 cap leaves unseen: an `auto_map` in a file over the cap is not read. The launch puts the verified snapshot's directory on the command line,
 not the repo id, with `HF_HUB_OFFLINE=1`. A repo id the cache does not hold launches by its id as

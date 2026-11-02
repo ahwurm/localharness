@@ -27,7 +27,7 @@ from tests.unit.test_launch_paths_repl import (  # noqa: F401 — the autouse fi
 from tests.unit.test_repl_model_cmd import _harness, _xrepl
 from tests.unit.units_support import fake_systemd  # noqa: F401 — the fixture
 
-SWITCH_HINT = "Switch with /model <name|number>, or scroll the menu and press Enter."
+SWITCH_HINT = "/model <name or number> switches · Enter picks from the menu"
 
 
 def _session(tmp_path, *, peers=None, live=None, current="qwen"):
@@ -52,9 +52,9 @@ async def test_bare_model_sends_the_one_list_and_the_switch_hint(tmp_path):
         harness, live={model_ops._norm_url(PRIMARY_URL): ("qwen",), model_ops._norm_url(PEER_URL): None},
         config_dir=tmp_path, trust=repl._machine_trust, floor=None, current=(PRIMARY_URL, "qwen"))
     assert sent == [*lines, SWITCH_HINT]
-    assert sent[:4] == ["Models:", "▸ llama.cpp · localhost:8081", "  1. qwen  (serving)  ● [active]",
+    assert sent[:4] == ["Models:", "▸ llama.cpp · localhost:8081", "  1. qwen · serving · active",
                         "▸ this box can launch"]
-    assert sent[4].startswith("  2. flash  llama.cpp")
+    assert sent[4].startswith("  2. flash · llama.cpp")
     assert [e.name for e in entries.numbered()] == ["qwen", "flash"]
 
 
@@ -110,7 +110,7 @@ async def test_a_live_entry_on_the_current_endpoint_hot_swaps(tmp_path):
     await repl._handle_slash("/model 2")
 
     assert agent._llm.config.model == "qwen-b" and agent._llm.rebinds == []
-    assert "Switched to qwen-b" in channel.messages[-1]
+    assert "◆ model switched qwen-b · " in channel.messages[-1]
 
 
 @pytest.mark.asyncio
@@ -258,7 +258,7 @@ async def test_a_cold_peer_launch_that_lands_says_the_strata_offer_after_the_swi
 
     await asyncio.wait_for(repl._handle_slash("/model 2"), 5)
 
-    assert channel.messages[-2].startswith("Switched to flash") and channel.messages[-1] == model_ops.STRATA_OFFER
+    assert channel.messages[-2].startswith(f"◆ model switched · {PEER_URL}") and channel.messages[-1] == model_ops.STRATA_OFFER
 
 
 @pytest.mark.asyncio

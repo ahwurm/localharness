@@ -121,7 +121,7 @@ async def test_listing_names_the_serving_model_and_opens_the_picker(tmp_path, mo
     r, chan, _llm, _p = _mk(tmp_path, _managed(), monkeypatch)
     await r._handle_model_cmd("")
     out = "\n".join(chan.msgs)
-    assert "1. qwen3.6-35b-a3b  (serving)  ● [active]" in out
+    assert "1. qwen3.6-35b-a3b · serving · active" in out
     assert "downloaded" not in out and "restarts the managed server" not in out
     assert r._model_cache == [("qwen3.6-35b-a3b", "serving now")]   # the menu offers what the list numbers
     assert chan.menu_opened == 1                       # bare /model auto-opens the picker menu
@@ -672,8 +672,8 @@ async def test_phone_cold_peer_build_note_is_computed_once_and_reaches_the_quest
     await repl._handle_slash("/model qwen-gguf")
 
     assert len(notes) == 1 and "(first build x)" in phone.asked[0].prompt
-    [launch] = [m for m, _ in phone.sent if m.startswith("Launching ")]
-    assert "the swap can take several minutes..." in launch and "(first build x)" in launch
+    [launch] = [m for m, _ in phone.sent if m.startswith("◆ model launching ")]
+    assert launch.endswith(" · a few minutes") and " · first build x · " in launch
 
 
 async def test_phone_cold_peer_launching_is_the_target_during_the_swap_and_the_landing(tmp_path, monkeypatch):
@@ -831,8 +831,8 @@ async def test_phone_restart_asks_then_chips_then_locks_and_computes_the_build_n
 
     assert phone.steps()[:3] == ["ask", "chip", "lock"] and len(launches.cmds) == 1
     assert len(notes) == 1 and "(first build x)" in phone.asked[0].prompt
-    [line] = [m for m, _ in phone.sent if m.startswith("Restarting managed")]
-    assert "model load can take several minutes... (first build x)" in line
+    [line] = [m for m, _ in phone.sent if m.startswith(f"◆ model launching {PRIMARY_SERVED} · managed ")]
+    assert " · first build x · a few minutes" in line
     assert repl._switch.launching is None
 
 
@@ -960,7 +960,7 @@ def _failing_restart_world(tmp_path, monkeypatch, *, bind=None, peers=None, on_p
 
     async def send(text, metadata=None):
         sent.append((text, llm.config.base_url))
-        if "Restarting managed" in text and getattr(channel, "cancel_at_restart", False):
+        if "◆ model launching" in text and getattr(channel, "cancel_at_restart", False):
             raise asyncio.CancelledError
         await real_send(text, metadata)
 

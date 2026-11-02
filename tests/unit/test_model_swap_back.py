@@ -117,7 +117,7 @@ async def test_the_down_primarys_served_name_is_listed_and_swaps_back(tmp_path, 
     assert primary.model == "/x/primary.gguf" and primary.served_name == "qwen-27b"
     assert repl._active_heavy == (primary, PRIMARY_URL)
     assert agent._llm.config.base_url == PRIMARY_URL and agent._llm.config.model == "qwen-27b"
-    assert any(m.startswith("Restarting managed llama.cpp with qwen-27b") for m in channel.messages)
+    assert any(m.startswith("◆ model launching qwen-27b · managed llama.cpp") for m in channel.messages)
 
 
 @pytest.mark.asyncio
@@ -131,9 +131,9 @@ async def test_an_up_primarys_name_rebinds_and_never_restarts_it(tmp_path, bound
     await repl._handle_slash("/model qwen-27b")
 
     assert boundaries.stops == [] and boundaries.cmds == [] and seen == []
-    assert not any(m.startswith("Restarting managed") for m in channel.messages)
+    assert not any(m.startswith("◆ model launching") for m in channel.messages)
     assert agent._llm.config.base_url == PRIMARY_URL and agent._llm.config.model == "qwen-27b"
-    assert any(m.startswith("Switched to qwen-27b") for m in channel.messages)
+    assert any(m.startswith("◆ model switched qwen-27b") for m in channel.messages)
 
 
 @pytest.mark.asyncio
@@ -193,7 +193,7 @@ async def test_a_primary_served_live_is_not_added_twice(tmp_path, boundaries):
     await repl._handle_slash("/model")
     listing = channel.messages[-1]
     rows = [line for line in listing.splitlines() if "qwen-27b" in line]
-    assert len(rows) == 1 and "(serving)" in rows[0]
+    assert len(rows) == 1 and " · serving" in rows[0]
 
     await repl._handle_slash("/model qwen-27b")
 
@@ -268,7 +268,7 @@ async def test_a_typed_gguf_path_restarts_that_file_under_its_own_name(
     assert seen == [{"model": str(path), "served_name": "Other-Q4", "runtime": "llamacpp"}]
     cmd = boundaries.cmds[-1]
     assert _flag_value(cmd, "-m") == str(path) and _flag_value(cmd, "-a") == "Other-Q4"
-    assert any(m.startswith(f"Restarting managed llama.cpp with {path}") for m in channel.messages)
+    assert any(m.startswith(f"◆ model launching {path} · managed llama.cpp") for m in channel.messages)
     # in memory only: nothing about the record reached overrides.yaml (T-5-65)
     overlay = load_overlay(tmp_path / "overrides.yaml") or {}
     assert "model" not in overlay.get("server", {}) and "served_name" not in overlay.get("server", {})

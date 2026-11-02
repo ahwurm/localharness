@@ -142,8 +142,8 @@ def one_line(text: str) -> str:
     return " ".join(sanitize_for_display(text.replace("\r", " ")).split())
 
 
-def notice(subject: str, state: str, commands: Sequence[str], tail: str = "") -> str:
-    """One harness line `◆ subject state · command · … · tail`, trimmed from the right toward `Caps.LINE` (the head is never cut); the result is final, `sanitize_for_display` would neutralise its mark."""
+def notice(subject: str, state: str, commands: Sequence[str], tail: str = "", limit: int | None = Caps.LINE) -> str:
+    """One harness line `◆ subject state · command · … · tail`, trimmed from the right toward `limit` (the head is never cut; None trims nothing, for a line whose clauses are all disclosures); the result is final, `sanitize_for_display` would neutralise its mark."""
     head = " ".join(p for p in (NOTICE_MARK, one_line(subject), one_line(state)) if p)
     cmds = [c for c in map(one_line, commands) if c]
     clauses = [c for c in one_line(tail).split(" · ") if c]
@@ -151,11 +151,14 @@ def notice(subject: str, state: str, commands: Sequence[str], tail: str = "") ->
     def line() -> str:
         return " · ".join([head, *cmds, *clauses])
 
-    while len(line()) > Caps.LINE and len(cmds) > 1:
+    def over() -> bool:
+        return limit is not None and len(line()) > limit
+
+    while over() and len(cmds) > 1:
         cmds.pop()
-    while len(line()) > Caps.LINE and clauses:
+    while over() and clauses:
         clauses.pop()
-    if len(line()) > Caps.LINE and cmds:
+    if over() and cmds:
         cmds[0] = re.sub(r"\s*\([^)]*\)$", "", cmds[0])
     return line()
 
@@ -267,9 +270,9 @@ class ChannelAdapter(ABC):
         """Does this channel show a live status row, so a notice's running lines need no printed twin?"""
         return False
 
-    async def send_notice(self, line: str) -> None:
+    async def send_notice(self, line: str, metadata: dict[str, Any] | None = None) -> None:
         """Prints a finished `notice()` line; a channel that sanitises its messages overrides this to keep the mark."""
-        await self.send_message(line, metadata={"style": "system.info"})
+        await self.send_message(line, metadata={"style": "system.info", **(metadata or {})})
 
     async def panel_started(self, line: str) -> None:
         """The one line announcing a reply panel; a channel whose row or frame shows the status text keeps this no-op."""

@@ -177,7 +177,7 @@ async def test_model_list_shows_serving_and_never_the_download_cache(tmp_path, m
     handled = await repl._handle_slash("/model")
     assert handled is True
     out = channel.messages[-1]
-    assert "model-a" in out and "(serving)" in out and "[active]" in out
+    assert "model-a · serving · active" in out
     assert "cached-b" not in out and "downloaded" not in out
 
 
@@ -193,7 +193,7 @@ async def test_model_hotswap_updates_client_and_persists(tmp_path):
     overlay = load_overlay(tmp_path / "overrides.yaml")
     assert overlay["provider"]["default_model"] == "model-b"
     assert overlay["org"]["default_model"] == "model-b"
-    assert "Switched to model-b" in channel.messages[-1]
+    assert "◆ model switched model-b · " in channel.messages[-1]
     # #129: the overlay write outlives the session — the confirmation must SAY it persisted.
     assert "saved as default — persists across restarts" in channel.messages[-1]
 
@@ -327,7 +327,7 @@ async def test_ctrl_c_during_a_slow_model_swap_never_exits_the_session(tmp_path)
         assert repl._sigint_armed is False, "the blocked loop cannot have answered either press"
 
         gate.set()
-        await _until(lambda: any("Switched to model-b" in m for m in channel.messages))
+        await _until(lambda: any("◆ model switched model-b · " in m for m in channel.messages))
         await _until(lambda: channel.ctrl_q.empty())  # the backlog drains here
         assert not loop_task.done(), "a Ctrl+C from the wait must not end the session"
         assert repl._sigint_armed is False
@@ -542,7 +542,7 @@ async def test_model_swap_audit_failure_not_reported_as_persist_failure(tmp_path
 
     assert agent._llm.config.model == "model-b"
     joined = "\n".join(channel.messages)
-    assert "Switched to model-b" in joined
+    assert "◆ model switched model-b · " in joined
     assert "persisting the new default failed" not in joined
     # The overlay was still written durably.
     assert load_overlay(tmp_path / "overrides.yaml")["provider"]["default_model"] == "model-b"
@@ -589,7 +589,7 @@ async def test_model_swap_no_pin_warning_when_none_pinned(tmp_path):
 
     joined = "\n".join(channel.messages)
     assert "won't reach these agents" not in joined
-    assert "Switched to model-b" in channel.messages[-1]
+    assert "◆ model switched model-b · " in channel.messages[-1]
 
 
 # --- #30/#31/#32: swap must refit the window + disclose a failed counter rebind, off-loop --- #
@@ -849,7 +849,7 @@ async def test_model_cross_endpoint_switch_rebinds_refits_persists(tmp_path):
     assert refresh_calls == [("gpt-oss:20b", "http://localhost:11434/v1", "ollama")]
     # persisted the peer endpoint (active_endpoint), not provider.default_model
     assert persist_calls == [("http://localhost:11434/v1", "ollama", "gpt-oss:20b")]
-    assert "Switched to gpt-oss:20b on ollama-local" in channel.messages[-1]
+    assert "◆ model switched gpt-oss:20b · on ollama-local · " in channel.messages[-1]
 
 
 @pytest.mark.asyncio
@@ -1006,7 +1006,8 @@ async def test_model_cold_peer_heavy_swap_stops_incumbent_launches_rebinds(
     assert agent._llm.config.provider_type == "llamacpp"
     assert repl._active_heavy == (cold.lifecycle, "http://127.0.0.1:8080/v1")  # GPU occupant moved
     assert persisted == [("http://127.0.0.1:8080/v1", "qwen-gguf")]
-    assert "Switched to qwen-gguf on llamacpp-local" in channel.messages[-1]
+    assert any(m.startswith("◆ model ready qwen-gguf") for m in channel.messages)
+    assert channel.messages[-1].startswith("◆ model switched · http://127.0.0.1:8080/v1 · ")
 
 
 @pytest.mark.asyncio
@@ -1363,14 +1364,14 @@ async def test_model_tree_groups_primary_and_peer_sections(tmp_path):
     out = channel.messages[-1]
     # primary provider section names its framework + host; its live model is marked active
     assert "▸ vLLM · localhost:8081" in out
-    assert "model-a" in out and "[active]" in out and "●" in out
+    assert "model-a · serving · active" in out
     # peer section names the peer framework + host; the peer-only model is grouped beneath it
     assert "▸ Ollama · localhost:11434" in out
     assert "gpt-oss:20b" in out
     # the peer model sits under the Ollama header, the live model under the vLLM header
     assert out.index("▸ vLLM") < out.index("model-a") < out.index("▸ Ollama") < out.index("gpt-oss:20b")
     # the one-Enter trailer + numbering hint is preserved
-    assert "scroll the menu and press Enter" in out
+    assert "/model <name or number> switches · Enter picks from the menu" in out
 
 
 @pytest.mark.asyncio
@@ -1439,47 +1440,6 @@ async def test_model_listing_without_peers_is_the_one_endpoint_group(tmp_path):
     assert "1. model-a" in out and "2. model-b" in out
 
 
-async def test_swap_tradeoff_note_from_ledger(tmp_path):
-    """Heavy-swap announcements name the verified tradeoff (ledger medians only): both sides,
-    target-only, current-only, or silence — never an estimate."""
-    from localharness.provider.speed_stats import record_tps
-
-    repl, channel, agent = _repl(tmp_path, _harness(), ["model-a"])
-    path = tmp_path / "speed_stats.json"  # config_dir=tmp_path roots the ledger here
-    record_tps(path, "vllm", "cur", 31.0)
-    record_tps(path, "ollama", "tgt", 12.0)
-    assert repl._swap_tradeoff_note("vllm", "cur", "ollama", "tgt") \
-        == " Speed: 31.0 t/s measured → 12.0 t/s measured."
-    assert repl._swap_tradeoff_note("vllm", "cur", "ollama", "nope") \
-        == " Current model runs 31.0 t/s measured; target unmeasured."
-    assert repl._swap_tradeoff_note("vllm", "nope", "ollama", "tgt") \
-        == " Target: 12.0 t/s measured."
-    assert repl._swap_tradeoff_note(None, "cur", None, "tgt") == ""
-
-
-async def test_swap_tradeoff_note_is_colorized_by_band(tmp_path):
-    """Both callers send this line with colorize=True, and terminal._RATE_NOTE only bands
-    'N t/s measured'. Two of the three shapes put the number before a bare 't/s', so the one
-    line warning the user they are about to spend minutes loading a SLOWER model rendered with
-    no band at all. Every rate a shape names must colorize, in its own speed band."""
-    from localharness.channels.terminal import _colorize_rate_notes
-    from localharness.provider.speed_stats import record_tps
-
-    repl, _channel, _agent = _repl(tmp_path, _harness(), ["model-a"])
-    path = tmp_path / "speed_stats.json"
-    record_tps(path, "vllm", "cur", 31.0)   # green band (>30)
-    record_tps(path, "ollama", "tgt", 12.0)  # red band (<20)
-
-    both = _colorize_rate_notes(repl._swap_tradeoff_note("vllm", "cur", "ollama", "tgt"))
-    assert both.spans, "no styled spans — the note never colorizes"
-    assert [str(s.style) for s in both.spans] == ["green", "bold red"], "both rates band"
-
-    tgt_only = _colorize_rate_notes(repl._swap_tradeoff_note("vllm", "nope", "ollama", "tgt"))
-    assert [str(s.style) for s in tgt_only.spans] == ["bold red"]
-    cur_only = _colorize_rate_notes(repl._swap_tradeoff_note("vllm", "cur", "ollama", "nope"))
-    assert [str(s.style) for s in cur_only.spans] == ["green"]
-
-
 @pytest.mark.asyncio
 async def test_model_hotswap_refit_honors_a_per_model_context_pin(tmp_path, monkeypatch):
     """#132: a per-model pin is CONFIGURATION and outranks the served-window probe. Without it
@@ -1499,7 +1459,7 @@ async def test_model_hotswap_refit_honors_a_per_model_context_pin(tmp_path, monk
     await repl._handle_slash("/model model-b")
 
     assert ctx.max_context_tokens == 24_000
-    assert "pinned to 24,000 tokens for model-b" in "\n".join(channel.messages)
+    assert "context budget pinned to 24,000 tokens" in "\n".join(channel.messages)
 
 
 @pytest.mark.asyncio

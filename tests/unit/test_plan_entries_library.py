@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+from itertools import dropwhile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -66,7 +67,7 @@ def test_an_nvfp4_snapshot_is_a_priced_entry_that_is_not_set_up(world, tmp_path,
     entries = listed(world)
 
     assert model_ops.entry_lines(entries)[3:] == [
-        "▸ this box can launch", f"  2. {NVIDIA}  vLLM · 100,864 (not set up)"]
+        "▸ this box can launch", f"  2. {NVIDIA} · vLLM · 100,864 window · not set up"]
     picked = entries.pick("2")
     assert (picked.kind, picked.setup.checkpoint.repo_id) == ("setup", NVIDIA)
     assert entries.pick(NVIDIA) is picked
@@ -108,7 +109,7 @@ def test_an_unrecorded_gguf_is_a_llama_cpp_entry_priced_like_a_record(world):
 
     assert (entry.kind, entry.setup.real) == ("setup", os.path.realpath(path))
     assert entry.window == window_of(world, path, entry.name)
-    assert model_ops.entry_lines(listed(world))[4] == f"  2. {entry.name}  llama.cpp · {entry.window:,} (not set up)"
+    assert model_ops.entry_lines(listed(world))[4] == f"  2. {entry.name} · llama.cpp · {entry.window:,} window · not set up"
 
 
 def test_one_projector_name_the_config_refuses_is_its_own_line_not_the_lists(world):
@@ -158,8 +159,8 @@ def test_the_second_nvfp4_snapshot_is_listed_beside_the_first(world, tmp_path, m
     with_vllm(tmp_path, monkeypatch)
 
     assert model_ops.entry_lines(listed(world))[3:] == [
-        "▸ this box can launch", f"  2. {NVIDIA}  vLLM · 100,864 (not set up)",
-        f"  3. {UKISAI}  vLLM · 100,864 (not set up)"]
+        "▸ this box can launch", f"  2. {NVIDIA} · vLLM · 100,864 window · not set up",
+        f"  3. {UKISAI} · vLLM · 100,864 window · not set up"]
 
 
 GEMMA = "DavidAU/gemma-4-31B-it-The-DECKARD-HERETIC-UNCENSORED-Thinking"
@@ -174,7 +175,7 @@ def gemma(tmp_path):
 
 
 def not_offered(entries):
-    return [line for line in model_ops.entry_lines(entries) if line.startswith("  not offered:")]
+    return list(dropwhile(lambda line: not line.startswith("  –  "), model_ops.entry_lines(entries)))
 
 
 def test_not_offered_reason_keeps_the_fix_clause():
@@ -187,7 +188,7 @@ def test_the_gemma_bf16_snapshot_is_one_unnumbered_line_with_its_reason(world, t
 
     entries = listed(world)
 
-    assert not_offered(entries) == [f"  not offered: {GEMMA} — {GEMMA_REASON} — {GEMMA_FIX}"]
+    assert not_offered(entries) == [f"  –  {GEMMA} · not offered · {GEMMA_REASON} — a 4-bit build of it (a GGUF Q4_K_M for llama.cp…"]
     assert [e.name for e in entries.numbered()] == [PRIMARY]
     assert entries.pick(GEMMA) == GEMMA_SENTENCE
 
@@ -201,7 +202,7 @@ def test_a_snapshot_with_an_auto_map_needs_trust_remote_code(world, tmp_path, mo
     entries = listed(world)
 
     assert not_offered(entries) == [
-        "  not offered: org/remote — needs trust_remote_code — the harness never passes --trust-remote-code"]
+        "  –  org/remote · not offered · needs trust_remote_code — the harness never passes --trust-remote-code"]
     assert entries.pick("org/remote") == (
         "org/remote cannot run here: needs trust_remote_code — the harness never passes --trust-remote-code.")
 
@@ -213,8 +214,8 @@ def test_with_no_vllm_binary_each_vllm_snapshot_says_so(world, tmp_path, monkeyp
     entries = listed(world)
 
     assert not_offered(entries) == [
-        f"  not offered: {GEMMA} — no vllm binary on PATH or in the harness's venv — install vllm or put it on PATH",
-        f"  not offered: {NVIDIA} — no vllm binary on PATH or in the harness's venv — install vllm or put it on PATH"]
+        f"  –  {GEMMA} · not offered · no vllm binary on PATH or in the harness's venv — install vllm or put it on PATH",
+        f"  –  {NVIDIA} · not offered · no vllm binary on PATH or in the harness's venv — install vllm or put it on PATH"]
     assert entries.pick(NVIDIA) == (
         f"{NVIDIA} cannot run here: no vllm binary on PATH or in the harness's venv — install vllm or put it on PATH.")
     assert [e.name for e in entries.numbered()] == [PRIMARY]
@@ -231,7 +232,7 @@ def test_an_embedding_snapshot_is_nowhere_in_the_list(world, tmp_path, monkeypat
 
     lines = model_ops.entry_lines(listed(world))
 
-    assert "Embedding" not in "\n".join(lines) and lines[-1] == f"  1. {PRIMARY}  (serving)  ● [active]"
+    assert "Embedding" not in "\n".join(lines) and lines[-1] == f"  1. {PRIMARY} · serving · active"
 
 
 def test_a_box_holding_nothing_unrecorded_has_no_setup_entry_and_no_library_line(world, tmp_path, monkeypatch):
@@ -239,7 +240,7 @@ def test_a_box_holding_nothing_unrecorded_has_no_setup_entry_and_no_library_line
 
     lines = model_ops.entry_lines(listed(world))
 
-    assert lines == ["Models:", "▸ llama.cpp · 127.0.0.1:8080", f"  1. {PRIMARY}  (serving)  ● [active]"]
+    assert lines == ["Models:", "▸ llama.cpp · 127.0.0.1:8080", f"  1. {PRIMARY} · serving · active"]
 
 
 def test_not_offered_lines_follow_every_numbered_entry_in_name_order(world, tmp_path, monkeypatch):
@@ -250,7 +251,7 @@ def test_not_offered_lines_follow_every_numbered_entry_in_name_order(world, tmp_
 
     lines = model_ops.entry_lines(listed(world))
 
-    assert [line.split(" — ")[0] for line in lines[-2:]] == ["  not offered: alpha/model", "  not offered: zeta/model"]
+    assert [line.split(" · not offered · ")[0] for line in lines[-2:]] == ["  –  alpha/model", "  –  zeta/model"]
     assert lines[-3].startswith("  2. ")
 
 
@@ -268,7 +269,7 @@ def test_payload_rows_of_a_planned_list_cut_the_long_reason_and_keep_the_termina
     why = {row["name"]: row["why"] for row in payload["models"]}
     assert why[GEMMA] == GEMMA_REASON + ROW_CUT
     [line] = [l for l in not_offered(entries) if "org/remote" in l]
-    assert why["org/remote"] == line.removeprefix("  not offered: org/remote — ")
+    assert why["org/remote"] == line.removeprefix("  –  org/remote · not offered · ")
     headers = {group.header for group in entries.groups}
     assert not headers & {row["name"] for row in payload["models"]}
 

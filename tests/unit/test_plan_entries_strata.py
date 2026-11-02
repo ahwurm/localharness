@@ -47,7 +47,7 @@ def test_a_sensed_install_marks_the_entry_and_makes_the_strata_set_up_pickable(t
 
     entries = entries_of(world, SERVING)
 
-    assert line_of(entries).endswith(f"{NAME}  llama.cpp · experts in RAM · 262,144 · Strata available: /model {NAME}-strata")
+    assert line_of(entries).endswith(f"{NAME} · llama.cpp · experts in RAM · 262,144 window · Strata available: /model {NAME}-strata")
     picked = entries.pick(f"{NAME}-strata")
     assert (picked.kind, picked.runtime, picked.name) == ("setup", "strata", f"{NAME}-strata")
     assert (picked.setup.config, picked.setup.real, picked.setup.record.name) == (CONFIG_NAME, str(shard1), NAME)
@@ -129,8 +129,9 @@ def test_a_refused_entry_with_an_install_says_available_on_its_not_offered_line(
 
     entries = entries_of(world, SERVING)
 
-    assert model_ops.entry_lines(entries)[-1].startswith(f"  not offered: {NAME} — ")
-    assert model_ops.entry_lines(entries)[-1].endswith(f" · Strata available: /model {NAME}-strata")
+    assert model_ops.entry_lines(entries)[-2].startswith(f"  –  {NAME} · not offered · needs ")
+    assert model_ops.entry_lines(entries)[-2].endswith(f" GiB free · Strata available: /model {NAME}-strata")
+    assert model_ops.entry_lines(entries)[-1] == "     close something that holds RAM, or pick a smaller quant"
     assert entries.pick(f"{NAME}-strata").runtime == "strata" and dict(entries.offers) == {}
 
 
@@ -269,7 +270,7 @@ def test_a_world_without_the_family_lists_the_same_with_or_without_an_install(tm
     bare = lines_in_a_world_without_the_family(tmp_path / "bare", monkeypatch, with_install=False)
     kept = lines_in_a_world_without_the_family(tmp_path, monkeypatch, with_install=True)
 
-    assert kept == bare and kept[:3] == ["Models:", "▸ llama.cpp · 127.0.0.1:8080", f"  1. {PRIMARY}  (serving)  ● [active]"]
+    assert kept == bare and kept[:3] == ["Models:", "▸ llama.cpp · 127.0.0.1:8080", f"  1. {PRIMARY} · serving · active"]
     assert not any("Strata" in line for line in kept)
 
 

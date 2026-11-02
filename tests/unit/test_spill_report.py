@@ -15,7 +15,7 @@ from tests.unit.test_launch_fit_retry import BASE, RATIOS, Box, _spec
 GIB = 2**30
 MIB = 2**20
 KV = 36992.0
-ENDING = " — {} GiB of layers on the CPU, decode will be slow"
+ENDING = " · {} GiB of layers on the CPU, decode will be slow"
 NVIDIA_HELD = 28098 * MIB
 SWIFT_HELD = 25960 * MIB
 
@@ -56,6 +56,30 @@ def test_the_healthy_swift_launch_carries_no_clause():
     assert priced(SWIFT) == 24_338_688_192
     assert spilled_bytes(SWIFT) is None
     assert "layers on the CPU" not in line(SWIFT)
+
+
+SCREENSHOT = report(gpu=int(21.6 * GIB - KV * 58_368), window=58_368, held=0,
+                    placement=placed(int(21.6 * GIB - KV * 58_368), kv=KV), free_bytes=int(26.4 * GIB))
+SCREENSHOT = dataclasses.replace(SCREENSHOT, placement=dataclasses.replace(SCREENSHOT.placement, free_bytes=int(26.4 * GIB)))
+
+
+def test_one_placement_fact_a_line_never_says_all_on_the_gpu_and_layers_on_the_cpu():
+    """The screenshot's line read `all on the GPU (21.6 of 26.4 GiB free) — 1.5 GiB of layers on the CPU`: the price planned
+    the first claim and the process's residency measured the second, and each was appended without asking the other."""
+    spilled = short_by(SCREENSHOT, int(1.5 * GIB))
+    healthy = dataclasses.replace(SCREENSHOT, held=priced(SCREENSHOT) + autosense.SPILL_OVERHEAD)
+    assert line(spilled) == "window: 58,368 · 1.5 GiB of layers on the CPU, decode will be slow"
+    assert line(healthy) == "window: 58,368 · all on the GPU (21.6 of 26.4 GiB free)"
+    for short in range(-2 * GIB, 6 * GIB, GIB // 4):  # held from well over the price to well under it
+        said = line(short_by(SCREENSHOT, short))
+        assert not ("all on the GPU" in said and "on the CPU" in said), said
+        assert ("layers on the CPU" in said) == (short >= GIB), said
+
+
+def test_the_spill_keeps_the_notes_a_line_carries():
+    said = line(short_by(dataclasses.replace(SCREENSHOT, served=32_768, retried=True), 2 * GIB))
+    assert said == ("window: 32,768 · 2.0 GiB of layers on the CPU, decode will be slow (asked 58,368) "
+                    "(after one retry at -c 58,368)")
 
 
 @pytest.mark.parametrize("reserve", [0.0, 3.0, 10.0])

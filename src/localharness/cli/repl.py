@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import inspect
 import logging
 import os
 import re
@@ -20,7 +21,6 @@ from localharness.agent.gate_types import MODE_STRICTNESS
 from localharness.channels import input_router
 from localharness.cli.model_ops import _hold_peer_session_key, _launch_key, _peer_session_key
 from localharness.cli.model_switch import (
-    LAUNCH_SLOW,
     MODEL_UNAVAILABLE,
     RESTART_DOWN_ON_PEER,
     ModelSwitch,
@@ -149,17 +149,17 @@ def _dropped_image_path(line: str) -> str | None:
 
 # #129: a /model swap that writes a new default to the user overlay must SAY so — the write
 # outlives the session, and a silent one leaves the user running an experiment forever.
-SAVED_DEFAULT_NOTE = " (saved as default — persists across restarts)"
+SAVED_DEFAULT_NOTE = "saved as default — persists across restarts"
 # A typed .gguf is served for this session only: the record keeps its own weights and name, so the
 # saved default is not rewritten for a name the record never serves (IN-57).
-TYPED_SWAP_NOTE = " (this session only — the saved default is unchanged)"
+TYPED_SWAP_NOTE = "this session only — the saved default is unchanged"
 # A llama.cpp primary restarts on a weights file: anything else a person typed (a local_models name,
 # an HF-cache repo id) is answered here, before anything is stopped (D-58).
 NOT_A_GGUF_LINE = "{target} is not a GGUF file — /model <path.gguf> or a preset name"
-# The launch line of a swap that stopped an incumbent says which one held the GPU (D-21): carried
-# right after "the swap can take several minutes..." so every check that the line STARTS with
-# "Launching <peer>" still holds.
-GPU_HOLDER_CLAUSE = " {holder} was stopped to free the GPU."
+# A swap reads as steps, one `◆ model <state> <name> · clause · …` line as each happens (`launching`, `stopped` when an
+# incumbent held the GPU (D-21), `ready`, `switched`). `notice()` builds them and trims nothing: a model's name alone can
+# run to 57 characters, and every clause is a fact the person needs or a disclosure (who can reach the server) they are owed.
+LAUNCH_TIME = "a few minutes"
 # A landing's selection (active_endpoint / last_served / pending_preset) that could not be written:
 # the in-session switch already happened (D-07).
 PERSIST_SELECTION_FAILED = "Switched for this session, but persisting the selection failed: {exc}"
@@ -259,23 +259,39 @@ def _generation_system_prompt() -> str:
     )
 
 
+def _model_notice(state: str, *clauses: str) -> str:
+    from localharness.channels.base import notice
+    return notice("model", state, clauses, limit=None)
+
+
+_WINDOW_HEAD = re.compile(r"window: (\d[\d,]*)(?: · |$)")
+
+
+def _ready_line(served: str, window: Sequence[str], rate: str | None) -> str:
+    """`◆ model ready <served> · N window · <speed> · <the rest of the window report>`: the speed prints here once, after the
+    window. A report with no `window: N` head (the server's own fit, Ollama's, the unpriced fit) keeps its words after the speed."""
+    report = " · ".join(window)
+    head = _WINDOW_HEAD.match(report)
+    return _model_notice(f"ready {served}", *([f"{head[1]} window", rate or "", report[head.end():]] if head else [rate or "", report]))
+
+
 class _ReplSwapReporter:
     """What the REPL says and remembers while `lifecycle.swap` runs (spec 20 §8.2, D-19, D-21).
 
     `freed` — after the accelerator is free, and again if a cancellation stopped the target — forgets
-    the heavy the session tracked; the first call also sends the launch line (today's text plus the
-    holds-the-GPU clause when an incumbent was stopped, R-13-24), after the session's first-launch
-    lines and before the launch, and the decision's note. `launched` / `restored` move `_active_heavy`
+    the heavy the session tracked; the first call also sends, after the session's first-launch lines and
+    before the launch, the `launching` line, a `stopped` line when an incumbent was stopped (R-13-24),
+    and the decision's note. `launched` / `restored` move `_active_heavy`
     to what is now running. `line` shows a failure sentence, masked here again (R-13-26) on top of the
     swap's own masking."""
 
-    def __init__(self, repl: "OrchestratorREPL", *, target: Any, incumbent: Any, launch_head: str,
-                 tradeoff: str, note: str | None, redact: Any) -> None:
+    def __init__(self, repl: "OrchestratorREPL", *, target: Any, incumbent: Any, peer: str, clauses: Sequence[str],
+                 note: str | None, redact: Any) -> None:
         self._repl = repl
         self._target = target
         self._incumbent = incumbent
-        self._launch_head = launch_head
-        self._tradeoff = tradeoff
+        self._peer = peer
+        self._clauses = clauses
         self._note = note
         self._redact = redact
         self._said = False
@@ -287,11 +303,10 @@ class _ReplSwapReporter:
             return
         self._said = True
         from localharness.provider import lifecycle as _lifecycle
-        holder = ""
-        if self._incumbent is not None and self._incumbent.spec is not self._target.spec:
-            holder = GPU_HOLDER_CLAUSE.format(holder=_lifecycle.heavy_label(self._incumbent))
         await repl._flush_launch_lines()
-        await repl._send_info(f"{self._launch_head}{holder}{self._tradeoff}", colorize=True)
+        await repl._step("launching", self._peer, *self._clauses)
+        if self._incumbent is not None and self._incumbent.spec is not self._target.spec:
+            await repl._step("stopped", _lifecycle.heavy_label(self._incumbent), "GPU freed")
         if self._note:
             await repl._send_info(self._note)
 
@@ -795,13 +810,23 @@ class OrchestratorREPL:
     def _levers(self) -> tuple[str, str]:
         return getattr(self._channel, "levers", lambda: ("", ""))()
 
-    async def _notice(self, *lines: str) -> None:
+    async def _notice(self, *lines: str, colorize: bool = False, names: Sequence[str] = ()) -> None:
+        """Finished `◆` lines through the channel's `send_notice`, which keeps the mark; `colorize` bands a rate note by
+        speed and `names` stay neutral on a terminal."""
         send = getattr(self._channel, "send_notice", None)
+        meta = {**({"colorize": "rates"} if colorize else {}), **({"names": list(names)} if names else {})}
+        with_meta = send is not None and len(inspect.signature(send).parameters) > 1  # a `send_notice(self, line)` gets the line alone
         for line in filter(None, lines):
-            if send is not None:
-                await send(line)
+            if send is None:
+                await self._channel.send_message(line, metadata={"style": "system.info", **meta})
             else:
-                await self._channel.send_message(line, metadata={"style": "system.info"})
+                await (send(line, meta) if meta and with_meta else send(line))
+
+    async def _step(self, verb: str, name: str | None, *clauses: str, colorize: bool = False) -> None:
+        """One `◆ model <verb> <name> · clause · …` line of a swap, the model named once and never cut; a URL in it shows no credentials."""
+        from localharness.provider.server import strip_url_credentials
+        await self._notice(_model_notice(f"{verb} {name}" if name else verb, *map(strip_url_credentials, clauses)),
+                           colorize=colorize, names=[name] if name else ())
 
     async def _flow_turn(self, turn: Any) -> Any:
         """Runs a turn so its flags and halt are cleared and its one end line printed on a finish, a cancel, an error and a kill."""
@@ -2004,7 +2029,6 @@ class OrchestratorREPL:
             await self._send_info(MODEL_UNAVAILABLE)
             return
 
-        current = llm.config.model
         from localharness.cli import model_ops
         entries, live, malformed = await self._plan_model_entries(llm)
         cur_key = model_ops._norm_url(llm.config.base_url)
@@ -2035,8 +2059,12 @@ class OrchestratorREPL:
                 )
                 return
             lines.extend(await asyncio.to_thread(model_ops.foreign_lines, entries, self._server_config_dir))
-            lines.append("Switch with /model <name|number>, or scroll the menu and press Enter.")
-            await self._send_info("\n".join(lines), colorize=True)
+            lines.append("/model <name or number> switches · Enter picks from the menu")
+            from localharness.cli.workspace import visible_text as vt
+            await self._send_info("\n".join(lines), colorize=True, names=[
+                *(f"{n}. {vt(e.name)}" for n, e in enumerate(entries.numbered(), 1)),
+                *(vt(e.name) for g in entries.groups if not g.numbered for e in g.entries),
+                *(vt(e.name) for e in entries.not_offered)])
             open_menu = getattr(self._channel, "box_open_model_menu", None)
             if open_menu is not None:
                 open_menu()  # one-Enter picker: menu pops with the first model highlighted
@@ -2079,11 +2107,9 @@ class OrchestratorREPL:
                 note = await self._refresh_token_counter(target)
                 saved = await self._persist_landed(llm.config.base_url, target)
                 rate = self._measured_note(medians, cur_ptype, target)
-                await self._send_info(
-                    f"Switched to {target} (tool calling: {cap.tool_call_mode}).{note}"
-                    + (f" {rate}." if rate else "")
-                    + (SAVED_DEFAULT_NOTE if saved else ""), colorize=True,
-                )
+                await self._step(
+                    "switched", target, llm.config.base_url, f"tool calling {cap.tool_call_mode}", note, rate or "",
+                    SAVED_DEFAULT_NOTE if saved else "", colorize=True)
                 return
             if ep is None:
                 from localharness.config.models import EndpointRef
@@ -2109,12 +2135,9 @@ class OrchestratorREPL:
             )
             saved = await self._persist_landed(ep.base_url, target, endpoint=ep)
             rate = self._measured_note(medians, ep.provider_type, target)
-            await self._send_info(
-                f"Switched to {target} on {ep.name} — {ep.base_url} "
-                f"(tool calling: {cap.tool_call_mode}).{note}"
-                + (f" {rate}." if rate else "")
-                + (SAVED_DEFAULT_NOTE if saved else ""), colorize=True,
-            )
+            await self._step(
+                "switched", target, f"on {ep.name}" if ep.name != target else "", ep.base_url,
+                f"tool calling {cap.tool_call_mode}", note, rate or "", SAVED_DEFAULT_NOTE if saved else "", colorize=True)
             return
 
         if entry is not None and entry.kind == "cold" and entry.record.peer is not None:
@@ -2194,16 +2217,12 @@ class OrchestratorREPL:
                 if box_note is not None:
                     box_note(f"launching {ep.name} · {int(elapsed)}s")
 
-            tradeoff = self._swap_tradeoff_note(cur_ptype, current, ep.provider_type, target)
             _, posture = effective_posture(ep.lifecycle, keyed=keyed, decision=decision)
+            outside = _lifecycle.RUNS_OUTSIDE_AUTOSTART if _lifecycle.outside_autostart(ep.lifecycle, self._unit_state) else ""
             reporter = _ReplSwapReporter(
-                self, target=swap_target, incumbent=swap_incumbent,
-                launch_head=(f"Launching {ep.name}{f' ({posture})' if posture else ''} — "
-                             "the swap " + LAUNCH_SLOW + "..."
-                             + (f" {_lifecycle.RUNS_OUTSIDE_AUTOSTART}"
-                                if _lifecycle.outside_autostart(ep.lifecycle, self._unit_state) else "")
-                             + build),
-                tradeoff=tradeoff, note=decision.note, redact=redact)
+                self, target=swap_target, incumbent=swap_incumbent, peer=ep.name,
+                clauses=(posture or "", outside.strip("()"), build.strip(" ()"), LAUNCH_TIME),
+                note=decision.note, redact=redact)
             self._switch.launch(target)
             async with self._launch_lock():
                 try:
@@ -2223,9 +2242,9 @@ class OrchestratorREPL:
                 return  # the reporter already said why, redacted
             live_ep = outcome.live
             served = live_ep.served_models[0] if live_ep.served_models else target
-            # the launch's window line, on the success path and OUTSIDE the try above: a reporting
+            # the launch's ready line, on the success path and OUTSIDE the try above: a reporting
             # fault must never read as a failed launch and tear a healthy server down (D-22, D-36)
-            await self._announce_window(live_ep, ep.provider_type, served)
+            await self._announce_ready(live_ep, ep.provider_type, served, self._measured_note(medians, ep.provider_type, served))
             # #3: pass ep.extra_headers directly (see the cross-endpoint branch above) — never None,
             # which would leave the previous endpoint's headers on the client.
             llm.rebind_endpoint(ep.base_url, api_key=ep.api_key, extra_headers=ep.extra_headers,
@@ -2236,13 +2255,8 @@ class OrchestratorREPL:
                 served, base_url=ep.base_url, provider_type=ep.provider_type
             )
             saved = await self._persist_landed(ep.base_url, served, endpoint=ep)
-            rate = self._measured_note(medians, ep.provider_type, served)
-            await self._send_info(
-                f"Switched to {served} on {ep.name} — {ep.base_url} "
-                f"(tool calling: {cap.tool_call_mode}).{note}"
-                + (f" {rate}." if rate else "")
-                + (SAVED_DEFAULT_NOTE if saved else ""), colorize=True,
-            )
+            await self._step(
+                "switched", None, ep.base_url, f"tool calling {cap.tool_call_mode}", note, SAVED_DEFAULT_NOTE if saved else "")
             await self._strata_offer(entries, arg)
             return
 
@@ -2344,9 +2358,6 @@ class OrchestratorREPL:
             if stop[0]:
                 await self._channel.send_message(stop[0], metadata={"style": stop[1]})
             return
-        # Tradeoff BEFORE the rebind-back below — cur_ptype must key where the current model
-        # actually ran (possibly a peer), not the primary we are about to re-point at.
-        tradeoff = self._swap_tradeoff_note(cur_ptype, current, prim_ptype, target)
         prior = None
         if _prim is not None and llm.config.base_url != _prim.base_url:
             c = llm.config
@@ -2363,11 +2374,7 @@ class OrchestratorREPL:
             label = RUNTIME_LABELS.get(managed.runtime, managed.runtime)
             _, posture = effective_posture(managed, keyed=bool(launch_kw), decision=decision)
             await self._flush_launch_lines()
-            await self._send_info(
-                f"Restarting managed {label} with {target}{f' ({posture})' if posture else ''}"
-                f" — model load {LAUNCH_SLOW}...{build}{tradeoff}",
-                colorize=True,
-            )
+            await self._step("launching", target, f"managed {label}", posture or "", build.strip(" ()"), LAUNCH_TIME)
             if decision.note:
                 await self._send_info(decision.note)
             box_note = getattr(self._channel, "box_activity", None)
@@ -2395,6 +2402,7 @@ class OrchestratorREPL:
                     return
                 if freed is not None:
                     self._active_heavy = None
+                    await self._step("stopped", _lifecycle.heavy_label(model_ops.incumbent_heavy(freed, self._harness)), "GPU freed")
                 # The shared record's own weights and name, put back if the restart fails.
                 before = (managed.model, managed.served_name)
                 spec = managed
@@ -2460,7 +2468,7 @@ class OrchestratorREPL:
                 url, key, headers, ptype = prior
                 llm.rebind_endpoint(url, api_key=key, extra_headers=headers, provider_type=ptype)
         served = models[0] if models else target
-        await self._announce_window(ep, prim_ptype or managed.runtime, served)
+        await self._announce_ready(ep, prim_ptype or managed.runtime, served, self._measured_note(medians, prim_ptype, served))
         llm.config.model = served
         cap = await llm.detect_capabilities()
         note = await self._refresh_token_counter(served)
@@ -2470,12 +2478,9 @@ class OrchestratorREPL:
                            and managed.model != target)
         saved = (False if alias_swap_back or typed_swap
                  else await self._persist_landed(llm.config.base_url, served))
-        rate = self._measured_note(medians, prim_ptype, served)
-        await self._send_info(
-            f"Switched to {served} (tool calling: {cap.tool_call_mode}).{note}"
-            + (f" {rate}." if rate else "")
-            + (SAVED_DEFAULT_NOTE if saved else TYPED_SWAP_NOTE if typed_swap else ""), colorize=True,
-        )
+        await self._step(
+            "switched", None, llm.config.base_url, f"tool calling {cap.tool_call_mode}", note,
+            SAVED_DEFAULT_NOTE if saved else TYPED_SWAP_NOTE if typed_swap else "")
 
     def _peer_by_base_url(self, base_url: str):
         """The configured peer ``EndpointRef`` serving ``base_url``, or None (e.g. the primary)."""
@@ -2503,12 +2508,28 @@ class OrchestratorREPL:
         report = getattr(live, "window", None)
         if report is None:
             return
+        for line in self._window_lines(report):
+            await self._send_info(line)
+        self._record_window(report, provider_type, model_id)
+
+    async def _announce_ready(self, live: Any, provider_type: str, served: str, rate: str | None) -> None:
+        """A swap's `ready` line: the served model, the window the launch got (what ``activate`` asked and the probe
+        verified, as `_announce_window` has it), the speed it measured, once, and where it sits. With no window to report
+        (vLLM, a daemon) it names the model and the speed alone; it is said whatever the launch learned, because the
+        `switched` line after it names no model."""
+        report = getattr(live, "window", None)
+        await self._notice(_ready_line(served, self._window_lines(report) if report is not None else (), rate),
+                           colorize=True, names=[served])
+        if report is not None:
+            self._record_window(report, provider_type, served)
+
+    def _window_lines(self, report: Any) -> list[str]:
         from localharness.config.models import AutosenseConfig
         from localharness.provider.autosense import window_lines
+        return window_lines(report, getattr(self._harness, "autosense", None) or AutosenseConfig())
+
+    def _record_window(self, report: Any, provider_type: str, model_id: str) -> None:
         from localharness.provider.speed_stats import default_speed_stats_path, record_window_report
-        ratios = getattr(self._harness, "autosense", None) or AutosenseConfig()
-        for line in window_lines(report, ratios):
-            await self._send_info(line)
         if report.served is None and report.trained is None and report.fits is None:
             return  # a launch that learned nothing must not overwrite a good recorded baseline with Nones
         try:
@@ -2838,7 +2859,7 @@ class OrchestratorREPL:
         capability probe, which is one call for vLLM and two for llama.cpp, 10s timeout each),
         so they run OFF the event loop (#32)
         — the Discord adapter and idle consolidation share it. Never aborts a completed swap; returns
-        a disclosure string (leading space; '' when clean) to append to the switch message so the
+        the disclosures as clauses (`a · b`, no final period; '' when clean) for the `switched` line so the
         user is told on the CHANNEL — not a swallowed log line — when counting/budget can't track."""
         import asyncio
 
@@ -2883,7 +2904,7 @@ class OrchestratorREPL:
         if getattr(ctx, "max_context_tokens", None) and pinned:
             if pin != ctx.max_context_tokens:
                 ctx.max_context_tokens = pin
-                notes.append(f"context budget pinned to {pin:,} tokens for {model}.")
+                notes.append(f"context budget pinned to {pin:,} tokens")
         elif getattr(ctx, "max_context_tokens", None):
             try:
                 window = await asyncio.to_thread(
@@ -2897,11 +2918,11 @@ class OrchestratorREPL:
                 # (agent.context.response_reserve), never a second time here.
                 if window != ctx.max_context_tokens:
                     ctx.max_context_tokens = window
-                    notes.append(f"context budget refit to the served window ({window:,} tokens).")
+                    notes.append(f"context budget refit to {window:,}")
             else:
                 notes.append(
                     "context budget unchanged — couldn't read this model's served window; "
-                    "re-run `localharness init` if its window differs."
+                    "re-run `localharness init` if its window differs"
                 )
 
         # #145: a CONFIGURED output cap must fit the reserve inside the (possibly new) budget, or
@@ -2923,7 +2944,7 @@ class OrchestratorREPL:
             if _cap != getattr(_llm_cfg, "max_tokens", None):
                 _llm_cfg.max_tokens = _cap
                 if _cap is not None:
-                    notes.append(f"per-reply output cap set to {_cap:,} tokens to fit the window.")
+                    notes.append(f"per-reply output cap set to {_cap:,} tokens to fit the window")
 
         # #30: rebind the counter off-loop. rebind() is exception-safe (restores the prior binding
         # on a failed re-probe), so a failure leaves an exact, usable counter — but bound to the OLD
@@ -2935,8 +2956,8 @@ class OrchestratorREPL:
             except Exception as exc:  # noqa: BLE001 — never let a counter refresh strand a done swap
                 log.warning("TokenCounter rebind after /model swap failed: %s", exc)
                 notes.append(
-                    f"token counting could not rebind to {model} and still uses the previous "
-                    "model, so counts may not match — re-run /model to retry."
+                    "token counting could not rebind and still uses the previous "
+                    "model, so counts may not match — re-run /model to retry"
                 )
 
         # The one post-switch point all four /model branches reach (spec §7.2): the level is re-resolved
@@ -2949,7 +2970,7 @@ class OrchestratorREPL:
         except Exception:  # noqa: BLE001 — never let an effort refresh strand a completed swap
             log.warning("effort re-resolve after /model swap failed", exc_info=True)
         self._rebind_effort_ledger(base_url)
-        return (" " + " ".join(notes)) if notes else ""
+        return " · ".join(notes)
 
     async def _live_models(self, base_url: str) -> tuple[list[str], bool]:
         """Delegate to the shared probe so the REPL and the `localharness model` CLI share ONE
@@ -3004,27 +3025,6 @@ class OrchestratorREPL:
             return f"~{tps:g} t/s measured"
         return None
 
-    def _swap_tradeoff_note(self, cur_ptype: str | None, cur_model: str,
-                            tgt_ptype: str | None, tgt_model: str) -> str:
-        """One sentence naming the speed tradeoff a HEAVY swap is about to make, from verified
-        ledger medians only ('' when neither side has one). The colored per-row view lives in
-        the picker; this is the last-chance line where the swap costs minutes of model load.
-
-        The 'N t/s measured' phrasing is LOAD-BEARING, not prose: both callers send this line
-        with colorize=True and terminal._RATE_NOTE only bands numbers written that way. Shapes
-        that put the number before a bare 't/s' rendered with no band at all."""
-        from localharness.provider.speed_stats import speed_key
-        m = self._measured_medians()
-        cur = m.get(speed_key(cur_ptype, cur_model)) if cur_ptype else None
-        tgt = m.get(speed_key(tgt_ptype, tgt_model)) if tgt_ptype else None
-        if cur is not None and tgt is not None:
-            return f" Speed: {cur:.1f} t/s measured → {tgt:.1f} t/s measured."
-        if tgt is not None:
-            return f" Target: {tgt:.1f} t/s measured."
-        if cur is not None:
-            return f" Current model runs {cur:.1f} t/s measured; target unmeasured."
-        return ""
-
     async def _prefetch_model_cache(self) -> None:
         """Warm the /model picker menu without ever blocking the UI: best-effort and silent, so a server
         that cannot be listed leaves the cache empty and /model itself reports why when run."""
@@ -3076,10 +3076,12 @@ class OrchestratorREPL:
         for line in pending:
             await self._send_info(line)
 
-    async def _send_info(self, text: str, colorize: bool = False) -> None:
+    async def _send_info(self, text: str, colorize: bool = False, names: Sequence[str] = ()) -> None:
         meta: dict = {"style": "system.info"}
         if colorize:
             meta["colorize"] = "rates"  # terminal styles 'N t/s measured' notes by band
+        if names:
+            meta["names"] = list(names)  # and keeps these, the words a person reads and types, off the dim
         await self._channel.send_message(text, metadata=meta)
 
     def _detect_creation_intent(self, user_input: str) -> bool:
