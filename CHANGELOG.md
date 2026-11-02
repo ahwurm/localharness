@@ -4,6 +4,24 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.27.4] — 2026-11-02
+
+**A reviewed reply reads like the agent talking, and the review flags more than it blocks.** Only a primary or security item under 5 holds a reply back; anything else under 8 is a warning you see. Once the review settles, the model writes the reply itself: how it got there, the answer, then what is worth double-checking. A live network-scan question shaped every item below.
+
+### Added
+- **the reply in the model's own words** — after the reply panel passes, or after the last round still blocked, the root gets one tool-less turn to write what you read: a few sentences on its path (the job as it understood it, what it ran or read, a change of course, what checking made it fix), the answer, and a closing `Worth double-checking:` line when points stay open. The harness hands it the facts as data: the job `jtbd` holds, the turn's calls and failures, what you typed mid-turn, the review's outcome and the open points without scores or ids.
+
+### Changed
+- **warnings, not blockers** — a primary item (`A*`) or any `security` item under 5 blocks; every other item under 8 is a warning, shown as it lands and carried into a revision, never holding the reply on its own.
+- Critics read every tool result of the turn through a content handle headed by its call, not only a delegated agent's; a fact critic no longer scores a command's output it could not see.
+- A revision is written to you: the root is told never to mention the review or apologise for the draft.
+- A reply still open after the last round says `◆ reply with caveats · N blockers`, and the phone titles it `reply ready (caveats)`.
+
+### Known limitations
+- The retelling is one more model call per reviewed reply, and the model, not the harness, writes it: it may restate a fact differently from the reviewed draft. An unreviewed reply, the stop word's included, goes out as it is.
+- Review time is unchanged: a shell command still adds `recency`, so a network-scan reply ran three critics a round and took 15 minutes on gemma, under 4 on qwen. Review dials are the next release.
+- `◆ reply pass · N notes` counts warnings and notes together.
+
 ## [0.27.3] — 2026-11-02
 
 **`localharness start` runs on Windows again.** 0.27.x crashed at start on Windows with `PermissionError: [Errno 13] Permission denied: '<workspace>\.localharness'` before the first prompt.
