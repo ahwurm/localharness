@@ -1486,10 +1486,41 @@ def _session_written_paths(bus: Any, session_id: str | None) -> list[str]:
     return paths
 
 
+_WORD = re.compile(r"[^\W_]+")
+_RUN, _STRETCH, _FOUND = 8, 60, 0.25
+
+
+def _runs(words: list[str]) -> set[tuple[str, ...]]:
+    return {tuple(words[i:i + _RUN]) for i in range(len(words) - _RUN + 1)}
+
+
+def provenance_note(answer: str, sources: Iterable[str]) -> str:
+    """One measured line: how many 60-word stretches of `answer` share almost no 8-word run with any source, "" when none."""
+    seen = set().union(*(_runs(_WORD.findall(t.casefold())) for t in sources), set())
+    words = _WORD.findall((answer or "").casefold())
+    stretches = [words[i:i + _STRETCH] for i in range(0, len(words) - _STRETCH + 1, _STRETCH)]
+    bare = [w for w in stretches if len(_runs(w) & seen) < _FOUND * len(_runs(w))]
+    if not bare:
+        return ""
+    return (f"{len(bare)} of {len(stretches)} stretches of {_STRETCH} words share almost no {_RUN}-word run with any tool "
+            f"output read, the first starting \"{' '.join(bare[0][:8])}\". Those are the writer's own words: text "
+            "given as copied or quoted from a source must appear in it.")
+
+
+def _session_outputs(bus: Any, session_id: str | None) -> list[str]:
+    from localharness.core.events import Observation
+    try:
+        return [e.output or "" for e in bus.history(session_id=session_id, event_types=[Observation])]
+    except Exception:
+        return []
+
+
 def _delegation_result(text: str, child_loop: Any, bus: Any, summary: str,
                        tool_calls: int) -> DelegationResult:
     reason = getattr(child_loop, "last_terminated_reason", None)  # test fakes may lack it
     sid = child_loop.current_session_id
+    if note := provenance_note(summary, _session_outputs(bus, sid)):
+        text = f"{text}\n\nMeasured by the harness: {note}"
     return DelegationResult(
         text, status=_delegation_status(reason), terminated_reason=reason,
         tool_calls=tool_calls, artifacts=_session_written_paths(bus, sid),

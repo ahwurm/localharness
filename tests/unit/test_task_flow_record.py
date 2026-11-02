@@ -221,13 +221,13 @@ def test_limited_known_names_drop_an_addition_and_a_critic_budget_outside_them()
 
 def test_panel_critics_are_the_floor_then_the_sensed_then_the_additions_without_duplicates():
     limits, _ = limited(SimpleNamespace(panels={"reply": ["security", "factual"]}))
-    assert panel_critics("reply", limits, sensed=("factual",)) == ("answer", "jtbd", "factual", "security")
-    assert panel_critics("reply", limited()[0]) == ("answer", "jtbd")
+    assert panel_critics("reply", limits, sensed=("factual",)) == ("jtbd", "factual", "security")
+    assert panel_critics("reply", limited()[0]) == ("jtbd",)
 
 
 def test_panel_critics_with_an_empty_configured_panel_still_yield_the_floor():
     limits, _ = limited(SimpleNamespace(panels={"reply": [], "plan": []}))
-    assert panel_critics("reply", limits) == ("answer", "jtbd")
+    assert panel_critics("reply", limits) == ("jtbd",)
     assert panel_critics("plan", limits) == STAGES["plan"].floor
 
 
@@ -257,7 +257,7 @@ def test_lines_model_renderings_appear_verbatim():
         "the interview is open; ask, or file stage=new first",
         "decisions.md is blocked; the person reopens or accepts it",
         "no unreviewed answer; next: plan",
-        "no task is open; the person opens one with /task new",
+        'no task is open; open one with task(stage="new", doc=<the objective and how you will do it>)',
         "plan.md is filed; research is closed",
         "the task is done; the person starts the next",
         "the doc changed after it was filed; the person accepts it",
@@ -559,10 +559,11 @@ def test_stop_step_removes_the_step_doc_row_and_keeps_the_stopped_log_cut_at_the
 DECISIONS = ("decisions.md", None)
 
 
-def test_precondition_refuses_the_models_new_with_no_task_and_admits_the_persons_objective():
+def test_precondition_refuses_a_bare_new_with_no_task_and_admits_an_objective_from_either():
     refused = precondition("new", None, "model", None)
     assert refused.reason == "no task"
-    assert refused.model == "no task is open; the person opens one with /task new"
+    assert refused.model == 'no task is open; open one with task(stage="new", doc=<the objective and how you will do it>)'
+    assert precondition("new", None, "model", "fix login") is None
     assert precondition("new", None, "person", "fix login") is None
     assert precondition("new", None, "person", None).reason == "no task"
 

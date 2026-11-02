@@ -1300,6 +1300,10 @@ class AgentConfig(BaseModel):
             "real consequence instead."
         ),
     )
+    act_guard: bool = Field(
+        default=True,
+        description="False when a tool-less first answer is complete work, as a critic's verdict is.",
+    )
 
     # --- Model ---
     model: str = Field(

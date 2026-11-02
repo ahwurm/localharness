@@ -12,7 +12,9 @@ BOUNDARY = {row.stage: boundary for boundary, row in STAGES.items() if row.stage
 TAKES = {"new": "doc", "plan": "doc", "research": "question", "done": "doc"}
 TAKEN_BY = {"doc": "new and plan", "question": "research"}
 DESCRIPTION = "\n".join([
-    f"Each call runs one unit of the open task and names the next; only the person opens a task. A doc is at most {Caps.DOC} bytes.",
+    ("Each call runs one unit of the open task and names the next. When the person asks for work of several steps and no "
+     "task is open, open one: new with a doc of the objective and how you will do it; the task's objective is the person's "
+     f"latest message. A doc is at most {Caps.DOC} bytes."),
     "Files the task produces go under the scratch folder your note names, or the project; the task folder is not yours to write.",
     *(f"{stage}: reads {', '.join(STAGES[BOUNDARY[stage]].reads)}, writes {', '.join(STAGES[BOUNDARY[stage]].writes)}; "
       f"takes {TAKES.get(stage, 'nothing')}" for stage in TOOL_STAGES),

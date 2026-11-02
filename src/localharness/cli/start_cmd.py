@@ -3185,6 +3185,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         )
         await tool_registry.register(agent_tool, scope="global")
         from localharness.orchestrator.task_flow import TaskFlow
+        from localharness.agent.subagent import builtin_toolset
         from localharness.orchestrator.task_flow.filer import Docs, Refused
         from localharness.orchestrator.task_flow.panel import critic_names
         from localharness.orchestrator.task_flow.record import limited
@@ -3198,6 +3199,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             config=agent_config, root_tools=(), llm=llm, token_counter=token_counter, bus=bus,
             messages=lambda: agent_loop.messages(), turn=lambda: agent_loop.turn,
             record=resume.task if resume is not None and not resume.slept else None,
+            web_tools=builtin_toolset("web-researcher", tool_registry) or (),
         )
         await tool_registry.register(TaskTool(flow), scope="global")
         warnings.extend(limited(agent_config.task_flow, known=critic_names())[1])

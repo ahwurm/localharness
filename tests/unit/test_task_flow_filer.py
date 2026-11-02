@@ -245,10 +245,10 @@ def test_a_planted_link_at_a_doc_is_replaced_never_followed(tmp_path):
     assert victim.read_text() == "untouched"
 
 
-def test_session_docs_are_a_fixed_pair_and_reset_to_empty(tmp_path):
+def test_session_docs_are_a_fixed_three_and_reset_to_empty(tmp_path):
     root, agent = tree(tmp_path)
     docs = Docs(root, True, "a")
-    assert SESSION_DOCS == ("jtbd.md", "reply-review.md")
+    assert SESSION_DOCS == ("jtbd.md", "reply-review.md", "reply-draft.md")
     with pytest.raises(Refused):
         docs.write_session("other.md", "x")
     with pytest.raises(Refused):
@@ -256,7 +256,7 @@ def test_session_docs_are_a_fixed_pair_and_reset_to_empty(tmp_path):
     docs.write_session("jtbd.md", "the job")
     assert docs.read_session("jtbd.md") == "the job"
     docs.reset_sessions()
-    assert [(agent / "sessions" / n).read_text() for n in SESSION_DOCS] == ["", ""]
+    assert [(agent / "sessions" / n).read_text() for n in SESSION_DOCS] == ["", "", ""]
     assert sorted(p.name for p in (agent / "sessions").iterdir()) == sorted(SESSION_DOCS)
 
 
@@ -547,7 +547,7 @@ def test_a_finding_that_forges_a_heading_or_a_verdict_stays_on_its_own_line():
 
 def test_a_finding_is_cut_at_the_finding_cap():
     long = Finding("NOTE", "r" * 1000, "", False, "c")
-    assert len(render_section(1, [long], "pass", 0).splitlines()[1]) <= len("- [NOTE]  (c)") + Caps.FINDING
+    assert len(render_section(1, [long], "pass", 0).splitlines()[1]) <= len("- [NOTE]  (c)") + 3 * Caps.FINDING
 
 
 def test_a_verdict_outside_the_four_is_refused():

@@ -42,7 +42,7 @@ from localharness.core.content import redact_images, text_of, text_part
 from localharness.core.fence import fence_project_text
 from localharness.agent.context import (
     APPROX_CHARS_PER_TOKEN, fixed_tokens, floor_schemas, harness_floor, response_reserve)
-from localharness.agent.context import ActiveReferenceError, ActiveReferenceOverflow
+from localharness.agent.context import _WEB_STUB_PREFIX, ActiveReferenceError, ActiveReferenceOverflow
 from localharness.plugins.api import ContextBudget
 from localharness.tools.capabilities import CoResidenceError
 
@@ -259,13 +259,16 @@ class StuckDetector:
         except Exception:  # noqa: BLE001 — fail closed
             return False
 
-    def record(self, tool_name: str, args: dict, result: tuple[bool, str]) -> None:
+    def record(self, tool_name: str, args: dict, result: tuple[bool, str], reread: bool = False) -> None:
+        """`reread` is a call whose earlier result was evicted from the request: it counts toward the ceiling, not the window."""
         call_sig = self.compute_signature(tool_name, args)
         if tool_name == "task":
             last = next((ln for ln in reversed(result[1].splitlines()) if ln.strip()), "")
             self._window.append(hashlib.sha256(f"{call_sig}:{last}".encode()).hexdigest()[:16])
             return
         self._call_counts[call_sig] = self._call_counts.get(call_sig, 0) + 1
+        if reread:
+            return
         if self._trusted(tool_name):
             ok, content = result
             result_hash = hashlib.sha256(
@@ -1273,6 +1276,7 @@ class AgentLoop:
         self._template_margin_ratio = template_margin_ratio
         self._bus = bus
         self._ctx = context_manager
+        self._evicted_calls: frozenset[str] = frozenset()
         self._request_note = request_note
         # How the last run_turn ended ("complete", "error", "stuck", "budget_*", ...): a
         # delegating parent reads it to report the child's runtime-truth status.
@@ -2736,7 +2740,7 @@ class AgentLoop:
                 # (issue #6: 'restate' invited meta-narrated duplicates on
                 # conversational turns).
                 if (session.actions_taken == 0 and not session.act_nudge_used
-                        and tool_schemas):
+                        and tool_schemas and getattr(self._config, "act_guard", True)):
                     session.act_nudge_used = True
                     tools_required = getattr(self._config, "tools_required", False)
                     log.info("Act-guard: tool-less first completion — nudging once "
@@ -2796,13 +2800,13 @@ class AgentLoop:
                             await asyncio.shield(self._bus.publish(held.pop().model_copy(
                                 update={"content": _clean_summary(_format_completion_summary(session, content))})))
                         raise
-                    if verdict == "blocked" and session.review_rounds < REVIEW_ROUNDS:
+                    if verdict == "blocked" and not self.reply_panel.stalled and session.review_rounds < REVIEW_ROUNDS:
                         session.review_rounds += 1
                         last = session.review_rounds == REVIEW_ROUNDS
                         self.reply_panel.say_revising(blockers, last)
                         if held:
                             held.pop()
-                        session.push(harness_message(revision_request(summary, findings, last), "critic_findings"))
+                        session.push(harness_message(revision_request(findings, last, self.reply_panel.card), "critic_findings"))
                         continue
                 if held:
                     await asyncio.shield(self._bus.publish(held.pop().model_copy(update={"content": summary})))
@@ -2970,7 +2974,8 @@ class AgentLoop:
 
                 # Hash the local result_content: step 11b appends the per-iteration budget note
                 # to the message afterwards, which would make every result look new.
-                stuck_detector.record(tool_call.name, tool_call.arguments, (not is_error, result_content))
+                stuck_detector.record(tool_call.name, tool_call.arguments, (not is_error, result_content),
+                                      reread=compute_signature(tool_call.name, tool_call.arguments) in self._evicted_calls)
 
             # 11b. Append budget status to the iteration's last tool result
             note = _budget_note(session, budget)
@@ -3264,9 +3269,15 @@ class AgentLoop:
                 calls, written, handles = self._turn_evidence(session)
                 if all(name in CLASSLESS_TOOLS for name, _ in calls):
                     return summary, None, "", 0, 0, ()
+                from localharness.agent.subagent import provenance_note
+                store = getattr(self._ctx, "_content_store", None)
+                draft_handle = store.put(summary, "untrusted") if store is not None else ""
+                sources = [text_of(m.get("content")) for m in session.messages[session.turn_start_idx:] if m.get("role") == "tool"]
                 inputs = PanelInputs(
-                    brief=reply_brief(task, written, handles), draft=summary, turns=tuple(typed_turns(session.messages)),
-                    handles=tuple(handles), critics=sense(calls, panel.jtbd_stood, panel.limits),
+                    brief=reply_brief(task, written, handles, provenance_note(summary, sources)), draft=summary,
+                    turns=tuple(typed_turns(session.messages)), draft_handle=draft_handle,
+                    handles=(*handles, *([draft_handle] if draft_handle else ())),
+                    critics=sense(calls, panel.jtbd_stood, panel.limits),
                 )
                 result = await panel.run(Unit("reply", "panel"), inputs)
                 verdict, finding, findings = result.verdict, result.finding, result.findings
@@ -3311,6 +3322,10 @@ class AgentLoop:
 
     async def _pack_request(self, messages: list[Message], tools: list | None, note: str, *, compact: bool = True):
         packed, budget = await self._ctx.build_messages(messages, tools, **({} if compact else {"compact": False}))
+        self._evicted_calls = frozenset(
+            m["_lh"]["outcome"]["call"] for m in packed
+            if m.get("role") == "tool" and str(m.get("content") or "").startswith(_WEB_STUB_PREFIX)
+            and isinstance(m.get("_lh"), dict) and "outcome" in m["_lh"])
         if note:
             # Request-local, after every lossy transform: one current note, no growing log.
             packed = [*packed, harness_message(note, "request_note")]
