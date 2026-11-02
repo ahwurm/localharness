@@ -87,8 +87,19 @@ def link(tmp_path: Path, component: str) -> tuple[Path, Path]:
           "t1": agent / "tasks" / "t1", "sessions": agent / "sessions"}[component]
     outside = tmp_path / "outside"
     at.rename(outside)
-    os.symlink(outside, at)
+    _dir_link(outside, at)
     return root, outside
+
+
+def _dir_link(target: Path, at: Path) -> None:
+    """A symlink, or on Windows without the symlink privilege a junction, which needs none and the walk must refuse too."""
+    try:
+        os.symlink(target, at, target_is_directory=True)
+    except OSError:
+        if os.name != "nt":
+            raise
+        import _winapi
+        _winapi.CreateJunction(str(target), str(at))
 
 
 def act(docs: Docs, op: str) -> object:
@@ -828,3 +839,35 @@ def test_drop_old_record_unlinks_a_link_and_never_its_target_and_ignores_a_folde
 def test_old_record_of_an_agent_with_no_folder_is_false(tmp_path):
     docs = Docs(state(tmp_path), True, "a")
     assert docs.old_record() is False and docs.drop_old_record() is False
+
+
+def test_the_path_walk_windows_uses_files_reads_lists_and_removes_like_the_descriptor_walk(tmp_path, monkeypatch):
+    """Windows has no `dir_fd` and cannot `os.open` a folder (0.27.2 crashed at start with EACCES); the path walk does the job."""
+    monkeypatch.setattr(filer, "_walk", filer._walk_paths)
+    docs = Docs(state(tmp_path), True, "a")
+    assert docs.folders() == [] and docs.highest() == 0
+    assert docs.new_task() == 1 and docs.new_task() == 2
+    text = "line one\nline two\n" + "é" * 10
+    got, _ = docs.write(1, "plan.md", text)
+    assert docs.read(1, "plan.md") == text and got == digest(text)
+    assert docs.path(1, "plan.md").read_bytes() == text.encode()  # no newline translation: the digest is of the bytes on disk
+    docs.write_session("jtbd.md", "job")
+    assert docs.read_session("jtbd.md") == "job"
+    assert docs.folders() == [1, 2] and docs.names(1) == ["plan"]
+    assert docs.remove(2) == [] and docs.folders() == [1]
+    (docs.state_dir / "agents" / "a" / "task.json").write_text("{}")
+    assert docs.old_record() and docs.drop_old_record() and not docs.old_record()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junctions are a Windows link")
+@pytest.mark.parametrize("component", ["tasks", "t1"])
+def test_a_junction_is_refused_like_a_symlink_on_windows(tmp_path, component):
+    root, agent = tree(tmp_path)
+    at = agent / "tasks" if component == "tasks" else agent / "tasks" / "t1"
+    outside = tmp_path / "outside"
+    at.rename(outside)
+    _dir_link(outside, at)
+    before = snap(outside)
+    with pytest.raises(Refused):
+        act(Docs(root, True, "a"), "write")
+    assert snap(outside) == before

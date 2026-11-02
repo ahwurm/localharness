@@ -135,7 +135,7 @@ def _fsync_dir(directory: Path) -> None:
 
 
 def atomic_write_text(path: Path | str, text: str, *, refuse_read_only: bool = False,
-                      follow_links: bool = False, dir_fd: int | None = None) -> None:
+                      follow_links: bool = False, dir_fd: int | None = None, newline: str | None = None) -> None:
     """Replace the file `path` names with `text`, atomically. The one writer every small file the
     harness owns goes through (IN-21, D-28): a same-directory temp file (a cross-filesystem temp
     file would defeat `os.replace`'s atomicity on container/NFS mounts), fsynced, restricted to
@@ -171,6 +171,7 @@ def atomic_write_text(path: Path | str, text: str, *, refuse_read_only: bool = F
     tmp = tempfile.NamedTemporaryFile(
         mode="w",
         encoding="utf-8",
+        newline=newline,  # "" writes `text` byte for byte; the default translates newlines on Windows
         dir=str(target.parent),
         prefix=f".{target.name}.",
         suffix=".tmp",

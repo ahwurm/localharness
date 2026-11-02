@@ -489,7 +489,7 @@ def wake_line(docs: Any) -> str | None:
         names = docs.names(n) if n else []
         if not n:
             return None
-    except Refused:
+    except (Refused, OSError):  # an informational line: a folder it cannot read never stops a start
         return None
     show = [f"/task show t{n}/{names[-1]}"] if names else []
     return notice("task", f"t{n} on disk, not carried over", [*show, "new <objective>"])
