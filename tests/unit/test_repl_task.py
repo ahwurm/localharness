@@ -1702,3 +1702,10 @@ async def test_a_queued_notice_is_held_until_it_is_sent_and_then_released(tmp_pa
     await asyncio.sleep(0.01)
     assert repl._queued_notices == set() and channel.notices == [verbs.render("queued phone", BOX, task="t1")]
     repl._turn_task.cancel()
+
+
+def test_wake_line_is_none_when_the_tasks_folder_cannot_be_read(tmp_path, monkeypatch):
+    """The 0.27.2 Windows start died here: an OSError from the filer must not stop a start for an informational line."""
+    flow, *_ = make_flow(tmp_path)
+    monkeypatch.setattr(type(flow.docs), "highest", lambda self: (_ for _ in ()).throw(PermissionError(13, "denied")))
+    assert verbs.wake_line(flow.docs) is None

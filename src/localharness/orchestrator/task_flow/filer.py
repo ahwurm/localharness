@@ -65,8 +65,37 @@ def _open_dir(path: str | os.PathLike[str], nofollow: bool, dir_fd: int | None =
         raise
 
 
-def _walk(root: Path, workspace_layer: bool, parts: tuple[str, ...], create: bool) -> int:
+def _is_link(st: os.stat_result) -> bool:
+    """A symlink, or on Windows a junction; other reparse points (OneDrive placeholders) are ordinary folders."""
+    return stat.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", 0) in (
+        getattr(stat, "IO_REPARSE_TAG_SYMLINK", -1), getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", -1))
+
+
+def _check_dir(path: Path, nofollow: bool) -> Path:
+    st = os.lstat(path) if nofollow else os.stat(path)
+    if (nofollow and _is_link(st)) or not stat.S_ISDIR(st.st_mode):
+        raise Refused(f"{path.name} is a link or not a folder; the filer does not follow it")
+    return path
+
+
+def _walk_paths(root: Path, workspace_layer: bool, parts: tuple[str, ...], create: bool) -> Path:
+    """Windows: no `dir_fd` and no `os.open` of a folder, so each component is checked by path with the same follow rules."""
+    path = _check_dir(Path(root), workspace_layer)
+    for i, name in enumerate(parts):
+        path = path / name
+        if create:
+            try:
+                os.mkdir(path, PRIVATE_DIR_MODE)
+            except FileExistsError:
+                pass
+        _check_dir(path, workspace_layer or i > 0)
+    return path
+
+
+def _walk(root: Path, workspace_layer: bool, parts: tuple[str, ...], create: bool) -> int | Path:
     """An open descriptor for `root/parts`, one component at a time; only the root and `agents` of the machine layer follow a link."""
+    if os.name == "nt":
+        return _walk_paths(root, workspace_layer, parts, create)
     fd = _open_dir(root, workspace_layer)
     for i, name in enumerate(parts):
         try:
@@ -82,11 +111,45 @@ def _walk(root: Path, workspace_layer: bool, parts: tuple[str, ...], create: boo
     return fd
 
 
-def _listing(fd: int) -> list[str]:
+def _listing(fd: int | Path) -> list[str]:
     return os.listdir(fd)
 
 
-def _highest(fd: int) -> int:
+# A folder handle is an open descriptor on POSIX and a checked Path on Windows (see `_walk`); these act on a name inside one.
+def _mkdir_in(fd: int | Path, name: str) -> None:
+    os.mkdir(fd / name, PRIVATE_DIR_MODE) if isinstance(fd, Path) else os.mkdir(name, PRIVATE_DIR_MODE, dir_fd=fd)
+
+
+def _lstat_in(fd: int | Path, name: str) -> os.stat_result:
+    return os.lstat(fd / name) if isinstance(fd, Path) else os.lstat(name, dir_fd=fd)
+
+
+def _unlink_in(fd: int | Path, name: str) -> None:
+    os.unlink(fd / name) if isinstance(fd, Path) else os.unlink(name, dir_fd=fd)
+
+
+def _rmtree_in(fd: int | Path, name: str) -> None:
+    if not isinstance(fd, Path):
+        shutil.rmtree(name, dir_fd=fd)
+    elif _is_link(st := os.lstat(fd / name)) or not stat.S_ISDIR(st.st_mode):
+        raise OSError(errno.ENOTDIR, "a link or not a folder", str(fd / name))
+    else:
+        shutil.rmtree(fd / name)
+
+
+def _open_regular_in(fd: int | Path, name: str) -> int:
+    if not isinstance(fd, Path):
+        return open_regular(name, dir_fd=fd)
+    if _is_link(os.lstat(fd / name)):
+        raise OSError(errno.ELOOP, "a link", str(fd / name))
+    return open_regular(fd / name)
+
+
+def _write_in(fd: int | Path, name: str, text: str) -> None:
+    atomic_write_text(fd / name, text, newline="") if isinstance(fd, Path) else atomic_write_text(name, text, dir_fd=fd)
+
+
+def _highest(fd: int | Path) -> int:
     return max((int(n[1:]) for n in _listing(fd) if _FOLDER.fullmatch(n)), default=0)
 
 
@@ -112,10 +175,10 @@ def _clip(text: str, limit: int) -> str:
     return text.encode()[:limit].decode(errors="ignore")
 
 
-def _slurp(fd: int, name: str) -> str | None:
+def _slurp(fd: int | Path, name: str) -> str | None:
     """The doc `name` inside `fd`, or None when it is missing or longer than a doc can be."""
     try:
-        with os.fdopen(open_regular(name, dir_fd=fd), "rb") as fh:
+        with os.fdopen(_open_regular_in(fd, name), "rb") as fh:
             raw = fh.read(_BOUND + 1)
     except FileNotFoundError:
         return None
@@ -294,14 +357,15 @@ class Docs:
         try:
             yield fd
         finally:
-            os.close(fd)
+            if not isinstance(fd, Path):
+                os.close(fd)
 
     def new_task(self) -> int:
         with self._dir("tasks", create=True) as fd:
             n = _highest(fd) + 1
             for _ in range(_ATTEMPTS):
                 try:
-                    os.mkdir(f"t{n}", PRIVATE_DIR_MODE, dir_fd=fd)
+                    _mkdir_in(fd, f"t{n}")
                 except FileExistsError:
                     n = max(n, _highest(fd)) + 1
                     continue
@@ -339,7 +403,7 @@ class Docs:
             with self._dir("tasks", f"t{task}", create=False) as fd:
                 held = sorted(_listing(fd))
             with self._dir("tasks", create=False) as fd:
-                shutil.rmtree(f"t{task}", dir_fd=fd)
+                _rmtree_in(fd, f"t{task}")
         except FileNotFoundError:
             held = []
         except OSError as e:
@@ -350,10 +414,10 @@ class Docs:
     def _old_record(self, drop: bool) -> bool:
         try:
             with self._dir(create=False) as fd:
-                if stat.S_ISDIR(os.lstat(OLD_RECORD, dir_fd=fd).st_mode):
+                if stat.S_ISDIR(_lstat_in(fd, OLD_RECORD).st_mode):
                     return False
                 if drop:
-                    os.unlink(OLD_RECORD, dir_fd=fd)
+                    _unlink_in(fd, OLD_RECORD)
                 return True
         except FileNotFoundError:
             return False
@@ -378,7 +442,7 @@ class Docs:
             raise Refused(f"{folder} was not made by this session; it is read-only")
         kept, truncated = cut(text)
         with self._dir("tasks", folder, create=False) as fd:
-            atomic_write_text(name, kept, dir_fd=fd)
+            _write_in(fd, name, kept)
         return digest(kept), truncated
 
     def read(self, task: int, name: str) -> str | None:
@@ -399,7 +463,7 @@ class Docs:
     def write_session(self, name: str, text: str, whole: bool = False) -> None:
         """`whole` keeps a draft uncut: it is the person's reply, already bounded by the model's output cap."""
         with self._dir("sessions", create=True) as fd:
-            atomic_write_text(_session(name), text if whole else cut(text)[0], dir_fd=fd)
+            _write_in(fd, _session(name), text if whole else cut(text)[0])
 
     def append_session(self, name: str, section: str, fresh: bool = False) -> None:
         old = "" if fresh else self.read_session(name).strip()
