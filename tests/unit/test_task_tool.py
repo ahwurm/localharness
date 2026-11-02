@@ -8,9 +8,11 @@ from localharness.core.caps import Caps
 from localharness.orchestrator.task_flow.record import STAGES, TOOL_STAGES, Row
 from localharness.tools.builtin.task_tool import TaskTool
 from localharness.tools import base
-from tests.unit.test_task_flow_record import make_flow, planned
+from tests.unit.test_task_flow_record import TYPED, make_flow, planned
 
-NO_TASK = "no task is open; the person opens one with /task new"
+TYPED_TEXT = TYPED[-1]["content"]
+
+NO_TASK = 'no task is open; open one with task(stage="new", doc=<the objective and how you will do it>)'
 
 
 def spied(flow):
@@ -48,10 +50,19 @@ async def test_tracer_new_call_files_the_doc_and_names_the_next_unit(tmp_path):
     assert result.output.splitlines()[-1] == "next: plan · file"
 
 
-async def test_no_task_open_the_model_cannot_open_one(tmp_path):
+async def test_no_task_open_the_models_new_opens_one_on_the_persons_latest_turn(tmp_path):
+    flow, _, rows, _ = make_flow(tmp_path)
+    flow.turn = lambda: 1
+    result = await TaskTool(flow)._execute(stage="new", doc="Objective: x, step by step")
+    assert flow.record is not None and flow.record.objective == TYPED_TEXT
+    assert flow.docs.read(flow.record.id, "decisions.md") == "Objective: x, step by step"
+    assert rows[0][:2] == (f"t{flow.record.id}", "opened by the model") and result.output.splitlines()[-1].startswith("next:")
+
+
+async def test_no_task_open_a_bare_new_still_refuses(tmp_path):
     flow = make_flow(tmp_path)[0]
     before = sorted(tmp_path.rglob("*"))
-    result = await TaskTool(flow)._execute(stage="new", doc="x")
+    result = await TaskTool(flow)._execute(stage="new")
     assert result.output == NO_TASK
     assert flow.record is None and sorted(tmp_path.rglob("*")) == before
 
@@ -230,3 +241,20 @@ async def test_done_closes_a_task_finished_before_any_plan_once_decisions_passed
 async def test_done_with_no_task_open_says_so(tmp_path):
     flow = make_flow(tmp_path)[0]
     assert (await TaskTool(flow)._execute(stage="done", doc="x")).output == "no task is open"
+
+
+async def test_the_model_opens_only_on_this_turns_message_and_once_a_turn(tmp_path):
+    flow, _, rows, _ = make_flow(tmp_path)
+    flow.turn = lambda: 2
+    await TaskTool(flow)._execute(stage="new", doc="x")
+    assert flow.record is None
+    flow.turn = lambda: 1
+    await TaskTool(flow)._execute(stage="new", doc="x")
+    first = flow.record
+    first.stage = "done"
+    await TaskTool(flow)._execute(stage="new", doc="y")
+    assert flow.record is first and len([r for r in rows if r[1] == "opened by the model"]) == 1
+    flow.end_turn()
+    await TaskTool(flow)._execute(stage="new", doc="y")
+    opened = [r for r in rows if r[1] == "opened by the model"]
+    assert flow.record is not first and len(opened) == 2 and opened[0][2] == ("/task clear (removes it)",)

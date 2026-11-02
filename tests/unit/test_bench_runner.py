@@ -1105,7 +1105,7 @@ def _flow_scen(task_flow=True, **kw):
     )
 
 
-GLOB_PANEL = ("answer", "jtbd", "factual")
+GLOB_PANEL = ("jtbd", "factual")
 
 
 def _glob_call(mock_llm_client):
@@ -1136,11 +1136,11 @@ def test_critic_children_counts_only_children_that_are_critics():
         return TurnCompleted(agent_id=agent_id, session_id="s", parent_id=parent_id, iterations=1,
                              duration_seconds=1.0, elapsed_tokens=1, summary="x")
 
-    acc.on_turn_completed(done("answer", "run"))
+    acc.on_turn_completed(done("factual", "run"))
     acc.on_turn_failed(TurnFailed(agent_id="jtbd", session_id="s", parent_id="run", reason="llm_error", detail="d",
                                   iterations=1, duration_seconds=1.0))
     acc.on_turn_completed(done("explore", "run"))
-    acc.on_turn_completed(done("answer", None))
+    acc.on_turn_completed(done("factual", None))
     assert acc.critic_children == 2
 
 
@@ -1403,7 +1403,7 @@ def _task_plan_queue(mock_llm_client, plan=TWO_STEPS, reply="The plan is filed: 
         *_opening(mock_llm_client),
         _task_call(mock_llm_client, 1, stage="plan"),
         _task_call(mock_llm_client, 2, stage="plan", doc=plan),
-        *[r for _ in range(3) for r in _say(mock_llm_client, "NONE")],
+        *[mock_llm_client.Response(content="NONE") for _ in range(3)],
         mock_llm_client.Response(content=reply),
         *_say(mock_llm_client, "NONE"),
     ])
@@ -1536,11 +1536,11 @@ def _claimed_queue(mock_llm_client, verdict=NEVER_WRITTEN):
         *_opening(mock_llm_client, "Which directory should hello.txt go in?"),
         _task_call(mock_llm_client, 1, stage="plan"),
         _task_call(mock_llm_client, 2, stage="plan", doc=HELLO_PLAN),
-        *[r for _ in range(3) for r in say("NONE")],
+        *[mock_llm_client.Response(content="NONE") for _ in range(3)],
         _task_call(mock_llm_client, 3, stage="run"),
         *say("I wrote hello.txt with the text hi."),
         _task_call(mock_llm_client, 4, stage="run"),
-        *say(verdict),
+        mock_llm_client.Response(content=verdict),
         mock_llm_client.Response(content="Step 1 is blocked: nothing was written."),
         *say("NONE"),
     ])

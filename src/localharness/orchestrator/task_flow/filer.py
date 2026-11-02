@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from localharness.orchestrator.task_flow.panel import Finding
 
 TRUNCATION_MARKER = "\n[truncated]\n"
-SESSION_DOCS = ("jtbd.md", "reply-review.md")
+SESSION_DOCS = ("jtbd.md", "reply-review.md", "reply-draft.md")
 _BOUND = Caps.DOC + len(TRUNCATION_MARKER.encode())
 _DIR = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
 _FOLDER = re.compile(r"t[0-9]+")
@@ -203,13 +203,13 @@ def _quote(text: str) -> str:
     return _HEADING_LINE.sub(lambda _: "\\#", sanitize_for_display(text))
 
 
-def render_section(round_n: int | None, findings: Iterable[Finding], verdict: str, blockers: int) -> str:
+def render_section(round_n: int | None, findings: Iterable[Finding], verdict: str, blockers: int, scores: str = "") -> str:
     if verdict not in VERDICTS:
         raise ValueError(f"{verdict!r} is not a review verdict")
     head = "## accepted by the person" if round_n is None else f"## round {round_n} · blockers {blockers}"
-    rows = (f"- [{f.tag}] {flat(' — '.join(p for p in (f.rule, f.evidence) if p), Caps.FINDING)}"
+    rows = (f"- [{f.tag}] {flat(' — '.join(p for p in (f.rule, f.evidence, getattr(f, 'fix', '') and f'to 9: {f.fix}') if p), 3 * Caps.FINDING)}"
             + (f" ({flat(f.critic)})" if f.critic else "") for f in findings)
-    return "\n".join([head, *rows, f"verdict: {verdict}"])
+    return "\n".join([head, *([flat(scores, Caps.BLOCK)] if scores else []), *rows, f"verdict: {verdict}"])
 
 
 def _sections(text: str) -> list[str]:
@@ -396,9 +396,19 @@ class Docs:
         except FileNotFoundError:
             return ""
 
-    def write_session(self, name: str, text: str) -> None:
+    def write_session(self, name: str, text: str, whole: bool = False) -> None:
+        """`whole` keeps a draft uncut: it is the person's reply, already bounded by the model's output cap."""
         with self._dir("sessions", create=True) as fd:
-            atomic_write_text(_session(name), cut(text)[0], dir_fd=fd)
+            atomic_write_text(_session(name), text if whole else cut(text)[0], dir_fd=fd)
+
+    def append_session(self, name: str, section: str, fresh: bool = False) -> None:
+        old = "" if fresh else self.read_session(name).strip()
+        text = "\n\n".join(p for p in (old, section.strip()) if p)
+        body = _newest([f"{p.strip()}\n\n" for p in _SECTION_BREAK.split(text) if p.strip()])
+        self.write_session(name, body.rstrip() + "\n")
+
+    def session_path(self, name: str) -> Path:
+        return self.state_dir / "agents" / self.agent / "sessions" / _session(name)
 
     def reset_sessions(self) -> None:
         for name in SESSION_DOCS:

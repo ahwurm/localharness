@@ -25,7 +25,7 @@ class Stage(NamedTuple):
 
 
 STAGES: dict[str, Stage] = {
-    "reply": Stage(None, ("draft",), (), ("panel", "revise", "panel"), ("answer", "jtbd"), 3, "seam", None),
+    "reply": Stage(None, ("draft",), (), ("panel", "revise", "panel"), ("jtbd",), 3, "seam", None),
     "new": Stage("new", ("turns", "instructions"), ("decisions.md",), ("file", "panel"), ("jtbd",), 1, "person", "plan"),
     "research": Stage("research", ("decisions.md",), ("research.md",), ("explore", "panel"),
                       ("jtbd", "factual"), 0, "root", "plan"),
@@ -371,7 +371,7 @@ LINES: dict[str, Line] = {
     "nothing to revise": Line("nothing to revise", ("/task plan <change>",)),
     "research full": Line("research full", (), "", f"{Caps.QUESTIONS} questions are filed; call stage=research to review them"),
     "nothing to review": Line("nothing to review", (), "", "no unreviewed answer; next: plan"),
-    "no task": Line("no task", ("/task new <objective>",), "", "no task is open; the person opens one with /task new"),
+    "no task": Line("no task", ("/task new <objective>",), "", "no task is open; open one with task(stage=\"new\", doc=<the objective and how you will do it>)"),
     "open and not blocked": Line("open and not blocked", ("/task plan (revises)", "new <objective> (closes tN)")),
     "step not executed": Line("step N not executed", ("/task run",)),
     "step not in the plan": Line("step N not in the plan", ("/task show plan",)),
@@ -442,7 +442,7 @@ def doc_key(name: str, record: Record) -> tuple[str, str | None] | None:
 
 def precondition(boundary: str, record: Record | None, by: str, carried: str | None) -> Need | None:
     if record is None:
-        return None if boundary == "new" and by == "person" and carried else need("no task")
+        return None if boundary == "new" and carried else need("no task")
     if record.stage == "done":
         return None
     filed = record.filed

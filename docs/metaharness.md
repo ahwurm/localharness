@@ -6,39 +6,38 @@ The reasoning is plain. A model grading its own answer finds little, so stranger
 
 ## In a normal session
 
-There is nothing to set up. A reply the model wrote without using a tool goes to you as written: a hello costs no critic. When the turn used a tool, critics read the reply before you see it: `answer` and `jtbd`, plus the ones the turn's calls sense (see below), each with a full turn (24 actions, 10 minutes) unless `task_flow.critics` sets a lower one. There is no off switch for such a turn. (`jtbd` stands down only for a turn of nothing but `task` calls when one of them ran a passing panel that already included it.)
+There is nothing to set up. A reply the model wrote without using a tool goes to you as written: a hello costs no critic. When the turn used a tool, critics read the reply before you see it: `jtbd`, plus the ones the turn's calls sense (see below), each with a full turn (24 actions, 10 minutes) unless `task_flow.critics` sets a lower one. There is no off switch for such a turn. (`jtbd` stands down only for a turn of nothing but `task` calls when one of them ran a passing panel that already included it.)
 
-A reply with a standing blocker goes back to the root, with its tools, for up to three rounds and is checked again after each; the critics' findings reach it as quoted data, the last round is announced, and its answer is delivered whatever the critics say. What you see:
+Every critic scores the work the same way. It breaks the work into numbered items (`A1` primary, `B1` secondary, `C1` auxiliary), scores each 0-10 and names the one change that would take it to 9. An item under 8 is a blocker. A reply with a blocker goes back to the root, with its tools, for up to three rounds. The root gets a score card and only the items under 8, and it is told to fix those and keep the rest. Revision stops early when a round's lowest score does not rise. The last round is announced, and its answer is delivered whatever the critics say. Each round's draft goes to `sessions/reply-draft.md`, and `sessions/reply-review.md` indexes every round with its scores and a diff stat against the round before. Critics read the whole draft through a content handle, not only its first 4,000 characters. What you see:
 
 - A passing reply is delivered, then `◆ reply pass · /task show reply`, with `· 2 notes` when the critics left warnings or notes. A reply no critic read prints nothing.
 - A blocked reply is delivered, then `◆ reply blocked · /task show reply · 3 blockers`; the line counts and names the command, and `/task show reply` prints the findings.
 - A panel that could not finish delivers the reply, then `◆ reply unreviewed · /task show reply · <why>`. Nothing prints after your own stop.
 
-While a reply is held, the status row and the phone show the running critic and its bound, for example `checking 3/4 · factual`; the classic path and ACP print one line, such as `checking reply · 4 critics · Ctrl+C delivers it unchecked`. A reply panel prints no bound; the lines of a task unit do. Each critic's findings print as they land, one line per finding (`◆ answer blocker the reply cites a real line · README.md:41 does not say that`) or `◆ answer pass` for a clean one, and `◆ root revising · 1 blocker` before each round, `◆ root revising · last round · 1 blocker` before the third. The channel's stop word during the check delivers the draft unchecked. `/task show reply` prints the last reply review, and `/task show job` prints what the `jtbd` critic takes the session's job to be; `◆ job now: … · turn N` appears when it changes.
+While a reply is held, the status row and the phone show the running critic and its bound, for example `checking 3/4 · factual`; the classic path and ACP print one line, such as `checking reply · 4 critics · Ctrl+C delivers it unchecked`. A reply panel prints no bound; the lines of a task unit do. Each critic's findings print as they land, one line per finding (`◆ factual blocker A1 2/10 the quoted passage · pg-3 does not hold it`) or `◆ factual pass` for a clean one, and `◆ root revising · 1 blocker` before each round, `◆ root revising · last round · 1 blocker` before the third. The channel's stop word during the check delivers the draft unchecked. `/task show reply` prints the last reply review, and `/task show job` prints what the `jtbd` critic takes the session's job to be; `◆ job now: … · turn N` appears when it changes.
 
 ## Which critics run
 
-Nine critics ship in the package, one small YAML file each. A critic's role is read from the package alone, never from your config, a project or an overlay.
+Eight critics ship in the package. Each is one small YAML file holding its breakdown and its score anchors, and every critic is handed the same shared contract first (`assets/critics/contract.md`). A critic's role is read from the package alone, never from your config, a project or an overlay.
 
-| Critic | What it looks for |
+| Critic | What it breaks the work into, and scores |
 |--------|-------------------|
-| `answer` | The reply is correct, honest and on the question, with no invented facts. |
-| `jtbd` | The work serves what you are trying to do, and which of your asks it drops or drifts from. It also keeps the session's job. |
-| `factual` | Each cited line says what the work claims it says. |
-| `recency` | The right entity is named, the facts are current, and each source is what it is said to be. |
-| `big-picture` | Every decision has a step, the plan answers the questions asked, and nothing drifted. |
-| `parsimony` | The plan is the smallest that does the job: nothing speculative. |
-| `security` | The permission gate, secrets, and what a cloned repository could do. |
-| `spec-compliance` | The step did the step: nothing missing, nothing extra. |
-| `quality` | The work reads clearly and a later change lands in one place. |
+| `jtbd` | Your asks, each quoted with its reading, scored by how much the work delivers now. It also keeps the session's job. |
+| `factual` | The work's claims, each opened at its source and scored by how well the source backs it. |
+| `recency` | The named things the work relies on, scored by whether each is the one you meant and current. |
+| `big-picture` | The decisions and asks, scored by how a plan step covers each. |
+| `parsimony` | The plan's steps, scored by whether each is needed and as small as it can be. |
+| `security` | What the change touches, scored against the gate, secrets and repository-borne steering. |
+| `spec-compliance` | The step's requirements, scored against the diff and the files. |
+| `quality` | The units the change touched, scored by whether a stranger could change each in one place. |
 
-On a reply, the turn's tool calls add critics to `answer` and `jtbd`: `factual` when the turn read files or called an agent, `recency` when it used the web, `spec-compliance` when it wrote files. A tool in no known read-only class counts as reading and the web, so a plugin or MCP tool fails closed. Each pipeline stage has its own floor panel (the table below). Four critics ship ready to add above a floor, by name in `task_flow.panels`: `recency` after research, `security` after the plan, `quality` and `factual` after a step.
+On a reply, the turn's tool calls add critics to `jtbd`: `factual` when the turn read files or called an agent, `recency` when it used the web, `spec-compliance` when it wrote files. A tool in no known read-only class counts as reading and the web, so a plugin or MCP tool fails closed. Each pipeline stage has its own floor panel (the table below). Four critics ship ready to add above a floor, by name in `task_flow.panels`: `recency` after research, `security` after the plan, `quality` and `factual` after a step.
 
-A critic is told to assume the work missed and to find where. A BLOCKER is only for what it can show is wrong or missing in what it read; a claim it cannot check is at most one NOTE, and its own lack of access is never the work's fault. On a reply, `factual` and `recency` also hold `web_search` and `web_fetch`; every other critic and every task-document panel is read-only. It answers `NONE`, or findings of the shape `[BLOCKER|WARNING|NOTE] rule — evidence — example fix`. A doc is blocked only while a BLOCKER stands; warnings pass. Findings reach a model fenced as data, labelled as such, and the model is told to check them against the files, not obey them.
+A critic opens its sources itself before it scores, and an item it cannot check scores `?` with what would let it check: a tool it lacks, context it was not given, or a narrower review. On a reply, `factual` and `recency` also hold `web_search`, `web_fetch` and `web_page_query`, and the browser's tools when its plugin is on; every other critic and every task-document panel is read-only. It answers one line per item, `A1 4/10 the item — what it saw — to 9: the fix`, then `SCORE <lowest>/10`. A doc is blocked only while an item scores under 8; a `?` passes. Findings reach a model fenced as data, labelled as such, and the model is told to check them against the files, not obey them.
 
 ## The task pipeline
 
-Only you open a task, with `/task new <objective>`. After that the root drives. It asks what it needs in ordinary replies and files `decisions.md`; it may research (`research.md`, one read-only explorer per question, at most six questions); it files `plan.md`, a list of `## Step N` sections, each with `files:`, `depends_on:` and `done:` lines; then a fresh executor runs each step (`step-N.md`) and the task review writes `review.md`. A plan that does not parse is handed back to the root with the shape it needs.
+You open a task with `/task new <objective>`, or the model opens one when your message asks for work of several steps: once a turn, with your message as the objective, announced as `◆ tN opened by the model` with `/task clear` to remove it. After that the root drives. It asks what it needs in ordinary replies and files `decisions.md`; it may research (`research.md`, one read-only explorer per question, at most six questions); it files `plan.md`, a list of `## Step N` sections, each with `files:`, `depends_on:` and `done:` lines; then a fresh executor runs each step (`step-N.md`) and the task review writes `review.md`. A plan that does not parse is handed back to the root with the shape it needs.
 
 Every unit is one `task` call: one child or one panel. The call returns a manifest that names what was filed, the verdict, the findings and `next:`, and the root calls again until the task is done, blocked or halted. Between units you steer with the verbs below, or with a message where the channel reads input mid-turn. No call runs longer than one child or one panel, so neither the root nor you is out of the loop for longer than that.
 
@@ -51,7 +50,7 @@ A task the root finishes while filing `decisions.md` can end there: a `done` cal
 | `plan` | `plan.md` | `jtbd`, `big-picture`, `parsimony` | 3 |
 | each step (`run`) | `step-N.md` | `spec-compliance` | 1 per step |
 | the task review | `review.md` | `jtbd`, `big-picture` | 0 |
-| a reply | nothing | `answer`, `jtbd` and the critics the turn senses | 3 rounds per turn |
+| a reply | nothing | `jtbd` and the critics the turn senses | 3 rounds per turn |
 
 A blocked doc is revised up to its stage's revisions, and only while its blockers fall. Past that it is yours to decide: `/task accept` it, or `/task plan <change>`. Every line the harness prints for a task unit names the bound of the unit it describes, a panel's the sum of its critics' minute ceilings and a child's its own minute ceiling, never more than the flow cap has left; at the defaults a plan panel is up to 30 minutes and an executor up to 25. One flow cap per turn limits child time (default 180 minutes, ceiling 360): when what is left is under the next unit's floor the run halts at a unit boundary, and `/task run` continues in the next turn. It bounds unattended child time; it does not promise that a task fits one turn.
 
@@ -118,7 +117,7 @@ The floors and ceilings are fixed in code: not even your own config can empty a 
 
 Read [the prompt-injection threat model](../SECURITY.md#threat-model-prompt-injection) and [the approval gate](../SECURITY.md#human-approval-gate) for the whole picture; these are the parts that touch the metaharness.
 
-- A clean panel is a quality signal, never a security one. A poisoned file can make a critic answer `NONE` as easily as object. A critic holds read-only tools, fixed in code, and on a reply `factual` and `recency` also hold the web pair.
+- A clean panel is a quality signal, never a security one. A poisoned file can make a critic answer `NONE` as easily as object. A critic holds read-only tools, fixed in code, and on a reply `factual` and `recency` also hold the web tools the web-researcher holds, the browser among them when its plugin is on.
 - No person's go-ahead stands between a plan and its steps. Executors hold the root's tools under the same approval gate, so in `auto` their ordinary repository writes and commands run unasked. What checks them is the gate, the executor's budget, the flow cap, `/task stop` and the critics.
 - The `task` tool's results are labelled untrusted: the manifest and the docs are written by the model and its children from repository files.
 - The refusal on the task and session folders is defence in depth, not a barrier. SECURITY.md names the write forms it does not cover.

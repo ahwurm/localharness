@@ -1273,7 +1273,7 @@ def _panel_assign(name: str):
 
 _web_pair = [e.value for e in _panel_assign("WEB_CRITIC_TOOLS").elts if isinstance(e, ast.Constant)]
 _fact_critics = sorted(ast.literal_eval(_panel_assign("WEB_CRITICS").args[0]))
-_WEB_PAIR = " and ".join(f"`{t}`" for t in _web_pair)
+_WEB_PAIR = ", ".join(f"`{t}`" for t in _web_pair[:-1]) + f" and `{_web_pair[-1]}`"
 _FACT_CRITICS = " and ".join(f"`{n}`" for n in _fact_critics)
 TASK_RUN_NEEDLES = (
     ("## Threat model: prompt injection", "The `task` tool declares its results untrusted, a label"),
@@ -1289,7 +1289,7 @@ TASK_RUN_NEEDLES = (
     ("## Threat model: prompt injection", "so an executor's ordinary repository writes and commands run unasked"),
     ("## Threat model: prompt injection", "The root already held the same tools, so no capability is new"),
     ("## Threat model: prompt injection", f"holds {_CRITIC_TOOLS}, a read-only set fixed in code"),
-    ("## Threat model: prompt injection", f"plus {_WEB_PAIR} for the {_FACT_CRITICS} critics on a reply only, and nothing else"),
+    ("## Threat model: prompt injection", f"plus {_WEB_PAIR} for the {_FACT_CRITICS} critics on a reply only"),
     ("## Threat model: prompt injection",
      "its role is read from the package's own critic files, never from your config, a project or an overlay"),
     ("## Threat model: prompt injection",
@@ -1477,7 +1477,7 @@ def test_metaharness_doc_bites():
     for needle in METAHARNESS_NEEDLES:
         assert check_metaharness_doc(_swap(page, needle, "x")) == [f"docs/metaharness.md does not say {needle}"]
     assert len(check_metaharness_doc("")) > len(METAHARNESS_NEEDLES) + len(TASK_VERBS) + len(CRITIC_NAMES)
-    assert len(TASK_VERBS) == 8 and len(CRITIC_NAMES) == 9
+    assert len(TASK_VERBS) == 8 and len(CRITIC_NAMES) == 8
     assert set(_metaharness_settings()) == {f"`{f}`" for f in TaskFlowConfig.model_fields}
     assert check_metaharness_doc(_swap(page, "## The eight verbs", "## Verbs")) == [
         f"docs/metaharness.md ## The eight verbs has no row for {v}" for v in TASK_VERBS]

@@ -364,6 +364,8 @@ async def run_unit(flow: TaskFlow, boundary: str, carried: str | None = None, by
         flow.called.add(boundary)
     try:
         record = flow.record
+        if boundary == "new" and carried and (record is None or record.stage == "done"):
+            record = flow.open_for_model() or record
         refused = precondition(boundary, record, by, carried) or (need("no task") if record is None else None)
         if refused:
             return _text(refused)

@@ -3,15 +3,15 @@ prompt: |
   Hello! Use glob to count the files in this folder, then greet me and tell me the count.
 expected_outcome: |
   A greeting after one glob call. The turn used a tool, so the reply panel judges the reply with
-  answer, jtbd and the factual critic that reading files senses, as three critic children. The bench
+  jtbd and the factual critic that reading files senses, as two critic children. The bench
   has no typed turn, so the verdict is `unreviewed` and that is expected; what the scenario pins is
-  that a tool-using turn pays exactly three critic children and still delivers its greeting.
+  that a tool-using turn pays exactly two critic children and still delivers its greeting.
 success_criteria:
   rubric:
     - 'regex:(?i)\b(hello|hi|hey|greetings)\b'
   event_counts:
     critic_children:
-      exact: 3
+      exact: 2
 budget:
   max_actions: 4
   max_duration_minutes: 5.0
