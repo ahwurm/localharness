@@ -582,7 +582,7 @@ class ChannelAdapter(ABC):
         if getattr(event, "parent_id", None):
             return
         await self.send_message(
-            content=event.summary,
+            content=getattr(event, "trail", "") + event.summary,
             agent_id=event.agent_id,
         )
         if line := reply_line(event):

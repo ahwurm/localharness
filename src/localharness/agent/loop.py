@@ -2821,6 +2821,7 @@ class AgentLoop:
                     finding=finding,
                     blockers=blockers,
                     notes=notes,
+                    trail=self._trail(session, task, verdict),
                 ))
                 if self.reply_panel is not None and self.reply_panel.on_delivered and verdict is not None:
                     try:
@@ -3189,9 +3190,19 @@ class AgentLoop:
         if self._live_turn is not None and math.isfinite(seconds) and seconds > 0:
             self._live_turn[0].excluded_seconds += seconds
 
+    def _trail(self, session: Session, task: str, verdict: str | None) -> str:
+        if self.reply_panel is None or verdict is None:
+            return ""
+        from localharness.orchestrator.task_flow.panel import trail
+        try:
+            return trail(task, session.messages[session.turn_start_idx:], self.reply_panel.rounds, verdict, self.reply_panel.stalled)
+        except Exception:  # noqa: BLE001 - the trail never costs the reply
+            log.warning("the reply trail failed", exc_info=True)
+            return ""
+
     def _turn_evidence(self, session: Session) -> tuple[list[tuple[str, str | None]], list[str], list[str]]:
-        """This turn's tool calls as (name, origin), the paths its write and edit calls named, and its agent results put in the store as handles."""
-        from localharness.orchestrator.task_flow.panel import WRITE_TOOLS
+        """This turn's tool calls as (name, origin), the paths its write and edit calls named, and its tool results put in the store as handles."""
+        from localharness.orchestrator.task_flow.panel import CLASSLESS_TOOLS, WRITE_TOOLS
         messages = session.messages[session.turn_start_idx:]
         bodies = {m.get("tool_call_id"): text_of(m.get("content")) for m in messages if m.get("role") == "tool"}
         store = getattr(self._ctx, "_content_store", None)
@@ -3212,8 +3223,8 @@ class AgentLoop:
                     path = arguments.get("path") if isinstance(arguments, dict) else None
                     if isinstance(path, str):
                         written.append(path)
-                elif name == "agent" and store is not None and call.get("id") in bodies:
-                    handles.append(store.put(bodies[call["id"]], origin or "untrusted"))
+                if name not in CLASSLESS_TOOLS and store is not None and call.get("id") in bodies:
+                    handles.append(store.put(f"{name} {function.get('arguments') or ''}\n{bodies[call['id']]}", origin or "untrusted"))
         return calls, written, handles
 
     @contextlib.contextmanager

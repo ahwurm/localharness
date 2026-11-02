@@ -159,6 +159,7 @@ async def test_a_turn_that_called_a_tool_runs_the_panel_with_the_critics_its_cal
     llm = Streaming([gen("Looking.", call=True), gen("Done.")])
     _, summary = await turn(loop_of(llm, bus, panel, await glob_registry(), evidence=None))
     assert summary == "Done." and panel.calls == ["jtbd", "factual"]
+    assert "- explored: glob" in events(bus, TaskComplete)[0].trail
     assert events(bus, TaskComplete)[0].verdict == "pass"
 
 
@@ -300,13 +301,14 @@ async def test_a_blocked_reply_goes_back_to_the_root_with_its_tools_and_the_find
     session, summary = await turn(loop_of(llm, bus, panel, await glob_registry(), evidence=None))
     assert len(llm.requests) == 3 and llm.requests[-1]["tools"]
     (found,) = findings_messages(session.messages)
-    assert found["role"] == "user" and found["content"].rstrip().endswith("Then answer with the revised reply.")
+    assert found["role"] == "user" and found["content"].rstrip().endswith("never mention the review or apologise for the draft.")
     assert FENCE_LABEL in found["content"] and FENCE_CLOSE in found["content"]
     assert "Draft reply." not in found["content"] and "README.md:41" in found["content"]
     assert [m["content"] for m in session.messages if m["role"] == "assistant"][-2:] == ["Draft reply.", "Fixed reply."]
     assert session.messages.index(found) == len(session.messages) - 2
     (done,) = events(bus, TaskComplete)
     assert (done.verdict, done.finding, done.summary, summary) == ("pass", "", "Fixed reply.", "Fixed reply.")
+    assert "- review 1: blocked → revised\n- review 2: pass · +1 -1 lines → validated" in done.trail
     assert session.review_rounds == 1
 
 
@@ -321,6 +323,7 @@ async def test_the_third_round_is_announced_as_the_last_and_its_answer_is_delive
     assert spoken == [("revising", "1 blocker")] * 2 + [("revising · last round", "1 blocker")]
     (done,) = events(bus, TaskComplete)
     assert (done.verdict, done.summary, summary) == ("blocked", "Reply 4.", "Reply 4.")
+    assert "review 4: blocked · +1 -1 lines → delivered with blockers left" in done.trail
     assert [a.content for a in tool_less(bus)] == ["Reply 4."]
 
 

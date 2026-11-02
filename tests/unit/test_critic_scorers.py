@@ -1,6 +1,8 @@
 """Critics as scorers: the score line, the stall rule, the round index, provenance and the evicted re-read."""
 from __future__ import annotations
 
+import json
+
 from localharness.agent.loop import StuckDetector, StuckState
 from localharness.agent.subagent import provenance_note
 from localharness.orchestrator.task_flow.filer import Docs
@@ -113,3 +115,46 @@ def test_a_blocker_line_on_screen_carries_its_fix():
     panel.emit = lambda *row: rows.append(row)
     panel._say("jtbd", parse("jtbd", "A1 4/10 ask — seen — to 9: do it\nSCORE 4/10", None))
     assert rows[0][1] == "blocker A1 4/10 ask" and rows[0][3] == "seen — to 9: do it"
+
+
+def test_only_a_primary_or_security_item_under_five_blocks_and_the_rest_under_eight_warns():
+    raw = "A1 6/10 ask — seen\nA2 4/10 count — seen\nB1 2/10 side — seen\nC1 ?/10 quick — no clock\nSCORE 2/10"
+    tags = {f.rule.split()[0]: f.tag for f in parse("jtbd", raw, None).findings}
+    assert tags == {"A1": "WARNING", "A2": "BLOCKER", "B1": "WARNING", "C1": "NOTE"}
+    assert parse("security", "C1 3/10 token in log — a.py:3\nSCORE 3/10", None).findings[0].tag == "BLOCKER"
+    warned = parse("jtbd", "A1 6/10 ask — seen\nSCORE 6/10", None)
+    assert not warned.clean and Panel._settle(Panel(None, limited(TaskFlowConfig())[0]), _inputs(), [warned], True).verdict == "pass"
+
+
+def _inputs():
+    from localharness.orchestrator.task_flow.panel import PanelInputs
+    return PanelInputs(brief="b")
+
+
+def test_a_revision_carries_warnings_with_the_blockers():
+    block = Finding("BLOCKER", "A1 2/10 ask", "seen", False, "jtbd", 2, "do it")
+    warn = Finding("WARNING", "B1 6/10 side", "seen", False, "jtbd", 6, "tidy")
+    text = revision_request((block, warn), False)
+    assert "A1 2/10" in text and "B1 6/10" in text and "never mention the review" in text
+
+
+def test_the_trail_retraces_the_turn_from_its_own_calls_additions_and_rounds():
+    from localharness.orchestrator.task_flow.panel import trail
+
+    def call(i, name, **args):
+        return {"role": "assistant", "tool_calls": [{"id": i, "function": {"name": name, "arguments": json.dumps(args)}}]}
+
+    messages = [call("1", "bash_exec", command="ip addr show"),
+                call("2", "bash_exec", command="nmap -sn 10.0.72.0/24"),
+                {"role": "tool", "tool_call_id": "2", "content": "[tool error] exit code 127: nmap: command not found"},
+                call("3", "bash_exec", command="for i in {1..10}; do ping -c 1 10.0.72.$i; done"),
+                call("4", "bash_exec", command="ping -c 1 10.0.0.1"),
+                {"role": "user", "content": "only the wifi", "_lh": {"origin": "human", "subtype": "steering"}},
+                call("5", "agent", task="list wifi clients"), call("6", "write", path="scratchpad/plan.md")]
+    text = trail("count the devices", messages, ["jtbd 2/10", "jtbd 9/10 · +3 -2 lines"], "pass", False)
+    assert text.splitlines()[:8] == ["**How I got here**", "- asked: count the devices", "- ran: ip, nmap ✗, ping ×2",
+                                     "- you added: only the wifi", "- delegated: list wifi clients",
+                                     "- wrote: scratchpad/plan.md", "- review 1: jtbd 2/10 → revised",
+                                     "- review 2: jtbd 9/10 · +3 -2 lines → validated"]
+    assert text.endswith("\n---\n\n") and trail("hi", [], [], "pass", False) == ""
+
