@@ -971,6 +971,35 @@ def test_the_0_27_4_changelog_entry_bites():
     assert check_0_27_4_entry(_swap(good, RELEASE_0_27_4_HEADER, "## [0.27.4] — 2026-11-03")) == missing
 
 
+RELEASE_0_27_5_HEADER = "## [0.27.5] — 2026-11-02"
+RELEASE_0_27_5_NEEDLES = (
+    "### Added", "### Changed", "### Known limitations",
+    "`/review`", "project_records.yaml", "Disputed <id>: <evidence>", "Question for you:",
+    "not re-checked", "up to 10 checks", "stall rule is gone", "`task_flow.revisions.reply`",
+)
+
+
+def check_0_27_5_entry(text: str) -> list[str]:
+    """CHANGELOG's 0.27.5 entry exists, names the command, the store, the moves, the endings and the limits."""
+    found = re.search(rf"^{re.escape(RELEASE_0_27_5_HEADER)}\n.*?(?=^## \[|\Z)", text, re.M | re.S)
+    if not found:
+        return [f"CHANGELOG has no {RELEASE_0_27_5_HEADER} entry"]
+    flat = " ".join(found.group(0).split())
+    return [f"CHANGELOG's 0.27.5 entry does not say {n}" for n in RELEASE_0_27_5_NEEDLES if n not in flat]
+
+
+def test_the_0_27_5_changelog_entry_live():
+    assert check_0_27_5_entry(_read("CHANGELOG.md")) == []
+
+
+def test_the_0_27_5_changelog_entry_bites():
+    good = _read("CHANGELOG.md")
+    for needle in RELEASE_0_27_5_NEEDLES:
+        assert check_0_27_5_entry(_swap(good, needle, "x")) == [f"CHANGELOG's 0.27.5 entry does not say {needle}"], needle
+    missing = [f"CHANGELOG has no {RELEASE_0_27_5_HEADER} entry"]
+    assert check_0_27_5_entry(_swap(good, RELEASE_0_27_5_HEADER, "## [0.27.5] — 2026-11-03")) == missing
+
+
 def _good_changelog() -> str:
     return (
         "# Changelog\n\n## [Unreleased]\n\nThis release adds plugins.\n\n### Added\n"

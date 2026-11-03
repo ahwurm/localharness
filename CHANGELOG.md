@@ -4,6 +4,25 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.27.5] — 2026-11-02
+
+**`/review` sets how hard a reply is checked.** A level is how many times a reply is checked and then fixed: `off`, `1` (the default), `2`, `3` or `max`. Between checks the model fixes what was found, disputes it with evidence, or asks you when only you can unblock it. The network-scan question that took 16.5 minutes on 0.27.2 now answers in 75 seconds at level 1.
+
+### Added
+- **`/review`** — a picker over `off 1 2 3 max`; `/review <level>` sets it for the session and saves it as this project's default, kept on this machine in `~/.localharness/project_records.yaml` (a repo cannot set it); `/review show` says what the level does. An unreadable store or a bad value falls back to the machine `task_flow.revisions.reply`.
+- **fix, dispute or ask** — after a check the model may end its fix with `Disputed <id>: <evidence>` lines, carried to the next check as unverified claims (a dispute never clears a blocker), or open its reply with `Question for you:` after a blocked check, which ends review and reads `◆ reply asks you`; the phone titles it `reply needs your answer`.
+
+### Changed
+- A level is check→fix cycles. Levels 1-3 end on a fix that goes out not re-checked (`◆ reply fixed · not re-checked · N were open`); its last turn also writes the reply in the model's own words. `max` runs up to 10 checks and ends on one. A check that passes ends the loop early. The stall rule is gone.
+- `task_flow.revisions.reply` is the level: floor 0 (`off`), default 1, ceiling 10 (`max`). It was 3 rounds that ended on a check.
+- The round line reads `◆ root fixing 2 · disputing 1 · 1/2`.
+- A shell command draws the `factual` critic only; `recency` joins when the command names a URL or runs `curl` or `wget`, or a web or untrusted tool ran.
+
+### Known limitations
+- Levels 1-3 deliver their last fix unchecked by design; the reply line says so, and `max` is the level that verifies its end state.
+- The default of 1 rests on one live question on qwen; ux-emulate runs at 1 and 2 on more scenarios and on gemma are next.
+- The model writes the dispute and question markers; a small model may not use them, and then the loop runs as plain check and fix.
+
 ## [0.27.4] — 2026-11-02
 
 **A reviewed reply reads like the agent talking, and the review flags more than it blocks.** Only a primary or security item under 5 holds a reply back; anything else under 8 is a warning you see. Once the review settles, the model writes the reply itself: how it got there, the answer, then what is worth double-checking. A live network-scan question shaped every item below.
