@@ -3201,6 +3201,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             record=resume.task if resume is not None and not resume.slept else None,
             web_tools=builtin_toolset("web-researcher", tool_registry) or (),
         )
+        if _boundary is not None:
+            from localharness.config.project_records import read_review_level
+            flow.limits.revisions["reply"] = read_review_level(
+                _boundary, flow.limits.revisions["reply"], config_dir=config_dir)
         await tool_registry.register(TaskTool(flow), scope="global")
         warnings.extend(limited(agent_config.task_flow, known=critic_names())[1])
         from localharness.tools.builtin.skill_tool import SkillTool

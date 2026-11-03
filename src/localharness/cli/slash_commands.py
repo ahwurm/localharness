@@ -47,6 +47,8 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
                  "_slash_reasoning", True),
     SlashCommand("/effort", "Reasoning effort for this session; /effort off|low|high|max, /effort show",
                  "_slash_effort", True),
+    SlashCommand("/review", "How many times a reply is checked and fixed; /review off|1|2|3|max, /review show",
+                 "_slash_review", True),
     SlashCommand("/verbose", "Show reasoning and every tool call with its arguments; /verbose on|off",
                  "_slash_verbose", True),
     SlashCommand("/mode", "Permission mode for this session; /mode guarded|trusted|read-only",

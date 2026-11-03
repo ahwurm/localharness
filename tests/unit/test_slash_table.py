@@ -45,6 +45,7 @@ CORE = [
     ("/model", "List available models; /model <name|number> to switch"),
     ("/reasoning", "Stream the model's reasoning while it thinks; /reasoning on|off"),
     ("/effort", "Reasoning effort for this session; /effort off|low|high|max, /effort show"),
+    ("/review", "How many times a reply is checked and fixed; /review off|1|2|3|max, /review show"),
     ("/verbose", "Show reasoning and every tool call with its arguments; /verbose on|off"),
     ("/mode", "Permission mode for this session; /mode guarded|trusted|read-only"),
     ("/pending", "Tool calls parked for you to answer"),
@@ -70,6 +71,7 @@ HELP_BEFORE = (
     "  /model         List available models; /model <name|number> to switch\n"
     "  /reasoning     Stream the model's reasoning while it thinks; /reasoning on|off\n"
     "  /effort        Reasoning effort for this session; /effort off|low|high|max, /effort show\n"
+    "  /review        How many times a reply is checked and fixed; /review off|1|2|3|max, /review show\n"
     "  /verbose       Show reasoning and every tool call with its arguments; /verbose on|off\n"
     "  /mode          Permission mode for this session; /mode guarded|trusted|read-only\n"
     "  /pending       Tool calls parked for you to answer\n"
@@ -120,7 +122,7 @@ async def _phone_menu(tmp_path) -> list[dict]:
 
 # ------------------------------------------------------------ no plugin rows: nothing moved
 
-def test_the_core_table_is_eighteen_rows_in_order():
+def test_the_core_table_is_nineteen_rows_in_order():
     assert [tuple(row) for row in SLASH_COMMANDS] == CORE  # a row unpacks as (name, description)
     assert all_rows() == SLASH_COMMANDS
 
@@ -135,7 +137,7 @@ def test_the_completer_offers_the_same_menu():
     assert _completions("/M") == _completions("/m")
 
 
-async def test_the_phone_menu_is_the_same_fifteen_rows_in_order(tmp_path):
+async def test_the_phone_menu_is_the_same_sixteen_rows_in_order(tmp_path):
     assert await _phone_menu(tmp_path) == [{"name": n, "description": d} for n, d in PHONE]
 
 
@@ -147,6 +149,7 @@ PARITY = [
     ("/model", "_handle_model_cmd", ("",), {}),
     ("/Reasoning ON", "_handle_reasoning_cmd", ("on",), {}),         # lowered + stripped
     ("/Effort LOW", "_handle_effort_cmd", ("low",), {}),             # lowered + stripped
+    ("/Review MAX", "_handle_review_cmd", ("max",), {}),
     ("/verbose off", "_handle_verbose_cmd", ("off",), {}),
     ("/mode guarded", "_handle_mode_cmd", ("guarded",), {}),
     ("/mode", "_handle_mode_cmd", ("",), {}),

@@ -335,7 +335,7 @@ class MobileChannel(ChannelAdapter):
         self._stream_id: Optional[str] = None
         self._status_task: Optional[asyncio.Task] = None
         self._turn_running = False
-        self._reply_verdict: Optional[tuple[Optional[str], str]] = None
+        self._reply_verdict: Optional[tuple[Optional[str], str, Optional[str]]] = None
         self._activity = ""
         self._context_pct: Optional[float] = None
 
@@ -740,7 +740,7 @@ class MobileChannel(ChannelAdapter):
                     policy.turn_started(self.session_id)
         elif isinstance(event, (TurnCompleted, TurnFailed)):
             if root:
-                verdict, finding = (self._reply_verdict or (None, "")) if isinstance(event, TurnCompleted) else (None, "")
+                verdict, finding, ending = (self._reply_verdict or (None, "", None)) if isinstance(event, TurnCompleted) else (None, "", None)
                 self._turn_running = False
                 await self._stop_status_ticker()
                 self._close_stream(None)
@@ -755,10 +755,11 @@ class MobileChannel(ChannelAdapter):
                         summary=(getattr(event, "summary", "") or "")[:PUSH_SUMMARY_CHARS],
                         verdict=verdict,
                         finding=finding[:PUSH_SUMMARY_CHARS],
+                        ending=ending,
                     ))
         elif isinstance(event, TaskComplete):
             if root:
-                self._reply_verdict = (event.verdict, event.finding)
+                self._reply_verdict = (event.verdict, event.finding, event.ending)
                 if line := reply_line(event):
                     self.push(Notice(session_id=self.session_id, text=line, style="system.info"))
         elif isinstance(event, PermissionStaged):

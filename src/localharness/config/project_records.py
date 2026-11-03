@@ -402,6 +402,27 @@ def write_instructions(
         _entry_for_write(data, key)["instructions"] = _record_to_dict(record)
 
 
+def read_review_level(root: Any, fallback: int, *, config_dir: Any = None) -> int:
+    """The review level saved for the root, or ``fallback`` for anything but an int inside the review row; never raises."""
+    from localharness.orchestrator.task_flow.record import LIMITS
+
+    row, key = LIMITS["revisions.reply"], _normalize_root(root)
+    try:
+        with _store_transaction(config_dir) as data:
+            entry = _entry(data, key)
+            level = entry.get("review") if entry is not None else None
+    except Exception:  # noqa: BLE001 - a store that cannot be read leaves the machine's level
+        return fallback
+    return level if isinstance(level, int) and not isinstance(level, bool) and row.floor <= level <= row.ceiling else fallback
+
+
+def write_review_level(root: Any, level: int, *, config_dir: Any = None) -> None:
+    """Save the root's review level beside its other records."""
+    key = _normalize_root(root)
+    with _store_transaction(config_dir) as data:
+        _entry_for_write(data, key)["review"] = level
+
+
 # --------------------------------------------------------------------------- notices
 
 

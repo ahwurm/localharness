@@ -315,8 +315,8 @@ class SlashCommandCompleter(Completer):
     (case-insensitive) against the slash table (`all_rows()`: core rows, then plugin rows) — the
     same table /help renders and the dispatcher reads, so the menu and /help never drift. It is read
     at completion time, never snapshotted, so plugin rows added later appear. Command arguments are
-    left alone (e.g. `/memory show 12`) with ONE exception: `/model <partial>` completes its first
-    argument from `model_names_fn` — the session's cached live-model list. The supplier must never
+    left alone (e.g. `/memory show 12`) with two exceptions: `/review <partial>` completes the review
+    levels, and `/model <partial>` completes its first argument from `model_names_fn` — the session's cached live-model list. The supplier must never
     fetch or block (an empty list just means no menu); ids filter case-insensitively but insert
     case-true (model ids are case-sensitive)."""
 
@@ -333,6 +333,12 @@ class SlashCommandCompleter(Completer):
             for name, desc in all_rows():
                 if name.startswith(text.lower()):
                     yield Completion(name, start_position=-len(text), display=name, display_meta=desc)
+            return
+        if head.lower() == "/review" and " " not in tail:
+            from localharness.orchestrator.task_flow.record import REVIEW_LEVELS
+            for level in (*REVIEW_LEVELS, "show"):
+                if level.startswith(tail.lower()):
+                    yield Completion(level, start_position=-len(tail), display=level)
             return
         if head.lower() != "/model" or " " in tail or self._model_names_fn is None:
             return

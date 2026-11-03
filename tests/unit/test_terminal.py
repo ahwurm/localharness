@@ -110,6 +110,17 @@ def test_reply_line_of_an_unreviewed_reply_needs_a_reason_and_a_cut_finding_fits
     assert long.startswith("◆ reply unreviewed · /task show reply · www") and len(long) == Caps.LINE
 
 
+def test_reply_line_of_a_fixed_or_asked_reply_and_of_review_turned_off():
+    from localharness.channels.base import REVIEW_OFF, reply_line
+
+    assert reply_line(completed(verdict="blocked", ending="fixed", blockers=2, notes=1)) == \
+        "◆ reply fixed · not re-checked · 3 were open · /task show reply"
+    assert reply_line(completed(verdict="blocked", ending="fixed", blockers=1)) == \
+        "◆ reply fixed · not re-checked · 1 was open · /task show reply"
+    assert reply_line(completed(verdict="blocked", ending="asked", blockers=1)) == "◆ reply asks you · /task show reply"
+    assert reply_line(completed(verdict="unreviewed", finding=REVIEW_OFF)) is None
+
+
 def test_reply_line_of_a_childs_completion_is_none():
     from localharness.channels.base import reply_line
 
