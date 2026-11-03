@@ -89,6 +89,14 @@ EFFORT_UNENFORCED_TEMPLATE = EFFORT_UNENFORCED_LINE
 EFFORT_PERSIST_FAILED_TEMPLATE = "Effort set for this session, but persisting it failed: {exc}"
 EFFORT_PICKER_PROMPT = "Reasoning effort for this session (/effort). This question holds no tool call."
 
+REVIEW_SET_TEMPLATE = "review: {level} — {phrase}"
+REVIEW_SAVED_LINE = "saved as this project's default"
+REVIEW_SESSION_ONLY_LINE = "this session only: there is no project to save it for"
+REVIEW_SAVE_FAILED_TEMPLATE = "Review set for this session, but saving it failed: {exc}"
+REVIEW_UNKNOWN_TEMPLATE = "Unknown review level '{arg}'. Levels: off, 1, 2, 3, max — /review show reports the current level."
+REVIEW_UNAVAILABLE_LINE = "review is unavailable: this session has no reply review."
+REVIEW_PICKER_PROMPT = "How many times a reply is checked and fixed (/review). This question holds no tool call."
+
 NOTHING_PENDING = "Nothing pending."
 PENDING_HEADER = "{total} waiting on you — /approve N or /deny N:"
 PENDING_LINE = "  #{id}  {label}{rendering}"
@@ -1442,6 +1450,70 @@ class OrchestratorREPL:
         if note:
             await self._send_info(note)
 
+    def _review_limits(self) -> Optional[dict]:
+        panel = getattr(self._agent, "reply_panel", None)
+        return panel.limits.revisions if panel is not None else None
+
+    @staticmethod
+    def _review_phrase(level: int) -> str:
+        from localharness.orchestrator.task_flow.record import LIMITS
+        row = LIMITS["revisions.reply"]
+        phrase = ("no check, the draft goes out as written" if level <= row.floor
+                  else f"check and fix until a check passes, at most {row.ceiling} checks" if level >= row.ceiling
+                  else f"{level} check{'s' * (level != 1)}, each followed by a fix; the last fix goes out not re-checked")
+        return phrase + " (default)" * (level == row.default)
+
+    async def _handle_review_cmd(self, arg: str) -> None:
+        """`/review [off|1|2|3|max|show]` — set or read how many times a reply is checked and fixed."""
+        from localharness.orchestrator.task_flow.record import REVIEW_LEVELS, review_label, review_level
+        revisions = self._review_limits()
+        if revisions is None:
+            await self._send_info(REVIEW_UNAVAILABLE_LINE)
+            return
+        current = review_label(revisions["reply"])
+        if arg == "show":
+            await self._send_info(REVIEW_SET_TEMPLATE.format(level=current, phrase=self._review_phrase(revisions["reply"])))
+            return
+        if not arg:
+            options = [f"{lv} · {self._review_phrase(review_level(lv))}" for lv in REVIEW_LEVELS]
+            mark = next((o for o in options if o.split()[0] == current), options[0])
+            channel = self._channel
+            can_pick = getattr(channel, "can_run_picker", None)
+            if self._use_input_box() and hasattr(channel, "run_picker"):
+                choice = await channel.run_picker(options, mark)
+            elif callable(can_pick) and can_pick():
+                choice = await channel.run_picker(options, mark, prompt=REVIEW_PICKER_PROMPT)
+            else:
+                shown = "  ".join(f"[{lv}]" if lv == current else lv for lv in REVIEW_LEVELS)
+                await self._send_info(f"review: {shown} — /review <level> sets it, /review show says what it does")
+                return
+            if choice is None:
+                return
+            arg = str(choice).split()[0]
+        level = review_level(arg)
+        if level is None:
+            await self._channel.send_message(REVIEW_UNKNOWN_TEMPLATE.format(arg=arg), metadata={"style": "system.error"})
+            return
+        await self._apply_review(level, revisions)
+
+    async def _apply_review(self, level: int, revisions: dict) -> None:
+        """Make `level` the session's review level, then save it for the project; the session change stands whatever saving does."""
+        from localharness.config.project_records import write_review_level
+        from localharness.orchestrator.task_flow.record import review_label
+        revisions["reply"] = level
+        gate = self._session_gate()
+        boundary = getattr(gate, "boundary", None)
+        said = REVIEW_SAVED_LINE if boundary is not None else REVIEW_SESSION_ONLY_LINE
+        if boundary is not None:
+            try:
+                await asyncio.to_thread(write_review_level, boundary, level, config_dir=self._config_dir)
+            except Exception as exc:  # noqa: BLE001 - the session change already happened
+                await self._channel.send_message(
+                    REVIEW_SAVE_FAILED_TEMPLATE.format(exc=exc), metadata={"style": "system.error"})
+                said = ""
+        await self._send_info(" · ".join(p for p in (
+            REVIEW_SET_TEMPLATE.format(level=review_label(level), phrase=self._review_phrase(level)), said) if p))
+
     def _effort_ledger_key(self) -> Optional[tuple[str, str]]:
         """`(provider_type, model)` of the live client — the one ledger key the after-turn hook and
         the rebind clear share. None when the client is a double without them."""
@@ -1695,6 +1767,9 @@ class OrchestratorREPL:
 
     async def _slash_effort(self, args: str, args_lower: str) -> None:
         await self._handle_effort_cmd(args_lower.strip())
+
+    async def _slash_review(self, args: str, args_lower: str) -> None:
+        await self._handle_review_cmd(args_lower.strip())
 
     async def _slash_verbose(self, args: str, args_lower: str) -> None:
         await self._handle_verbose_cmd(args_lower.strip())

@@ -58,7 +58,8 @@ a phone earns its notifications being switched off — and then the permission b
 nobody, which is the failure §5.5 exists to prevent.
 """
 
-REPLY_TITLES = {"pass": "reply ready", "unreviewed": "reply ready (unchecked)", "blocked": "reply ready (caveats)"}
+REPLY_TITLES = {"pass": "reply ready", "unreviewed": "reply ready (unchecked)", "blocked": "reply ready (caveats)",
+                "fixed": "reply ready (fix not re-checked)", "asked": "reply needs your answer"}
 
 NEEDS_YOU_COOLDOWN_S = MEASURED_LONG_TURN_S
 """One alerting "needs you" per session per window.
@@ -365,7 +366,7 @@ class PushPolicy:
     def turn_finished(
         self, session_id: Optional[str], *, clients_attached: int, now: Optional[float] = None,
         summary: str = "", duration: Optional[float] = None,
-        verdict: Optional[str] = None, finding: str = "",
+        verdict: Optional[str] = None, finding: str = "", ending: Optional[str] = None,
     ) -> Optional[Push]:
         """A push, or None — and None is the common answer.
 
@@ -390,8 +391,8 @@ class PushPolicy:
         if elapsed is None or elapsed < TURN_PUSH_MIN_S:
             return None
         return Push(
-            title=REPLY_TITLES.get(verdict, "turn finished"),
-            body=(finding if verdict == "blocked" and finding else summary) or f"{int(elapsed)}s of work is waiting for you.",
+            title=REPLY_TITLES.get(ending or verdict, "turn finished"),
+            body=(finding if verdict == "blocked" and not ending and finding else summary) or f"{int(elapsed)}s of work is waiting for you.",
             tag=f"{CLASS_TURN_FINISHED}:{session_id or ''}",
             badge=len(state.outstanding),
             data={

@@ -714,6 +714,20 @@ def test_a_finishing_turn_is_titled_from_the_replys_verdict(verdict, finding, ti
     assert (out.title, out.body) == (title, body)
 
 
+@pytest.mark.parametrize("verdict,finding,ending,title,body", [
+    ("blocked", "[BLOCKER] x", "fixed", "reply ready (fix not re-checked)", "the reply"),
+    ("blocked", "[BLOCKER] x", "asked", "reply needs your answer", "the reply"),
+    ("unreviewed", "review is off", None, "reply ready (unchecked)", "the reply"),
+    ("blocked", "[BLOCKER] x", None, "reply ready (caveats)", "[BLOCKER] x"),
+])
+def test_a_finishing_turn_is_titled_from_how_the_reply_ended(verdict, finding, ending, title, body):
+    p = _policy()
+    p.turn_started("s1", now=0.0)
+    out = p.turn_finished("s1", clients_attached=0, now=1000.0, summary="the reply", verdict=verdict,
+                          finding=finding, ending=ending)
+    assert (out.title, out.body, out.alert) == (title, body, True)
+
+
 def test_an_unreviewed_reply_with_no_reason_pushes_nothing_and_still_resets_the_clock():
     p = _policy()
     p.turn_started("s1", now=0.0)
