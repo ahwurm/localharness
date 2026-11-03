@@ -96,20 +96,20 @@ def test_review_sets_the_session_level_saves_it_per_project_and_says_so(tmp_path
     assert revisions["reply"] == level and saved(tmp_path) == level
     ((text, meta),) = channel.sent
     assert meta == INFO and text.startswith(f"review: {arg} — ") and text.endswith(REVIEW_SAVED_LINE)
-    assert (level == 0) == ("the draft goes out as written" in text)
-    assert (level == CEILING) == ("until a check passes, at most 10 checks" in text)
+    assert (level == 0) == ("send the draft as written" in text)
+    assert (level == CEILING) == ("until it passes, up to 10 checks" in text)
 
 
 def test_review_one_names_the_default_and_the_unrechecked_last_fix(tmp_path):
     repl, _, channel = repl_at(tmp_path, level=3)
     run(repl._handle_review_cmd("1"))
-    assert "1 check, each followed by a fix; the last fix goes out not re-checked (default)" in channel.sent[0][0]
+    assert "check, then fix (default)" in channel.sent[0][0]
 
 
 def test_review_show_prints_the_level_and_what_it_does_and_changes_nothing(tmp_path):
     repl, revisions, channel = repl_at(tmp_path, level=3)
     run(repl._handle_review_cmd("show"))
-    assert channel.sent == [("review: 3 — 3 checks, each followed by a fix; the last fix goes out not re-checked", INFO)]
+    assert channel.sent == [("review: 3 — check and fix, three times", INFO)]
     assert revisions["reply"] == 3 and saved(tmp_path) == -1
 
 
@@ -161,7 +161,7 @@ def test_the_terminal_picker_is_a_row_of_levels_with_the_highlighted_one_describ
     run(repl._handle_review_cmd(""))
     ((options, current, notes),) = channel.picker_calls
     assert options == list(REVIEW_LEVELS) and current == "1"
-    assert notes[0].endswith("the draft goes out as written") and "(default)" in notes[1]
+    assert notes[0].endswith("send the draft as written") and "(default)" in notes[1]
     assert revisions["reply"] == 3 and saved(tmp_path) == 3
 
 

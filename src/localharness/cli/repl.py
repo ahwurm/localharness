@@ -1458,9 +1458,10 @@ class OrchestratorREPL:
     def _review_phrase(level: int) -> str:
         from localharness.orchestrator.task_flow.record import LIMITS
         row = LIMITS["revisions.reply"]
-        phrase = ("no check, the draft goes out as written" if level <= row.floor
-                  else f"check and fix until a check passes, at most {row.ceiling} checks" if level >= row.ceiling
-                  else f"{level} check{'s' * (level != 1)}, each followed by a fix; the last fix goes out not re-checked")
+        times = {1: "check, then fix", 2: "check and fix, twice", 3: "check and fix, three times"}
+        phrase = ("send the draft as written" if level <= row.floor
+                  else f"check and fix until it passes, up to {row.ceiling} checks" if level >= row.ceiling
+                  else times.get(level, f"check and fix, {level} times"))
         return phrase + " (default)" * (level == row.default)
 
     async def _handle_review_cmd(self, arg: str) -> None:
