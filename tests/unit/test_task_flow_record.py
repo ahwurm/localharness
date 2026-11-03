@@ -21,8 +21,10 @@ from localharness.orchestrator.task_flow.record import (
     Counts,
     LIMITS,
     LINES,
+    Limit,
     REPLY_RESERVE_MINUTES,
     PREDICATES,
+    REVIEW_LEVELS,
     SENSED,
     STAGES,
     TOOL_STAGES,
@@ -50,6 +52,8 @@ from localharness.orchestrator.task_flow.record import (
     precondition,
     printed_bound,
     reopen,
+    review_label,
+    review_level,
     review_of,
     set_stage,
     set_verdict,
@@ -62,7 +66,7 @@ from localharness.orchestrator.task_flow.record import (
 def test_stages_are_keyed_by_the_six_boundaries_with_eight_fields_each():
     assert list(STAGES) == list(BOUNDARIES) == ["reply", "new", "research", "plan", "step", "task"]
     assert all(len(row) == 8 for row in STAGES.values())
-    assert [row.revisions for row in STAGES.values()] == [3, 1, 0, 3, 1, 0]
+    assert [row.revisions for row in STAGES.values()] == [1, 1, 0, 3, 1, 0]
     assert [row.next for row in STAGES.values()] == [None, "plan", "plan", "step", "task", "done"]
 
 
@@ -105,7 +109,9 @@ def test_every_limit_row_orders_floor_default_ceiling():
 def test_revisions_limit_rows_derive_from_the_stage_table_with_the_ceiling_two_past_the_default():
     rows = {k.removeprefix("revisions."): v for k, v in LIMITS.items() if k.startswith("revisions.")}
     assert set(rows) == {b for b, row in STAGES.items() if row.revisions}
-    assert all(r.floor == 0 and r.default == STAGES[b].revisions and r.ceiling == r.default + 2 for b, r in rows.items())
+    assert all(r.floor == 0 and r.default == STAGES[b].revisions and r.ceiling == r.default + 2
+               for b, r in rows.items() if b != "reply")
+    assert LIMITS["revisions.reply"] == Limit(0, 1, 10)
 
 
 def test_limit_budgets_are_the_shipped_numbers():
@@ -132,7 +138,21 @@ def test_bound_of_every_unit_at_the_defaults_is_computed_from_the_table():
     assert minutes("step", "execute", 1) == minutes("step", "revise", 1) == executor
     assert minutes("step", "panel", 1) == len(STAGES["step"].floor) * critic
     assert minutes("task", "panel") == len(STAGES["task"].floor) * critic
-    assert minutes("reply", "panel", sensed=("factual", "recency")) == (len(STAGES["reply"].floor) + 2) * (1 + STAGES["reply"].revisions) * critic
+    assert minutes("reply", "panel", sensed=("factual", "recency")) == (len(STAGES["reply"].floor) + 2) * STAGES["reply"].revisions * critic
+
+
+def test_reply_minutes_are_the_level_times_one_panel_and_nothing_at_off():
+    panel = lambda level: unit_minutes(Unit("reply", "panel"), limited(SimpleNamespace(revisions={"reply": level}))[0])  # noqa: E731
+    one = panel(1)
+    assert [panel(n) for n in (0, 2, 3, 10)] == [0, 2 * one, 3 * one, 10 * one]
+
+
+def test_review_labels_and_levels_derive_from_the_row_and_round_trip():
+    row = LIMITS["revisions.reply"]
+    assert REVIEW_LEVELS == ("off", "1", "2", "3", "max")
+    assert [review_label(n) for n in (row.floor, 1, 2, 3, row.ceiling)] == list(REVIEW_LEVELS)
+    assert [review_level(t) for t in REVIEW_LEVELS] == [row.floor, 1, 2, 3, row.ceiling]
+    assert [review_level(t) for t in ("", "bogus", "-1", "11", "1.5", "²")] == [None] * 6
 
 
 def test_bound_of_a_three_step_task_sums_the_units_the_table_names():
@@ -155,7 +175,7 @@ def test_printed_bound_rounds_down_and_never_promises_more_than_the_remainder():
 
 def test_reserve_holds_the_widest_reply_panel_through_its_revision():
     widest = len(STAGES["reply"].floor) + len(SENSED) + LIMITS["additions"].ceiling
-    assert REPLY_RESERVE_MINUTES == widest * (LIMITS["revisions.reply"].ceiling + 1) * LIMITS["critic"].ceiling.minutes
+    assert REPLY_RESERVE_MINUTES == widest * LIMITS["revisions.reply"].ceiling * LIMITS["critic"].ceiling.minutes
     assert SENSED == ("factual", "recency", "spec-compliance")
 
 
@@ -183,7 +203,7 @@ def test_limited_raises_a_critic_budget_below_the_floor_and_cannot_lower_it():
 
 
 def test_limited_revisions_clamp_to_the_ceiling_and_drop_a_boundary_with_none():
-    limits, notes = limited(SimpleNamespace(revisions={"plan": 9, "reply": 9, "research": 1}))
+    limits, notes = limited(SimpleNamespace(revisions={"plan": 9, "reply": 11, "research": 1}))
     assert all(limits.revisions[b] == LIMITS[f"revisions.{b}"].ceiling for b in ("plan", "reply"))
     assert len(notes) == 3 and any("research" in n and "dropped" in n for n in notes)
 

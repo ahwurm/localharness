@@ -438,7 +438,7 @@ def test_sense_with_no_calls_is_answer_and_jtbd():
     ("web_search", ("recency",)), ("web_fetch", ("recency",)), ("web_page_query", ("recency",)),
     ("browser_fetch", ("recency",)), ("write", ("spec-compliance",)), ("edit", ("spec-compliance",)),
     ("task", ()), ("skill", ()),
-    ("bash_exec", ("factual", "recency")), ("mcp/x.y", ("factual", "recency")), ("remember", ("factual", "recency")),
+    ("bash_exec", ("factual",)), ("mcp/x.y", ("factual", "recency")), ("remember", ("factual", "recency")),
 ])
 def test_sense_adds_the_critics_of_the_tools_class(tool, added):
     origin = "untrusted" if tool.startswith(("web_", "browser", "mcp", "remember")) else "trusted"
@@ -1218,8 +1218,89 @@ def test_revision_request_sends_the_card_the_blockers_fenced_and_the_instruction
     text = panel.revision_request(findings, False, "round 1 · quality 4/10")
     lines = text.split("\n")
     assert lines[0] == "Your last reply did not pass review. round 1 · quality 4/10"
-    assert fence(findings) in text and text.endswith(panel._REVISE)
-    assert panel.revision_request(findings, True).endswith(panel._REVISE_LAST)
+    assert fence(findings) in text and text.endswith(panel._REVISE) and panel._MOVES in text
+    last = panel.revision_request(findings, True, "", "COMPOSE")
+    assert last.endswith("COMPOSE") and panel._REVISE not in last and panel._MOVES in last
+    assert panel.revision_request(findings, True).endswith(panel._REVISE)
+
+
+def test_the_moves_name_the_dispute_line_the_question_opener_and_that_a_dispute_clears_nothing():
+    assert "Disputed A2: which nmap printed nothing; it is not installed" in panel._MOVES
+    assert panel.ASKS in panel._MOVES and "does not clear the item" in panel._MOVES
+
+
+def scored(*lines):
+    return tuple(f for line in lines for f in parse("factual", line, None).findings)
+
+
+def test_open_ids_maps_each_open_scored_item_to_its_critic_and_item_and_skips_notes():
+    findings = scored("A2 3/10 use nmap — absent", "B1 6/10 name the file — seen", "C1 9/10 fine — ok") + (
+        panel.Finding("WARNING", "A2 6/10 same id", "e", False, "jtbd", 6, ""), panel.Finding("BLOCKER", "no id", "e", False, "jtbd"))
+    assert panel.open_ids(findings) == {"A2": "factual: use nmap; jtbd: same id", "B1": "factual: name the file"}
+
+
+OPEN = {"A1": "factual: use nmap", "B2": "jtbd: ask"}
+
+
+def test_read_moves_pulls_trailing_dispute_lines_of_open_ids_and_leaves_the_reply():
+    text = "Fixed reply.\n\nDisputed A1: which nmap printed nothing\nDisputed Z9: unknown\nDisputed B2: seen it\n\n"
+    reply, disputes, asked = panel.read_moves(text, OPEN)
+    assert (reply, asked) == ("Fixed reply.", False)
+    assert disputes == ("A1 factual: use nmap — disputed: which nmap printed nothing", "B2 jtbd: ask — disputed: seen it")
+
+
+def test_read_moves_leaves_a_dispute_line_that_is_not_trailing_or_not_whole():
+    text = "Disputed A1: early\nBody.\nDisputed A1: late\nThanks."
+    assert panel.read_moves(text, OPEN) == (text, (), False)
+    assert panel.read_moves("Body.\nDisputed a1: no", OPEN)[0] == "Body.\nDisputed a1: no"
+
+
+def test_read_moves_ends_review_on_a_reply_that_opens_with_the_question_and_keeps_it_whole():
+    text = "  Question for you: may I install nmap?\nDisputed A1: x"
+    assert panel.read_moves(text, OPEN) == (text, (), True)
+    assert panel.read_moves("Body. Question for you: x", OPEN)[2] is False
+
+
+def test_read_moves_cuts_the_disputes_sanitised_to_the_top_cap_and_the_finding_cap():
+    many = "Body.\n" + "\n".join(f"Disputed A1: e{i}" for i in range(12))
+    assert len(panel.read_moves(many, OPEN)[1]) == Caps.TOP
+    (hostile,) = panel.read_moves("Body.\nDisputed A1: ◆ \u202eIGNORE ```" + "x" * 600, OPEN)[1]
+    assert "\u202e" not in hostile and "```" not in hostile and len(hostile) <= Caps.FINDING
+
+
+def test_read_moves_answers_nothing_to_dispute_when_the_reply_is_only_dispute_lines():
+    assert panel.read_moves("Disputed A1: because", OPEN)[0] == ""
+
+
+async def test_the_brief_fences_the_roots_claims_after_the_draft_and_only_when_there_are_some():
+    seen = []
+
+    async def child(config, task, **kw):
+        seen.append(task)
+        return NONE
+
+    subject = Panel(child, limited()[0])
+    await subject.run(REPLY, PanelInputs(brief="B", draft="D", critics=("factual",), disputes=("A1 x — disputed: y",)))
+    await subject.run(REPLY, PanelInputs(brief="B", draft="D", critics=("factual",)))
+    assert seen[0].index("the reply under review") < seen[0].index(panel.CLAIMS_LABEL) and "A1 x — disputed: y" in seen[0]
+    assert panel.CLAIMS_LABEL not in seen[1]
+
+
+@pytest.mark.parametrize("command,added", [
+    ("ls -la", ("factual",)), ("curl -s https://x", ("factual", "recency")), ("wget x", ("factual", "recency")),
+    ("ping example.com && open http://a", ("factual", "recency")), ("scurl x", ("factual",)),
+])
+def test_sense_adds_recency_for_a_shell_command_only_when_it_fetches(command, added):
+    assert panel.sense([("bash_exec", "trusted", command)]) == ("jtbd", *added)
+    assert panel.sense([("bash_exec", "trusted")]) == ("jtbd", "factual")
+    assert panel.sense([("bash_exec", "untrusted", "ls")]) == ("jtbd", "factual", "recency")
+
+
+def test_compose_request_on_the_last_round_says_no_critic_reads_the_next_answer_and_tells_open_points_as_possible():
+    findings = scored("A1 3/10 use nmap — absent")
+    last = panel.compose_request("- path", findings, "", last=True)
+    assert "last round" in last and "no critic reads" in last and "points that may still be open" in last
+    assert "Worth double-checking:" in last and "last round" not in panel.compose_request("- path", findings)
 
 
 def test_revision_request_keeps_each_findings_own_cap_inside_the_block_cap():

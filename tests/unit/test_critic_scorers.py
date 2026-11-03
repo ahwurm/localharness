@@ -47,7 +47,7 @@ def test_revision_sends_the_card_and_only_the_items_under_eight():
     ok = Finding("NOTE", "B1 9/10 other", "fine", False, "jtbd", 9, "")
     text = revision_request((low, ok), False, "round 1 · jtbd 4/10")
     assert "round 1 · jtbd 4/10" in text and "to 9: do it" in text and "B1 9/10" not in text
-    assert FENCE_CLOSE in text and "keep everything else as it is" in text
+    assert FENCE_CLOSE in text and "keep the rest as it is" in text
 
 
 def _run(score: int) -> PanelRun:
@@ -55,18 +55,18 @@ def _run(score: int) -> PanelRun:
     return PanelRun(1, (f,), "blocked", True)
 
 
-def test_a_round_whose_lowest_score_did_not_rise_stalls_and_rounds_are_indexed(tmp_path):
+def test_rounds_are_indexed_with_the_card_the_diff_and_the_latest_draft(tmp_path):
     docs = Docs(tmp_path, True, "root")
     panel = Panel(None, limited(TaskFlowConfig())[0], docs=docs)
     panel.round = 1
     panel._rounds("one\ntwo\n", _run(3), "blocked")
-    assert not panel.stalled and "jtbd 3/10" in panel.card
+    assert "jtbd 3/10" in panel.card
     panel.round = 2
     panel._rounds("one\nthree\n", _run(5), "blocked")
-    assert not panel.stalled and "+1 -1 lines" in panel.card
+    assert "+1 -1 lines" in panel.card
     panel.round = 3
     panel._rounds("one\nthree\n", _run(5), "blocked")
-    assert panel.stalled
+    assert "vs round 2: +0 -0 lines" in panel.card
     index = docs.read_session("reply-review.md")
     assert index.count("## round") == 3 and (tmp_path / "agents/root/sessions/reply-draft.md").read_text() == "one\nthree\n"
 

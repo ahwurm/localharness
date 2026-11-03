@@ -123,6 +123,8 @@ class Session:
     baton_nudges_used: int = 0
     review_rounds: int = 0
     reviewed: tuple | None = None
+    pending_fix: tuple | None = None
+    disputes: tuple[str, ...] = ()
     truncated_tool_calls: int = 0  # #77: tool calls suppressed for output-ceiling truncation
     # #152: one corrective nudge per turn is spent on a degenerate (one-line-repeated) candidate
     # answer; the next degenerate reply fails the turn instead of shipping the repetition.
@@ -1870,14 +1872,15 @@ class AgentLoop:
         try:
             self._person_stop = False
             original = None
+            gated = self._review_level() > 0
             try:
-                if self.reply_panel is not None:
+                if gated:
                     original = getattr(self._llm, "on_reasoning", None)
                     self._llm.on_reasoning = self._reasoning_gate(original)
                 summary = await self._execute_loop(session, task, on_token, images, subtype)
             finally:
                 self._person_stop = False
-                if self.reply_panel is not None:
+                if gated:
                     self._llm.on_reasoning = original
                     self._held.clear()
                 # Back at the caller's depth BEFORE the turn's ending is published: a TurnFailed or
@@ -2504,7 +2507,7 @@ class AgentLoop:
                 completion_tokens=_usage_count(usage, "completion_tokens"),
                 latency_ms=_latency_ms,
             )
-            if self.reply_panel is not None and not tool_calls:
+            if self._review_level() > 0 and not tool_calls:
                 held.append(reply_action)
                 self._held.clear()
             else:
@@ -2788,29 +2791,49 @@ class AgentLoop:
                     session.push(harness_message(_SENTINEL_REPROMPT_NUDGE, "sentinel_retry"))
                     continue
 
-                from localharness.orchestrator.task_flow.panel import REVIEW_ROUNDS, compose_request, revision_request
-                if self.reply_panel is None or session.reviewed is not None:
+                from localharness.channels.base import REVIEW_OFF
+                from localharness.orchestrator.task_flow.panel import open_ids, read_moves, revision_request
+                from localharness.orchestrator.task_flow.record import LIMITS
+                panel, level, top = self.reply_panel, self._review_level(), LIMITS["revisions.reply"].ceiling
+                if session.pending_fix is not None:
+                    verdict, finding, blockers, notes, findings, draft = session.pending_fix
+                    session.pending_fix = None
+                    content, session.disputes, asked = read_moves(content or "", open_ids(findings))
+                    content = content or draft
+                    if asked:
+                        session.reviewed = ("blocked", finding, blockers, notes, findings, "asked")
+                    else:
+                        opened = sum(f.tag != "NOTE" for f in findings)
+                        panel.say_moves(opened - len(session.disputes), len(session.disputes), session.review_rounds)
+                off = panel is not None and level == 0 and session.reviewed is None
+                if panel is None or level == 0 or session.reviewed is not None:
                     summary = _clean_summary(_format_completion_summary(session, content))
-                    verdict, finding, blockers, notes, _ = session.reviewed or (None, "", 0, 0, ())
+                    verdict, finding, blockers, notes, _, ending = session.reviewed or (
+                        ("unreviewed", REVIEW_OFF, 0, 0, (), None) if off else (None, "", 0, 0, (), None))
                 else:
                     try:
-                        self.reply_panel.round = session.review_rounds + 1
+                        panel.round = session.review_rounds + 1
                         summary, verdict, finding, blockers, notes, findings = await self._review_reply(session, task, content)
                     except BaseException:
                         if held:
                             await asyncio.shield(self._bus.publish(held.pop().model_copy(
                                 update={"content": _clean_summary(_format_completion_summary(session, content))})))
                         raise
-                    if verdict == "blocked" and not self.reply_panel.stalled and session.review_rounds < REVIEW_ROUNDS:
+                    ending = None
+                    if verdict == "blocked" and session.review_rounds < (level if level < top else top - 1):
                         session.review_rounds += 1
-                        last = session.review_rounds == REVIEW_ROUNDS
-                        self.reply_panel.say_revising(blockers, last)
+                        last = level < top and session.review_rounds == level
+                        session.pending_fix = (verdict, finding, blockers, notes, findings, summary)
+                        if last:
+                            warnings = sum(f.tag == "WARNING" for f in findings)
+                            session.reviewed = (verdict, finding, blockers, warnings, findings, "fixed")
                         if held:
                             held.pop()
-                        session.push(harness_message(revision_request(findings, last, self.reply_panel.card), "critic_findings"))
+                        compose = self._compose(session, task, verdict, findings, last=True) if last else ""
+                        session.push(harness_message(revision_request(findings, last, panel.card, compose), "critic_findings"))
                         continue
                     if verdict in ("pass", "blocked"):
-                        session.reviewed = (verdict, finding, blockers, notes, findings)
+                        session.reviewed = (verdict, finding, blockers, notes, findings, None)
                         if held:
                             held.pop()
                         session.push(harness_message(self._compose(session, task, verdict, findings), "compose"))
@@ -2828,10 +2851,11 @@ class AgentLoop:
                     finding=finding,
                     blockers=blockers,
                     notes=notes,
+                    ending=ending,
                 ))
-                if self.reply_panel is not None and self.reply_panel.on_delivered and verdict is not None:
+                if panel is not None and panel.on_delivered and verdict is not None and not off:
                     try:
-                        self.reply_panel.on_delivered(verdict)
+                        panel.on_delivered(verdict)
                     except Exception:  # noqa: BLE001 - settling a task never loses the reply
                         log.warning("settling the task after the reply failed", exc_info=True)
                 session.terminated_reason = "complete"
@@ -3196,7 +3220,10 @@ class AgentLoop:
         if self._live_turn is not None and math.isfinite(seconds) and seconds > 0:
             self._live_turn[0].excluded_seconds += seconds
 
-    def _compose(self, session: Session, task: str, verdict: str, findings: tuple) -> str:
+    def _review_level(self) -> int:
+        return self.reply_panel.limits.revisions["reply"] if self.reply_panel is not None else 0
+
+    def _compose(self, session: Session, task: str, verdict: str, findings: tuple, last: bool = False) -> str:
         from localharness.orchestrator.task_flow.panel import compose_request, trail
         panel = self.reply_panel
         try:
@@ -3205,15 +3232,15 @@ class AgentLoop:
             log.warning("the reply path failed", exc_info=True)
             path = ""
         job = panel.docs.read_session("jtbd.md").strip() if panel.docs else ""
-        return compose_request(path, findings, job)
+        return compose_request(path, findings, job, last)
 
-    def _turn_evidence(self, session: Session) -> tuple[list[tuple[str, str | None]], list[str], list[str]]:
-        """This turn's tool calls as (name, origin), the paths its write and edit calls named, and its tool results put in the store as handles."""
+    def _turn_evidence(self, session: Session) -> tuple[list[tuple[str, str | None, str]], list[str], list[str]]:
+        """This turn's tool calls as (name, origin, shell command), the paths its write and edit calls named, and its tool results put in the store as handles."""
         from localharness.orchestrator.task_flow.panel import CLASSLESS_TOOLS, WRITE_TOOLS
         messages = session.messages[session.turn_start_idx:]
         bodies = {m.get("tool_call_id"): text_of(m.get("content")) for m in messages if m.get("role") == "tool"}
         store = getattr(self._ctx, "_content_store", None)
-        calls: list[tuple[str, str | None]] = []
+        calls: list[tuple[str, str | None, str]] = []
         written: list[str] = []
         handles: list[str] = []
         for m in messages:
@@ -3221,15 +3248,15 @@ class AgentLoop:
                 function = call.get("function") or {}
                 name = function.get("name") or ""
                 origin = self._tools.result_origin(name) if self._tools is not None else None
-                calls.append((name, origin))
-                if name in WRITE_TOOLS:
-                    try:
-                        arguments = json.loads(function.get("arguments") or "{}")
-                    except ValueError:
-                        arguments = {}
-                    path = arguments.get("path") if isinstance(arguments, dict) else None
-                    if isinstance(path, str):
-                        written.append(path)
+                try:
+                    arguments = json.loads(function.get("arguments") or "{}")
+                except (ValueError, TypeError):
+                    arguments = {}
+                if not isinstance(arguments, dict):
+                    arguments = {}
+                calls.append((name, origin, str(arguments.get("command") or "") if name == "bash_exec" else ""))
+                if name in WRITE_TOOLS and isinstance(arguments.get("path"), str):
+                    written.append(arguments["path"])
                 if name not in CLASSLESS_TOOLS and store is not None and call.get("id") in bodies:
                     handles.append(store.put(f"{name} {function.get('arguments') or ''}\n{bodies[call['id']]}", origin or "untrusted"))
         return calls, written, handles
@@ -3244,7 +3271,7 @@ class AgentLoop:
             self._in_flight = False
 
     def _held_sink(self, on_token: Callable | None) -> Callable | None:
-        if self.reply_panel is None or on_token is None:
+        if self._review_level() == 0 or on_token is None:
             return on_token
 
         async def held(piece: str) -> None:
@@ -3285,7 +3312,7 @@ class AgentLoop:
         try:
             try:
                 calls, written, handles = self._turn_evidence(session)
-                if all(name in CLASSLESS_TOOLS for name, _ in calls):
+                if all(name in CLASSLESS_TOOLS for name, *_ in calls):
                     return summary, None, "", 0, 0, ()
                 from localharness.agent.subagent import provenance_note
                 store = getattr(self._ctx, "_content_store", None)
@@ -3295,7 +3322,7 @@ class AgentLoop:
                     brief=reply_brief(task, written, handles, provenance_note(summary, sources)), draft=summary,
                     turns=tuple(typed_turns(session.messages)), draft_handle=draft_handle,
                     handles=(*handles, *([draft_handle] if draft_handle else ())),
-                    critics=sense(calls, panel.jtbd_stood, panel.limits),
+                    critics=sense(calls, panel.jtbd_stood, panel.limits), disputes=session.disputes,
                 )
                 result = await panel.run(Unit("reply", "panel"), inputs)
                 verdict, finding, findings = result.verdict, result.finding, result.findings
