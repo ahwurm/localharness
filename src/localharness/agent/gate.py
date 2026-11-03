@@ -97,16 +97,17 @@ auto-denied after the tool's own timeout while three separate docs promised it w
 Nothing is awaited under a deadline either when both the config value and the tool timeout are
 None."""
 
-STAGING_MODES: frozenset[str] = frozenset({"auto"})
+STAGING_MODES: frozenset[str] = frozenset({"auto", "unattended"})
 """The modes in which an ASK is PARKED for a human instead of put to one (owner ruling
 2026-09-12: a blacklisted call must never block the agent loop in the default mode).
 
-``auto`` only. It is the mode a person gets without choosing it, it asks about a handful of
-irreversible things (:data:`~localharness.agent.gate_types.AUTO_BLACKLIST`), and its whole design
-goal is "the thinnest interaction off of no interaction" — a question that stops the loop until
-somebody walks back to the keyboard is the thickest interaction there is. ``guarded`` and
-``trusted`` keep the blocking ask because being asked is what those modes ARE; ``read-only``
-denies and ``unattended`` allows, so neither reaches an ask at all.
+``auto`` is the mode a person gets without choosing it, it asks about a handful of irreversible
+things (:data:`~localharness.agent.gate_types.AUTO_BLACKLIST`), and its whole design goal is "the
+thinnest interaction off of no interaction" — a question that stops the loop until somebody walks
+back to the keyboard is the thickest interaction there is. ``unattended`` allows every ask but the
+severe ones (running a file saved from the web, a severe action after reading saved pages), and
+nobody is there to answer those either, so they park the same way. ``guarded`` and ``trusted`` keep
+the blocking ask because being asked is what those modes ARE; ``read-only`` denies.
 
 A frozenset rather than ``self.mode == "auto"`` at the call site so the rule is one named thing
 to read, and widening it later is one diff."""

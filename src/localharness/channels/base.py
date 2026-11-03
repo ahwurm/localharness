@@ -568,6 +568,11 @@ class ChannelAdapter(ABC):
             await self.send_permission_denied(
                 tool_name=event.tool_name or "", reason=reason, agent_id=event.agent_id
             )
+        if not is_error:
+            from localharness.tools.builtin.web_tool import download_notice
+
+            if line := download_notice(event.tool_name or "", result):
+                await self.send_notice(line)
 
     async def on_permission_staged(self, event: Any) -> None:
         """Default handler for PermissionStaged: draw the one-line notice.

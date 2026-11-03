@@ -31,7 +31,7 @@ import fnmatch
 import os
 import posixpath
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable, Iterable, Literal, Optional
 from urllib.parse import urlparse
@@ -58,6 +58,7 @@ from localharness.agent.gate_types import (
 )
 from localharness.agent.permissions import PermissionResult
 from localharness.agent.shell_classify import copy_operands
+from localharness.agent.taint import TAINTED_ASK_CLASSES, under_downloads
 from localharness.config.paths import WORKSPACE_DIR_NAME, global_config_dir
 from localharness.tools.base import GateFamily
 
@@ -222,6 +223,11 @@ model can re-plan rather than retry — hence a sentence, not an error code."""
 PRIVATE_PLAN_REASON = "a task's plan is changed with /task plan, not edited"
 PRIVATE_DOC_REASON = "a task document is not editable by the agent; ask the person to edit it, then /task accept {doc}"
 PRIVATE_STATE_REASON = "harness state; not editable"
+DOWNLOADS_WRITE_REASON = (
+    "the downloads folder holds pages saved from the web and only web_fetch writes it; re-fetch "
+    "with save_to, or edit a copy in the workspace")
+DOWNLOAD_EXEC_DETAIL = "runs a file saved from the web"
+SAVED_PAGES_NOTE = " — the agent has read pages saved from the web ({source})."
 
 MISSING_TARGET_DISPLAY = "<no path argument>"
 """A write-shaped call that names no target at all. It cannot be resolved, so PRD §3.2 step 8's
@@ -392,6 +398,10 @@ class GateContext:
     state_dirs: tuple[Path, ...] = ()
     """Extra state folders whose ``agents/*/tasks`` and ``agents/*/sessions`` the deny class guards; the
     config folders the gate knows are always guarded."""
+    tainted_by: Optional[str] = None
+    """The saved page(s) the calling agent has read, as the ask line names them; None when it has read none."""
+    content_grants: frozenset[str] = frozenset()
+    """Exact-content "always" answers given while `tainted_by` is set; the only grants a severe ask honours."""
 
 
 # ------------------------------------------------------------------- internals
@@ -892,12 +902,19 @@ def _ask_record(
     )
 
 
+def _severe(ctx: GateContext, klass: str, detail: str) -> bool:
+    """Does this ask outrank the mode: it runs a saved file, or the agent has read saved pages and the class can hurt?"""
+    return detail == DOWNLOAD_EXEC_DETAIL or (ctx.tainted_by is not None and klass in TAINTED_ASK_CLASSES)
+
+
 def _granted(ctx: GateContext, klass: str, key: str) -> bool:
     """Is there a stored "always here" for this ``(class, key)``? (PRD §3.3.)
 
     The one place the grant store is read, so :data:`MODES_WITHOUT_GRANTS` can hold for the
     whole verdict rather than in each branch that remembered to check.
     """
+    if _severe(ctx, klass, ""):
+        return key in ctx.content_grants
     if ctx.mode in MODES_WITHOUT_GRANTS:
         return False
     return ctx.grants(ctx.workspace, klass, key) is not None
@@ -949,8 +966,9 @@ def _decide(
     modes (PRD §3.3, §3.4).
 
     ``unattended`` turns every remaining ASK into ALLOW (today's behavior named honestly — bench
-    and scheduled jobs pin it, critic finding 7). ``trusted`` allows a request only when every
-    ask in it is grantable.
+    and scheduled jobs pin it, critic finding 7) except the severe ones (:func:`_severe`), which
+    stay asks in every mode. ``trusted`` allows a request only when every ask in it is grantable
+    and none is severe.
 
     ``auto`` — the default since v0.14.1 (owner ruling 2026-09-11: "auto = thinnest interaction;
     asks only when genuinely dangerous") — drops every ask the blacklist does not name and asks
@@ -965,10 +983,14 @@ def _decide(
         refusal = _refused(ctx, ask.klass, ask.key)
         if refusal is not None:
             return VerdictResult(Verdict.DENY, f"{REFUSAL_DENY_REASON}: {refusal.key}")
+    ordered = [replace(a, allowed_in_auto=False) if _severe(ctx, a.klass, a.detail) else a for a in ordered]
+    severe = [a for a in ordered if _severe(ctx, a.klass, a.detail)]
     if ctx.mode == "unattended":
-        return VerdictResult(
-            Verdict.ALLOW, f"unattended mode: {ordered[0].klass} allowed without asking"
-        )
+        if not severe:
+            return VerdictResult(
+                Verdict.ALLOW, f"unattended mode: {ordered[0].klass} allowed without asking"
+            )
+        ordered = severe
     if ctx.mode == "auto":
         blacklisted = [ask for ask in ordered if not ask.allowed_in_auto]
         if not blacklisted:
@@ -978,12 +1000,15 @@ def _decide(
         ordered = blacklisted
     primary = ordered[0]
     grantable = all(a.grantable for a in ordered)
-    if grantable and ctx.mode == "trusted":
+    if grantable and ctx.mode == "trusted" and not severe:
         return VerdictResult(Verdict.ALLOW, f"trusted mode: {primary.klass} allowed without asking")
     groups = _grouped_reasons(ordered)
     reason = "; ".join(text for _, text in groups)
     body = "; ".join(f"{klass} — {text}" for klass, text in groups)
     display = f"{tool_name}: {_truncate(salient)}  ({body})" if salient else f"{tool_name}  ({body})"
+    if ctx.tainted_by is not None and any(a.klass in TAINTED_ASK_CLASSES for a in ordered):
+        note = SAVED_PAGES_NOTE.format(source=ctx.tainted_by)
+        reason, display = reason + note, display + note
     return VerdictResult(
         verdict=Verdict.ASK,
         reason=reason,
@@ -1126,6 +1151,8 @@ def _private_deny(
     """DENY for the first ``(target, is_removal)`` that lands in harness state, in every mode and ahead of every ask."""
     for raw, removal in targets:
         for path in _named_file(raw, anchor):
+            if not removal and under_downloads(path):
+                return VerdictResult(Verdict.DENY, DOWNLOADS_WRITE_REASON)
             reason = _private_reason(path, ctx, removal)
             if reason is not None:
                 return VerdictResult(Verdict.DENY, reason)
@@ -1287,6 +1314,16 @@ def _entry(target: str, anchor: Optional[Path]) -> Optional[Path]:
         return None
 
 
+def _run_paths(segment, anchor: Optional[Path], settings: GateSettings) -> list[Path]:
+    """The realpaths a segment executes, sources or interprets: its program, and an interpreter's or `source`'s first argument."""
+    if not segment.argv:
+        return []
+    words = [segment.program or segment.argv[0]]
+    if Path(segment.argv[0]).name in settings.interpreter_commands or segment.argv[0] in ("source", "."):
+        words += segment.argv[1:2]
+    return [path for word in words if (path := _resolve(word, anchor)) is not None]
+
+
 def _evaluate_shell(
     tool_name: str, params: dict, ctx: GateContext, settings: GateSettings
 ) -> VerdictResult:
@@ -1342,6 +1379,12 @@ def _evaluate_shell(
     ))
 
     asks += _removal_asks(non_read_only, anchor, ctx, settings, classified.segments)
+
+    for segment in classified.segments:
+        for path in _run_paths(segment, anchor, settings):
+            if under_downloads(path):
+                asks.append(_ask_record("shell-destructive", str(path),
+                                        f"{DOWNLOAD_EXEC_DETAIL} ({path})", detail=DOWNLOAD_EXEC_DETAIL))
 
     for segment in non_read_only:
         runs_it = False
