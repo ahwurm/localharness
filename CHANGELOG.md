@@ -4,6 +4,21 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.27.6] — 2026-11-03
+
+**`/review` reads like `/effort`, and a reply keeps the length you asked for.** The picker is a row of levels with the highlighted one described below it, the level and reply lines are in plain words, and an ask for "three sentences" gets three sentences of answer, not a paragraph about how the agent worked.
+
+### Changed
+- **the `/review` picker** — `off  1  2  3  max` on one row, with the highlighted level's description on the line below; the long rows no longer run off the screen. The phone keeps one button per level.
+- **plain words** — the levels read "send the draft as written", "check, then fix", "check and fix, twice", "check and fix, three times" and "check and fix until it passes, up to 10 checks"; a reply whose last fix went out reads `◆ reply revised · N points raised`, and the phone titles it `reply ready (revised)`.
+
+### Fixed
+- An ask that names a length or a form ("in three sentences", "one line", "briefly") gets the answer alone, in that form: the reply no longer opens with how the agent got there. Every reply speaks to you as "you", never "the person".
+
+### Known limitations
+- The form is recognised from a short list of phrasings; an ask that sets a form some other way still gets the path first.
+- A small model may still miss the exact count: one live run asked for three sentences and got two.
+
 ## [0.27.5] — 2026-11-02
 
 **`/review` sets how hard a reply is checked.** A level is how many times a reply is checked and then fixed: `off`, `1` (the default), `2`, `3` or `max`. Between checks the model fixes what was found, disputes it with evidence, or asks you when only you can unblock it. The network-scan question that took 16.5 minutes on 0.27.2 now answers in 75 seconds at level 1.
