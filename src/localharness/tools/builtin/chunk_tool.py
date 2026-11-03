@@ -101,4 +101,5 @@ class ChunkTool(Tool):
             f"then combine your per-piece findings into the final answer.",
             chunk_handles=handles,
             origin=origin,
+            paths=[src] if (src := self._store.source(id)) else [],
         )

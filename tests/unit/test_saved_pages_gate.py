@@ -8,7 +8,10 @@ from typing import Any
 
 import pytest
 
-from localharness.agent.context import ContextManager
+import json
+import re
+
+from localharness.agent.context import ContentStore, ContextManager, _evict_large_tool_results
 from localharness.agent.gate import NO_ASKER_REASON, PermissionGate
 from localharness.agent.gate_types import Decision, GateSettings, ToolMeta, Verdict
 from localharness.agent.loop import AgentLoop
@@ -26,7 +29,12 @@ from localharness.agent.verdict import (
 from localharness.config.grants import GrantStore, new_grant
 from localharness.config.models import AgentConfig
 from localharness.tools import Tool, ToolRegistry, ToolResult, ToolSchema
+from localharness.tools.builtin.chunk_tool import ChunkTool
+from localharness.tools.builtin.cruncher_exec import UntrustedHandleError, bind_clean_origin_bodies
+from localharness.tools.builtin.grep_tool import GrepTool
+from localharness.tools.builtin.load_document_tool import LoadDocumentTool
 from localharness.tools.builtin.read_tool import ReadTool
+from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
 from localharness.tools.builtin.write_tool import WriteTool
 from tests.conftest import FakeLLMResponse, FakeToolCall, MockLLMClient
 from tests.unit.test_compact_md_disable_sentinel import _loop as repl_loop
@@ -97,10 +105,12 @@ def make(bus, tmp_path, monkeypatch):
                               asker=asker, channel_name="test", bus=bus, has_review_surface=True, **gate_kw)
         shell = Stub("bash_exec", "shell", "command")
         py = Stub("python_exec", "code", "code")
+        store = ContentStore()
         registry = ToolRegistry()
-        for tool in (ReadTool(), WriteTool(), shell, py):
+        for tool in (ReadTool(), WriteTool(), GrepTool(), LoadDocumentTool(store), ToolResultGetTool(store),
+                     ChunkTool(store), shell, py):
             await registry.register(tool, scope="global")
-        return Rig(ws=ws, gate=gate, bus=bus, registry=registry, shell=shell, py=py, tmp=tmp_path)
+        return Rig(ws=ws, gate=gate, bus=bus, registry=registry, shell=shell, py=py, tmp=tmp_path, store=store)
     return build
 
 
@@ -283,6 +293,114 @@ async def test_writing_inside_the_downloads_folder_is_refused_with_the_save_to_r
     r = await make("auto", asker=Asker())
     await r.run(("write", {"path": f"{SAVED}/z.md", "content": "x"}))
     assert any(DOWNLOADS_WRITE_REASON in e for e in r.errors())
+
+async def test_a_file_written_by_a_shell_redirect_is_recorded_as_written(make):
+    r = await make("auto", asker=Asker())
+    await r.read("a.md")
+    r.shell.effects["echo hi > made.sh"] = (r.ws / "made.sh", "echo hi\n")
+    await r.run(sh("echo hi > made.sh"))
+    assert r.gate.taint.written(AGENT, r.ws / "made.sh") == content_key(b"echo hi\n")
+
+
+
+
+# ------------------------------------------------------------------------- every reader marks
+
+async def test_grep_marks_with_an_explicit_path_or_include_hidden_but_not_by_default(make):
+    r = await make()
+    await r.run(("grep", {"pattern": "page", "path": "."}))
+    assert r.marked() is None, "a default search skips dot-directories, so it never reaches the downloads"
+    await r.run(("grep", {"pattern": "page", "path": SAVED}))
+    assert r.marked() is not None
+    r.gate.reset_context_state()
+    await r.run(("grep", {"pattern": "page", "path": ".", "include_hidden": True}))
+    assert r.marked() is not None
+
+
+async def test_grep_of_a_workspace_file_does_not_mark(make):
+    r = await make()
+    await r.run(("grep", {"pattern": "page", "path": "notes.md"}))
+    assert r.marked() is None
+
+
+async def test_load_document_of_a_download_marks_and_the_handle_is_untrusted(make):
+    r = await make()
+    await r.run(("load_document", {"path": str(r.ws / "notes.md")}))
+    assert r.marked() is None
+    await r.run(("load_document", {"path": str(r.ws / SAVED / "a.md")}))
+    assert r.marked() == "a.md"
+    (handle,) = [h for h, (body, origin) in r.store._bodies.items() if origin == "untrusted"]
+    assert r.store.source(handle).endswith(f"{SAVED}/a.md")
+    with pytest.raises(UntrustedHandleError):
+        bind_clean_origin_bodies(r.store, [handle])
+
+
+async def test_a_shell_cat_of_a_download_marks_and_a_listing_does_not(make):
+    r = await make()
+    await r.run(sh(f"cat {SAVED}/a.md"))
+    assert r.marked() == "a.md"
+    r.gate.reset_context_state()
+    await r.run(sh(f"ls {SAVED}"), sh("cat notes.md"))
+    assert r.marked() is None
+    await r.run(sh(f"cat {SAVED}/*.md"))
+    assert r.marked() is not None
+
+
+async def test_python_exec_naming_the_folder_marks(make):
+    r = await make("auto", asker=Asker())
+    await r.run(("python_exec", {"code": "print(1)"}))
+    assert r.marked() is None
+    await r.run(("python_exec", {"code": f"print(open('{SAVED}/a.md').read())"}))
+    assert r.marked() is not None
+
+
+async def test_an_evicted_download_read_marks_again_through_tool_result_get_and_chunk(make):
+    r = await make()
+    path = str(r.ws / SAVED / "a.md")
+    messages = [
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "read", "arguments": json.dumps({"path": path})}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "page a\n" * 50},
+    ]
+    stubbed, evicted = _evict_large_tool_results(messages, r.store, threshold_chars=10, keep_last=0)
+    assert evicted == 1
+    handle = re.search(r"tool_result_get\('([^']+)'\)", stubbed[1]["content"]).group(1)
+    assert r.store.origin(handle) == "untrusted" and r.store.source(handle) == path
+
+    await r.read("b.md")
+    r.gate.reset_context_state()
+    assert r.marked() is None
+    await r.run(("tool_result_get", {"id": handle}))
+    assert r.marked() == "a.md"
+    r.gate.reset_context_state()
+    await r.run(("chunk", {"id": handle, "max_chars": 100}))
+    assert r.marked() == "a.md"
+
+
+def test_an_evicted_ordinary_read_stays_trusted_and_a_download_read_is_refused_by_cruncher_exec(tmp_path):
+    store = ContentStore()
+    notes = tmp_path / "notes.md"
+    messages = [
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "read", "arguments": json.dumps({"path": str(notes)})}},
+            {"id": "c2", "type": "function", "function": {"name": "read", "arguments": json.dumps(
+                {"path": str(tmp_path / SAVED / "a.md")})}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "ordinary text\n" * 20},
+        {"role": "tool", "tool_call_id": "c2", "content": "saved text\n" * 20},
+    ]
+    stubbed, evicted = _evict_large_tool_results(messages, store, threshold_chars=10, keep_last=0,
+                                                 result_origin=lambda name: "trusted")
+    assert evicted == 2
+    ordinary, saved = (re.search(r"tool_result_get\('([^']+)'\)", m["content"]).group(1) for m in stubbed[1:])
+    assert store.origin(ordinary) == "trusted" and store.origin(saved) == "untrusted"
+    assert bind_clean_origin_bodies(store, [ordinary])["handles"]
+    with pytest.raises(UntrustedHandleError):
+        bind_clean_origin_bodies(store, [saved])
+
+
+def test_security_md_never_says_taint():
+    text = (Path(__file__).resolve().parents[2] / "SECURITY.md").read_text()
+    assert "taint" not in text.lower()
 
 
 # ------------------------------------------------------------------------------ the subagent

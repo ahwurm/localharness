@@ -59,7 +59,7 @@ from localharness.agent.gate_types import (
 )
 from localharness.agent.permissions import PermissionResult
 from localharness.agent.shell_classify import copy_operands
-from localharness.agent.taint import TAINTED_ASK_CLASSES, content_key, under_downloads
+from localharness.agent.taint import DOWNLOADS, TAINTED_ASK_CLASSES, content_key, under_downloads
 from localharness.config.paths import WORKSPACE_DIR_NAME, global_config_dir
 from localharness.tools.base import GateFamily
 
@@ -1428,7 +1428,8 @@ def _evaluate_shell(
             else ("shell-unfamiliar",
                   f"shell command not seen in this workspace before ({segment.signature})")
         )
-        key = content_key("\0".join(segment.argv)) if segment.inline_interpreter and ctx.tainted_by else segment.signature
+        key = (content_key("\0".join(segment.argv))
+               if segment.inline_interpreter and ctx.tainted_by else segment.signature)
         granted = _granted(ctx, klass, key)
         if granted and _refused(ctx, klass, key) is None:
             continue
@@ -1452,7 +1453,8 @@ def _evaluate_named(
     """
     if klass == "code-exec" and tool_name != "python_exec":
         ctx = replace(ctx, tainted_by=None)
-    key = content_key(json.dumps(params, sort_keys=True, default=str)) if klass == "code-exec" and ctx.tainted_by else tool_name
+    key = (content_key(json.dumps(params, sort_keys=True, default=str))
+           if klass == "code-exec" and ctx.tainted_by else tool_name)
     if _granted(ctx, klass, key) and not _refused(ctx, klass, key):
         return VerdictResult(Verdict.ALLOW, f"granted in this workspace: {tool_name}")
     return _decide(
@@ -1722,16 +1724,45 @@ def harness_config_file_target(tool_name: str, params: dict, ctx: GateContext,
     return None
 
 
+def _shell_paths(
+    command: str, params: dict, ctx: GateContext, settings: GateSettings
+) -> tuple[list[Path], list[Path]]:
+    """(paths a shell command's words name, paths its static redirects and targets write)."""
+    from localharness.agent.shell_classify import classify_shell
+
+    anchor = _shell_anchor("bash_exec", params, ctx)
+    folder = "/".join(DOWNLOADS)
+    read: list[Path] = []
+    written: list[Path] = []
+    for segment in classify_shell(command, settings).segments:
+        for word in segment.argv:
+            path = _resolve(word, anchor)
+            if path is not None and path.parts[-2:] != DOWNLOADS:
+                read.append(path)
+            elif path is None and folder in word:
+                read.append(Path(word))
+            elif path is None and anchor is not None and under_downloads(anchor):
+                read.append(anchor)
+        if not segment.unresolvable_write:
+            written += [p for t in segment.write_targets if (p := _resolve(t, anchor)) is not None]
+    return read, written
+
+
 def call_paths(
     tool_name: str, params: dict, metadata: Optional[dict], ctx: GateContext, settings: GateSettings
 ) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
     """The files a finished call read and the files it wrote, best effort; never raises."""
     try:
-        read = tuple(Path(p) for p in (metadata or {}).get("paths", ()))
-        written: tuple[Path, ...] = ()
+        read = [Path(p) for p in (metadata or {}).get("paths", ())]
+        written: list[Path] = []
         if tool_name in WRITE_TOOL_PATH_PARAMS and (raw := _write_target(tool_name, params)):
-            written = tuple(p for p in (_resolve(raw, Path(ctx.workspace)),) if p is not None)
-        return read, written
+            written += [p for p in (_resolve(raw, Path(ctx.workspace)),) if p is not None]
+        elif tool_name in SHELL_COMMAND_PARAMS and isinstance(command := params.get("command"), str):
+            shell_read, shell_written = _shell_paths(command, params, ctx, settings)
+            read, written = read + shell_read, written + shell_written
+        elif tool_name == "python_exec" and "/".join(DOWNLOADS) in str(params.get("code", "")):
+            read.append(Path(*DOWNLOADS))
+        return tuple(read), tuple(written)
     except Exception:  # noqa: BLE001 — what this cannot read marks nothing
         return (), ()
 

@@ -118,7 +118,7 @@ section of your `overrides.yaml` and tool scripts as they are; later changes are
 about. And the record a Yes writes is an ordinary file in
 your config folder, `trusted_workspaces.yaml`: the agent's write and edit tools and the shell writes
 the gate can read reach it only with your approval (in every mode but `unattended`, which approves
-everything), but code the agent is already running — an interpreter tool, which `auto` runs without
+everything [bar the asks after a saved page](#saved-pages-under-unattended)), but code the agent is already running — an interpreter tool, which `auto` runs without
 asking — can rewrite any file you own, that record included, and a start believes the record it
 finds. These questions guard what the agent writes with its file tools and the shell,
 not what code that is already running can do. Plugin
@@ -279,13 +279,13 @@ https://snyk.io/blog/toxicskills-malicious-ai-agent-skills-clawhub/): there is n
 command here, and the bundled `skill-creator` writes no install or setup step. Every skills
 directory except the bundled one is a protected path: the protected list under the approval gate holds `skills/**`, and
 `.agents/skills/` is protected beside it, so a write there asks with no "always" in `guarded`,
-`trusted` and `auto`, is denied in `read-only` and is allowed without an ask in `unattended`. The
+`trusted` and `auto`, is denied in `read-only` and is allowed without an ask in `unattended` ([saved-page exception](#saved-pages-under-unattended)). The
 bundled `skill-creator` writes one file per `write`, with one approval per file, and never switches
 the mode. The `localharness skills` verb only reads, never prompts, and names a `.agents/skills/`
 directory it does not read for want of a `.localharness/`; an "always" given to a bare
 `localharness` before this release covers no subcommand, so each subcommand the agent runs is asked
 about again, once per subcommand. What this does not stop, as it behaves today: in `auto`, `trusted`
-and `unattended` a script a skill names runs without an ask, and a granted interpreter-plus-file
+and `unattended` a script a skill names runs without an ask ([saved-page exception](#saved-pages-under-unattended)), and a granted interpreter-plus-file
 signature covers a file the agent just wrote, the same gap as a granted `python3 <script>` under the
 approval gate's named gaps; a cloned repository's skill descriptions enter the root
 prompt, and the bodies the model loads when cued and may be cued by name, silently, as its
@@ -791,7 +791,7 @@ a folder's contents into it (`rsync -a src/`, `cp -r src/.`, `cp -T`) or a downl
 name the server chooses (`curl -J`, `wget --content-disposition`) — for those the model is told to
 unpack or fetch elsewhere and copy the files it means. That rule is code, not a deny pattern, so no
 config can remove it, and it applies whatever the mode — but only to the shapes it reads, so it is
-not a boundary in `unattended`, where everything else runs unasked.
+not a boundary in `unattended`, where everything else runs unasked (bar the [saved-page asks](#saved-pages-under-unattended)).
 What this does NOT cover: `python_exec` and `cruncher_exec` run code that can write any file you
 can; code run inline through a non-shell interpreter (`python3 -c …`, `node -e …`) is not read for
 the files it touches (a shell payload — `sh -c …`, `bash -c …`, `eval` — is); the rule reads the
@@ -824,7 +824,7 @@ the v0.14.0 default, now opt-in with `permissions.mode: guarded` or `/mode guard
 about each step-4 class and remembers your answer, and asks about every write when there is no
 boundary. `trusted` is `auto` plus one thing: a destructive file operation aimed **inside** the
 project asks too. `read-only` refuses writes, non-read-only shell, and code execution with a
-message the model can re-plan against. `unattended` turns every ask into allow, leaving only your
+message the model can re-plan against. `unattended` turns every ask into allow ([bar the saved-page asks](#saved-pages-under-unattended)), leaving only your
 deny patterns — and the settings-file rule above for the shell shapes it reads, which is no
 backstop there: code, and every shape it does not read, runs unasked — **this is how the harness
 behaved before v0.14**, named honestly. It is
@@ -1260,7 +1260,20 @@ untrusted text. This is enforced where an agent's tools are resolved: a host-mut
 toolset combined with untrusted ingestion is rejected, and the check **fails closed**
 (deny on doubt). Untrusted content moves between agents only as opaque handles
 carrying a sticky "untrusted" tag; its raw bytes resolve only inside an agent that
-holds no host-mutating tools.
+holds no host-mutating tools. One path is the exception, described next.
+
+**Saved pages: the one raw path, behind a severity gate.** One path now carries raw untrusted bytes
+into the agent that holds host tools. A researcher's `web_fetch` with `save_to` writes a page's full
+text into `.localharness/downloads/` in the project (folder 0700, files 0600, written through no
+symlink, at most 256 MB and 1,000 files with the oldest removed), the agent reads it with its
+ordinary tools, and those bytes sit behind a severity gate instead of the floor. From the moment the
+agent (or a subagent it dispatches while in that state) reads a saved page, destructive shell
+(inside the project too), inline interpreters, `python_exec`, running a file it wrote since, and
+writes outside the project ask in every mode, with the page named in the ask. Stored "always"
+answers do not cover them, and an "always" for code covers that exact code until `/clear` or a new
+session. Reading, writing and editing inside the project, a redirect into it and a listing stay
+silent. Only `web_fetch` writes the folder, and running a file from it asks every time, with no
+"always", whether or not the agent has read a page.
 
 The separation is on by default. Only your machine-level config can turn it off
 (`org.enforce_capability_floor: false`); a project's value for that setting is ignored, with a
@@ -1333,6 +1346,13 @@ And a plugin tool that ingests is kept apart from the host tools, and the phone'
 labels it untrusted from what it declares, but the terminal does not mark it where you read its output:
 the terminal's "web results — UNTRUSTED, treated as data only" note covers the three built-in web tools only
 (a result of `browser_fetch` or of the four session tools still opens with the untrusted banner the model reads).
+The saved-page gate is best effort at the edges. A subagent's reply that quotes a saved page does not
+mark the agent that reads the reply. Shell reads the classifier cannot place are missed, `python_exec`
+marks only when its code names the folder, and a copy made out of the folder is not marked once the
+state clears. A written file that runs implicitly is not caught: `make` after writing a `Makefile`,
+`pytest` after a `conftest.py`, `npm`, `cargo` or `tox`, a script importing a written helper,
+`bash -x run.sh`, `xargs sh`, and a file created and run in one command. No model screens the pages,
+and cookies are a separate matter.
 
 Memory is split the same way, and one part of it is trusted. What `memory_search` and `memory_get`
 return is marked untrusted, like web content: a recalled fact is fenced as data. What the
@@ -1594,6 +1614,13 @@ read as a redirect to a non-public address — both lines are fixed text that en
 session tools add what the paragraph above names as accepted: a script's own `POST` on a click, text
 typed into a page reaching any public host it loads, and a page that hides instructions in names the
 model reads; none of these is stopped by the document-`POST` abort, which only keeps navigation read-only.
+
+### Saved pages under unattended
+
+`unattended` allows every ask but these. Once the agent has read a
+saved page, and whenever a command runs a file from the downloads folder, those asks park as
+pending as they do in `auto`: the model carries on without that step, and you answer with ctrl+y /
+ctrl+n or `/pending` when you return. A run with no channel that can ask refuses them.
 
 ## Securing the endpoint
 

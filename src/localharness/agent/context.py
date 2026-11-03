@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
+from localharness.agent.taint import under_downloads
 from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
 from localharness.core.types import Message, provider_messages
 from localharness.core.content import content_image_tokens, drop_images, text_of, with_text
@@ -321,6 +322,7 @@ class ContentStore:
         self._bodies: dict[str, tuple[str, Origin]] = {}
         self._web: "OrderedDict[str, None]" = OrderedDict()
         self._aliases: dict[str, str] = {}
+        self._sources: dict[str, str] = {}
         self._fetch_seq = 0
         self._max_web = max_web
         self._parent = parent
@@ -372,10 +374,14 @@ class ContentStore:
         self.active_step = step
         self._active_references = references
 
-    def put(self, body: str, origin: Origin = "trusted", derived_from: str | None = None) -> str:
+    def put(self, body: str, origin: Origin = "trusted", derived_from: str | None = None,
+            source: str | None = None) -> str:
         """Store a body, return its handle. Origin is sticky: untrusted if explicitly untrusted,
-        derived from an untrusted handle, or this exact body was already stored untrusted."""
+        derived from an untrusted handle, or this exact body was already stored untrusted.
+        `source` is the saved page the body came from, or else the one `derived_from` carries."""
         h = _content_handle(body)
+        if source := source or (self.source(derived_from) if derived_from else None):
+            self._sources[h] = source
         prev = self._bodies.get(h)
         tainted = (
             origin == "untrusted"
@@ -423,6 +429,10 @@ class ContentStore:
             return self._parent.origin(h)
         return None
 
+    def source(self, ref: str) -> str | None:
+        """The saved page a handle or alias holds, if it holds one."""
+        return self._sources.get(self._aliases.get(ref, ref))
+
     def stub_meta(self, ref: str) -> tuple[int, Origin] | None:
         """(byte size, origin) for a handle/alias — used to size the inline stub for the trigger."""
         h = self._aliases.get(ref, ref)
@@ -440,12 +450,12 @@ class ContentStore:
         self.clear_active_references()
 
 
-def _call_meta(messages: list[Message]) -> dict[str, tuple[str, str]]:
-    """tool_call id -> (function name, hint). The hint is the call's first string argument —
+def _call_meta(messages: list[Message]) -> dict[str, tuple[str, str, str]]:
+    """tool_call id -> (function name, hint, path argument). The hint is the call's first string argument —
     whitespace-collapsed, capped at _STUB_HINT_CHARS — and is what makes a stub self-describing.
     tool_calls arrive as dicts (replayed history) or objects (fresh provider parse), so both
     shapes are read."""
-    meta: dict[str, tuple[str, str]] = {}
+    meta: dict[str, tuple[str, str, str]] = {}
     for m in messages:
         if m.get("role") != "assistant":
             continue
@@ -460,15 +470,17 @@ def _call_meta(messages: list[Message]) -> dict[str, tuple[str, str]]:
                 args = {}
             first = next((v for v in args.values() if isinstance(v, str) and v.strip()), "") \
                 if isinstance(args, dict) else ""
+            path = args.get("path") if isinstance(args, dict) else None
             tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
             if tc_id:
-                meta[tc_id] = (name, " ".join(first.split())[:_STUB_HINT_CHARS])
+                meta[tc_id] = (name, " ".join(first.split())[:_STUB_HINT_CHARS],
+                               path if isinstance(path, str) else "")
     return meta
 
 
 def _tool_call_ids_named(messages: list[Message], names: frozenset[str]) -> set[str]:
     """tool_call ids whose function name is in `names`."""
-    return {i for i, (n, _) in _call_meta(messages).items() if n in names}
+    return {i for i, (n, *_) in _call_meta(messages).items() if n in names}
 
 
 def _out_of_view_note(messages: list[Message], max_context_tokens: int) -> str:
@@ -544,7 +556,7 @@ def _drop_superseded_failures(
         meta = _call_meta([m])
         if len(meta) != 1:
             continue
-        tc_id, (name, _hint) = next(iter(meta.items()))
+        tc_id, (name, *_) = next(iter(meta.items()))
         j = tool_index.get(tc_id)
         if j is None or j <= i:
             continue
@@ -599,7 +611,7 @@ def _evict_large_tool_results(
     assistant call compacted away) is untrusted."""
     # tool_call_ids that resolve to web tools — those go through the web path, skip here.
     meta = _call_meta(messages)
-    web_ids = {i for i, (n, _) in meta.items() if n in _WEB_TOOLS}
+    web_ids = {i for i, (n, *_) in meta.items() if n in _WEB_TOOLS}
     evictable = [
         i for i, m in enumerate(messages)
         if m.get("role") == "tool"
@@ -626,9 +638,10 @@ def _evict_large_tool_results(
     for i in stale:
         m = out[i]
         body = m.get("content") or ""
-        name, hint = meta.get(m.get("tool_call_id") or "", ("", ""))
+        name, hint, path = meta.get(m.get("tool_call_id") or "", ("", "", ""))
         origin: Origin = result_origin(name) if name else "untrusted"
-        rid = store.put(body, origin=origin)
+        saved = name == "read" and under_downloads(path)
+        rid = store.put(body, origin="untrusted" if saved else origin, source=path if saved else None)
         approx_tokens = len(body) // APPROX_CHARS_PER_TOKEN
         what = " ".join(s for s in (name, hint) if s)
         out[i] = {**m, "content": (
