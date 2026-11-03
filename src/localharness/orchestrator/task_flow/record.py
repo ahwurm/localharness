@@ -25,7 +25,7 @@ class Stage(NamedTuple):
 
 
 STAGES: dict[str, Stage] = {
-    "reply": Stage(None, ("draft",), (), ("panel", "revise", "panel"), ("jtbd",), 3, "seam", None),
+    "reply": Stage(None, ("draft",), (), ("panel", "revise", "panel"), ("jtbd",), 1, "seam", None),
     "new": Stage("new", ("turns", "instructions"), ("decisions.md",), ("file", "panel"), ("jtbd",), 1, "person", "plan"),
     "research": Stage("research", ("decisions.md",), ("research.md",), ("explore", "panel"),
                       ("jtbd", "factual"), 0, "root", "plan"),
@@ -56,10 +56,24 @@ LIMITS: dict[str, Limit] = {
     "additions": Limit(0, 0, 3),
     "flow_cap_minutes": Limit(1.0, 180.0, 360.0),
     **{f"revisions.{b}": Limit(0, row.revisions, row.revisions + 2)
-       for b, row in STAGES.items() if row.revisions},
+       for b, row in STAGES.items() if row.revisions and b != "reply"},
+    "revisions.reply": Limit(0, STAGES["reply"].revisions, 10),
 }
 REPLY_RESERVE_MINUTES = ((len(STAGES["reply"].floor) + len(SENSED) + LIMITS["additions"].ceiling)
-                         * (LIMITS["revisions.reply"].ceiling + 1) * LIMITS["critic"].ceiling.minutes)
+                         * LIMITS["revisions.reply"].ceiling * LIMITS["critic"].ceiling.minutes)
+REVIEW_LEVELS = ("off", "1", "2", "3", "max")
+
+
+def review_label(level: int) -> str:
+    row = LIMITS["revisions.reply"]
+    return "off" if level <= row.floor else "max" if level >= row.ceiling else str(level)
+
+
+def review_level(text: str) -> int | None:
+    row = LIMITS["revisions.reply"]
+    if text in ("off", "max"):
+        return row.floor if text == "off" else row.ceiling
+    return int(text) if text.isascii() and text.isdigit() and row.floor <= int(text) <= row.ceiling else None
 
 
 @dataclass(frozen=True)
@@ -169,7 +183,7 @@ def unit_minutes(unit: Unit, limits: Limits, sensed: tuple[str, ...] = ()) -> fl
         return limits.explorer.minutes
     if unit.kind in ("execute", "revise"):
         return limits.executor.minutes
-    panels = 1 + limits.revisions["reply"] if unit.boundary == "reply" else 1
+    panels = limits.revisions["reply"] if unit.boundary == "reply" else 1
     return panels * panel_minutes(panel_critics(unit.boundary, limits, sensed), limits)
 
 

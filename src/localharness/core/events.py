@@ -207,6 +207,9 @@ class TaskComplete(BaseEvent):
     )
     blockers: int = Field(default=0, description="Blockers the reply panel found; 0 at a task unit or with no panel.")
     notes: int = Field(default=0, description="Warnings and notes the reply panel found; 0 at a task unit or with no panel.")
+    ending: Optional[Literal["fixed", "asked"]] = Field(
+        default=None, description="How a blocked reply ended: its last fix shipped unchecked, or the root asked the person; None otherwise."
+    )
 
 
 class Action(BaseEvent):

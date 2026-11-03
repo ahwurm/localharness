@@ -163,12 +163,21 @@ def notice(subject: str, state: str, commands: Sequence[str], tail: str = "", li
     return line()
 
 
+REVIEW_OFF = "review is off"
+
+
 def reply_line(event: Any) -> str | None:
-    """The line after a root reply the panel judged: the verdict, how many blockers or notes, and the command that shows them; None for a child, a reply no panel read, or the person's own stop."""
+    """The line after a root reply the panel judged: the verdict, how many blockers or notes, and the command that shows them; None for a child, a reply no panel read, review turned off, or the person's own stop."""
     verdict = event.verdict
-    if getattr(event, "parent_id", None) or verdict is None or (verdict == "unreviewed" and not event.finding):
+    if (getattr(event, "parent_id", None) or verdict is None
+            or (verdict == "unreviewed" and event.finding in ("", REVIEW_OFF))):
         return None
     commands = ("/task show reply",)
+    if event.ending == "asked":
+        return notice("reply", "asks you", commands, "")
+    if event.ending == "fixed":
+        n = event.blockers + event.notes
+        return notice("reply", f"fixed · not re-checked · {n} {'was' if n == 1 else 'were'} open", commands, "")
     if verdict == "blocked":
         return notice("reply", f"with caveats · {event.blockers} blocker{'s' * (event.blockers != 1)}", commands, "")
     if verdict == "pass":

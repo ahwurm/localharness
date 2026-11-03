@@ -11,17 +11,18 @@ from localharness.agent.context import ActiveReferenceOverflow, ContextManager
 from localharness.agent.loop import AgentLoop, Session
 from localharness.agent.permissions import PermissionEvaluator
 from localharness.agent.subagent import DelegationResult
-from localharness.channels.base import ChannelAdapter
+from localharness.channels.base import REVIEW_OFF, ChannelAdapter, reply_line
 from localharness.config.models import AgentConfig
 from localharness.core.caps import Caps
 from localharness.core.events import Action, TaskComplete
-from localharness.orchestrator.task_flow.panel import FENCE_CLOSE, FENCE_LABEL, REVIEW_ROUNDS, Panel, PanelInputs
+from localharness.orchestrator.task_flow.panel import CLAIMS_LABEL, FENCE_CLOSE, FENCE_LABEL, Panel, PanelInputs
 from localharness.cli.repl import OrchestratorREPL
-from localharness.orchestrator.task_flow.record import Unit, limited
+from localharness.orchestrator.task_flow.record import LIMITS as ROWS, Limits, Unit, limited
 from tests.unit.test_subagent_children import FakeLoop, config_child, make_runner
 from tests.unit.test_capabilities import _builtin_registry
 
 LIMITS = limited(None)[0]
+LIMITS_ROW = ROWS["revisions.reply"]
 BLOCKER = "[BLOCKER] the reply cites a real line — README.md:41 does not say that"
 
 
@@ -66,9 +67,13 @@ def children(answers, delay=0.0):
     return run_child
 
 
-def panel_of(answers=None, delay=0.0) -> Panel:
+def at_level(n) -> Limits:
+    return limited(SimpleNamespace(revisions={"reply": n}))[0]
+
+
+def panel_of(answers=None, delay=0.0, level=None) -> Panel:
     run_child = children(answers or {}, delay)
-    panel = Panel(run_child, LIMITS)
+    panel = Panel(run_child, LIMITS if level is None else at_level(level))
     panel.calls = run_child.calls
     return panel
 
@@ -300,38 +305,125 @@ def said_by_root(panel):
     return lines
 
 
-async def test_a_blocked_reply_goes_back_to_the_root_with_its_tools_and_the_findings_as_quoted_data(bus):
-    llm = Streaming([gen("Looking.", call=True), gen("Draft reply."), gen("Fixed reply."), gen("Composed.")])
+A1 = answered("A1 3/10 use nmap — it is not installed")
+
+
+def compose_messages(messages):
+    return [m for m in messages if isinstance(m.get("_lh"), dict) and m["_lh"].get("subtype") == "compose"]
+
+
+async def test_a_blocked_reply_at_level_one_gets_one_fix_and_the_fix_is_the_reply_the_person_reads(bus):
+    llm = Streaming([gen("Looking.", call=True), gen("Draft reply."), gen("Fixed reply.")])
     panel = panel_of({"factual": [answered(BLOCKER), NONE]})
     session, summary = await turn(loop_of(llm, bus, panel, await glob_registry(), evidence=None))
-    assert len(llm.requests) == 4 and llm.requests[2]["tools"]
+    assert len(llm.requests) == 3 and llm.requests[2]["tools"] and panel.calls == ["jtbd", "factual"]
     (found,) = findings_messages(session.messages)
-    assert found["role"] == "user" and found["content"].rstrip().endswith("never mention the review or apologise for the draft.")
-    assert FENCE_LABEL in found["content"] and FENCE_CLOSE in found["content"]
-    assert "Draft reply." not in found["content"] and "README.md:41" in found["content"]
-    assert [m["content"] for m in session.messages if m["role"] == "assistant"][-3:] == ["Draft reply.", "Fixed reply.", "Composed."]
-    assert session.messages.index(found) == len(session.messages) - 4
+    asked = found["content"]
+    assert found["role"] == "user" and FENCE_LABEL in asked and FENCE_CLOSE in asked
+    assert "Draft reply." not in asked and "README.md:41" in asked
+    assert "Disputed <id>" in asked and "Question for you:" in asked
+    assert "This is the last round" in asked and "- You looked at *.zzz" in asked and "Worth double-checking:" in asked
+    assert compose_messages(session.messages) == []
     (done,) = events(bus, TaskComplete)
-    assert (done.verdict, done.finding, done.summary, summary) == ("pass", "", "Composed.", "Composed.")
-    assert "you revised it once, and it passed" in compose_message(session.messages)
-    assert session.review_rounds == 1
+    assert (done.verdict, done.ending, done.summary, summary) == ("blocked", "fixed", "Fixed reply.", "Fixed reply.")
+    assert (done.blockers, done.notes) == (1, 0) and session.review_rounds == 1
 
 
-async def test_the_third_round_is_announced_as_the_last_and_its_answer_is_delivered_whatever_the_verdict(bus):
-    panel = panel_of({"factual": [answered(BLOCKER)]})
+async def test_level_three_checks_and_fixes_three_times_and_only_the_last_fix_is_asked_to_retell(bus):
+    panel = panel_of({"factual": [answered(BLOCKER)]}, level=3)
     spoken = said_by_root(panel)
-    llm = Streaming([gen("Looking.", call=True), *(gen(f"Reply {n}.") for n in range(1, REVIEW_ROUNDS + 2)), gen("Composed.")])
-    session, summary = await turn(loop_of(llm, bus, panel, await glob_registry(), evidence=None))
-    assert len(llm.requests) == REVIEW_ROUNDS + 3 and panel.calls.count("factual") == REVIEW_ROUNDS + 1
-    assert session.review_rounds == REVIEW_ROUNDS
+    llm = Llm(["Draft.", "Fix 1.", "Fix 2.", "Fix 3."])
+    session, summary = await turn(loop_of(llm, bus, panel))
+    assert len(llm.requests) == 4 and panel.calls.count("factual") == 3
     assert ["This is the last round" in m["content"] for m in findings_messages(session.messages)] == [False, False, True]
-    assert spoken == [("revising", "1 blocker")] * 2 + [("revising · last round", "1 blocker")]
+    assert spoken == [("fixing 1 · disputing 0", "1/3"), ("fixing 1 · disputing 0", "2/3"),
+                      ("fixing 1 · disputing 0", "3/3 · last round")]
     (done,) = events(bus, TaskComplete)
-    assert (done.verdict, done.summary, summary) == ("blocked", "Composed.", "Composed.")
-    asked = compose_message(session.messages)
-    assert "you revised it 3 times; some points are still open" in asked and "points still open" in asked
-    assert "- README.md:41 does not say that" in asked
-    assert [a.content for a in tool_less(bus)] == ["Composed."]
+    assert (done.verdict, done.ending, summary) == ("blocked", "fixed", "Fix 3.")
+    assert compose_messages(session.messages) == []
+
+
+async def test_a_check_that_passes_ends_review_through_the_compose_step_at_any_level(bus):
+    panel = panel_of({"factual": [answered(BLOCKER), NONE]}, level=3)
+    llm = Llm(["Draft.", "Fix 1.", "Composed."])
+    session, summary = await turn(loop_of(llm, bus, panel))
+    assert len(llm.requests) == 3 and summary == "Composed." and len(compose_messages(session.messages)) == 1
+    (done,) = events(bus, TaskComplete)
+    assert (done.verdict, done.ending) == ("pass", None)
+
+
+async def test_max_runs_ten_checks_and_nine_fixes_with_no_stall_exit_then_delivers_with_caveats(bus):
+    panel = panel_of({"factual": [A1]}, level=LIMITS_ROW.ceiling)
+    spoken = said_by_root(panel)
+    llm = Llm([*(f"Reply {n}." for n in range(1, 11)), "Composed."])
+    session, summary = await turn(loop_of(llm, bus, panel))
+    assert panel.calls.count("factual") == 10 and len(llm.requests) == 11 and len(findings_messages(session.messages)) == 9
+    assert all("This is the last round" not in m["content"] for m in findings_messages(session.messages))
+    assert spoken[0] == ("fixing 1 · disputing 0", "1/max") and spoken[-1] == ("fixing 1 · disputing 0", "9/max")
+    (done,) = events(bus, TaskComplete)
+    assert (done.verdict, done.ending, done.summary) == ("blocked", None, "Composed.")
+    assert len(compose_messages(session.messages)) == 1
+
+
+async def test_level_off_runs_no_critic_streams_live_and_publishes_unreviewed(bus):
+    panel = panel_of({"factual": [answered(BLOCKER)]}, level=0)
+    settled = []
+    panel.on_delivered = settled.append
+    log, _, on_token = recorder()
+    llm, _, summary = await streamed_turn(bus, [gen("Hello there.", call=False)], panel, on_token=on_token)
+    assert summary == "Hello there." and panel.calls == [] and settled == [] and llm.during[0] is None
+    assert llm.requests[0]["on_token"] is on_token and log
+    (done,) = events(bus, TaskComplete)
+    assert (done.verdict, done.finding, done.ending) == ("unreviewed", REVIEW_OFF, None)
+    assert reply_line(done) is None
+
+
+async def test_a_dispute_of_an_open_item_reaches_the_next_check_fenced_and_never_the_draft(bus):
+    briefs = []
+
+    async def run_child(config, task, **kw):
+        briefs.append((config.name, task))
+        return A1 if config.name == "factual" and len(briefs) <= 2 else NONE
+
+    panel = Panel(run_child, at_level(2))
+    spoken = said_by_root(panel)
+    fix = "Fixed reply.\nDisputed A1: which nmap printed nothing\nDisputed Z9: not open\n"
+    session, summary = await turn(loop_of(Llm(["Draft reply.", fix, "Composed."]), bus, panel))
+    second = [t for n, t in briefs if n == "factual"][1]
+    assert CLAIMS_LABEL in second and "A1 factual: use nmap" in second and "which nmap printed nothing" in second
+    assert "Z9" not in second and "Disputed" not in second and "Fixed reply." in second
+    assert CLAIMS_LABEL not in [t for n, t in briefs if n == "factual"][0]
+    assert spoken == [("fixing 0 · disputing 1", "1/2")] and summary == "Composed."
+
+
+async def test_a_fix_turn_that_is_only_dispute_lines_checks_the_draft_it_answers(bus):
+    seen = []
+    panel = panel_of({"factual": [A1]})
+    real = panel.run
+
+    async def spy(unit, inputs):
+        seen.append(inputs.draft)
+        return await real(unit, inputs)
+
+    panel.run = spy
+    _, summary = await turn(loop_of(Llm(["Draft reply.", "Disputed A1: it is installed"]), bus, panel))
+    assert seen == ["Draft reply."] and summary == "Draft reply."
+
+
+async def test_a_question_in_a_fix_turn_ends_review_and_the_same_text_in_a_first_draft_is_reviewed(bus):
+    ask = "Question for you: may I install nmap?"
+    panel = panel_of({"factual": [A1]})
+    llm = Llm(["Draft reply.", ask])
+    session, summary = await turn(loop_of(llm, bus, panel))
+    assert summary == ask and len(llm.requests) == 2 and panel.calls == ["jtbd", "factual"]
+    (done,) = events(bus, TaskComplete)
+    assert (done.verdict, done.ending, done.blockers) == ("blocked", "asked", 1)
+    assert compose_messages(session.messages) == []
+
+    other = type(bus)()
+    panel = panel_of()
+    _, summary = await turn(loop_of(Llm([ask, "Composed."]), other, panel))
+    assert panel.calls == ["jtbd", "factual"] and events(other, TaskComplete)[0].verdict == "pass"
 
 
 @pytest.mark.parametrize("answers, verdict, calls", [({}, "pass", 2), ({"factual": [answered("")]}, "unreviewed", 1)])
@@ -377,7 +469,7 @@ async def test_action_a_blocked_draft_is_dropped_and_the_delivered_reply_is_publ
     (action,) = tool_less(bus)
     assert (action.content, action.prompt_tokens, action.completion_tokens) == ("Fixed reply.", 40, 5)
     (done,) = events(bus, TaskComplete)
-    assert action.seq < done.seq and done.verdict == "pass"
+    assert action.seq < done.seq and (done.verdict, done.ending) == ("blocked", "fixed")
     assert session.input_tokens >= 140
 
 
@@ -423,14 +515,14 @@ class Gate:
         return self.first or NONE
 
 
-def gated_loop(bus, gate, replies=("Hello there.",)):
-    panel = Panel(gate, LIMITS)
+def gated_loop(bus, gate, replies=("Hello there.",), level=None):
+    panel = Panel(gate, LIMITS if level is None else at_level(level))
     llm = Llm(replies)
     return loop_of(llm, bus, panel), llm
 
 
-async def cancelled_during_a_critic(bus, gate, replies=("Hello there.",)):
-    loop, llm = gated_loop(bus, gate, replies)
+async def cancelled_during_a_critic(bus, gate, replies=("Hello there.",), level=None):
+    loop, llm = gated_loop(bus, gate, replies, level)
     task = asyncio.create_task(turn(loop))
     await gate.started.wait()
     loop.stop_turn(task)
@@ -488,7 +580,7 @@ async def test_cancel_during_a_critic_prints_no_turn_cancelled_and_acp_answers_e
 
 async def test_cancel_during_the_review_of_the_second_answer_delivers_it_unreviewed(bus):
     gate = Gate(blocks_on=4, first=answered(BLOCKER))
-    task, loop, llm = await cancelled_during_a_critic(bus, gate, ("Draft reply.", "Fixed reply."))
+    task, loop, llm = await cancelled_during_a_critic(bus, gate, ("Draft reply.", "Fixed reply."), level=2)
     session, summary = await task
     assert summary == "Fixed reply." and session.messages[-1]["content"] == "Fixed reply."
     (done,) = events(bus, TaskComplete)
