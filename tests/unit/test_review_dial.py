@@ -154,14 +154,14 @@ def test_bare_review_without_a_picker_lists_the_levels_with_the_current_brackete
     assert channel.sent[0][0].startswith("review: off  1  [2]  3  max") and revisions["reply"] == 2
 
 
-def test_the_terminal_picker_offers_a_phrase_per_level_and_applies_the_chosen_label(tmp_path, monkeypatch):
-    channel = TerminalDouble("3 · anything")
+def test_the_terminal_picker_is_a_row_of_levels_with_the_highlighted_one_described_below(tmp_path, monkeypatch):
+    channel = TerminalDouble("3")
     repl, revisions, _ = repl_at(tmp_path, channel)
     monkeypatch.setattr(repl, "_use_input_box", lambda: True)
     run(repl._handle_review_cmd(""))
-    ((options, current),) = channel.picker_calls
-    assert [o.split()[0] for o in options] == list(REVIEW_LEVELS) and current.startswith("1 · ")
-    assert options[0].endswith("the draft goes out as written") and "(default)" in options[1]
+    ((options, current, notes),) = channel.picker_calls
+    assert options == list(REVIEW_LEVELS) and current == "1"
+    assert notes[0].endswith("the draft goes out as written") and "(default)" in notes[1]
     assert revisions["reply"] == 3 and saved(tmp_path) == 3
 
 

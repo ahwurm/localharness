@@ -1849,7 +1849,7 @@ class TerminalChannel(ChannelAdapter):
                 self._waiting -= 1
         return Decision(kind=kind)
 
-    async def run_picker(self, options: Sequence[str], current: str | None) -> str | None:
+    async def run_picker(self, options: Sequence[str], current: str | None, notes: Sequence[str] = ()) -> str | None:
         """The one-line arrow-key picker; None on Esc, Ctrl+C or when no terminal can draw it."""
         from localharness.cli.picker import PICKER_STYLE, pick
 
@@ -1859,7 +1859,7 @@ class TerminalChannel(ChannelAdapter):
             try:
                 # INPUT_STYLE has no `selected` class; listing it last keeps this channel's hint and frame colours.
                 return await pick(
-                    list(options), current, output=output,
+                    list(options), current, output=output, notes=notes,
                     style=merge_styles([PICKER_STYLE, INPUT_STYLE]),
                     erase_when_done=ERASE_APPLICATIONS_WHEN_DONE,
                 )

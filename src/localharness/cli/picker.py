@@ -31,6 +31,7 @@ def build_picker(
     output: Any = None,
     style: Any = None,
     erase_when_done: bool = True,
+    notes: Sequence[str] = (),
 ) -> Application:
     """A one-line chooser over ``options`` with the highlight starting on ``current``.
 
@@ -43,10 +44,8 @@ def build_picker(
     state = [opts.index(current) if current in opts else 0]
 
     def _fragments() -> list[tuple[str, str]]:
-        return [
-            ("class:selected" if i == state[0] else "class:hint", f" {o} ")
-            for i, o in enumerate(opts)
-        ]
+        row = [("class:selected" if i == state[0] else "class:hint", f" {o} ") for i, o in enumerate(opts)]
+        return row + [("class:hint", f"\n {notes[state[0]]}")] if notes else row
 
     kb = KeyBindings()
 
@@ -72,7 +71,7 @@ def build_picker(
     def _leave(event) -> None:
         event.app.exit(result=None)
 
-    body = Window(FormattedTextControl(_fragments), height=1, style="class:frame")
+    body = Window(FormattedTextControl(_fragments), height=2 if notes else 1, wrap_lines=True, style="class:frame")
     app = Application(
         layout=Layout(body),
         key_bindings=kb,

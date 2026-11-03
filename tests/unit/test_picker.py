@@ -337,3 +337,10 @@ async def test_run_picker_with_a_real_box_takes_real_keystrokes(can_draw):
             assert ch._box_active is True, "the input box was not restarted"
         finally:
             await ch.stop_input_box()
+
+
+def test_notes_show_the_highlighted_option_on_a_line_below_the_row():
+    app = build_picker(["off", "1", "max"], "1", output=DummyOutput(), notes=["no check", "one check", "until it passes"])
+    text = "".join(t for _, t in app._lh_picker_fragments())
+    assert text.split("\n") == [" off  1  max ", " one check"]
+    assert "until it passes" not in text
