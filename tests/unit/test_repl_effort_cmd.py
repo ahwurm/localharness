@@ -52,8 +52,8 @@ class TerminalDouble(Chan):
         self.answer = answer
         self.picker_calls: list[tuple] = []
 
-    async def run_picker(self, options, current):
-        self.picker_calls.append((options, current))
+    async def run_picker(self, options, current, notes=()):
+        self.picker_calls.append((options, current, *([list(notes)] if notes else [])))
         return self.answer
 
 

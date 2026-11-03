@@ -1475,13 +1475,14 @@ class OrchestratorREPL:
             await self._send_info(REVIEW_SET_TEMPLATE.format(level=current, phrase=self._review_phrase(revisions["reply"])))
             return
         if not arg:
-            options = [f"{lv} · {self._review_phrase(review_level(lv))}" for lv in REVIEW_LEVELS]
-            mark = next((o for o in options if o.split()[0] == current), options[0])
+            phrases = [self._review_phrase(review_level(lv)) for lv in REVIEW_LEVELS]
             channel = self._channel
             can_pick = getattr(channel, "can_run_picker", None)
             if self._use_input_box() and hasattr(channel, "run_picker"):
-                choice = await channel.run_picker(options, mark)
+                choice = await channel.run_picker(list(REVIEW_LEVELS), current, notes=phrases)
             elif callable(can_pick) and can_pick():
+                options = [f"{lv} · {p}" for lv, p in zip(REVIEW_LEVELS, phrases)]
+                mark = next((o for o in options if o.split()[0] == current), options[0])
                 choice = await channel.run_picker(options, mark, prompt=REVIEW_PICKER_PROMPT)
             else:
                 shown = "  ".join(f"[{lv}]" if lv == current else lv for lv in REVIEW_LEVELS)
