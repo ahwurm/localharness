@@ -161,8 +161,9 @@ def test_repl_lifecycle_sites_name_the_global_pin():
     # a server; + 2 from plan 13-08: the cold swap's `resolve_serving(..., config_dir=...)` (it reads
     # the machine's selections, never launches) and `_persist_landed`'s `persist_landed(...)` (an
     # overlay + ledger write; `_persist_active_endpoint` swapped its own use of the same name for
-    # the same call). MEASURED at 17, not assumed.
-    assert text.count("self._config_dir") == 17, _where(text, "self._config_dir")
+    # the same call), + 1 from `_apply_review`, which saves the review level in the machine store
+    # (no server). MEASURED at 18, not assumed.
+    assert text.count("self._config_dir") == 18, _where(text, "self._config_dir")
     for raw in (
         "free_accelerator(self._active_heavy, ep.lifecycle, self._config_dir)",
         "strategy.stop(managed, self._config_dir)",
@@ -175,8 +176,9 @@ def test_repl_lifecycle_sites_name_the_global_pin():
     # `self._server_config_dir` is still 7 because the GPU daemon did not move either. 4 after Phase 3:
     # `/effort`'s `persist_effort` is a fourth overlay write and takes the session's config dir the
     # same way `persist_default_model` does. 6 after plan 13-08: `resolve_serving` (the cold swap's
-    # trust-resolved target) and `persist_landed` (the landing's overlay + ledger writer) take it too.
-    assert text.count("config_dir=self._config_dir") == 6, _where(text, "config_dir=self._config_dir")
+    # trust-resolved target) and `persist_landed` (the landing's overlay + ledger writer) take it too,
+    # and `write_review_level` is a seventh.
+    assert text.count("config_dir=self._config_dir") == 7, _where(text, "config_dir=self._config_dir")
 
 
 def test_init_guided_setup_names_the_global_pin():
