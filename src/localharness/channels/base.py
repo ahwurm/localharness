@@ -177,7 +177,7 @@ def reply_line(event: Any) -> str | None:
         return notice("reply", "asks you", commands, "")
     if event.ending == "fixed":
         n = event.blockers + event.notes
-        return notice("reply", f"fixed · not re-checked · {n} {'was' if n == 1 else 'were'} open", commands, "")
+        return notice("reply", f"revised · {n} point{'s' * (n != 1)} raised", commands, "")
     if verdict == "blocked":
         return notice("reply", f"with caveats · {event.blockers} blocker{'s' * (event.blockers != 1)}", commands, "")
     if verdict == "pass":

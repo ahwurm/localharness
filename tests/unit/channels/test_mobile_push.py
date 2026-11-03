@@ -715,7 +715,7 @@ def test_a_finishing_turn_is_titled_from_the_replys_verdict(verdict, finding, ti
 
 
 @pytest.mark.parametrize("verdict,finding,ending,title,body", [
-    ("blocked", "[BLOCKER] x", "fixed", "reply ready (fix not re-checked)", "the reply"),
+    ("blocked", "[BLOCKER] x", "fixed", "reply ready (revised)", "the reply"),
     ("blocked", "[BLOCKER] x", "asked", "reply needs your answer", "the reply"),
     ("unreviewed", "review is off", None, "reply ready (unchecked)", "the reply"),
     ("blocked", "[BLOCKER] x", None, "reply ready (caveats)", "[BLOCKER] x"),

@@ -59,7 +59,7 @@ nobody, which is the failure §5.5 exists to prevent.
 """
 
 REPLY_TITLES = {"pass": "reply ready", "unreviewed": "reply ready (unchecked)", "blocked": "reply ready (caveats)",
-                "fixed": "reply ready (fix not re-checked)", "asked": "reply needs your answer"}
+                "fixed": "reply ready (revised)", "asked": "reply needs your answer"}
 
 NEEDS_YOU_COOLDOWN_S = MEASURED_LONG_TURN_S
 """One alerting "needs you" per session per window.
