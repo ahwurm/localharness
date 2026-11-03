@@ -3232,7 +3232,7 @@ class AgentLoop:
             log.warning("the reply path failed", exc_info=True)
             path = ""
         job = panel.docs.read_session("jtbd.md").strip() if panel.docs else ""
-        return compose_request(path, findings, job, last)
+        return compose_request(path, findings, job, last, task)
 
     def _turn_evidence(self, session: Session) -> tuple[list[tuple[str, str | None, str]], list[str], list[str]]:
         """This turn's tool calls as (name, origin, shell command), the paths its write and edit calls named, and its tool results put in the store as handles."""

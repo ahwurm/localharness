@@ -288,17 +288,23 @@ def open_points(findings: Iterable[Finding]) -> list[str]:
 _COMPOSE_HEAD = "The review is done. Write your final reply to the person now, without tools."
 _COMPOSE_LAST = ("This is the last round: no critic reads your next answer, and once you have made the fixes above "
                  "that answer is the final reply the person reads. Write it now.")
-_COMPOSE = (" Open with two to four "
-            "sentences in your own words on how you got here: the job as you understood it, what you looked at or ran, "
-            "any change of course, and what checking it made you correct. Then give the answer, keeping its facts as they "
-            "are. When points are still open, your last line must start \"Worth double-checking:\" and name each in plain "
-            "words. Talk as you would to the person: no scores, reviewer names, item ids, apologies, talk of a review panel, "
+_COMPOSE_PATH = (" Open with two to four sentences in your own words on how you got here: the job as you understood "
+                 "it, what you looked at or ran, any change of course, and what checking it made you correct. Then give "
+                 "the answer, keeping its facts as they are. When points are still open, your last line must start "
+                 "\"Worth double-checking:\" and name each in plain words.")
+_COMPOSE_FORM = (" They asked for a length or a form: the reply is only the answer, in exactly that form, keeping its "
+                 "facts as they are; say nothing about how you got there.")
+_COMPOSE = (" Talk to the person as \"you\": no scores, reviewer names, item ids, apologies, talk of a review panel, "
             "and never call the answer corrected or revised.")
+_FORM = re.compile(r"\b(in (one|two|three|four|five|a few|[0-9]+) (sentences?|lines?|words?|bullets?|paragraphs?)"
+                   r"|one[- ]liner|one line|briefly|tl;?dr|in a sentence|in a word)\b", re.I)
 
 
-def compose_request(path: str, findings: Iterable[Finding], job: str = "", last: bool = False) -> str:
-    """The harness message that asks the root to deliver its reviewed answer in its own words, with its path and open points as data."""
-    blocks = [(_COMPOSE_LAST if last else _COMPOSE_HEAD) + _COMPOSE]
+def compose_request(path: str, findings: Iterable[Finding], job: str = "", last: bool = False, request: str = "") -> str:
+    """The harness message that asks the root to deliver its reviewed answer in its own words; an ask that names a length or form gets the answer alone."""
+    if _FORM.search(request):
+        return (_COMPOSE_LAST if last else _COMPOSE_HEAD) + _COMPOSE_FORM + _COMPOSE
+    blocks = [(_COMPOSE_LAST if last else _COMPOSE_HEAD) + _COMPOSE_PATH + _COMPOSE]
     if job:
         blocks.append(_data("the job as the session understands it", job[:Caps.BLOCK]))
     if path:
