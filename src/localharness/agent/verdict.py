@@ -28,6 +28,7 @@ family are what a tool says about itself, so a tool that misdescribes itself is 
 from __future__ import annotations
 
 import fnmatch
+import json
 import os
 import posixpath
 import re
@@ -58,7 +59,7 @@ from localharness.agent.gate_types import (
 )
 from localharness.agent.permissions import PermissionResult
 from localharness.agent.shell_classify import copy_operands
-from localharness.agent.taint import TAINTED_ASK_CLASSES, under_downloads
+from localharness.agent.taint import TAINTED_ASK_CLASSES, content_key, under_downloads
 from localharness.config.paths import WORKSPACE_DIR_NAME, global_config_dir
 from localharness.tools.base import GateFamily
 
@@ -228,6 +229,7 @@ DOWNLOADS_WRITE_REASON = (
     "with save_to, or edit a copy in the workspace")
 DOWNLOAD_EXEC_DETAIL = "runs a file saved from the web"
 SAVED_PAGES_NOTE = " — the agent has read pages saved from the web ({source})."
+WRITTEN_FILE_REASON = "runs a file the agent wrote after reading pages saved from the web ({path})"
 
 MISSING_TARGET_DISPLAY = "<no path argument>"
 """A write-shaped call that names no target at all. It cannot be resolved, so PRD §3.2 step 8's
@@ -402,6 +404,8 @@ class GateContext:
     """The saved page(s) the calling agent has read, as the ask line names them; None when it has read none."""
     content_grants: frozenset[str] = frozenset()
     """Exact-content "always" answers given while `tainted_by` is set; the only grants a severe ask honours."""
+    written: Optional[Callable[[Path], Optional[str]]] = None
+    """The digest of a file the calling agent wrote since it read saved pages, or None."""
 
 
 # ------------------------------------------------------------------- internals
@@ -1388,6 +1392,13 @@ def _evaluate_shell(
 
     for segment in non_read_only:
         runs_it = False
+        for path in _run_paths(segment, anchor, settings) if ctx.tainted_by and ctx.written else ():
+            if (digest := ctx.written(path)) is not None:
+                key = f"{path}@{digest}"
+                if not _granted(ctx, TOOL_SCRIPT_UNCONFIRMED, key):
+                    asks.append(_ask_record(TOOL_SCRIPT_UNCONFIRMED, key,
+                                            WRITTEN_FILE_REASON.format(path=path)))
+                runs_it = True
         for path, digest, position in _pending_scripts(segment, anchor, ctx):
             key = f"{path}@{digest}"
             if not _granted(ctx, TOOL_SCRIPT_UNCONFIRMED, key) or _refused(
@@ -1417,10 +1428,11 @@ def _evaluate_shell(
             else ("shell-unfamiliar",
                   f"shell command not seen in this workspace before ({segment.signature})")
         )
-        granted = _granted(ctx, klass, segment.signature)
-        if granted and _refused(ctx, klass, segment.signature) is None:
+        key = content_key("\0".join(segment.argv)) if segment.inline_interpreter and ctx.tainted_by else segment.signature
+        granted = _granted(ctx, klass, key)
+        if granted and _refused(ctx, klass, key) is None:
             continue
-        asks.append(_ask_record(klass, segment.signature, reason))
+        asks.append(_ask_record(klass, key, reason, detail=segment.signature))
     if not asks:
         return VerdictResult(Verdict.ALLOW, "read-only shell")
     return _decide(ctx, tool_name, params, asks, salient=command)
@@ -1435,12 +1447,16 @@ def _evaluate_named(
     family — a plugin's, or one whose schema could not be read — so an unknown tool is answered
     once per workspace and then remembered, instead of running unasked.
 
-    Read-only mode is handled up front in :func:`evaluate`, not here.
+    Read-only mode is handled up front in :func:`evaluate`, not here. The severity gate covers
+    ``python_exec`` only: ``cruncher_exec`` has no ``open`` or import and refuses untrusted bodies.
     """
-    if _granted(ctx, klass, tool_name) and not _refused(ctx, klass, tool_name):
+    if klass == "code-exec" and tool_name != "python_exec":
+        ctx = replace(ctx, tainted_by=None)
+    key = content_key(json.dumps(params, sort_keys=True, default=str)) if klass == "code-exec" and ctx.tainted_by else tool_name
+    if _granted(ctx, klass, key) and not _refused(ctx, klass, key):
         return VerdictResult(Verdict.ALLOW, f"granted in this workspace: {tool_name}")
     return _decide(
-        ctx, tool_name, params, [_ask_record(klass, tool_name, reason)],
+        ctx, tool_name, params, [_ask_record(klass, key, reason, detail=tool_name)],
         salient=_first_string(params),
     )
 
@@ -1704,6 +1720,20 @@ def harness_config_file_target(tool_name: str, params: dict, ctx: GateContext,
     except Exception:  # noqa: BLE001 — what this cannot read stays the verdict's to judge
         return None
     return None
+
+
+def call_paths(
+    tool_name: str, params: dict, metadata: Optional[dict], ctx: GateContext, settings: GateSettings
+) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    """The files a finished call read and the files it wrote, best effort; never raises."""
+    try:
+        read = tuple(Path(p) for p in (metadata or {}).get("paths", ()))
+        written: tuple[Path, ...] = ()
+        if tool_name in WRITE_TOOL_PATH_PARAMS and (raw := _write_target(tool_name, params)):
+            written = tuple(p for p in (_resolve(raw, Path(ctx.workspace)),) if p is not None)
+        return read, written
+    except Exception:  # noqa: BLE001 — what this cannot read marks nothing
+        return (), ()
 
 
 # ------------------------------------------------------------------- the verdict

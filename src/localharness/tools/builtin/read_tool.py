@@ -145,4 +145,5 @@ class ReadTool(Tool):
         return self.ok(
             numbered, total_lines=total_lines, lines_returned=len(selected),
             truncated=truncated, original_length=full_len if truncated else None,
+            paths=[str(target)],
         )
