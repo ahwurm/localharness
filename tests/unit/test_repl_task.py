@@ -332,7 +332,7 @@ def test_bound_at_the_defaults_is_the_units_computed_from_the_table(tmp_path):
              Unit("research", "panel"): panel("research"), Unit("step", "execute", 1): executor,
              Unit("step", "panel", 1): panel("step"), Unit("task", "panel"): panel("task")}
     assert {u: verbs.bound(flow, u) for u in units} == units
-    assert verbs.bound(flow, Unit("reply", "panel"), ("factual", "recency")) == (len(STAGES["reply"].floor) + 2) * (1 + STAGES["reply"].revisions) * critic
+    assert verbs.bound(flow, Unit("reply", "panel"), ("factual", "recency")) == (len(STAGES["reply"].floor) + 2) * STAGES["reply"].revisions * critic
 
 
 @pytest.mark.parametrize(("seconds", "printed"), [(1500, 25), (1499, 24), (600, 10), (1501, 25), (59, 0)])

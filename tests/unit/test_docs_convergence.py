@@ -1195,6 +1195,7 @@ def test_filer_walk_doc_bites():
 
 
 _PANEL = "src/localharness/orchestrator/task_flow/panel.py"
+_ONE_TO_TEN = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten")
 REPLY_PANEL_NEEDLES = (
     "A clean panel is a quality signal, never a security one",
     "a poisoned file can as easily make a critic answer `NONE` as object",
@@ -1202,7 +1203,9 @@ REPLY_PANEL_NEEDLES = (
     "the same class as the laundered influence above",
     "the first blocking finding reaches a paired phone's lock screen as the push body",
     "cut to 120 characters and encrypted to the device",
-    f"goes back to the root with its tools for up to {('', 'one', 'two', 'three', 'four')[STAGES["reply"].revisions]} rounds",
+    f"goes back to the root with its tools for as many rounds as the session's review level allows (`/review`: "
+    f"{_ONE_TO_TEN[LIMITS['revisions.reply'].default]} by default, none at `off`, at most {_ONE_TO_TEN[LIMITS['revisions.reply'].ceiling]} checks at `max`)",
+    f"`{_source_constant(_PANEL, 'CLAIMS_LABEL')}`", "never clear a blocker",
     "the last round is announced and its answer is delivered whatever the critics say",
     "for which the closing sentence is the only bound",
     "The first blocking finding is carried as `TaskComplete.finding`")
@@ -1468,7 +1471,6 @@ METAHARNESS_NEEDLES = (
     "a quality signal, never a security one", "not a barrier", "global files only", "begins with no task",
     "A reply the model wrote without using a tool goes to you as written", "Each critic's findings print as they land",
     "A reply panel prints no bound", f"{_FACT_CRITICS} also hold {_WEB_PAIR}")
-_ONE_TO_TEN = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten")
 _REVISIONS = {b: LIMITS[f"revisions.{b}"] for b in STAGES if f"revisions.{b}" in LIMITS}
 _REVISION_ORDER = [*(b for b in _REVISIONS if b != "reply"), "reply"]
 
@@ -1486,12 +1488,12 @@ def _table(page: str, heading: str) -> list[list[str]]:
 
 def _metaharness_settings() -> dict[str, tuple[str, str, str]]:
     critic, flow = LIMITS["critic"], LIMITS["flow_cap_minutes"]
-    (plus,) = {r.ceiling - r.default for r in _REVISIONS.values()}
+    (plus,) = {r.ceiling - r.default for b, r in _REVISIONS.items() if b != "reply"}
     return {
         "`panels`": ("none added", "none", f"{LIMITS['additions'].ceiling} added"),
         "`revisions`": (str(_REVISIONS["plan"].floor),
                         ", ".join(f"`{b}` {_REVISIONS[b].default}" for b in _REVISION_ORDER),
-                        f"the default plus {plus}"),
+                        f"the default plus {plus}, `reply` {_REVISIONS['reply'].ceiling}"),
         "`critics`": (_budget(critic.floor), _budget(critic.default), _budget(critic.ceiling)),
         **{f"`{k}`": (_budget(LIMITS[k].floor), _budget(LIMITS[k].default), _budget(LIMITS[k].ceiling)) for k in ("executor", "explorer")},
         "`flow_cap_minutes`": (f"{flow.floor:g}", f"{flow.default:g}", f"{flow.ceiling:g}"),
@@ -1548,8 +1550,9 @@ def test_metaharness_doc_bites():
                      ("(24 actions, 10 minutes)", "(24 actions, 11 minutes)"),
                      ("| 3 actions, 1 minute | 24 actions, 10 minutes | 24 actions, 10 minutes |",
                       "| 3 actions, 1 minute | 24 actions, 11 minutes | 24 actions, 10 minutes |"),
-                     ("| the default plus 2 |", "| the default plus 3 |"), ("`reply` 3 |", "`reply` 4 |"),
-                     ("| 3 rounds per turn |", "| 4 rounds per turn |"),
+                     ("| the default plus 2, `reply` 10 |", "| the default plus 3, `reply` 10 |"),
+                     ("`reply` 1 |", "`reply` 2 |"), ("| the default plus 2, `reply` 10 |", "| the default plus 2, `reply` 9 |"),
+                     ("| 1 check→fix cycle per turn (`/review`) |", "| 2 check→fix cycle per turn (`/review`) |"),
                      ("`checking reply · 4 critics", "`checking reply · 5 critics"), ("`checking 3/4 · factual`", "`checking 3/4 · recency`")):
         assert len(check_metaharness_doc(_swap(page, old, new))) == 1, old
 
