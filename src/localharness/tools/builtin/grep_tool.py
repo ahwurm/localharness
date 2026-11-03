@@ -160,6 +160,7 @@ class GrepTool(Tool):
 
         loop = asyncio.get_running_loop()
         lines_out: list[str] = []
+        hit_files: set[str] = set()
         total = 0
         scanned = 0
         start_t = time.monotonic()
@@ -182,9 +183,11 @@ class GrepTool(Tool):
                     for j in range(start, end):
                         lines_out.append(f"{fpath}:{j+1}: {file_lines[j]}")
                     total += 1
+                    hit_files.add(fpath)
                     if total >= limit:
                         lines_out.append(f"... (limit {limit} reached)")
-                        return self.ok("\n".join(lines_out), match_count=total, truncated=True)
+                        return self.ok("\n".join(lines_out), match_count=total, truncated=True,
+                                       paths=sorted(hit_files))
 
         if capped:
             elapsed = time.monotonic() - start_t
@@ -192,7 +195,8 @@ class GrepTool(Tool):
                 lines_out.append(
                     f"... (scan capped: {scanned} files / {elapsed:.1f}s — narrow path or glob)"
                 )
-                return self.ok("\n".join(lines_out), match_count=total, truncated=True)
+                return self.ok("\n".join(lines_out), match_count=total, truncated=True,
+                               paths=sorted(hit_files))
             return self.ok(
                 f"(no matches in first {scanned} files — scan capped; narrow path or glob)",
                 match_count=0,
@@ -201,4 +205,4 @@ class GrepTool(Tool):
 
         if not lines_out:
             return self.ok("(no matches)")
-        return self.ok("\n".join(lines_out), match_count=total)
+        return self.ok("\n".join(lines_out), match_count=total, paths=sorted(hit_files))

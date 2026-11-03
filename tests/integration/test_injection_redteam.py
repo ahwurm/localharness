@@ -144,7 +144,7 @@ def _patch_fetch_canned(monkeypatch, page: str = None):
     """
     body = page if page is not None else _INJECTED_PAGE
 
-    async def _fake_execute(self, url, max_chars=web_tool.FETCH_DEFAULT_CHARS, start_index=0):
+    async def _fake_execute(self, url, max_chars=web_tool.FETCH_DEFAULT_CHARS, start_index=0, save_to=None):
         return ToolResult(
             output=web_tool.UNTRUSTED_BANNER + body,
             success=True,

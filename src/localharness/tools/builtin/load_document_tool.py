@@ -7,12 +7,12 @@ tool RETAINS the full body in the agent's ContentStore on produce and returns on
 handle, so the orchestrator holds a grantable handle without the bytes ever entering its window. It
 then delegates over-window analysis to the cruncher with grant_handles=[<handle>].
 
-Origin is TRUSTED (a local file the agent was pointed at, like `read`). Untrusted external ingest
-stays the web path (no-host-dangerous agents only); a host-dangerous orchestrator must not pull
-untrusted bytes into its store — so this tool does not mint untrusted handles."""
+Origin is TRUSTED (a local file the agent was pointed at, like `read`), except a page saved from the
+web, whose handle is untrusted and keeps its path so reading it back marks the reader."""
 import os
 
 from localharness.agent.context import ContentStore
+from localharness.agent.taint import under_downloads
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 
 _MAX_DOC_BYTES = 50 * 1024 * 1024  # 50MB sanity cap
@@ -62,7 +62,9 @@ class LoadDocumentTool(Tool):
         except OSError as exc:
             return self.err(f"Could not read '{path}': {exc}", error_type="execution_error")
 
-        handle = self._store.put(body, origin="trusted")
+        real = os.path.realpath(p)
+        saved = under_downloads(real)
+        handle = self._store.put(body, origin="untrusted" if saved else "trusted", source=real if saved else None)
         return self.ok(
             f"[document loaded — {len(body)} chars retained as handle '{handle}' (not shown inline; "
             f"too large for the window)]\n"
@@ -70,4 +72,5 @@ class LoadDocumentTool(Tool):
             f"agent('cruncher', task='<your question about the document>', grant_handles=['{handle}']).",
             doc_handle=handle,
             chars=len(body),
+            paths=[real],
         )
