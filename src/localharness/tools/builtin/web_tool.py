@@ -11,10 +11,15 @@ import asyncio
 import json
 import os
 import re
+import secrets
+import stat
 import sys
+import unicodedata
 from asyncio.subprocess import DEVNULL, PIPE
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -165,6 +170,152 @@ def retain_window(store: Any, text: str, url: str, start: int, max_chars: int, r
         metadata={"url": url, "fetch_id": fid, "start_index": start, "next_start_index": end if more else None},
     )
 
+DOWNLOADS_MAX_BYTES = 256 * 1024 * 1024
+DOWNLOADS_MAX_FILES = 1000
+_RESERVED_NAME = re.compile(r"(?i)(con|prn|aux|nul|com[1-9]|lpt[1-9])")
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+_REPLACED_LINE = "(replaced an existing file)"
+_REMOVED_LINE = "removed {n} older downloads"
+_SALVAGE_ALTERNATIVES = ("Use the search snippet, or try a static-HTML source "
+                         "(Wikipedia, macrotrends, stockanalysis, statista, an IR/press-release page).")
+
+
+def _title(html: str) -> str:
+    m = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
+    return re.sub(r"\s+", " ", m.group(1)).strip()[:200] if m else ""
+
+
+def _slug(name: str) -> str:
+    ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().lower()
+    return re.sub(r"[^a-z0-9._-]+", "-", ascii_name).lstrip(".")[:128]
+
+
+def _download_name(save_to: str, url: str, html: str) -> str:
+    """The slug to save under: `save_to`, else the URL's last path segment, else the page title; "" when none has a letter or digit."""
+    candidates = (save_to, urlparse(url).path.rstrip("/").rsplit("/", 1)[-1], _title(html))
+    return next((slug for slug in map(_slug, candidates) if re.search(r"[a-z0-9]", slug)), "")
+
+
+def _open_dir(name: str, dir_fd: Optional[int] = None, create: bool = False) -> int:
+    try:
+        return os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
+    except FileNotFoundError:
+        if not create:
+            raise
+        os.mkdir(name, 0o700, dir_fd=dir_fd)
+        return os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
+
+
+def _trim_downloads(dfd: int, keep: str) -> int:
+    """Remove the oldest regular files (never `keep`) until the folder fits both caps; returns how many went."""
+    files = []
+    with os.scandir(dfd) as entries:
+        for entry in entries:
+            st = entry.stat(follow_symlinks=False)
+            if stat.S_ISREG(st.st_mode):
+                files.append((st.st_mtime, entry.name, st.st_size))
+    files.sort()
+    total, count, removed = sum(f[2] for f in files), len(files), 0
+    for _, name, size in files:
+        if total <= DOWNLOADS_MAX_BYTES and count <= DOWNLOADS_MAX_FILES:
+            break
+        if name == keep:
+            continue
+        os.unlink(name, dir_fd=dfd)
+        total, count, removed = total - size, count - 1, removed + 1
+    return removed
+
+
+def _write_download(boundary: Path, name: str, data: bytes) -> tuple[bool, int]:
+    """Write `data` to <boundary>/.localharness/downloads/<name> through no symlink, as a new file; returns (replaced, removed). Raises OSError."""
+    from localharness.agent.taint import DOWNLOADS
+
+    fds: list[int] = []
+    tmp = f".tmp-{secrets.token_hex(8)}"
+    try:
+        fds.append(_open_dir(str(Path(boundary) / DOWNLOADS[0]), create=True))
+        dfd = _open_dir(DOWNLOADS[1], fds[0], create=True)
+        fds.append(dfd)
+        os.fchmod(dfd, 0o700)
+        try:
+            existing = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and not stat.S_ISREG(existing.st_mode):
+            raise OSError(f"{name} is not a plain file")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
+        try:
+            os.fchmod(fd, 0o600)
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+        finally:
+            os.close(fd)
+        os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+        return existing is not None, _trim_downloads(dfd, name)
+    except BaseException:
+        if len(fds) == 2:
+            try:
+                os.unlink(tmp, dir_fd=fds[1])
+            except OSError:
+                pass
+        raise
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+
+def _save_page(store: Any, boundary: Path, text: str, stored: str, url: str, html: str,
+               save_to: str, capped: bool, content_type: str) -> ToolResult:
+    """Save the whole extracted `text` as a download and return the receipt in place of a window."""
+    from localharness.agent.taint import DOWNLOADS
+
+    def refuse(why: str) -> ToolResult:
+        return ToolResult(output="", success=False, error_type="validation_error",
+                          error=f"nothing saved: {why}")
+
+    name = _download_name(save_to, url, html)
+    if not name:
+        return refuse("give save_to a name with letters or digits")
+    if _RESERVED_NAME.fullmatch(name.split(".")[0]):
+        return refuse(f"{name!r} is a reserved file name — pick another save_to")
+    data = text.encode("utf-8")
+    if len(data) > FETCH_MAX_BODY_BYTES:
+        text = data[:FETCH_MAX_BODY_BYTES].decode("utf-8", errors="ignore")
+        data, capped = text.encode("utf-8"), True
+    try:
+        replaced, removed = _write_download(boundary, name, data)
+    except OSError as exc:
+        return refuse(f"the downloads folder cannot be written safely ({exc.strerror or exc})")
+    fid = store.put_web(stored)
+    shown = "/".join((*DOWNLOADS, name))
+    lines = [f"saved {len(text)} chars to {shown} (fetch_id={fid})",
+             f"first: {' '.join(text[:1000].split())[:200]}",
+             f"last: {' '.join(text[-1000:].split())[-200:]}"]
+    if capped:
+        lines.append(f"PREFIX ONLY: download capped at {FETCH_MAX_BODY_BYTES} bytes")
+    if replaced:
+        lines.append(_REPLACED_LINE)
+    if removed:
+        lines.append(_REMOVED_LINE.format(n=removed))
+    return ToolResult(
+        output=UNTRUSTED_BANNER + "\n".join(lines), success=True,
+        metadata={"url": url, "content_type": content_type, "fetch_id": fid, "path": shown,
+                  "chars": len(text), "capped": capped, "replaced": replaced, "removed": removed},
+    )
+
+
+def download_notice(tool_name: str, output: str) -> Optional[str]:
+    """One line for the person when a saved page replaced a file or pushed older ones out; None otherwise."""
+    if tool_name != "web_fetch":
+        return None
+    lines = output.splitlines()
+    facts = [line.strip("()") for line in lines if line == _REPLACED_LINE
+             or re.fullmatch(_REMOVED_LINE.format(n=r"\d+"), line)]
+    saved = next((line for line in lines if line.startswith("saved ")), "")
+    where = re.search(r" to (\S+)", saved)
+    return f"{where.group(1)}: {', '.join(facts)}" if facts and where else None
+
 
 class WebSearchTool(Tool):
     timeout_s = 25.0
@@ -233,9 +384,10 @@ class WebSearchTool(Tool):
 class WebFetchTool(Tool):
     timeout_s = 25.0
 
-    def __init__(self, store: Any = None) -> None:
+    def __init__(self, store: Any = None, boundary: Optional[Path] = None) -> None:
         # Per-agent ContentStore (bound via bind_agent_store_tools); bare tools share the default.
         self._store = store if store is not None else get_default_store()
+        self.boundary = boundary
 
     def info(self) -> ToolSchema:
         return ToolSchema(
@@ -264,6 +416,13 @@ class WebFetchTool(Tool):
                                        "Use the value suggested in a previous clip notice.",
                         "default": 0, "minimum": 0,
                     },
+                    "save_to": {
+                        "type": "string",
+                        "description": "A file name. Saves the page's whole text under "
+                                       ".localharness/downloads/ in the project instead of returning "
+                                       "a window, and returns a receipt; read the file afterwards "
+                                       "with read.",
+                    },
                 },
                 "required": ["url"],
             },
@@ -273,7 +432,14 @@ class WebFetchTool(Tool):
 
     async def _execute(
         self, url: str, max_chars: int = FETCH_DEFAULT_CHARS, start_index: int = 0,
+        save_to: Optional[str] = None,
     ) -> ToolResult:
+        if save_to is not None:
+            if not isinstance(save_to, str):
+                return self.err("save_to must be a file name", error_type="validation_error")
+            if self.boundary is None:
+                return self.err("nothing saved: no project folder here — start localharness in a "
+                                "project folder", error_type="validation_error")
         if not url.startswith(("http://", "https://")):  # the old wording (test_agent_loop pins it);
             return self.err(f"Invalid URL (must be http/https): {url!r}",  # netguard decides every hop
                             error_type="validation_error")
@@ -296,6 +462,7 @@ class WebFetchTool(Tool):
         body = b"".join(chunks).decode(encoding, errors="replace")
         is_html = not ("text/plain" in ctype or "json" in ctype)
         text = body if not is_html else _html_to_text(body)
+        extracted = text
         if capped:
             text += (f"\n[download capped at {FETCH_MAX_BODY_BYTES} bytes — the rest of this page "
                      f"was not retrieved; the retained text is a PREFIX, not the full page]")
@@ -303,13 +470,18 @@ class WebFetchTool(Tool):
         # Say so explicitly (don't invite a wasted re-fetch) and rescue the <title> (often the
         # headline figure) so the call is not a total loss.
         if is_html and len(text.strip()) < 80:
-            m = re.search(r"<title[^>]*>(.*?)</title>", body, re.I | re.S)
-            title = re.sub(r"\s+", " ", m.group(1)).strip()[:200] if m else ""
+            if save_to is not None:
+                return self.err("nothing saved: the page has no extractable text (likely JS-rendered "
+                                f"or blocking the fetcher). {_SALVAGE_ALTERNATIVES}",
+                                error_type="validation_error")
+            title = _title(body)
             note = ("[low extractable text — page is likely JS-rendered or blocking the fetcher; "
-                    "do NOT re-fetch this URL. Use the search snippet, or try a static-HTML source "
-                    "(Wikipedia, macrotrends, stockanalysis, statista, an IR/press-release page).")
+                    f"do NOT re-fetch this URL. {_SALVAGE_ALTERNATIVES}")
             note += f' Page title: "{title}"]' if title else "]"
             return self.ok(f"{UNTRUSTED_BANNER}URL: {final_url}\n\n{note}", url=final_url, content_type=ctype)
+        if save_to is not None:
+            return _save_page(self._store, self.boundary, extracted, text, final_url, body, save_to,
+                              capped, ctype)
         res = retain_window(self._store, text, final_url, start_index, max_chars, refetch="web_fetch")
         if not res.success:
             return res
