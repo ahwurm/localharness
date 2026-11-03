@@ -48,6 +48,7 @@ from localharness.agent.gate_types import (
     Verdict,
 )
 from localharness.agent.permissions import PermissionResult
+from localharness.agent.taint import TAINTED_ASK_CLASSES, Taint
 from localharness.agent.verdict import (
     DenyFn,
     GateContext,
@@ -437,6 +438,7 @@ class PermissionGate:
 
         self._config_deny = deny
         self._warned_cannot_ask = False
+        self.taint = Taint()
 
         self.pending: dict[int, PendingCall] = {}
         """Calls parked for a human, oldest first (owner ruling 2026-09-12).
@@ -570,8 +572,16 @@ class PermissionGate:
                 )
         return PermissionResult(denied=False)
 
-    def context(self, deny: Optional[DenyFn] = None) -> GateContext:
+    def reset_context_state(self) -> None:
+        """Clear what a context reset clears: the owner's record of saved pages read."""
+        if self.owner_agent_id is not None:
+            self.taint.end(self.owner_agent_id)
+
+    def context(self, deny: Optional[DenyFn] = None, agent_id: Optional[str] = None) -> GateContext:
         """The :class:`GateContext` for one call, gathered from this session's state."""
+        marks = {} if agent_id is None else dict(
+            tainted_by=self.taint.source(agent_id), written=partial(self.taint.written, agent_id),
+            content_grants=self.taint.grants(agent_id))
         return GateContext(
             boundary=self.boundary,
             workspace=self.workspace,
@@ -584,6 +594,7 @@ class PermissionGate:
             script_pending=partial(trust.tool_script_pending, global_dir=self.config_dir),
             config_dir=self.config_dir,
             state_dirs=self.state_dirs,
+            **marks,
         )
 
     # ---------------------------------------------------------------- check
@@ -621,7 +632,8 @@ class PermissionGate:
         # The harness's own settings files are never the agent's to change, in any mode — ahead of
         # the verdict, so no ticket, staged approval or mode turns this into an allow (orchestrator
         # ruling R13). The verdict itself still answers its protected-path ask for them.
-        hit = harness_config_file_target(tool_name, tool_params, self.context(deny), self.settings)
+        hit = harness_config_file_target(
+            tool_name, tool_params, self.context(deny, agent_id), self.settings)
         if hit is not None:
             self._approved_once.pop(identity, None)  # spent on sight, as below: never stockpiled
             reason = (HARNESS_CONFIG_FILE_REASON if hit.name.casefold() in HARNESS_CONFIG_FILES
@@ -634,7 +646,8 @@ class PermissionGate:
         # was staged) still wins, because no channel answer is above either.
         ticket = self._approved_once.pop(identity, None)
         try:
-            result = evaluate(tool_name, tool_params, tool_meta, self.context(deny), self.settings)
+            result = evaluate(
+                tool_name, tool_params, tool_meta, self.context(deny, agent_id), self.settings)
         except Exception:  # noqa: BLE001 — a verdict that crashes must deny, never escape
             log.exception(GATE_ERROR_LOG, tool_name)
             return GateOutcome(allowed=False, reason=GATE_ERROR_REASON)
@@ -993,7 +1006,11 @@ class PermissionGate:
         if decision.kind == "allow_always":
             if not request.grantable:
                 return False
+            marked = self.taint.source(request.agent_id) is not None
             for klass, key in request.grant_keys or ((request.klass, request.key),):
+                if marked and klass in TAINTED_ASK_CLASSES:
+                    self.taint.grant(request.agent_id, key)
+                    continue
                 self.grants.add(
                     new_grant(
                         key=key,

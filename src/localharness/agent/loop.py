@@ -29,6 +29,8 @@ from localharness.agent.gate import (
     tool_meta_from_schema,
 )
 from localharness.agent.gate_types import GateOutcome, ToolMeta
+from localharness.agent.taint import DISPATCHING
+from localharness.agent.verdict import call_paths
 from localharness.core.types import (
     Message,
     ToolOutcome,
@@ -1800,7 +1802,46 @@ class AgentLoop:
         if store is not None:
             store.reset()
 
+    async def _dispatch_tool(self, session: Session, tool_call: Any) -> Any:
+        """Dispatch one allowed call, then record the saved pages it read and the files it wrote."""
+        token = DISPATCHING.set(session.agent_id)
+        try:
+            result = await self._tools.dispatch(
+                tool_call.name,
+                tool_call.arguments,
+                self._config.name,
+                self._config.division or "",
+                self._config.tools,
+            )
+        finally:
+            DISPATCHING.reset(token)
+        if (taint := getattr(self._gate, "taint", None)) is not None:
+            read, written = call_paths(tool_call.name, tool_call.arguments, result.metadata,
+                                       self._gate.context(), self._gate.settings)
+            taint.note_read(session.agent_id, tool_call.name, read)
+            taint.note_write(session.agent_id, written)
+        return result
+
     async def run_turn(
+        self,
+        task: str,
+        initial_messages: list[Message] | None = None,
+        on_token: Callable | None = None,
+        images: list[dict] | None = None,
+        subtype: str = "request",
+    ) -> str:
+        """Run a turn; a subagent started inside a marked parent's tool call starts marked and ends with its run."""
+        taint, parent = getattr(self._gate, "taint", None), DISPATCHING.get()
+        child = taint is not None and parent is not None and parent != self._config.name
+        if child:
+            taint.inherit(parent, self._config.name)
+        try:
+            return await self._run_turn(task, initial_messages, on_token, images, subtype)
+        finally:
+            if child:
+                taint.end(self._config.name)
+
+    async def _run_turn(
         self,
         task: str,
         initial_messages: list[Message] | None = None,
@@ -2950,13 +2991,7 @@ class AgentLoop:
                 artifact: ArtifactRef | None = None
                 if self._tools is not None:
                     try:
-                        result = await self._tools.dispatch(
-                            tool_call.name,
-                            tool_call.arguments,
-                            self._config.name,
-                            self._config.division or "",
-                            self._config.tools,
-                        )
+                        result = await self._dispatch_tool(session, tool_call)
                         is_error = not result.success
                         # Error results carry their message in .error with output "" —
                         # forward it or the model sees an empty result it can't react to.
@@ -3751,13 +3786,7 @@ class AgentLoop:
             success = False
             if self._tools is not None:
                 try:
-                    result = await self._tools.dispatch(
-                        tool_call.name,
-                        tool_call.arguments,
-                        self._config.name,
-                        self._config.division or "",
-                        self._config.tools,
-                    )
+                    result = await self._dispatch_tool(session, tool_call)
                     result_content = result.output
                     success = result.success
                 except Exception as exc:

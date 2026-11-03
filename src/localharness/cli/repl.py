@@ -1889,6 +1889,8 @@ class OrchestratorREPL:
                 await gate.deny()
                 dropped += 1
             self._agent.clear()
+            if (reset := getattr(gate, "reset_context_state", None)) is not None:
+                reset()
             sid = self._agent.current_session_id
             if sid is not None:
                 await self._bus.publish(ConversationCleared(agent_id=self._agent._config.name, session_id=sid))
