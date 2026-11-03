@@ -163,6 +163,9 @@ def test_the_compose_request_carries_the_job_the_path_and_the_open_points_in_pla
     note = Finding("NOTE", "C1 9/10 tone", "fine", False, "jtbd", 9, "")
     text = compose_request("- You ran ip", (block, note), "Count the devices on the wifi")
     assert text.startswith("The review is done.") and "no scores, reviewer names, item ids" in text
+    formed = compose_request("- You ran ip", (block,), "job", request="in three sentences, what is this?")
+    assert "only the answer, in exactly that form" in formed and "- You ran ip" not in formed and "Worth" not in formed
+    assert "only the answer" not in compose_request("- You ran ip", (block,), request="what is this project?")
     assert "Count the devices on the wifi" in text and "- You ran ip" in text
     assert "- the list has 7, the reply says 6" in text and "tone" not in text and "2/10" not in text
     assert "points still open" not in compose_request("", (note,))
