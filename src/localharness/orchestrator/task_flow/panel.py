@@ -493,12 +493,20 @@ def revision_request(findings: Iterable[Finding], last: bool, card: str = "", co
                       compose if last and compose else _REVISE))
 
 
-def reply_brief(request: str, written: Iterable[str] = (), handles: Iterable[str] = (), provenance: str = "") -> str:
-    """The reply critics' brief: today's date, the person's request, the files the turn wrote, the granted handles and the harness's provenance measure."""
+def reply_brief(request: str, paths: Iterable[str] = (), handles: Iterable[str] = (), provenance: str = "",
+                checks: str = "", steps: str = "") -> str:
+    """The reply critics' brief: today's date, the person's request, what the review is asked to check, the turn's steps, the files it read, saved or wrote, the granted handles and the harness's provenance measure."""
+    paths = tuple(paths)
     blocks = [f"Today is {date.today().isoformat()}.", _data("the person's request this turn", request[:Caps.BLOCK])]
-    for label, items in (("the files this turn wrote", written), ("the result handles granted to you", handles)):
-        if names := ", ".join(one_line(i)[:Caps.LINE] for i in items):
+    if checks:
+        blocks.append(f"What this review is asked to check:\n{_bare(checks)}")
+    if steps:
+        blocks.append(_data("the steps this turn took", steps[:Caps.BLOCK]))
+    for label, items in (("the files this turn read, saved or wrote", paths), ("the result handles granted to you", handles)):
+        if names := ", ".join(one_line(i)[:Caps.FINDING] for i in items):
             blocks.append(_data(label, names))
+    if paths:
+        blocks.append("Read those files first; use the web or redo the work only for what they cannot answer.")
     if provenance:
         blocks.append(f"Measured by the harness: {provenance}")
     return "\n".join(blocks)

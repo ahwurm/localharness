@@ -6,7 +6,7 @@ import os
 import re
 import stat
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -49,13 +49,17 @@ MULTILINE_DESCRIPTION = ("<path> description is more than one line", "write it o
 CONTROL_DESCRIPTION = ("<path> description holds a control character", "remove the control characters")
 BAD_PURPOSE = ("<path> purpose is not one line of plain text", "write purpose: on one line")
 BAD_TOOLS = ("<path> tools is not a list of tool names", "write tools: as a list of tool names")
+BAD_REVIEW = (
+    "<path> review is not critics from <critics> and checks as text",
+    "write review: with critics: as a list of those names and checks: as text",
+)
 CAP_PROJECT = ("<dir> is past the 32 project skills kept", "remove project skills you do not need")
 CAP_TOTAL = ("<dir> is past the 64 skills kept", "remove skills you do not need")
 SHADOWED = ("<dir> is shadowed by <other>", "rename yours to keep both")
 RULES = (
     OVER_256, NOT_REGULAR, OUTSIDE, CONTROL_PATH, TOO_LARGE, UNREADABLE, NO_FRONTMATTER, UNPARSEABLE,
     ANCHORS, NOT_MAPPING, NO_NAME, BAD_NAME, LONG_NAME, NAME_DIR, BUNDLED_NAME, NO_DESCRIPTION,
-    LONG_DESCRIPTION, MULTILINE_DESCRIPTION, CONTROL_DESCRIPTION, BAD_PURPOSE, BAD_TOOLS, CAP_PROJECT, CAP_TOTAL, SHADOWED,
+    LONG_DESCRIPTION, MULTILINE_DESCRIPTION, CONTROL_DESCRIPTION, BAD_PURPOSE, BAD_TOOLS, BAD_REVIEW, CAP_PROJECT, CAP_TOTAL, SHADOWED,
 )
 
 
@@ -68,6 +72,8 @@ class Skill:
     untrusted: bool
     purpose: str = ""
     tools: tuple[str, ...] | None = None
+    critics: tuple[str, ...] | None = None
+    checks: str = ""
 
 
 @dataclass(frozen=True)
@@ -241,9 +247,23 @@ def _check(label: str, lexical_dir: Path, real_dir: Path, entry: str, bundled: f
         and all(isinstance(t, str) and t and not any(c.isspace() for c in t) and not _control(t) for t in tools)
     ):
         return _skip(BAD_TOOLS, skill_md.parent, path=skill_md)
+    from localharness.orchestrator.task_flow.panel import critic_names
+
+    review = data.get("review")
+    critics = checks = None
+    valid = review is None
+    if isinstance(review, dict):
+        critics, checks = review.get("critics"), review.get("checks")
+        names = critic_names()
+        valid = (critics is None or isinstance(critics, list) and all(isinstance(c, str) and c in names for c in critics)) and (
+            checks is None or isinstance(checks, str)
+        )
+    if not valid:
+        return _skip(BAD_REVIEW, skill_md.parent, path=skill_md, critics=", ".join(sorted(critic_names())))
     return Skill(
         name, description, label, skill_md, label == "project",
         (purpose or "").strip(), None if tools is None else tuple(dict.fromkeys(tools)),
+        None if critics is None else tuple(dict.fromkeys(critics)), (checks or "").strip(),
     )
 
 
@@ -296,6 +316,7 @@ class SkillSet:
     skills: tuple[Skill, ...]
     skipped: tuple[Skipped, ...]
     origins: tuple[tuple[str, Path, Path], ...]
+    loaded: list[Skill] = field(default_factory=list)
 
     @classmethod
     def discover(cls, config_dir, project_root) -> SkillSet:

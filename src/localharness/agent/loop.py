@@ -107,6 +107,8 @@ class Session:
     # turn's user task is pushed). The CONFIRMED-sentinel summary fallback searches ONLY
     # messages[turn_start_idx:], so it can never splice a PRIOR turn's reply as this turn's answer.
     turn_start_idx: int = 0
+    turn_started: float = 0.0
+    turn_loads: int = 0
     # #91: one bounded re-prompt spent this turn when a completion is a bare sentinel with nothing
     # in-turn to confirm (flag-guarded like act_nudge_used) — provably terminates.
     sentinel_reprompt_used: bool = False
@@ -2182,6 +2184,8 @@ class AgentLoop:
         # #91: mark where THIS turn's assistant replies will begin, so the CONFIRMED-sentinel
         # summary fallback is turn-scoped and can never splice a prior turn's reply.
         session.turn_start_idx = len(session.messages)
+        session.turn_started = time.time()
+        session.turn_loads = len(self._skill_set().loaded)
 
         # MOVE 0c: a fresh turn earns fresh compaction attempts — re-arm the per-turn fire cap
         # so a prior turn's cap never suppresses this turn's compaction.
@@ -3269,14 +3273,32 @@ class AgentLoop:
         job = panel.docs.read_session("jtbd.md").strip() if panel.docs else ""
         return compose_request(path, findings, job, last, task)
 
+    def _registered(self, kind):
+        return next((t for t in getattr(self._tools, "global_tools", list)() if isinstance(t, kind)), None)
+
+    def _skill_set(self):
+        from localharness.config.skills import SkillSet
+        from localharness.tools.builtin.skill_tool import SkillTool
+        tool = self._registered(SkillTool)
+        return tool.skills if tool is not None else SkillSet((), (), ())
+
+    def _saved_since(self, started: float) -> list[str]:
+        from localharness.agent.taint import downloads_dir
+        from localharness.tools.builtin.web_tool import WebFetchTool
+        boundary = getattr(self._registered(WebFetchTool), "boundary", None)
+        try:
+            return sorted(str(p) for p in downloads_dir(boundary).iterdir() if p.is_file() and p.stat().st_mtime >= started) if boundary else []
+        except OSError:
+            return []
+
     def _turn_evidence(self, session: Session) -> tuple[list[tuple[str, str | None, str]], list[str], list[str]]:
-        """This turn's tool calls as (name, origin, shell command), the paths its write and edit calls named, and its tool results put in the store as handles."""
+        """This turn's tool calls as (name, origin, shell command), the paths it read, saved or wrote, and its tool results put in the store as handles."""
         from localharness.orchestrator.task_flow.panel import CLASSLESS_TOOLS, WRITE_TOOLS
         messages = session.messages[session.turn_start_idx:]
         bodies = {m.get("tool_call_id"): text_of(m.get("content")) for m in messages if m.get("role") == "tool"}
         store = getattr(self._ctx, "_content_store", None)
         calls: list[tuple[str, str | None, str]] = []
-        written: list[str] = []
+        paths: list[str] = []
         handles: list[str] = []
         for m in messages:
             for call in m.get("tool_calls") or ():
@@ -3290,11 +3312,11 @@ class AgentLoop:
                 if not isinstance(arguments, dict):
                     arguments = {}
                 calls.append((name, origin, str(arguments.get("command") or "") if name == "bash_exec" else ""))
-                if name in WRITE_TOOLS and isinstance(arguments.get("path"), str):
-                    written.append(arguments["path"])
+                if name in WRITE_TOOLS | {"read", "load_document"} and isinstance(arguments.get("path"), str):
+                    paths.append(arguments["path"])
                 if name not in CLASSLESS_TOOLS and store is not None and call.get("id") in bodies:
                     handles.append(store.put(f"{name} {function.get('arguments') or ''}\n{bodies[call['id']]}", origin or "untrusted"))
-        return calls, written, handles
+        return calls, list(dict.fromkeys([*paths, *self._saved_since(session.turn_started)])), handles
 
     @contextlib.contextmanager
     def _generating(self):
@@ -3339,25 +3361,32 @@ class AgentLoop:
 
     async def _review_reply(self, session: Session, task: str, content: str | None) -> tuple[str, str | None, str, int, int, tuple]:
         """The reply panel's judgment of a draft the turn's tool calls shaped: (the summary to deliver, the verdict, the finding, blockers, notes, the findings); a draft written with no tool call goes as it is."""
-        from localharness.orchestrator.task_flow.panel import CLASSLESS_TOOLS, PanelInputs, finding_text, reply_brief, sense, typed_turns
+        from localharness.orchestrator.task_flow.panel import CLASSLESS_TOOLS, PanelInputs, finding_text, reply_brief, sense, trail, typed_turns
         from localharness.orchestrator.task_flow.record import Unit
+        from localharness.tools.builtin.skill_tool import review_of
         panel = self.reply_panel
         summary = _clean_summary(_format_completion_summary(session, content))
         started = time.monotonic()
         try:
             try:
-                calls, written, handles = self._turn_evidence(session)
-                if all(name in CLASSLESS_TOOLS for name, *_ in calls):
+                calls, paths, handles = self._turn_evidence(session)
+                critics, checks = review_of(self._skill_set().loaded[session.turn_loads:])
+                if critics == () or critics is None and all(name in CLASSLESS_TOOLS for name, *_ in calls):
                     return summary, None, "", 0, 0, ()
+                try:
+                    steps = trail(task, session.messages[session.turn_start_idx:], [], None)
+                except Exception:  # noqa: BLE001 - a missing path never costs the review
+                    log.warning("the reply path failed", exc_info=True)
+                    steps = ""
                 from localharness.agent.subagent import provenance_note
                 store = getattr(self._ctx, "_content_store", None)
                 draft_handle = store.put(summary, "untrusted") if store is not None else ""
                 sources = [text_of(m.get("content")) for m in session.messages[session.turn_start_idx:] if m.get("role") == "tool"]
                 inputs = PanelInputs(
-                    brief=reply_brief(task, written, handles, provenance_note(summary, sources)), draft=summary,
+                    brief=reply_brief(task, paths, handles, provenance_note(summary, sources), "\n".join(checks), steps), draft=summary,
                     turns=tuple(typed_turns(session.messages)), draft_handle=draft_handle,
                     handles=(*handles, *([draft_handle] if draft_handle else ())),
-                    critics=sense(calls, panel.jtbd_stood, panel.limits), disputes=session.disputes,
+                    critics=critics or sense(calls, panel.jtbd_stood, panel.limits), disputes=session.disputes,
                 )
                 result = await panel.run(Unit("reply", "panel"), inputs)
                 verdict, finding, findings = result.verdict, result.finding, result.findings

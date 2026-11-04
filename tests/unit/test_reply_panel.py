@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import re
 from types import SimpleNamespace
 
@@ -90,10 +92,10 @@ async def glob_registry():
 USED_A_TOOL = ([("glob", None)], [], [])
 
 
-def loop_of(llm, bus, panel=None, registry=None, evidence=USED_A_TOOL, context=None) -> AgentLoop:
+def loop_of(llm, bus, panel=None, registry=None, evidence=USED_A_TOOL, context=None, tools=None) -> AgentLoop:
     """The loop under test; the turn reports `evidence` (a read call by default) unless it is None, which reads the session."""
     loop = AgentLoop(
-        config=AgentConfig.model_validate({"name": "reply-agent", "role": "Test agent."}),
+        config=AgentConfig.model_validate({"name": "reply-agent", "role": "Test agent.", **({"tools": tools} if tools else {})}),
         llm=llm, bus=bus, context_manager=context or ContextManager(), tool_registry=registry,
         permission_evaluator=PermissionEvaluator(), reply_panel=panel,
     )
@@ -1183,3 +1185,155 @@ async def test_the_delivered_verdict_reaches_the_panels_on_delivered_hook(bus):
     panel.on_delivered = got.append
     await turn(loop_of(Llm(["Hello there."]), bus, panel))
     assert got == ["pass"]
+
+
+class Calls(Llm):
+    """Scripted round-trips of (text, [(tool, arguments)]); a call's id is its round-trip index."""
+
+    async def stream_complete(self, messages=None, tools=None, on_token=None):
+        self.requests.append({"messages": list(messages), "tools": tools, "on_token": on_token})
+        text, calls = self.replies[min(len(self.requests), len(self.replies)) - 1]
+        wire = [{"id": f"c{len(self.requests)}-{i}", "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+                for i, (name, args) in enumerate(calls)] or None
+        return SimpleNamespace(content=text, tool_calls=wire, finish_reason="stop"), None
+
+
+ROOT_TOOLS = {"inherit": [], "add": ["skill", "write", "read"]}
+
+
+def skill_text(name, review="", origin_body="Body."):
+    return f"---\nname: {name}\ndescription: Use {name}.\n{review}---\n{origin_body}\n"
+
+
+async def skilled_registry(tmp_path, monkeypatch, **skill_dirs):
+    """A registry holding the real skill, write and read tools over skills laid out under tmp_path: machine=, project= are {name: SKILL.md text}."""
+    from localharness.config import skills as skills_module
+    from localharness.config.skills import SkillSet
+    from localharness.tools.builtin import register_builtin_tools
+    from localharness.tools.builtin.skill_tool import SkillTool
+    from localharness.tools.registry import ToolRegistry
+    from tests.unit.test_skills_discovery import _skill
+
+    monkeypatch.setattr(skills_module, "PACKAGE_DIR", tmp_path / "pkg")
+    (tmp_path / "proj" / ".localharness").mkdir(parents=True)
+    for name, text in skill_dirs.get("machine", {}).items():
+        _skill(tmp_path / "cfg" / "skills", name, text)
+    for name, text in skill_dirs.get("project", {}).items():
+        _skill(tmp_path / "proj" / ".localharness" / "skills", name, text)
+    found = SkillSet.discover(tmp_path / "cfg", tmp_path / "proj")
+    full = ToolRegistry()
+    await register_builtin_tools(full, boundary=tmp_path / "proj")
+    from localharness.agent.context import ContentStore
+    await full.register(SkillTool(found, ContentStore(), lambda: 50_000), scope="global")
+    return full, found
+
+
+def spying(panel):
+    seen = []
+    real = panel.run
+
+    async def spy(unit, inputs):
+        seen.append(inputs)
+        return await real(unit, inputs)
+
+    panel.run = spy
+    return seen
+
+
+def skill_then_write(tmp_path, *names, reply="Done."):
+    out = tmp_path / "chapter.md"
+    return Calls([("", [("skill", {"name": n}) for n in names]), ("", [("write", {"path": str(out), "content": "x"})]), (reply, [])])
+
+
+async def test_a_loaded_skills_critics_replace_the_sensed_picks_and_its_checks_steps_and_paths_reach_the_brief(bus, tmp_path, monkeypatch):
+    review = "review:\n  critics: [spec-compliance]\n  checks: Is every scene of the download kept?\n"
+    registry, _ = await skilled_registry(tmp_path, monkeypatch, machine={"x": skill_text("x", review)})
+    panel = panel_of()
+    seen = spying(panel)
+    await turn(loop_of(skill_then_write(tmp_path, "x"), bus, panel, registry, evidence=None, tools=ROOT_TOOLS))
+    (inputs,) = seen
+    assert inputs.critics == ("spec-compliance",) and panel.calls == ["spec-compliance"]
+    assert "Is every scene of the download kept?" in inputs.brief
+    assert "You wrote chapter.md" in inputs.brief or "- You wrote" in inputs.brief
+    assert str(tmp_path / "chapter.md") in inputs.brief and "Read those files first" in inputs.brief
+    assert "<project-instructions" not in inputs.brief
+
+
+async def test_two_loaded_skills_give_the_union_of_their_critics_in_first_seen_order_and_both_checks(bus, tmp_path, monkeypatch):
+    first = skill_text("a", "review:\n  critics: [factual]\n  checks: Check one.\n")
+    second = skill_text("b", "review:\n  critics: [spec-compliance, factual]\n  checks: Check two.\n")
+    registry, _ = await skilled_registry(tmp_path, monkeypatch, machine={"a": first, "b": second})
+    panel = panel_of()
+    seen = spying(panel)
+    await turn(loop_of(skill_then_write(tmp_path, "a", "b"), bus, panel, registry, evidence=None, tools=ROOT_TOOLS))
+    (inputs,) = seen
+    assert inputs.critics == ("factual", "spec-compliance")
+    assert "Check one." in inputs.brief and "Check two." in inputs.brief
+
+
+async def test_a_loaded_skill_declaring_no_critics_runs_no_panel_and_the_draft_goes_out_unreviewed(bus, tmp_path, monkeypatch):
+    registry, _ = await skilled_registry(tmp_path, monkeypatch, machine={"x": skill_text("x", "review:\n  critics: []\n")})
+    panel = panel_of()
+    session, summary = await turn(loop_of(skill_then_write(tmp_path, "x"), bus, panel, registry, evidence=None, tools=ROOT_TOOLS))
+    assert summary == "Done." and panel.calls == []
+    (done,) = events(bus, TaskComplete)
+    assert (done.verdict, done.summary) == (None, "Done.")
+
+
+async def test_a_project_skills_checks_reach_the_brief_fenced_as_the_projects_own_text_and_a_machine_skills_plain(bus, tmp_path, monkeypatch):
+    from localharness.core.fence import TAG
+    review = "review:\n  critics: [factual]\n  checks: Keep all of it.\n"
+    registry, _ = await skilled_registry(tmp_path, monkeypatch, project={"p": skill_text("p", review)}, machine={"m": skill_text("m", review.replace("Keep all", "Machine keeps all"))})
+    panel = panel_of()
+    seen = spying(panel)
+    await turn(loop_of(skill_then_write(tmp_path, "p", "m"), bus, panel, registry, evidence=None, tools=ROOT_TOOLS))
+    (inputs,) = seen
+    assert f"<project-instructions {TAG}>\nKeep all of it.\n</project-instructions {TAG}>" in inputs.brief
+    assert "\nMachine keeps all of it.\n" in inputs.brief and inputs.brief.count(f"<project-instructions {TAG}>") == 1
+
+
+async def test_a_turn_that_loads_no_skill_keeps_the_sensed_picks_and_the_request_as_what_is_asked(bus, tmp_path, monkeypatch):
+    registry, _ = await skilled_registry(tmp_path, monkeypatch, machine={"x": skill_text("x", "review:\n  critics: [security]\n")})
+    panel = panel_of()
+    seen = spying(panel)
+    out = tmp_path / "chapter.md"
+    llm = Calls([("", [("write", {"path": str(out), "content": "x"})]), ("Done.", [])])
+    await turn(loop_of(llm, bus, panel, registry, evidence=None, tools=ROOT_TOOLS))
+    (inputs,) = seen
+    assert inputs.critics == ("jtbd", "spec-compliance") and "What this review is asked to check" not in inputs.brief
+
+
+async def test_a_skill_loaded_in_an_earlier_turn_does_not_steer_a_later_one(bus, tmp_path, monkeypatch):
+    registry, found = await skilled_registry(tmp_path, monkeypatch, machine={"x": skill_text("x", "review:\n  critics: [security]\n")})
+    found.loaded.append(found.skills[0])
+    panel = panel_of()
+    seen = spying(panel)
+    out = tmp_path / "chapter.md"
+    llm = Calls([("", [("write", {"path": str(out), "content": "x"})]), ("Done.", [])])
+    await turn(loop_of(llm, bus, panel, registry, evidence=None, tools=ROOT_TOOLS))
+    assert seen[0].critics == ("jtbd", "spec-compliance")
+
+
+async def test_a_page_saved_during_the_turn_by_a_helper_and_the_file_the_root_wrote_are_both_named(bus, tmp_path, monkeypatch):
+    registry, _ = await skilled_registry(tmp_path, monkeypatch, machine={"x": skill_text("x", "review:\n  critics: [spec-compliance]\n")})
+    downloads = tmp_path / "proj" / ".localharness" / "downloads"
+    downloads.mkdir(parents=True)
+    old = downloads / "old.md"
+    old.write_text("before the turn")
+    os.utime(old, (1, 1))
+    page = downloads / "page.md"
+    panel = panel_of()
+    seen = spying(panel)
+    llm = skill_then_write(tmp_path, "x")
+    loop = loop_of(llm, bus, panel, registry, evidence=None, tools=ROOT_TOOLS)
+    real = llm.stream_complete
+
+    async def saving(messages=None, tools=None, on_token=None):
+        if len(llm.requests) == 1:
+            page.write_text("the page")
+        return await real(messages, tools, on_token)
+
+    llm.stream_complete = saving
+    await turn(loop)
+    (inputs,) = seen
+    assert str(page) in inputs.brief and str(tmp_path / "chapter.md") in inputs.brief and "old.md" not in inputs.brief
