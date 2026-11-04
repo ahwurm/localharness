@@ -172,10 +172,12 @@ class BrowserPlugin(Plugin):
         from localharness.tools.builtin.browser_session import (
             BrowserClickTool, BrowserOpenTool, BrowserScrollTool, BrowserTypeTool)
         from localharness.tools.builtin.browser_tool import BrowserFetchTool, BrowserRuntime
+        from localharness.tools.builtin.web_tool import WebFetchTool
 
         self._runtime = BrowserRuntime(ctx.config)
-        return [cls(self._runtime) for cls in (
-            BrowserFetchTool, BrowserOpenTool, BrowserClickTool, BrowserTypeTool, BrowserScrollTool)]
+        fetch = next((t for t in ctx.tools.global_tools() if isinstance(t, WebFetchTool)), None)
+        session = (cls(self._runtime) for cls in (BrowserOpenTool, BrowserClickTool, BrowserTypeTool, BrowserScrollTool))
+        return [BrowserFetchTool(self._runtime, boundary=getattr(fetch, "boundary", None)), *session]
 
     async def stop(self, ctx: PluginContext) -> None:
         if self._runtime is not None:

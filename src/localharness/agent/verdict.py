@@ -225,8 +225,8 @@ PRIVATE_PLAN_REASON = "a task's plan is changed with /task plan, not edited"
 PRIVATE_DOC_REASON = "a task document is not editable by the agent; ask the person to edit it, then /task accept {doc}"
 PRIVATE_STATE_REASON = "harness state; not editable"
 DOWNLOADS_WRITE_REASON = (
-    "the downloads folder holds pages saved from the web and only web_fetch writes it; re-fetch "
-    "with save_to, or edit a copy in the workspace")
+    "the downloads folder holds pages saved from the web and only web_fetch and browser_fetch write it; "
+    "re-fetch with save_to, or edit a copy in the workspace")
 DOWNLOAD_EXEC_DETAIL = "runs a file saved from the web"
 SAVED_PAGES_NOTE = " — the agent has read pages saved from the web ({source})."
 WRITTEN_FILE_REASON = "runs a file the agent wrote after reading pages saved from the web ({path})"

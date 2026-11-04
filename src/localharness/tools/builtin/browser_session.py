@@ -8,7 +8,8 @@ from typing import Any
 
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 from localharness.tools.builtin.browser_proxy import NAV_TIMEOUT_S
-from localharness.tools.builtin.browser_tool import RenderError, _HTTP_FAILED, fail, refusal, render_error, render_line
+from localharness.tools.builtin.browser_tool import (
+    RenderError, _HTTP_FAILED, center_pointer, fail, refusal, render_error, render_line)
 from localharness.tools.builtin.web_tool import FETCH_MAX_BODY_BYTES, UNTRUSTED_BANNER, get_default_store, retain_window
 
 SESSION_IDLE_S = 600
@@ -278,7 +279,7 @@ async def _type(page, ref: str, text: str, submit: bool) -> ToolResult | None:
 
 
 async def _scroll(page, direction: str) -> None:
-    height = (page.viewport_size or {}).get("height", 720)
+    height = (await _bounded(center_pointer(page), ACT_S))["height"]
     await _bounded(page.mouse.wheel(0, height if direction == "down" else -height), ACT_S)
 
 
