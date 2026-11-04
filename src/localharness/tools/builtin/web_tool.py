@@ -173,7 +173,7 @@ def retain_window(store: Any, text: str, url: str, start: int, max_chars: int, r
 DOWNLOADS_MAX_BYTES = 256 * 1024 * 1024
 DOWNLOADS_MAX_FILES = 1000
 _RESERVED_NAME = re.compile(r"(?i)(con|prn|aux|nul|com[1-9]|lpt[1-9])")
-_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+_DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 _REPLACED_LINE = "(replaced an existing file)"
 _REMOVED_LINE = "removed {n} older downloads"
 _SALVAGE_ALTERNATIVES = ("Use the search snippet, or try a static-HTML source "
