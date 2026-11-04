@@ -336,6 +336,12 @@ class SkillSet:
                 return _load(record.path, lexical, real)
         return _skip(OUTSIDE, here, dir=here, origin=here.parent)
 
+    def refresh(self) -> None:
+        """Find every entry the start-time origins hold now, so a skill written since start joins the set."""
+        for _, lexical, _real in self.origins:
+            for entry in _entries(lexical)[0]:
+                self.find(entry)
+
     def find(self, name) -> Skill | Skipped | None:
         """Look a typed name up, rescanning with the start-time workspace decision; the one method that grows the set."""
         if not isinstance(name, str) or len(name) > MAX_NAME or not NAME.fullmatch(name):

@@ -481,6 +481,9 @@ class _Delegating:
         self.after_child = after_child  # what happens in the root's turn once the child has returned
         self.child_summaries: list[str] = []
 
+    def global_tools(self):
+        return []
+
     def get_tools_for_agent(self, agent_id, division_id, tool_config):
         return {}
 

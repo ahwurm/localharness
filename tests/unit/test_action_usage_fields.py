@@ -30,6 +30,9 @@ from tests.conftest import FakeCompletionUsage, FakeLLMResponse, FakeToolCall, M
 class _Registry:
     """One tool, `bash`, that always succeeds."""
 
+    def global_tools(self):
+        return []
+
     def get_tools_for_agent(self, agent_id, division_id, tool_config, **kw):
         return {}
 

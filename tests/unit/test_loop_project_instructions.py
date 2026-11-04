@@ -416,6 +416,9 @@ class _Registry:
         self.handle = handle
         self.dispatched: list[tuple[str, int]] = []
 
+    def global_tools(self):
+        return []
+
     def get_tools_for_agent(self, agent_id, division_id, tool_config):
         return {}
 

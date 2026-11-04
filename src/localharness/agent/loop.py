@@ -1267,7 +1267,6 @@ class AgentLoop:
         budget_labels: BudgetLabels | None = None,
         unattended_max_actions: int | None = None,
         project_instructions: "ProjectInstructions | None" = None,
-        skills: str = "",
         index: str = "",
         affordances: Affordances | None = None,
         turn: int = 0,
@@ -1343,6 +1342,7 @@ class AgentLoop:
         # turn start, so a cut in one turn never silences thinking in the next.
         self._thinking_off_next = False
         self._tools = tool_registry
+        self._scope_skill_tool()
         self._permissions = permission_evaluator
         # The human-approval gate (PRD §3.1-§3.5). Every tool call of every agent goes through
         # it. A caller that passes none gets a FAIL-CLOSED one: same deny tier, mode from this
@@ -1362,7 +1362,6 @@ class AgentLoop:
         # tests). The loop calls only its `candidates`, `mark_pending` and `section` and never reads,
         # hashes or writes the file (D-03); the handle owns the store.
         self._project_instructions = project_instructions
-        self._skills = skills
         self._index = index
         self._affordances = affordances
         # The reconnect seam: a supplier of the shared ServerRecovery pair for this loop's server (None
@@ -1522,7 +1521,7 @@ class AgentLoop:
             self._config,
             tool_call_mode=getattr(getattr(self._llm, "config", None), "tool_call_mode", "native"),
             guardrails=self._read_guardrails(),
-            skills=self._skills,
+            skills=self._skill_listing(),
             index=self._index,
         )
         return fixed_tokens(self._ctx._token_counter, prompt, schemas)
@@ -2105,7 +2104,7 @@ class AgentLoop:
                 self._config,
                 tool_call_mode=tool_call_mode,
                 guardrails=self._read_guardrails(),
-                skills=self._skills,
+                skills=self._skill_listing(),
                 index=self._index,
             )
             # The project's own file, fenced, directly after Guardrails and ahead of the memory slot.
@@ -3274,13 +3273,29 @@ class AgentLoop:
         return compose_request(path, findings, job, last, task)
 
     def _registered(self, kind):
-        return next((t for t in getattr(self._tools, "global_tools", list)() if isinstance(t, kind)), None)
+        return None if self._tools is None else next((t for t in self._tools.global_tools() if isinstance(t, kind)), None)
+
+    def _skill_listing(self) -> str:
+        from localharness.tools.builtin.skill_tool import SkillTool
+        tool = self._registered(SkillTool)
+        return "" if tool is None else tool.listing()
 
     def _skill_set(self):
         from localharness.config.skills import SkillSet
         from localharness.tools.builtin.skill_tool import SkillTool
         tool = self._registered(SkillTool)
         return tool.skills if tool is not None else SkillSet((), (), ())
+
+    def _scope_skill_tool(self) -> None:
+        from localharness.tools.builtin.skill_tool import SkillTool
+        tool = self._registered(SkillTool)
+        if tool is not None:
+            config = self._config
+
+            def held():
+                return [t.name for t in floor_schemas(self._tools, config.name, config.division or "", config.tools)]
+
+            self._tools.rebind_global(tool.scoped(self._ctx._content_store, held, config.skills))
 
     def _saved_since(self, started: float) -> list[str]:
         from localharness.agent.taint import downloads_dir

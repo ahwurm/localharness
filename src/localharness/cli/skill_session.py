@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 from localharness.cli.slash_commands import SlashCommand
+from localharness.config.skills import Skipped
 from localharness.core.events import Action, AffordanceCued, TurnCompleted, TurnFailed
 from localharness.tools.builtin.paths import resolve_user_path
 
@@ -32,8 +33,9 @@ def skill_row(record) -> SlashCommand:
 
 
 class SkillSession:
-    def __init__(self, skill_set, affordances=None):
+    def __init__(self, skill_set, affordances=None, refusal=None):
         self.skill_set = skill_set
+        self._refusal = refusal
         self._affordances = affordances
         self._stash: str | None = None
         self._armed: str | None = None
@@ -47,6 +49,8 @@ class SkillSession:
         return self.skill_set.find(name)
 
     def invoke(self, record, args):
+        if self._refusal is not None and (refused := self._refusal(record)) is not None:
+            return Skipped(*refused, record.path)
         text = self.skill_set.read_body(record)
         if not isinstance(text, str):
             return text

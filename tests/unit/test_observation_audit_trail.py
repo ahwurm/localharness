@@ -68,6 +68,9 @@ async def test_observation_carries_full_uncapped_output(bus):
     body = "A" * 1000
 
     class FakeRegistry:
+        def global_tools(self):
+            return []
+
         def get_tools_for_agent(self, agent_id, division_id, tool_config):
             return {}
 
@@ -159,6 +162,9 @@ async def test_model_still_sees_the_full_result(bus):
     body = "B" * 1000
 
     class FakeRegistry:
+        def global_tools(self):
+            return []
+
         def get_tools_for_agent(self, agent_id, division_id, tool_config):
             return {}
 
@@ -180,6 +186,9 @@ async def test_error_result_reports_its_own_length(bus):
     """A failed dispatch stores the forwarded '[tool error] …' text: nothing was dropped,
     so truncated stays False and original_length measures what is stored."""
     class FakeRegistry:
+        def global_tools(self):
+            return []
+
         def get_tools_for_agent(self, agent_id, division_id, tool_config):
             return {}
 

@@ -26,7 +26,7 @@ def _loop(tmp_path, **kwargs) -> AgentLoop:
         llm=SimpleNamespace(),
         bus=SimpleNamespace(),
         context_manager=SimpleNamespace(),
-        tool_registry=SimpleNamespace(),
+        tool_registry=SimpleNamespace(global_tools=list),
         permission_evaluator=SimpleNamespace(),
         **kwargs,
     )

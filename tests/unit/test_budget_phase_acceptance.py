@@ -81,6 +81,9 @@ class _Registry:
     def __init__(self):
         self.calls: list[dict] = []
 
+    def global_tools(self):
+        return []
+
     def get_tools_for_agent(self, agent_id, division_id, tool_config):
         return {}
 

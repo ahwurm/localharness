@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 
 from localharness.agent.context import ContentStore
-from localharness.config.skills import MAX_NAME, NAME, Skill, SkillSet, Skipped, shown
+from localharness.config.skills import Skill, SkillSet, Skipped, shown
 from localharness.core.caps import Caps
 from localharness.core.fence import fence_project_text
 from localharness.tools.base import Tool, ToolResult, ToolSchema
@@ -39,14 +39,14 @@ def render_listing(skills: tuple[Skill, ...]) -> str:
     return "\n".join(lines)
 
 
-def skill_schema(names: Iterable[str]) -> ToolSchema:
+def skill_schema() -> ToolSchema:
     return ToolSchema(
         name="skill", group="skill",
         gate_family="allow", ingest="none", host="safe", result_origin="trusted",
         description=SKILL_DESCRIPTION,
         parameters={
             "type": "object",
-            "properties": {"name": {"type": "string", "enum": sorted(names)}},
+            "properties": {"name": {"type": "string"}},
             "required": ["name"],
         },
     )
@@ -71,25 +71,61 @@ def review_of(loaded: Iterable[Skill]) -> tuple[tuple[str, ...] | None, list[str
 
 
 class SkillTool(Tool):
-    def __init__(self, skills: SkillSet, store: ContentStore, result_cap: Callable[[], int]) -> None:
+    def __init__(
+        self, skills: SkillSet, store: ContentStore, result_cap: Callable[[], int],
+        held: Callable[[], Iterable[str]] | None = None, allowed: Iterable[str] | None = None,
+    ) -> None:
         self._skills = skills
         self._store = store
         self._result_cap = result_cap
-        self._names = tuple(s.name for s in skills.skills)
+        self._held = held
+        self._allowed = None if allowed is None else frozenset(allowed)
 
     @property
     def skills(self) -> SkillSet:
         return self._skills
 
+    def scoped(self, store: ContentStore, held: Callable[[], Iterable[str]], allowed: Iterable[str] | None) -> SkillTool:
+        return SkillTool(self._skills, store, self._result_cap, held, allowed)
+
+    def refusal(self, record: Skill, held: frozenset[str] | None = None) -> tuple[str, str] | None:
+        """Why this agent may not load the skill and what fixes it, or None when it may."""
+        if self._allowed is not None and record.name not in self._allowed:
+            return f"skill {record.name!r} is not on this agent's skills list", "add it to skills: in this agent's file"
+        held = self._held_now() if held is None else held
+        if held is not None and (missing := [t for t in record.tools or () if t not in held]):
+            return f"skill {record.name!r} needs tools this agent lacks: {', '.join(missing)}", "give the agent those tools or load it in an agent that has them"
+        return None
+
+    def _held_now(self) -> frozenset[str] | None:
+        return None if self._held is None else frozenset(self._held())
+
+    def _pick(self, held: frozenset[str] | None) -> tuple[Skill, ...]:
+        self._skills.refresh()
+        return tuple(s for s in self._skills.skills if self.refusal(s, held) is None)
+
+    def loadable(self) -> tuple[Skill, ...]:
+        return self._pick(self._held_now())
+
+    def listing(self) -> str:
+        held = self._held_now()
+        return "" if held is not None and "skill" not in held else render_listing(self._pick(held))
+
     def info(self) -> ToolSchema:
-        return skill_schema(self._names)
+        return skill_schema()
 
     async def _execute(self, name: str) -> ToolResult:
-        valid = isinstance(name, str) and len(name) <= MAX_NAME and NAME.fullmatch(name)
-        record = next((s for s in self._skills.skills if s.name == name), None) if valid else None
+        record = self._skills.find(name)
         if record is None:
-            listed = ", ".join(sorted(s.name for s in self._skills.skills))
+            listed = ", ".join(sorted(s.name for s in self.loadable()))
             return self.err(f"no skill named {name!r}; the skills are: {listed}", error_type="validation_error")
+        if isinstance(record, Skipped):
+            return self.err(
+                f"skill {name!r} could not be read: {record.reason}. {record.fix}. Tell the person; do not retry it.",
+                error_type="not_found",
+            )
+        if (refused := self.refusal(record)) is not None:
+            return self.err(f"{refused[0]}, so it was not loaded. {refused[1]}.", error_type="validation_error")
         text = self._skills.read_body(record)
         if isinstance(text, Skipped):
             return self.err(

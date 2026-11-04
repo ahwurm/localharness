@@ -128,6 +128,9 @@ class _Registry:
         self.calls: list[dict] = []
         self._on_call = on_call
 
+    def global_tools(self):
+        return []
+
     def get_tools_for_agent(self, agent_id, division_id, tool_config):
         return {}
 

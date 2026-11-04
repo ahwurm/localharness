@@ -232,6 +232,9 @@ async def test_over_four_refusal_reaches_the_model_through_the_loop(tmp_path, bu
     tool = ToolResultGetTool(store)
 
     class Registry:
+        def global_tools(self):
+            return []
+
         def get_tools_for_agent(self, *args):
             return {}
 

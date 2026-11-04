@@ -18,6 +18,7 @@ from localharness.config.loader import ConfigLoader
 from localharness.config.models import AgentConfig, PermissionConfig
 from localharness.config.skills import LISTING_BUDGET_CHARS, Skill, SkillSet, shown
 from localharness.core.fence import TAG
+from localharness.tools.registry import ToolRegistry
 from localharness.tools.builtin.skill_tool import LISTING_HEADER, SKILLS_FENCE_HEADER, SkillTool, render_listing, skill_schema
 from tests.conftest import FakeLLMResponse
 from tests.unit.test_capabilities import _production_registry
@@ -257,14 +258,21 @@ def _listing(tmp_path, pkg):
     (proj / ".localharness").mkdir(parents=True)
     _skill(pkg / "assets" / "skills", "notes")
     _skill(proj / ".localharness" / "skills", "release-notes")
-    return render_listing(SkillSet.discover(cfg, proj).skills)
+    found = SkillSet.discover(cfg, proj)
+    return found, render_listing(found.skills)
+
+
+async def _skill_registry(found):
+    registry = ToolRegistry()
+    await registry.register(SkillTool(found, ContentStore(), lambda: 50_000), scope="global")
+    return registry
 
 
 @pytest.mark.asyncio
 async def test_the_listing_sits_after_the_guardrails_and_before_the_project_instructions(bus, tmp_path, pkg):
-    listing = _listing(tmp_path, pkg)
+    found, listing = _listing(tmp_path, pkg)
     handle = _FakeHandle(script=[("Use tabs.\n", None)])
-    loop, llm = _build(bus, handle, guardrails="No pushes.", tmp_path=tmp_path, skills=listing)
+    loop, llm = _build(bus, handle, guardrails="No pushes.", tmp_path=tmp_path, tool_registry=await _skill_registry(found))
     await loop.run_turn("hi")
     role = llm.roles[0]
     assert "## Guardrails\nNo pushes.\n\n" + listing + "\n\n## Project instructions\n" in role
@@ -277,8 +285,8 @@ async def test_the_listing_sits_after_the_guardrails_and_before_the_project_inst
 
 @pytest.mark.asyncio
 async def test_without_guardrails_the_listing_ends_the_base_prompt(bus, tmp_path, pkg):
-    listing = _listing(tmp_path, pkg)
-    loop, llm = _build(bus, None, skills=listing)
+    found, listing = _listing(tmp_path, pkg)
+    loop, llm = _build(bus, None, tool_registry=await _skill_registry(found))
     await loop.run_turn("hi")
     assert llm.roles[0].endswith("\n\n" + listing)
     assert llm.roles[0].count(listing) == 1
@@ -307,10 +315,10 @@ def test_a_listing_is_appended_once_and_verbatim(mode, native, guardrails):
 
 @pytest.mark.asyncio
 async def test_the_listing_is_byte_stable_across_turns(bus, tmp_path, pkg):
-    listing = _listing(tmp_path, pkg)
+    found, listing = _listing(tmp_path, pkg)
     loop, llm = _build(
         bus, None, responses=[FakeLLMResponse(content="One."), FakeLLMResponse(content="Two.")],
-        guardrails="No pushes.", tmp_path=tmp_path, skills=listing,
+        guardrails="No pushes.", tmp_path=tmp_path, tool_registry=await _skill_registry(found),
     )
     await loop.run_turn("hi")
     await loop.run_turn("again")
@@ -320,17 +328,16 @@ async def test_the_listing_is_byte_stable_across_turns(bus, tmp_path, pkg):
     assert second.count(listing) == 1
 
 
-def test_the_loops_fixed_part_counts_the_listing(tmp_path, pkg):
-    listing = _listing(tmp_path, pkg)
+async def test_the_loops_fixed_part_counts_the_listing(tmp_path, pkg):
+    found, listing = _listing(tmp_path, pkg)
     path = tmp_path / "GUARDRAILS.md"
     path.write_text("RULES-G", encoding="utf-8")
     plain, plain_counter = _loop(10)
-    loop, counter = _loop(10)
+    loop, counter = _loop(10, await _skill_registry(found))
     plain._guardrails_path = loop._guardrails_path = path
-    loop._skills = listing
     plain.fixed_tokens()
     loop.fixed_tokens()
-    counted = counter.seen[-1][0]["content"]
+    counted = next(m[0]["content"] for m in counter.seen if "## Guardrails" in m[0]["content"])
     assert listing in counted
     assert counted.index("## Guardrails\n") < counted.index(listing)
     assert counted == base_system_prompt(loop._config, tool_call_mode="native", guardrails="RULES-G", skills=listing)
@@ -338,7 +345,21 @@ def test_the_loops_fixed_part_counts_the_listing(tmp_path, pkg):
 
 
 def test_a_loop_built_without_skills_has_none():
-    assert _loop(10)[0]._skills == ""
+    assert _loop(10)[0]._skill_listing() == ""
+
+
+async def test_a_skill_written_mid_session_is_listed_on_the_next_turn(bus, tmp_path, pkg):
+    found, listing = _listing(tmp_path, pkg)
+    loop, llm = _build(
+        bus, None, responses=[FakeLLMResponse(content="One."), FakeLLMResponse(content="Two."), FakeLLMResponse(content="Three.")],
+        tool_registry=await _skill_registry(found),
+    )
+    await loop.run_turn("hi")
+    await loop.run_turn("again")
+    _skill(tmp_path / "proj" / ".localharness" / "skills", "fresh")
+    await loop.run_turn("once more")
+    assert len(set(llm.roles[:4])) == 1 and "fresh" not in llm.roles[0]
+    assert all(role.count("- fresh (project)") == 1 for role in llm.roles[4:])
 
 
 _ROOT = AgentConfig(name="orchestrator", role="r", model="inherit")
@@ -375,7 +396,7 @@ async def test_launch_floor_prices_the_listing_and_the_skill_schema(tmp_path, pk
     assert prompt == base_system_prompt(
         _ROOT, tool_call_mode="native", guardrails="", skills=render_listing(found.skills))
     assert prompt.endswith(render_listing(found.skills))
-    assert schemas[-1] == skill_schema(["notes"])
+    assert schemas[-1] == skill_schema()
 
 
 async def test_launch_floor_without_skills_is_todays_floor(tmp_path, pkg, monkeypatch):
@@ -489,8 +510,8 @@ async def test_start_builds_one_skill_set_for_the_floor_the_prompt_and_the_tool(
     await _start_async(None, False, False, str(tmp_path))
     (loop,) = agents
     assert [s.name for s in seen[0]] == ["notes"]
-    assert loop._skills == render_listing(seen[0]) and "- notes: Use notes when asked." in loop._skills
-    assert loop._tools.schema_of("skill").parameters["properties"]["name"]["enum"] == ["notes"]
+    assert loop._skill_listing() == render_listing(seen[0]) and "- notes: Use notes when asked." in loop._skill_listing()
+    assert loop._tools.schema_of("skill") == skill_schema()
     tool = loop._tools._tools["global"]["skill"]
     assert isinstance(tool, SkillTool) and tool._store is loop._ctx._content_store
     assert calls[0][1] == loop.floor()
@@ -500,16 +521,16 @@ async def test_start_builds_one_skill_set_for_the_floor_the_prompt_and_the_tool(
     assert tool._result_cap() == 1234
 
 
-async def test_a_late_skill_found_after_start_leaves_the_listing_as_it_was(tmp_path, pkg, monkeypatch):
+async def test_a_late_skill_written_after_start_is_listed_and_loads_by_name(tmp_path, pkg, monkeypatch):
     from localharness.cli.start_cmd import _start_async
 
     _, agents = _start_world(tmp_path, monkeypatch)
     await _start_async(None, False, False, str(tmp_path))
     (loop,) = agents
-    listing, tool = loop._skills, loop._tools._tools["global"]["skill"]
+    tool = loop._tools._tools["global"]["skill"]
     _skill(tmp_path / "skills", "late")
-    assert tool._skills.find("late").name == "late"
-    assert [s.name for s in tool._skills.skills] == ["notes", "late"] and loop._skills == listing
+    assert "- late" in loop._skill_listing()
+    assert (await tool.run(name="late")).success and [s.name for s in tool.skills.skills] == ["notes", "late"]
 
 
 async def test_a_root_that_denies_the_skill_tool_is_told_of_no_skills(tmp_path, pkg, monkeypatch):
@@ -521,7 +542,7 @@ async def test_a_root_that_denies_the_skill_tool_is_told_of_no_skills(tmp_path, 
         "name: orchestrator\nrole: Test role\nmodel: inherit\ntools:\n  deny: [skill]\n")
     await _start_async(None, False, False, str(tmp_path))
     (loop,) = agents
-    assert [s.name for s in seen[0]] == ["notes"] and loop._skills == ""
+    assert [s.name for s in seen[0]] == ["notes"] and loop._skill_listing() == ""
 
 
 async def test_a_floor_schemas_that_raises_leaves_start_running_with_the_listing(tmp_path, pkg, monkeypatch):
@@ -541,7 +562,7 @@ async def test_a_floor_schemas_that_raises_leaves_start_running_with_the_listing
     monkeypatch.setattr(context, "floor_schemas", boom_once)
     await _start_async(None, False, False, str(tmp_path))
     (loop,) = agents
-    assert calls and loop._skills == render_listing(seen[0]) and "- notes:" in loop._skills
+    assert calls and loop._skill_listing() == render_listing(seen[0]) and "- notes:" in loop._skill_listing()
 
 
 async def test_a_start_with_no_skill_has_no_listing_and_no_tool(tmp_path, pkg, monkeypatch):
@@ -550,7 +571,7 @@ async def test_a_start_with_no_skill_has_no_listing_and_no_tool(tmp_path, pkg, m
     seen, agents = _start_world(tmp_path, monkeypatch, skill=False)
     await _start_async(None, False, False, str(tmp_path))
     (loop,) = agents
-    assert seen == [()] and loop._skills == "" and loop._tools.schema_of("skill") is None
+    assert seen == [()] and loop._skill_listing() == "" and loop._tools.schema_of("skill") is None
 
 
 async def test_the_listing_and_the_schema_raise_the_floor_a_start_records(tmp_path, pkg, monkeypatch):

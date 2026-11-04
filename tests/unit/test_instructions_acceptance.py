@@ -66,6 +66,9 @@ class _Registry:
         self.marks_at_dispatch: list[tuple[str, tuple[str, ...]]] = []
         self._on_agent = on_agent
 
+    def global_tools(self):
+        return []
+
     def get_tools_for_agent(self, agent_id, division_id, tool_config):
         return {}
 

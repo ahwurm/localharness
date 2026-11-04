@@ -2098,11 +2098,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.cli.agent_cmd import config_dir_source, unread_project_agents
     from localharness.cli.skills_cmd import agents_only
     from localharness.config.skills import SkillSet
-    from localharness.tools.builtin.skill_tool import render_listing
     root = workspace.parent if workspace is not None else None
     config_dir_flag = config_dir_source(config_dir) == "flag"
     skill_set = SkillSet.discover(cfg_path, root)
-    skill_listing = render_listing(skill_set.skills)
     unread = unread_project_agents(None, config_dir) if config_dir_flag else []
     for line in _skill_start_lines(skill_set) + agents_only() + unread:
         console.print(line, style="yellow", markup=False, soft_wrap=True)
@@ -3219,9 +3217,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         except Exception:  # noqa: BLE001 — names every tool the root registered, though the loop's own resolution then holds none
             held = {"agent", "task", "skill"} if skill_set.skills else {"agent", "task"}
         flow.root_tools = sorted(held)
-        skill_listing = skill_listing if "skill" in held else ""
         affordances = None
-        if skill_listing:
+        if skill_set.skills and "skill" in held:
             from localharness.agent.affordance import Affordances
             memory_entry = plugin_resolution.plan.entry("memory") if plugin_resolution is not None else None
             bundled_memory = memory_slot.occupant_name == "memory" and memory_entry is not None and memory_entry.bundled
@@ -3262,7 +3259,6 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # the loop reads it live against the gate, so an interactive terminal root stays unbounded.
             unattended_max_actions=harness.channels.unattended_max_actions,
             project_instructions=instructions_handle,
-            skills=skill_listing,
             index=render_index(root, cfg_path, held, config_dir_flag, slash=acp_channel is None),
             affordances=affordances,
             # PAPI-04: the memory slot — the lifecycle's; its occupant (the memory plugin) feeds the
@@ -3591,6 +3587,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             pending = []  # start's own launch said it all; the REPL has nothing to add
         elif (conversion := _conversion_launch_line(harness, primary_launch_key, sensed.converted)):
             pending.insert(0, conversion)  # D-17: the conversion's line leads the first launch
+        skill_refusal = next((t.refusal for t in tool_registry.global_tools() if isinstance(t, SkillTool)), None)
         repl = OrchestratorREPL(
             orchestrator=orchestrator,
             agent_loop=agent_loop,
@@ -3618,7 +3615,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # The harness's own unit state sensed once above: the session's launches go through it too
             # (D-19) and it never senses again.
             unit_state=_unit,
-            skills=SkillSession(skill_set, affordances) if skill_set.skills else None,
+            skills=SkillSession(skill_set, affordances, skill_refusal) if skill_set.skills else None,
             task_flow=flow,
         )
 

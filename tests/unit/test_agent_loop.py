@@ -470,6 +470,9 @@ async def test_run_turn_executes_tool_calls(mock_llm_client, bus):
 
     # Mock tool registry that returns "ok" for any dispatch
     class FakeRegistry:
+        def global_tools(self):
+            return []
+
         def get_tools_for_agent(self, agent_id, division_id, tool_config):
             return {}
 
@@ -494,6 +497,9 @@ async def test_run_turn_stops_on_budget_exceeded(mock_llm_client, bus):
     ToolCallObj = mock_llm_client.ToolCall
 
     class FakeRegistry:
+        def global_tools(self):
+            return []
+
         def get_tools_for_agent(self, agent_id, division_id, tool_config):
             return {}
         async def dispatch(self, name, arguments, agent_id, division_id, tool_config):
@@ -544,6 +550,9 @@ async def test_run_turn_stops_on_stuck_escalation(mock_llm_client, bus):
     ToolCallObj = mock_llm_client.ToolCall
 
     class FakeRegistry:
+        def global_tools(self):
+            return []
+
         def get_tools_for_agent(self, agent_id, division_id, tool_config):
             return {}
         async def dispatch(self, name, arguments, agent_id, division_id, tool_config):
@@ -569,6 +578,9 @@ async def test_run_turn_injects_recovery_on_recovering(mock_llm_client, bus):
     ToolCallObj = mock_llm_client.ToolCall
 
     class FakeRegistry:
+        def global_tools(self):
+            return []
+
         def get_tools_for_agent(self, agent_id, division_id, tool_config):
             return {}
         async def dispatch(self, name, arguments, agent_id, division_id, tool_config):
@@ -593,6 +605,9 @@ async def test_run_turn_injects_recovery_on_recovering(mock_llm_client, bus):
 
 class _SameResultRegistry:
     """Every dispatch returns the same output — used to drive the stuck detector."""
+    def global_tools(self):
+        return []
+
     def get_tools_for_agent(self, agent_id, division_id, tool_config):
         return {}
     async def dispatch(self, name, arguments, agent_id, division_id, tool_config):
@@ -826,6 +841,9 @@ async def test_execute_loop_publishes_tool_call_action(mock_llm_client, bus):
     ToolCallObj = mock_llm_client.ToolCall
 
     class FakeRegistry:
+        def global_tools(self):
+            return []
+
         def get_tools_for_agent(self, agent_id, division_id, tool_config):
             return {}
         async def dispatch(self, name, arguments, agent_id, division_id, tool_config):
@@ -859,6 +877,9 @@ async def test_llm_response_action_flags_has_tool_calls(mock_llm_client, bus):
     ToolCallObj = mock_llm_client.ToolCall
 
     class FakeRegistry:
+        def global_tools(self):
+            return []
+
         def get_tools_for_agent(self, agent_id, division_id, tool_config):
             return {}
         async def dispatch(self, name, arguments, agent_id, division_id, tool_config):
@@ -941,6 +962,9 @@ async def test_heartbeat_contains_correct_iteration_and_agent(mock_llm_client, b
     ToolCallObj = mock_llm_client.ToolCall
 
     class FakeRegistry:
+        def global_tools(self):
+            return []
+
         def get_tools_for_agent(self, agent_id, division_id, tool_config):
             return {}
         async def dispatch(self, name, arguments, agent_id, division_id, tool_config):
@@ -970,6 +994,9 @@ async def test_tool_call_action_published_before_observation(mock_llm_client, bu
     ToolCallObj = mock_llm_client.ToolCall
 
     class FakeRegistry:
+        def global_tools(self):
+            return []
+
         def get_tools_for_agent(self, agent_id, division_id, tool_config):
             return {}
         async def dispatch(self, name, arguments, agent_id, division_id, tool_config):
@@ -2333,6 +2360,9 @@ class _RecordingRegistry:
     def __init__(self, dispatched: list):
         self._dispatched = dispatched
 
+    def global_tools(self):
+        return []
+
     def get_tools_for_agent(self, agent_id, division_id, tool_config):
         return {}
 
@@ -2474,6 +2504,9 @@ async def test_no_usage_fallback_counts_wire_tools_and_honors_sticky_rejection(m
             return Response(content="Done."), None  # provider omits usage
 
     class _Registry:
+        def global_tools(self):
+            return []
+
         def get_tools_for_agent(self, agent_id, division_id, tool_config):
             return {"get_weather": ToolSchema(
                 name="get_weather", description="d", parameters={"type": "object"})}
@@ -2526,6 +2559,9 @@ class _OneToolRegistry:
     """Registry exposing one real schema (so the act-guard arms) and recording dispatches."""
     def __init__(self, dispatched: list | None = None):
         self._dispatched = dispatched if dispatched is not None else []
+
+    def global_tools(self):
+        return []
 
     def get_tools_for_agent(self, agent_id, division_id, tool_config):
         from localharness.tools.base import ToolSchema
