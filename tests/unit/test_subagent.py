@@ -472,9 +472,9 @@ async def test_resolve_target_toolset_is_empty_for_the_root():
     assert _resolve_target_toolset("orchestrator", await _builtin_registry()) == []
 
 
-STATIC_ROLES = {"explore": ["read", "glob", "grep"], "cruncher": ["tool_result_get", "chunk"]}
+STATIC_ROLES = {"explore": ["read", "glob", "grep", "skill"], "cruncher": ["tool_result_get", "chunk"]}
 WEB_ROLES = ("web-researcher", "search-verifier")
-THREE = ["web_search", "web_fetch", "web_page_query"]
+THREE = ["web_search", "web_fetch", "web_page_query", "skill"]
 
 
 async def _web_base(monkeypatch, *tools, **kw):
@@ -518,7 +518,7 @@ async def test_a_bundled_web_tool_joins_both_web_roles_in_registration_order(mon
     for name in ("fake_b", "fake_a"):
         await base.register(_FakeWebTool(name), source_plugin="fakeweb")
     for role in WEB_ROLES:
-        assert builtin_toolset(role, base) == [*THREE, "fake_b", "fake_a"] == builtin_toolset(role, base)
+        assert builtin_toolset(role, base) == [*THREE[:3], "fake_b", "fake_a", "skill"] == builtin_toolset(role, base)
     assert builtin_toolset("explore", base) == STATIC_ROLES["explore"]
 
 
@@ -583,10 +583,10 @@ async def test_the_role_floor_prices_the_tools_the_role_holds(monkeypatch):
     monkeypatch.setattr(subagent, "role_floor", _floor)
     base = await _web_base(monkeypatch)
     subagent.builtin_role_floors(base, None, None, None)
-    assert seen == {"explore": 3, "web-researcher": 3, "search-verifier": 3}
+    assert seen == {"explore": 4, "web-researcher": 4, "search-verifier": 4}
     await base.register(_FakeWebTool(), source_plugin="fakeweb")
     subagent.builtin_role_floors(base, None, None, None)
-    assert seen == {"explore": 3, "web-researcher": 4, "search-verifier": 4}
+    assert seen == {"explore": 4, "web-researcher": 5, "search-verifier": 5}
 
 
 async def test_the_grant_target_gate_resolves_a_bundled_web_tool_for_a_web_role(monkeypatch):
@@ -594,7 +594,7 @@ async def test_the_grant_target_gate_resolves_a_bundled_web_tool_for_a_web_role(
     from tests.unit.test_capabilities import _FakeWebTool
 
     base = await _web_base(monkeypatch, _FakeWebTool(), source_plugin="fakeweb")
-    assert _resolve_target_toolset("search-verifier", base) == [*THREE, "fake_web"]
+    assert _resolve_target_toolset("search-verifier", base) == [*THREE[:3], "fake_web", "skill"]
     assert _resolve_target_toolset("explore", base) == STATIC_ROLES["explore"]
 
 
@@ -656,7 +656,7 @@ async def test_config_child_write_implies_edit():
     writer = AgentConfig.model_validate({
         "name": "drafter", "role": "Writes notes.", "tools": {"add": ["read", "write"]},
     })
-    assert _config_child_allowed(writer) == ["read", "write", "edit"]
+    assert _config_child_allowed(writer) == ["read", "write", "edit", "skill"]
 
     no_edit = AgentConfig.model_validate({
         "name": "drafter", "role": "Writes notes.",

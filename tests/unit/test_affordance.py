@@ -73,7 +73,7 @@ ALL = {"skill", "agent", "task"}
 FULL = """## Where things are
 Project: '/home/u/proj'.
 Skills: listed above. New ones go in '.localharness/skills' under the project root; also read: '.agents/skills' under it, and '/home/u/.localharness/skills'. `/help` lists them as `/<name>` rows; `localharness skills` also shows any skipped.
-Agents: listed in the agent tool. A delegated agent never has skill or task; `/agents` lists them for the person."""
+Agents: listed in the agent tool. A delegated agent never has task; `/agents` lists them for the person."""
 
 
 def _index(root=PROJ, machine=HOME, held=ALL, flag=False, slash=True):
@@ -123,18 +123,19 @@ def test_with_a_layer_the_project_line_comes_first_and_the_directories_are_relat
 
 
 @pytest.mark.usefixtures("pkg")
-async def test_no_delegated_agent_holds_skill_or_task(tmp_path):
+async def test_no_delegated_agent_holds_task_and_the_roles_that_choose_their_tools_hold_skill(tmp_path):
     reg = await _production_registry()
     await reg.register(SkillTool(_notes(tmp_path), ContentStore(), result_cap=lambda: 50_000), scope="global")
     await reg.register(TaskTool(make_flow(tmp_path)[0]), scope="global")
     names = {*BUILTIN_AGENT_NAMES, *subagent._STATIC_TOOLSETS, *subagent._WEB_ROLES}
     for name in names:
         toolset = subagent.builtin_toolset(name, reg)
-        assert toolset is not None and not set(toolset) & {"skill", "task"}, name
+        assert toolset is not None and "task" not in toolset, name
+        assert ("skill" in toolset) == (name in {"explore", *subagent._WEB_ROLES}), name
     assert set(subagent.NON_LEAF_AGENTS) <= names
     child = AgentConfig(name="c", role="r", tools=ToolConfig(add=["read", "skill", "task", "agent"]))
-    assert not set(subagent._config_child_allowed(child)) & {"skill", "task"}
-    assert "A delegated agent never has skill or task" in _index()
+    assert subagent._config_child_allowed(child) == ["read", "skill"]
+    assert "A delegated agent never has task" in _index()
 
 
 def test_a_newline_and_an_escape_in_a_path_stay_on_one_quoted_line():

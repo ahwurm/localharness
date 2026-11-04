@@ -68,8 +68,13 @@ async def _builtin_registry() -> ToolRegistry:
     async def _runner(*_a, **_k):  # pragma: no cover - never invoked
         return ""
 
+    from localharness.config.skills import SkillSet
+    from localharness.agent.context import ContentStore
+    from localharness.tools.builtin.skill_tool import SkillTool
+
     reg = await _production_registry()
-    for tool in (PythonExecTool(), CruncherExecTool(seed={}), AgentTool(agent_runner=_runner)):
+    skill = SkillTool(SkillSet((), (), ()), ContentStore(), lambda: 50_000)
+    for tool in (PythonExecTool(), CruncherExecTool(seed={}), AgentTool(agent_runner=_runner), skill):
         await reg.register(tool, scope="global")
     return reg
 

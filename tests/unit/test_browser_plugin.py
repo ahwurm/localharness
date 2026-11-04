@@ -1643,7 +1643,7 @@ async def test_both_web_roles_hold_the_tool_after_the_three_and_explore_does_not
     from tests.unit.test_subagent_narrowing import LEAF_TOOLSETS
 
     base = await base_with(cache, tmp_path)
-    assert [builtin_toolset(r, base) for r in WEB_ROLES] == [[*THREE, *BROWSER]] * 2
+    assert [builtin_toolset(r, base) for r in WEB_ROLES] == [[*THREE, *BROWSER, "skill"]] * 2
     assert not any(name in toolset for toolset in LEAF_TOOLSETS.values() for name in BROWSER)
 
 
@@ -1652,7 +1652,7 @@ async def test_the_floors_of_the_web_roles_price_the_browser_schemas_and_three_w
 
     seen: list[list[str]] = []
     monkeypatch.setattr(subagent, "role_floor", lambda cfg, schemas, **kw: seen.append([s.name for s in schemas]) or 0)
-    for browser, want in ((True, [*THREE, *BROWSER]), (False, THREE)):
+    for browser, want in ((True, [*THREE, *BROWSER, "skill"]), (False, [*THREE, "skill"])):
         seen.clear()
         subagent.builtin_role_floors(await base_with(cache, tmp_path, browser=browser), None, None, None)
         assert [names for names in seen if "web_fetch" in names] == [want, want]
@@ -1743,7 +1743,7 @@ async def test_with_the_plugin_off_nothing_moves(home, cache, world, tmp_path, m
     await start_plugins(resolution, bus=EventBus(), registry=base, hooks=None, llm=None,
                         paths=PluginPaths(global_config_dir=home, workspace=None, state_dir=tmp_path))
     assert not base.has("browser_fetch")
-    assert [builtin_toolset(r, base) for r in WEB_ROLES] == [THREE, THREE]
+    assert [builtin_toolset(r, base) for r in WEB_ROLES] == [[*THREE, "skill"]] * 2
     seen: list[list[str]] = []
     monkeypatch.setattr(subagent, "role_floor", lambda cfg, schemas, **kw: seen.append([s.name for s in schemas]) or 0)
     subagent.builtin_role_floors(base, None, None, None)

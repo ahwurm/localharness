@@ -68,7 +68,7 @@ def load_critic(name: str, web_tools: Iterable[str] = ()) -> AgentConfig:
         raise ValueError(f"no critic named {name!r}")
     spec = yaml.safe_load(item.read_text(encoding="utf-8"))
     return AgentConfig(name=name, purpose=spec["purpose"], role=f"{_contract().strip()}\n\n{spec['role']}",
-                       tools=ToolConfig(add=[*CRITIC_TOOLS, *web_tools]),
+                       tools=ToolConfig(add=[*CRITIC_TOOLS, *web_tools], deny=["skill"]),
                        permissions=PermissionConfig(budget=BudgetConfig()), act_guard=False)
 
 

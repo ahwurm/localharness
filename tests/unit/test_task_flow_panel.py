@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from localharness.agent.subagent import DelegationResult
+from localharness.agent.subagent import DelegationResult, _config_child_allowed
 from localharness.channels.base import notice
 from localharness.config.loader import ConfigLoader
 from localharness.config.models import ChildBudget, TaskFlowConfig
@@ -93,6 +93,7 @@ def test_load_critic_builds_the_config_with_the_fixed_toolset(name):
     config = panel.load_critic(name)
     assert config.name == name and config.act_guard is False
     assert config.tools.add == list(panel.CRITIC_TOOLS)
+    assert config.tools.deny == ["skill"] and "skill" not in _config_child_allowed(config)
     assert "\n" not in config.purpose.strip() and config.purpose.strip()
     assert len(config.role.split("\n\n", 1)[1].strip().splitlines()) <= 13
 

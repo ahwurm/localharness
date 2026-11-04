@@ -252,9 +252,13 @@ confirm would use the index it names, the same exposure any `pip install` on thi
 `.localharness/`), `~/.localharness/skills/` on your machine (or the folder a session's
 `--config-dir` names), then the bundled set inside the package, whose names no other skill can take.
 A project's skills load with its config under the workspace rule above: in a clone with no prompt,
-and from a workspace outside your project only after the trust question, which names them. Only the
-`name` and `description` of a skill are read and every other key is ignored, so `allowed-tools`
-grants nothing. A skill runs no command of its own and installs nothing. A project skill's listing
+and from a workspace outside your project only after the trust question, which names them. A skill's
+`name`, `description`, `purpose`, `tools` and `review` are read and every other key is ignored, so
+`allowed-tools` grants nothing and none of the keys read grants anything. Every agent, delegated ones
+included, loads a skill only when it already holds each tool the skill's `tools` names. A skill's
+`review` chooses only which critics check work done under it and what they check; a project skill
+has the same control over that review as your own, down to none, and its checks reach the critics
+inside the same fence as its body. A skill runs no command of its own and installs nothing. A project skill's listing
 line sits after the guardrails and the body the model loads when cued arrives as a tool result, each
 inside a fence that marks it as the project's own text, the way a project's instructions file does
 ([Project instructions files](#project-instructions-files)); the fence is a marker, not a
@@ -271,7 +275,9 @@ reused, and a custom embedding model is calibrated without the release's accepta
 is held to is that no must-not-cue labelled prompt crosses its threshold. The cue never downloads anything, and it
 identifies the cached embedding model by its content-addressed file names in the Hugging
 Face cache, without verifying the files. A project skill's body is stored as untrusted
-content, which keeps it from a child agent that holds a host-dangerous tool. The description alone
+content, and its handle is never granted to a child agent that holds a host-dangerous tool; a child
+that loads the skill through its own skill tool gets the same fenced text the root does, and the
+gate governs every call it then makes. The description alone
 steers which skill a model picks ("Under the Hood of SKILL.md", https://arxiv.org/abs/2605.11418),
 and the malicious skills found in public marketplaces hid their payload in a "Prerequisites" install
 step (Snyk's ToxicSkills audit,

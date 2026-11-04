@@ -470,15 +470,15 @@ def test_a_failed_discovery_in_the_swap_floor_falls_back_to_the_cache(tmp_path, 
     assert seen == []
 
 
-async def test_the_built_in_role_floors_do_not_move_when_the_root_holds_the_skill_tool(tmp_path, pkg):
+async def test_the_built_in_role_floors_price_the_skill_schema_when_the_root_holds_the_skill_tool(tmp_path, pkg):
     reg = await _production_registry()
     counter, llm = TokenCounter(offline=True), SimpleNamespace(config=None)
     before = subagent.builtin_role_floors(reg, counter, llm, None)
     tool = SkillTool(_notes(tmp_path), ContentStore(), result_cap=lambda: 50_000)
     await reg.register(tool, scope="global")
     after = subagent.builtin_role_floors(reg, counter, llm, None)
-    assert before == after
-    assert set(after) == {"explore", "web-researcher", "search-verifier"}
+    assert set(after) == set(before) == {"explore", "web-researcher", "search-verifier"}
+    assert all(after[role] > before[role] for role in after)
 
 
 def _start_world(base, monkeypatch, skill=True):

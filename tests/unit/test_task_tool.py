@@ -180,11 +180,11 @@ def test_description_is_one_line_per_stage_in_tool_stage_order_the_same_every_ca
     assert tool.info().description == text
 
 
-def test_config_child_allowed_still_strips_task(tmp_path):
+def test_config_child_allowed_still_strips_task_and_holds_skill(tmp_path):
     from localharness.config.models import AgentConfig, ToolConfig
 
     cfg = AgentConfig(name="c", role="r", tools=ToolConfig(add=["task", "read"]))
-    assert _config_child_allowed(cfg) == ["read"]
+    assert _config_child_allowed(cfg) == ["read", "skill"]
 
 
 @pytest.mark.parametrize("cap", [None, 1.0, 360.0])

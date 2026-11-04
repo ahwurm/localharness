@@ -87,7 +87,7 @@ def loops(monkeypatch):
     return install_fake_loop(monkeypatch)
 
 
-WEB_SET = {"web_search", "web_fetch", "web_page_query"}
+WEB_SET = {"web_search", "web_fetch", "web_page_query", "skill"}
 
 
 async def test_a_narrowed_call_does_not_leak_into_the_next(base, loops, mock_llm_client):
@@ -239,11 +239,11 @@ async def test_omitting_tools_leaves_every_child_as_it_was(base, loops, mock_llm
     task = VERIFIER_TASK if agent == "search-verifier" else "t"
     result = await runner(agent, task, **({} if tools is None else {"tools": tools}))
     assert getattr(result, "tools", None) is None
-    held = {"explore": {"read", "glob", "grep"}, "cfg": {"read", "grep", "bash_exec"}}.get(agent, WEB_SET)
+    held = {"explore": {"read", "glob", "grep", "skill"}, "cfg": {"read", "grep", "bash_exec", "skill"}}.get(agent, WEB_SET)
     assert {frozenset(lp.held) for lp in loops} == {frozenset(held)}
     if agent == "cfg":
         assert loops[0].briefs == [prepend_toolset("Budget: no action limit, no time limit.\n\nt",
-                                                   ["read", "grep", "bash_exec"])]
+                                                   ["read", "grep", "bash_exec", "skill"])]
         assert "Ignore" not in loops[0].briefs[0]
     else:
         assert loops[0].briefs == [task]
