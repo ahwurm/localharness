@@ -4,6 +4,30 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.27.7] — 2026-11-04
+
+**Web pages reach your files whole, and a skill says how its work is checked.** A helper can save a page whole into the project instead of retelling it, `browser_fetch` scrolls until a page stops loading more, an agent that has read a saved page asks before it runs or deletes anything, and a skill's `review:` block picks the critics that check work done under it, pointed at the files rather than the reply.
+
+### Added
+- **`save_to` on `web_fetch` and `browser_fetch`** — saves the page's whole text under `.localharness/downloads/` and returns a receipt (size, first and last line) instead of a window. Only those two tools write the folder, and running a file from it always asks.
+- **asks after reading a saved page** — once an agent has read a page from the downloads folder, destructive commands, inline code, `python_exec`, running a file it wrote since, and writes outside the project ask in every mode; in `auto` and `unattended` they wait as pending for ctrl+y. `/clear` ends it.
+- **a skill's `review:` block** — `critics:` and `checks:` in `SKILL.md` replace the usual reply review whenever the skill is loaded. The critics get the steps, the files read, saved or written, and what to check, and read those files before going to the web.
+- **every agent loads skills** — the orchestrator and its helpers load a skill by name or by need, one written during the session included, from their own list (by default every skill whose declared `tools:` they hold). A refused load says why and what fixes it.
+
+### Changed
+- **`browser_fetch` scrolls** until the page stops loading more (up to 10 s), keeps the first screen when scrolling drops it, and says so when a page was still growing.
+
+### Fixed
+- `browser_fetch` failed every call once `web_fetch` gained `save_to`.
+- The harness failed to import where `O_DIRECTORY` or `O_NOFOLLOW` is missing; `save_to` refuses there instead.
+
+### Known limitations
+- The asks after a saved page are best effort for the shell: a `cd` into the folder before reading or running a file, flags before a script (`bash -x`), and `grep -r` over the folder slip past them, and a plain `rm` of one file does not ask.
+- In `unattended`, a write to a protected path such as `~/.bashrc` after reading a saved page is allowed, as it was before.
+- The folder rules compare names case-sensitively, so a case-insensitive filesystem can sidestep them.
+- An "always" on such an ask works only in `guarded` and `trusted`; in `auto` each pending call needs its own ctrl+y.
+- A skill's review applies to a turn that loads the skill; a model that follows a skill from memory gets the usual review.
+
 ## [0.27.6] — 2026-11-03
 
 **`/review` reads like `/effort`, and a reply keeps the length you asked for.** The picker is a row of levels with the highlighted one described below it, the level and reply lines are in plain words, and an ask for "three sentences" gets three sentences of answer, not a paragraph about how the agent worked.
