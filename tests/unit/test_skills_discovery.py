@@ -14,6 +14,7 @@ import pytest
 from localharness.config import skills
 from localharness.config.skills import SkillSet, skip_line
 from localharness.core import content
+from localharness.orchestrator.task_flow.panel import critic_names
 
 SRC = Path(skills.__file__).resolve().parent.parent
 
@@ -86,11 +87,12 @@ def test_rules_are_the_data_in_order():
         ("<path> description holds a control character", "remove the control characters"),
         ("<path> purpose is not one line of plain text", "write purpose: on one line"),
         ("<path> tools is not a list of tool names", "write tools: as a list of tool names"),
+        ("<path> review is not critics from <critics> and checks as text", "write review: with critics: as a list of those names and checks: as text"),
         ("<dir> is past the 32 project skills kept", "remove project skills you do not need"),
         ("<dir> is past the 64 skills kept", "remove skills you do not need"),
         ("<dir> is shadowed by <other>", "rename yours to keep both"),
     )
-    assert len({fix for _, fix in skills.RULES}) == 24
+    assert len({fix for _, fix in skills.RULES}) == 25
 
 
 def _tree(name):
@@ -250,6 +252,13 @@ def _bad_tools(cfg, proj, pkg):
     return _expect(skills.BAD_TOOLS, path=_write(cfg, _fm(extra="tools: read\n")))
 
 
+def _bad_review(cfg, proj, pkg):
+    return _expect(
+        skills.BAD_REVIEW, path=_write(cfg, _fm(extra="review: {critics: [nope]}\n")),
+        critics=", ".join(sorted(critic_names())),
+    )
+
+
 def _cap_project(cfg, proj, pkg):
     for i in range(33):
         last = _skill(proj / ".localharness" / "skills", f"s{i:02d}")
@@ -291,6 +300,7 @@ CASES = [
     (skills.CONTROL_DESCRIPTION, _control_description),
     (skills.BAD_PURPOSE, _bad_purpose),
     (skills.BAD_TOOLS, _bad_tools),
+    (skills.BAD_REVIEW, _bad_review),
     (skills.CAP_PROJECT, _cap_project),
     (skills.CAP_TOTAL, _cap_total),
     (skills.SHADOWED, _shadowed),
@@ -333,7 +343,7 @@ def _bundled_and(entry, text):
 def _project_cap_and_control(cfg, proj, pkg):
     for i in range(32):
         _skill(proj / ".localharness" / "skills", f"s{i:02d}")
-    return _skill(proj / ".localharness" / "skills", "s32", _fm("s32", extra="tools: read\n")), {}
+    return _skill(proj / ".localharness" / "skills", "s32", _fm("s32", extra="review: {critics: [nope]}\n")), {"critics": _CRITICS}
 
 
 def _total_cap_and_shadow(cfg, proj, pkg):
@@ -348,6 +358,7 @@ def _plain(text, entry="a", **fields):
 
 
 LONG_A = "A" * 65
+_CRITICS = ", ".join(sorted(critic_names()))
 PAIRS = [
     (skills.NOT_REGULAR, skills.OUTSIDE, _link_and_file),
     (skills.OUTSIDE, skills.CONTROL_PATH, _outside_and_control),
@@ -366,7 +377,8 @@ PAIRS = [
     (skills.MULTILINE_DESCRIPTION, skills.CONTROL_DESCRIPTION, _plain(_fm(description='"a\\nb"'))),
     (skills.CONTROL_DESCRIPTION, skills.BAD_PURPOSE, _plain(_fm(description='"a\\tb"', extra="purpose: 7\n"))),
     (skills.BAD_PURPOSE, skills.BAD_TOOLS, _plain(_fm(extra="purpose: 7\ntools: read\n"))),
-    (skills.BAD_TOOLS, skills.CAP_PROJECT, _project_cap_and_control),
+    (skills.BAD_TOOLS, skills.BAD_REVIEW, _plain(_fm(extra="tools: read\nreview: {critics: [nope]}\n"), critics=_CRITICS)),
+    (skills.BAD_REVIEW, skills.CAP_PROJECT, _project_cap_and_control),
     (skills.CAP_TOTAL, skills.SHADOWED, _total_cap_and_shadow),
 ]
 UNREACHABLE = [
@@ -561,13 +573,13 @@ def test_echoed_names_are_cut_to_64_and_echoed_paths_are_whole(cfg):
     assert long_entry in _only(cfg)[-1]
 
 
-def test_unknown_keys_are_ignored_and_a_skill_has_seven_fields(cfg):
+def test_unknown_keys_are_ignored_and_a_skill_has_nine_fields(cfg):
     extra = "allowed-tools: [bash]\nmetadata:\n  k: v\nlicense: MIT\n"
     _write(cfg, _fm(extra=extra))
     (kept,) = SkillSet.discover(cfg, None).skills
     assert kept.name == "a"
     assert [f.name for f in dataclasses.fields(skills.Skill)] == [
-        "name", "description", "origin", "path", "untrusted", "purpose", "tools"]
+        "name", "description", "origin", "path", "untrusted", "purpose", "tools", "critics", "checks"]
 
 
 def test_no_project_root_reads_no_project_origin(cfg, proj):
@@ -675,9 +687,9 @@ def test_regular_file_test_is_lstat():
 
 def test_every_rule_has_a_case():
     assert {pair for pair, _ in CASES} == set(skills.RULES)
-    assert len(CASES) == len(skills.RULES) == 24
+    assert len(CASES) == len(skills.RULES) == 25
     fixes = [fix for _, fix in skills.RULES]
-    assert len(set(fixes)) == 24 and all(fixes)
+    assert len(set(fixes)) == 25 and all(fixes)
 
 
 def test_the_entry_bound_is_256_and_the_257th_sorted_name_is_never_read(cfg):
@@ -1162,6 +1174,31 @@ def test_malformed_tools_skip_the_skill_with_their_own_line(cfg, extra):
 def test_tools_keep_their_listed_order_with_duplicates_removed(cfg):
     found = _found(cfg, "tools: [z, a, z, m, a]\n")
     assert found.skills[0].tools == ("z", "a", "m")
+
+
+def test_review_critics_and_checks_parse_onto_the_skill(cfg):
+    found = _found(cfg, "review:\n  critics: [spec-compliance, factual, factual]\n  checks: >\n    Is every scene kept?\n")
+    assert [(s.critics, s.checks) for s in found.skills] == [(("spec-compliance", "factual"), "Is every scene kept?")]
+    assert found.skipped == ()
+
+
+def test_a_skill_without_review_has_no_critics_and_empty_checks_and_an_empty_list_is_none_at_all(cfg):
+    assert [(s.critics, s.checks) for s in _found(cfg, "").skills] == [(None, "")]
+    assert [(s.critics, s.checks) for s in _found(cfg, "review:\n").skills] == [(None, "")]
+    assert [(s.critics, s.checks) for s in _found(cfg, "review: {critics: []}\n").skills] == [((), "")]
+
+
+@pytest.mark.parametrize("extra", [
+    "review: {critics: [nope]}\n", "review: [factual]\n", "review: yes\n", "review: {critics: factual}\n",
+    "review: {critics: [[factual]]}\n", "review: {critics: [7]}\n", "review: {checks: [a]}\n",
+    "review: {critics: [factual, nope]}\n",
+])
+def test_a_malformed_review_skips_the_skill_and_the_line_names_the_valid_critics(cfg, extra):
+    found = _found(cfg, extra)
+    assert found.skills == ()
+    (line,) = [skip_line(s) for s in found.skipped]
+    assert line == _expect(skills.BAD_REVIEW, path=cfg / "skills" / "a" / "SKILL.md", critics=", ".join(sorted(critic_names())))
+    assert "spec-compliance" in line and "jtbd" in line
 
 
 def test_only_the_display_and_parse_modules_read_a_purpose():

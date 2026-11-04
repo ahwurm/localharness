@@ -5,6 +5,7 @@
 - `description`: one line, at most 1024 characters, best at most 250. Avoid `: ` and ` #` inside it, or quote it.
 - `purpose`, optional: one line of plain text, at most 1024 characters. Nothing reads it yet.
 - `tools`, optional: a list of tool names. Nothing reads it yet.
+- `review`, optional: `critics` from the critic set replace the usual reply review whenever the skill is loaded (`critics: []` runs none); `checks` says what done right means.
 - Every other key is ignored. `allowed-tools` grants nothing.
 
 ## Layout
@@ -73,6 +74,7 @@ A project skill shadows a machine one of the same name. A bundled name cannot be
 - `skipped: <path> description holds a control character. remove the control characters.`
 - `skipped: <path> purpose is not one line of plain text. write purpose: on one line.`
 - `skipped: <path> tools is not a list of tool names. write tools: as a list of tool names.`
+- `skipped: <path> review is not critics from <critics> and checks as text. write review: with critics: as a list of those names and checks: as text.`
 - `skipped: <dir> is past the 32 project skills kept. remove project skills you do not need.`
 - `skipped: <dir> is past the 64 skills kept. remove skills you do not need.`
 - `skipped: <dir> is shadowed by <other>. rename yours to keep both.`

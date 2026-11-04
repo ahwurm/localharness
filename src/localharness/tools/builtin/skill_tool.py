@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterable
 
 from localharness.agent.context import ContentStore
 from localharness.config.skills import MAX_NAME, NAME, Skill, SkillSet, Skipped, shown
+from localharness.core.caps import Caps
 from localharness.core.fence import fence_project_text
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 from localharness.tools.registry import cut_output
@@ -59,12 +60,26 @@ def _body(text: str) -> str:
     return "\n".join(lines).strip("\r\n")
 
 
+def review_of(loaded: Iterable[Skill]) -> tuple[tuple[str, ...] | None, list[str]]:
+    """The union of the loaded skills' declared critics (None when none declares), and their checks, a project skill's fenced."""
+    loaded = list(loaded)
+    declared = [s.critics for s in loaded if s.critics is not None]
+    critics = None if not declared else tuple(dict.fromkeys(c for names in declared for c in names))
+    asked = [s for s in loaded if s.checks]
+    cap = Caps.BLOCK // max(len(asked), 1)
+    return critics, [fence_project_text(SKILLS_FENCE_HEADER, s.checks[:cap]) if s.untrusted else s.checks[:cap] for s in asked]
+
+
 class SkillTool(Tool):
     def __init__(self, skills: SkillSet, store: ContentStore, result_cap: Callable[[], int]) -> None:
         self._skills = skills
         self._store = store
         self._result_cap = result_cap
         self._names = tuple(s.name for s in skills.skills)
+
+    @property
+    def skills(self) -> SkillSet:
+        return self._skills
 
     def info(self) -> ToolSchema:
         return skill_schema(self._names)
@@ -81,6 +96,7 @@ class SkillTool(Tool):
                 f"skill {name!r} could not be read: {text.reason}. Tell the person; do not retry it.",
                 error_type="not_found",
             )
+        self._skills.loaded.append(record)
         body = _body(text)
         header = f"skill {name!r} ({record.origin}), directory {str(record.path.parent.absolute())!r}"
 
