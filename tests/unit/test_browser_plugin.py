@@ -784,9 +784,10 @@ def test_the_schema_is_web_fetchs_with_the_one_description_and_its_name():
     schema, web = tool.info(), WebFetchTool(ContentStore()).info()
     assert schema.description == DESCRIPTION
     assert schema.parameters["properties"]["url"] == {"type": "string", "description": "The https URL to render."}
-    assert {**schema.parameters["properties"], "url": None} == {**web.parameters["properties"], "url": None}
+    web_props = {k: v for k, v in web.parameters["properties"].items() if k != "save_to"}
+    assert {**schema.parameters["properties"], "url": None} == {**web_props, "url": None}
     assert {**schema.parameters, "properties": None} == {**web.parameters, "properties": None}
-    assert list(schema.parameters["properties"]) == list(web.parameters["properties"])
+    assert list(schema.parameters["properties"]) == list(web_props)
     assert schema.name == "browser_fetch" and isinstance(tool, StoreBound)
     assert (schema.group, schema.estimated_tokens, schema.destructive) == (web.group, web.estimated_tokens, False)
     assert tool.timeout_s == browser_tool.NAV_TIMEOUT_S + 20

@@ -388,7 +388,8 @@ def render_line(e: RenderError) -> str:
 
 _WEB = WebFetchTool(store=object()).info().parameters
 _PARAMETERS = {**_WEB, "properties": {
-    **_WEB["properties"], "url": {**_WEB["properties"]["url"], "description": "The https URL to render."}}}
+    **{k: v for k, v in _WEB["properties"].items() if k != "save_to"},
+    "url": {**_WEB["properties"]["url"], "description": "The https URL to render."}}}
 
 
 class BrowserFetchTool(Tool):
