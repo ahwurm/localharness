@@ -720,18 +720,28 @@ async def test_a_word_longer_than_a_row_name_is_looked_up_and_a_row_backed_word_
     terminal.agent.run_turn.assert_not_called()
 
 
-async def test_the_listing_and_the_enum_stay_as_start_fixed_them(terminal, monkeypatch, tmp_path):
+async def test_the_next_turns_listing_carries_a_skill_written_after_start(terminal):
     from localharness.agent.context import ContentStore
     from localharness.tools.builtin import skill_tool
 
     tool = skill_tool.SkillTool(terminal.found, ContentStore(), lambda: 10_000)
-    assert tool.info().parameters["properties"]["name"]["enum"] == ["notes"]
+    assert "- fresh" not in tool.listing()
     write_skill(terminal.cfg / "skills", "fresh")
-    with monkeypatch.context() as m:
-        m.setattr(skill_tool, "render_listing", lambda *_: pytest.fail("the listing was rebuilt"))
-        m.setattr(skill_tool, "skill_schema", lambda *_: pytest.fail("the schema was rebuilt"))
-        assert await terminal.repl._handle_slash("/fresh go") is True
-    assert tool.info().parameters["properties"]["name"]["enum"] == ["notes"]
+    assert "- fresh" in tool.listing()
+    assert tool.info() == skill_tool.skill_schema()
+
+
+async def test_a_name_the_root_may_not_load_prints_the_reason_and_the_fix_and_starts_nothing(terminal):
+    from localharness.agent.context import ContentStore
+    from localharness.tools.builtin import skill_tool
+
+    tool = skill_tool.SkillTool(terminal.found, ContentStore(), lambda: 10_000).scoped(ContentStore(), lambda: ["skill"], ["other"])
+    terminal.repl._skills = SkillSession(terminal.found, None, tool.refusal)
+    assert await terminal.repl._handle_slash("/notes") is True
+    (text, meta), = terminal.channel.sent
+    assert text == "skipped: skill 'notes' is not on this agent's skills list. add it to skills: in this agent's file." and meta == {"style": "system.error"}
+    assert terminal.repl._slash_followup is None
+    terminal.agent.run_turn.assert_not_called()
 
 
 def _watch_run(monkeypatch, *lines):

@@ -270,7 +270,7 @@ async def launch_floor(agent_config: Any, skills: tuple = (), *, root: Path | No
     try:
         schemas = floor_schemas(registry, agent_config.name, agent_config.division or "", tools)
         if skills:
-            schemas = [*schemas, skill_schema(s.name for s in skills)]
+            schemas = [*schemas, skill_schema()]
     except Exception:  # noqa: BLE001 — the loop's own count degrades the same way: no schemas
         schemas = []
     # agent and task register after this count and the slash form is the longer one: over-prices, never under

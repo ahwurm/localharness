@@ -257,10 +257,11 @@ def test_the_loop_floor_rises_by_the_index_alone():
                     - fixed_tokens(counter, base_system_prompt(_CFG, **kw), [])) > 0
 
 
-async def test_every_turn_carries_the_index_after_the_listing_and_before_the_instructions(bus, tmp_path):
-    listing = "## Skills\n- notes: d"
+async def test_every_turn_carries_the_index_after_the_listing_and_before_the_instructions(bus, tmp_path, pkg):
+    from tests.unit.test_skills_listing import _listing, _skill_registry
+    found, listing = _listing(tmp_path, pkg)
     loop, llm = _build(bus, _FakeHandle(script=[("Use tabs.\n", None)]), guardrails="No pushes.",
-                       tmp_path=tmp_path, skills=listing, index=FULL)
+                       tmp_path=tmp_path, tool_registry=await _skill_registry(found), index=FULL)
     await loop.run_turn("hi")
     role = llm.roles[0]
     assert role.count(FULL) == 1
@@ -404,7 +405,7 @@ async def test_a_floor_schemas_that_raises_keeps_every_line_the_root_registered(
     index = loop._index
     assert _line(index, "Agents: ") is not None
     if skill:
-        assert _line(index, "Skills: ") is not None and "- notes: Use notes when asked." in loop._skills
+        assert _line(index, "Skills: ") is not None and "- notes: Use notes when asked." in loop._skill_listing()
     else:
         assert _line(index, "Skills: ") is None
 

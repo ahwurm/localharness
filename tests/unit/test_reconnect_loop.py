@@ -103,6 +103,9 @@ class _Registry:
     def __init__(self) -> None:
         self.ran = 0
 
+    def global_tools(self):
+        return []
+
     def get_tools_for_agent(self, agent_id, division_id, tool_config):
         return {}
 

@@ -25,7 +25,7 @@ from localharness.config.skills import BUNDLED_NAME, LISTING_BUDGET_CHARS, ORIGI
 from localharness.agent import subagent
 from tests.unit.test_subagent_narrowing import LEAF_TOOLSETS
 from localharness.agent.context import MAX_ACTIVE_REFERENCES, ContentStore
-from localharness.tools.builtin.skill_tool import SkillTool
+from localharness.tools.builtin.skill_tool import SkillTool, skill_schema
 from localharness.tools.registry import ToolRegistry
 from tests.unit.agent.test_auto_mode import SETTINGS, SHELL, WRITE, _ctx, _shell, _verdict
 from tests.unit.test_docs_convergence import (
@@ -351,8 +351,8 @@ async def test_a_real_start_lists_the_creator_and_registers_the_tool(tmp_path, m
     await _start_async(None, False, False, str(tmp_path))
     (loop,) = agents
 
-    assert f"- skill-creator: {DESCRIPTION}" in loop._skills
-    assert loop._tools.schema_of("skill").parameters["properties"]["name"]["enum"] == ["skill-creator"]
+    assert f"- skill-creator: {DESCRIPTION}" in loop._skill_listing()
+    assert loop._tools.schema_of("skill") == skill_schema()
 
 
 BUNDLED = resources.files("localharness").joinpath("assets", "skills", "skill-creator")

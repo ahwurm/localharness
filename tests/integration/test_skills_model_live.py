@@ -162,7 +162,7 @@ def root_loop(client, cfg: AgentConfig, shape: Shape, skill_set: SkillSet, regis
         context_manager=ContextManager(
             max_context_tokens=shape.window, preserve_first_n=cfg.context.preserve_first_n_messages,
             preserve_last_n=cfg.context.preserve_last_n_messages, **context_size_kwargs(cfg.context)),
-        kill_file_path=None, skills=render_listing(skill_set.skills),
+        kill_file_path=None,
         effort=shape.effort, effort_ratios=shape.ratios,
         index=render_index(None, machine_dir(skill_set), held, False, True), affordances=affordances)
 

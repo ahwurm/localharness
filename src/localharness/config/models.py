@@ -1289,6 +1289,11 @@ class AgentConfig(BaseModel):
         description="One line naming what this agent is for, shown beside its name in the agent tool's roster.",
     )
 
+    skills: Optional[list[str]] = Field(
+        default=None,
+        description="The skills this agent may load, narrowing the default of every skill whose declared tools it holds; [] loads none.",
+    )
+
     tools_required: bool = Field(
         default=False,
         description=(

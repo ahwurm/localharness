@@ -4,7 +4,7 @@
 - `name`: lowercase letters and digits joined by single hyphens, at most 64 characters, equal to the directory name.
 - `description`: one line, at most 1024 characters, best at most 250. Avoid `: ` and ` #` inside it, or quote it.
 - `purpose`, optional: one line of plain text, at most 1024 characters. Nothing reads it yet.
-- `tools`, optional: a list of tool names. Nothing reads it yet.
+- `tools`, optional: a list of tool names. The skill loads only into an agent that already holds every one; it grants none.
 - `review`, optional: `critics` from the critic set replace the usual reply review whenever the skill is loaded (`critics: []` runs none); `checks` says what done right means.
 - Every other key is ignored. `allowed-tools` grants nothing.
 

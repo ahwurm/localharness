@@ -101,16 +101,16 @@ async def test_the_skill_tool_loads_a_bundled_body_without_its_frontmatter(tmp_p
     assert result.output == f"skill 'notes' (bundled), directory {str(dirs.bundled / 'notes')!r}\n\nBody of notes."
 
 
-def test_the_schema_carries_the_task_declarations_and_the_start_set_enum(tmp_path, dirs):
+def test_the_schema_carries_the_task_declarations_and_no_name_enumeration(tmp_path, dirs):
     _skill(dirs.bundled, "notes")
     _skill(dirs.project, "release-notes")
     schema = skill_tool(tmp_path, discovered(dirs)).info()
-    assert schema == skill_schema(["notes", "release-notes"])
+    assert schema == skill_schema()
     assert (schema.name, schema.group, schema.gate_family, schema.ingest, schema.host, schema.result_origin) == (
         "skill", "skill", "allow", "none", "safe", "trusted")
     assert schema.parameters == {
         "type": "object",
-        "properties": {"name": {"type": "string", "enum": ["notes", "release-notes"]}},
+        "properties": {"name": {"type": "string"}},
         "required": ["name"],
     }
     assert schema.description == (
@@ -140,17 +140,16 @@ async def test_a_project_body_comes_fenced_after_the_header(tmp_path, dirs):
 
 
 @pytest.mark.parametrize("name", ["nope", "../x", "Notes", "a" * 65, "a\x1bb"])
-async def test_an_unknown_or_invalid_name_lists_the_skills_and_touches_no_disk(tmp_path, dirs, monkeypatch, name):
+async def test_an_unknown_or_invalid_name_lists_the_skills_and_reads_no_body(tmp_path, dirs, monkeypatch, name):
     _skill(dirs.bundled, "notes")
     _skill(dirs.project, "release-notes")
     tool = skill_tool(tmp_path, discovered(dirs))
-    touched = []
-    monkeypatch.setattr(SkillSet, "find", lambda *a: touched.append("find"))
-    monkeypatch.setattr(SkillSet, "read_body", lambda *a: touched.append("read_body"))
+    read = []
+    monkeypatch.setattr(SkillSet, "read_body", lambda *a: read.append("read_body"))
     result = await tool.run(name=name)
     assert (result.success, result.error_type) == (False, "validation_error")
     assert result.error == f"no skill named {name!r}; the skills are: notes, release-notes"
-    assert touched == []
+    assert read == []
 
 
 async def test_the_unknown_name_line_lists_the_live_set_sorted(tmp_path, dirs):
@@ -170,28 +169,57 @@ async def test_a_file_gone_since_start_tells_the_model_to_tell_the_person(tmp_pa
     assert result.error.endswith(". Tell the person; do not retry it.")
 
 
-async def test_the_tool_never_rescans_and_loads_what_find_added(tmp_path, dirs):
+async def test_the_tool_finds_a_skill_written_after_start_and_lists_it(tmp_path, dirs):
     _skill(dirs.bundled, "notes")
     found = discovered(dirs)
     tool = skill_tool(tmp_path, found)
     _skill(dirs.machine, "late")
-    refused_ = await tool.run(name="late")
-    assert refused_.error == "no skill named 'late'; the skills are: notes"
-    assert found.find("late").name == "late"
     loaded = await tool.run(name="late")
     assert loaded.success and loaded.output == header("late", "machine", dirs.machine) + "\n\nBody of late."
-    assert tool.info() == skill_schema(["notes"])
+    _skill(dirs.machine, "later")
+    assert [s.name for s in tool.loadable()] == ["notes", "late", "later"]
+    assert tool.info() == skill_schema()
 
 
-async def test_the_enum_holds_the_whole_start_set_and_a_sixty_four_character_name_enters_whole(tmp_path, dirs):
+async def test_a_sixty_four_character_name_loads(tmp_path, dirs):
     long = "a" * 64
-    names = [long, *(f"s{i:02d}" for i in range(63))]
-    for name in names:
+    for name in (long, *(f"s{i:02d}" for i in range(63))):
         _skill(dirs.machine, name)
-    tool = skill_tool(tmp_path, discovered(dirs))
-    enum = tool.info().parameters["properties"]["name"]["enum"]
-    assert enum == sorted(names) and len(enum) == 64 and long in enum
-    assert (await tool.run(name=long)).success
+    assert (await skill_tool(tmp_path, discovered(dirs)).run(name=long)).success
+
+
+def scoped(tmp_path, found, held, allowed=None):
+    return skill_tool(tmp_path, found).scoped(ContentStore(), lambda: held, allowed)
+
+
+async def test_a_skill_naming_a_tool_the_agent_lacks_is_refused_with_the_fix_and_grants_nothing(tmp_path, dirs):
+    _skill(dirs.bundled, "notes")
+    _skill(dirs.machine, "build", "---\nname: build\ndescription: Use it.\ntools: [bash_exec]\n---\nBody.\n")
+    held = ["skill", "read"]
+    tool = scoped(tmp_path, discovered(dirs), held)
+    result = await tool.run(name="build")
+    assert (result.success, result.error_type) == (False, "validation_error")
+    assert "bash_exec" in result.error and "not loaded" in result.error and "give the agent those tools" in result.error
+    assert held == ["skill", "read"] and [s.name for s in tool.loadable()] == ["notes"] and "build" not in tool.listing()
+    holding = scoped(tmp_path, discovered(dirs), [*held, "bash_exec"])
+    assert (await holding.run(name="build")).success and "- build" in holding.listing()
+
+
+async def test_the_agents_skills_list_narrows_what_it_lists_and_loads(tmp_path, dirs):
+    _skill(dirs.bundled, "notes")
+    _skill(dirs.machine, "other")
+    tool = scoped(tmp_path, discovered(dirs), ["skill"], ["notes"])
+    assert [s.name for s in tool.loadable()] == ["notes"]
+    refused = await tool.run(name="other")
+    assert not refused.success and "not on this agent's skills list" in refused.error and "skills: in this agent's file" in refused.error
+    assert (await tool.run(name="notes")).success
+    assert scoped(tmp_path, discovered(dirs), ["skill"], []).loadable() == ()
+
+
+def test_an_agent_without_the_skill_tool_is_listed_no_skills(tmp_path, dirs):
+    _skill(dirs.bundled, "notes")
+    assert scoped(tmp_path, discovered(dirs), ["read"]).listing() == ""
+    assert "- notes" in scoped(tmp_path, discovered(dirs), ["skill"]).listing()
 
 
 async def test_bom_crlf_and_frontmatter_only_files(tmp_path, dirs):
@@ -219,7 +247,7 @@ async def test_a_body_is_reread_on_every_call(tmp_path, dirs):
 
 
 def test_the_skill_schema_differs_from_the_task_schema_only_in_what_names_it_and_its_result_origin(tmp_path):
-    skill, task = skill_schema(["notes"]), TaskTool(make_flow(tmp_path)[0]).info()
+    skill, task = skill_schema(), TaskTool(make_flow(tmp_path)[0]).info()
     same = set(type(skill).model_fields) - {"name", "group", "description", "parameters", "estimated_tokens", "result_origin"}
     assert all(getattr(skill, f) == getattr(task, f) for f in same)
     assert (skill.gate_family, skill.ingest, skill.host, skill.result_origin) == ("allow", "none", "safe", "trusted")
@@ -227,7 +255,7 @@ def test_the_skill_schema_differs_from_the_task_schema_only_in_what_names_it_and
 
 
 def test_the_skill_tool_is_read_tier_in_every_mode(tmp_path):
-    meta = tool_meta_from_schema(skill_schema(["notes"]))
+    meta = tool_meta_from_schema(skill_schema())
     results = [
         verdict.evaluate("skill", {"name": "notes"}, meta, verdict.GateContext(
             boundary=tmp_path, workspace=tmp_path, grants=lambda *_: None, mode=mode), GateSettings())
@@ -248,6 +276,9 @@ class Registry:
 
     def get_tools_for_agent(self, *args):
         return {}
+
+    def global_tools(self):
+        return []
 
     async def dispatch(self, name, args, *rest):
         if name in self.tools:
