@@ -15,7 +15,8 @@ from localharness.agent.context import ContentStore
 from localharness.tools.base import StoreBound
 from localharness.tools.builtin import browser_tool
 from localharness.tools.builtin.browser_tool import BrowserFetchTool, BrowserRuntime, Rendered
-from localharness.tools.builtin.web_tool import UNTRUSTED_BANNER, WebFetchTool, WebPageQueryTool
+from localharness.tools.builtin.web_tool import (
+    NO_PROJECT_FOLDER, UNTRUSTED_BANNER, WebFetchTool, WebPageQueryTool, download_notice)
 from tests.plugin_prompts import fake_prompts
 from tests.unit.test_web_fetch_guard import public_web
 
@@ -81,6 +82,9 @@ class FakeMouse:
         if self.world.on_act:
             await self.world.on_act("wheel", dy)
 
+    async def move(self, x, y):
+        self.world.moves.append((x, y))
+
 
 class FakePage:
     viewport_size = {"width": 1280, "height": 720}
@@ -137,6 +141,8 @@ class FakePage:
             return UA
         if world.eval_error:
             raise world.eval_error
+        if expression == browser_tool._LEN:
+            return len(world.pages[self.url][1])
         assert expression == browser_tool._TEXT
         world.slices.append((expression, arg))
         return world.eval_result if world.eval_result is not UNSET else [world.capped, world.pages[self.url][1]]
@@ -221,7 +227,7 @@ class World:
         self.on_goto = None
         self.on_snapshot = None
         self.snapshots = {}
-        self.refs, self.acts, self.counts, self.attrs, self.on_act = [], [], {}, {}, None
+        self.refs, self.acts, self.counts, self.attrs, self.on_act, self.moves = [], [], {}, {}, None, []
         self.eval_error = None
         self.eval_result = UNSET
         self.argv_edit = lambda argv: argv
@@ -510,7 +516,7 @@ async def test_a_render_opens_one_context_with_the_exact_options_and_routes_befo
     assert [e for e in world.events if e[1] in ("**/*", browser_tool._INIT, "", "https://example.com/")][-4:] == [
         ("route", "**/*"), ("init", browser_tool._INIT), ("new_page", ""), ("goto", "https://example.com/")]
     assert world.gotos[-1] == {"url": "https://example.com/", "wait_until": "load", "timeout": 30000}
-    assert world.waits == [500]
+    assert world.waits == [500] + [250] * 8
     assert world.slices == [(browser_tool._TEXT, browser_tool.FETCH_MAX_BODY_BYTES)]
     assert "innerText" in browser_tool._INIT and "0xD800" in browser_tool._INIT and "__lh_text" in browser_tool._TEXT
 
@@ -751,11 +757,12 @@ async def test_close_cancels_a_pending_idle_close(world, runtime):
 
 
 DESCRIPTION = (
-    "Like web_fetch, but runs the page's JavaScript first (slow, up to 30 s). If web_fetch returned "
-    "\"low extractable text\" for an https URL, call this once with the same URL — web_fetch's "
-    "\"do NOT re-fetch\" means do not call web_fetch again, not this tool. Otherwise use web_fetch. "
-    "Same start_index and fetch_id; search the full page with web_page_query. "
-    "To click or type on the page, use browser_open.")
+    "Like web_fetch, but runs the page's JavaScript and scrolls until the page stops loading more (slow, "
+    "up to 45 s). Call this once with the same https URL when web_fetch returned \"low extractable text\" "
+    "or text that looks cut off (it stops mid-sentence, at a \"continue reading\" wall, or short of what the "
+    "page should hold) — web_fetch's \"do NOT re-fetch\" means do not call web_fetch again, not this tool. "
+    "Otherwise use web_fetch. Same start_index, fetch_id and save_to; search the full page with "
+    "web_page_query. To click or type on the page, use browser_open.")
 PAGE = "x" * 3000 + " needle " + "y" * 2992
 
 
@@ -779,15 +786,154 @@ async def test_a_rendered_page_is_retained_in_the_tools_store_and_found_by_web_p
     assert found.success and "needle" in found.output
 
 
+A = "https://example.com/a"
+LINES = "\n".join(f"line {i} of the first screen, long enough to count" for i in range(10))
+
+
+def grows(world, *steps):
+    """Each wheel puts the next text on the page; the last stays."""
+    left = list(steps)
+
+    async def on_act(ref, *what):
+        if ref == "wheel" and left:
+            world.pages[A] = (200, left.pop(0), "text/html")
+    world.on_act = on_act
+
+
+def wheels(world):
+    return [a for a in world.acts if a[0] == "wheel"]
+
+
+def ticking(monkeypatch):
+    """A clock that moves one second each time anything reads it."""
+    ticks = iter(range(10_000))
+    monkeypatch.setattr(browser_tool, "_now", lambda: next(ticks))
+
+
+async def test_a_page_that_loads_more_as_it_scrolls_is_read_once_it_stops_growing(fetch, world):
+    tool, _ = fetch
+    world.pages[A] = (200, LINES, "text/html")
+    grows(world, LINES + "\n" + "middle " * 30, LINES + "\n" + "middle " * 30 + "\n" + "the end " * 30)
+    got = await tool.run(url=A, max_chars=20000)
+    assert got.success and "the end" in got.output and "still loading" not in got.output
+    assert wheels(world) == [("wheel", 20 * 720)] * 4 and world.moves == [(640, 360)]
+
+
+async def test_growth_under_the_threshold_is_not_growth(fetch, world):
+    tool, _ = fetch
+    world.pages[A] = (200, LINES, "text/html")
+    grows(world, *(LINES + " tick" * n for n in range(1, 50)))
+    got = await tool.run(url=A, max_chars=20000)
+    assert len(wheels(world)) == browser_tool.SCROLL_IDLE and "tick" not in got.output
+
+
+async def test_a_list_that_drops_the_first_screen_returns_the_first_screen(fetch, world):
+    tool, _ = fetch
+    world.pages[A] = (200, LINES, "text/html")
+    grows(world, "\n".join(f"row {i} far down the virtual list, long" for i in range(40)))
+    got = await tool.run(url=A, max_chars=20000)
+    assert "line 0 of the first screen" in got.output and "far down" not in got.output
+
+
+async def test_a_page_that_moves_to_another_address_while_scrolling_returns_the_first_one(fetch, world):
+    tool, _ = fetch
+    world.pages[A] = (200, LINES, "text/html")
+
+    async def on_act(ref, *what):
+        if ref == "wheel":
+            page = world.contexts[-1].pages[-1]
+            world.pages[A] = (200, LINES + "\nNEXT ARTICLE " * 30, "text/html")
+            page.url = "https://example.com/next"
+            world.pages[page.url] = world.pages[A]
+    world.on_act = on_act
+    got = await tool.run(url=A, max_chars=20000)
+    assert got.metadata["url"] == A and "NEXT ARTICLE" not in got.output
+
+
+@pytest.mark.parametrize("now, same", [
+    ("https://h/ch-2/page/3", True), ("https://h/ch-2#p4", True), ("https://h/ch-2?page=2", True),
+    ("https://h/ch-2-next", False), ("https://h/other", False), ("https://other/ch-2/page/3", False)])
+def test_a_reader_going_deeper_is_the_same_document_and_a_sibling_is_not(now, same):
+    assert browser_tool._same_document("https://h/ch-2", now) is same
+
+
+async def test_a_page_still_growing_at_the_deadline_says_it_holds_more(fetch, world, monkeypatch):
+    tool, _ = fetch
+    ticking(monkeypatch)
+    world.pages[A] = (200, LINES, "text/html")
+    grows(world, *(LINES + "\n" + "more " * (40 * n) for n in range(1, 200)))
+    got = await tool.run(url=A, max_chars=20000)
+    assert 0 < len(wheels(world)) < 20 and "the page was still loading more as it scrolled" in got.output
+
+
+async def test_no_scrolling_when_the_call_has_no_time_left(fetch, world, monkeypatch):
+    tool, _ = fetch
+    monkeypatch.setattr(BrowserFetchTool, "timeout_s", 10)
+    got = await tool.run(url=A)
+    assert got.success and wheels(world) == []
+
+
+async def test_a_page_capped_on_the_first_read_is_not_scrolled(fetch, world):
+    tool, _ = fetch
+    world.capped = True
+    got = await tool.run(url=A, max_chars=20000)
+    assert wheels(world) == [] and "PREFIX" in got.output and "still loading" not in got.output
+
+
+async def test_save_to_writes_the_scrolled_text_to_the_downloads_folder(world, runtime, monkeypatch, tmp_path):
+    public_web(monkeypatch)
+    world.pages[A] = (200, LINES, "text/html")
+    grows(world, LINES + "\n" + "closing line " * 20)
+    tool = BrowserFetchTool(runtime, ContentStore(), boundary=tmp_path)
+    got = await tool.run(url=A, save_to="part one.txt")
+    saved = (tmp_path / ".localharness" / "downloads" / "part-one.txt").read_text()
+    assert got.success and saved.rstrip().endswith("closing line") and "\n[" not in saved
+    assert got.output.startswith(UNTRUSTED_BANNER + "saved ") and "last: " in got.output
+
+
+async def test_a_save_cut_short_by_the_deadline_says_so_in_the_receipt(world, runtime, monkeypatch, tmp_path):
+    public_web(monkeypatch)
+    ticking(monkeypatch)
+    world.pages[A] = (200, LINES, "text/html")
+    grows(world, *(LINES + "\n" + "more " * (40 * n) for n in range(1, 200)))
+    got = await BrowserFetchTool(runtime, ContentStore(), boundary=tmp_path).run(url=A, save_to="a.txt")
+    assert got.output.startswith(UNTRUSTED_BANNER + "saved ") and got.output.endswith(browser_tool._STILL_LOADING)
+    assert "still loading" not in (tmp_path / ".localharness" / "downloads" / "a.txt").read_text()
+
+
+async def test_a_near_empty_page_saves_nothing(world, runtime, monkeypatch, tmp_path):
+    public_web(monkeypatch)
+    world.pages[A] = (200, "tiny", "text/html")
+    got = await BrowserFetchTool(runtime, ContentStore(), boundary=tmp_path).run(url=A, save_to="a.txt")
+    assert not got.success and got.error.startswith("nothing saved") and not (tmp_path / ".localharness").exists()
+
+
+async def test_an_empty_save_to_is_no_save(fetch, world, tmp_path):
+    tool, _ = fetch
+    got = await BrowserFetchTool(tool._runtime, ContentStore(), boundary=tmp_path).run(url=A, save_to="  ")
+    assert got.success and "fetch_id=" in got.output and not (tmp_path / ".localharness").exists()
+
+
+async def test_save_to_with_no_project_folder_refuses_before_opening_the_page(world, runtime, monkeypatch):
+    public_web(monkeypatch)
+    got = await BrowserFetchTool(runtime, ContentStore()).run(url=A, save_to="a.txt")
+    assert not got.success and got.error == NO_PROJECT_FOLDER and world.gotos == []
+
+
+async def test_a_replaced_browser_save_tells_the_person():
+    out = UNTRUSTED_BANNER + "saved 3 chars to .localharness/downloads/a.txt (fetch_id=pg-1)\nfirst: x\nlast: y\n" \
+        "(replaced an existing file)"
+    assert download_notice("browser_fetch", out) == ".localharness/downloads/a.txt: replaced an existing file"
+
+
 def test_the_schema_is_web_fetchs_with_the_one_description_and_its_name():
     tool = BrowserFetchTool(object(), ContentStore())
     schema, web = tool.info(), WebFetchTool(ContentStore()).info()
     assert schema.description == DESCRIPTION
     assert schema.parameters["properties"]["url"] == {"type": "string", "description": "The https URL to render."}
-    web_props = {k: v for k, v in web.parameters["properties"].items() if k != "save_to"}
-    assert {**schema.parameters["properties"], "url": None} == {**web_props, "url": None}
+    assert {**schema.parameters["properties"], "url": None} == {**web.parameters["properties"], "url": None}
     assert {**schema.parameters, "properties": None} == {**web.parameters, "properties": None}
-    assert list(schema.parameters["properties"]) == list(web_props)
+    assert list(schema.parameters["properties"]) == list(web.parameters["properties"])
     assert schema.name == "browser_fetch" and isinstance(tool, StoreBound)
     assert (schema.group, schema.estimated_tokens, schema.destructive) == (web.group, web.estimated_tokens, False)
     assert tool.timeout_s == browser_tool.NAV_TIMEOUT_S + 20
@@ -997,9 +1143,9 @@ from localharness.tools.builtin.browser_plugin import (  # noqa: E402
     BROWSER_AGENT_PROMPT, BrowserConfig, BrowserPlugin, setup_help)
 
 
-def plugin_ctx(tmp_path: Path, **cfg) -> PluginContext:
+def plugin_ctx(tmp_path: Path, tools=(), **cfg) -> PluginContext:
     return PluginContext(
-        bus=None, tools=None, hooks=None, config=BrowserConfig(**cfg), agent_config=None,
+        bus=None, tools=SimpleNamespace(global_tools=lambda: list(tools)), hooks=None, config=BrowserConfig(**cfg), agent_config=None,
         paths=PluginPaths(global_config_dir=tmp_path / "cfg", workspace=None, state_dir=tmp_path / "state"), llm=None)
 
 
@@ -1186,6 +1332,12 @@ async def test_tools_returns_fetch_and_the_four_session_tools_over_the_one_runti
     assert world.browsers[0].connected
     await plugin.stop(plugin_ctx(tmp_path))
     assert world.browsers[0].closed and world.stopped == 1
+
+
+async def test_browser_fetch_saves_where_web_fetch_does(cache, world, tmp_path):
+    install_shell(cache)
+    tools = await BrowserPlugin().tools(plugin_ctx(tmp_path, tools=[WebFetchTool(boundary=tmp_path / "proj")]))
+    assert tools[0].boundary == tmp_path / "proj" == tools[0].bound_to(ContentStore()).boundary
 
 
 async def test_stop_with_nothing_started_does_nothing(cache, world, tmp_path):

@@ -15,13 +15,15 @@ import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from localharness import __version__
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 from localharness.tools.builtin import netguard
 from localharness.tools.builtin.browser_proxy import NAV_TIMEOUT_S, Proxy, serve
 from localharness.tools.builtin.web_tool import (
-    FETCH_DEFAULT_CHARS, FETCH_MAX_BODY_BYTES, UNTRUSTED_BANNER, WebFetchTool, get_default_store, retain_window)
+    FETCH_DEFAULT_CHARS, FETCH_MAX_BODY_BYTES, NO_PROJECT_FOLDER, UNTRUSTED_BANNER, WebFetchTool, get_default_store,
+    retain_window, save_page)
 
 MAX_CONTEXTS = 2
 RETRY_AFTER_S = 60
@@ -37,6 +39,13 @@ _LAUNCH_ERRORS = (("Host system is missing dependencies", MISSING_LIBS), ("No us
 _PROFILE_PREFIX = "playwright_chromiumdev_profile-"
 _ARGS = ("--disable-quic", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp", "--disable-breakpad")
 _SKIPPED_TYPES = frozenset({"image", "media", "font"})
+SCROLL_S = 10
+SCROLL_SCREENS = 20
+SCROLL_POLLS = 4
+SCROLL_POLL_MS = 250
+SCROLL_GROWTH = 100
+SCROLL_IDLE = 2
+READ_AFTER_SCROLL_S = 5
 # Runs before any page script, so the natives are taken before the page can replace them. Counts UTF-16 code units,
 # so a cut can leave a lone high surrogate, which would not survive the driver pipe.
 _INIT = """(() => {
@@ -52,8 +61,13 @@ _INIT = """(() => {
     if (c >= 0xD800 && c <= 0xDBFF) s = apply(slice, s, [0, -1]);
     return [t.length > n, s];
   }, writable: false, configurable: false, enumerable: false});
+  Object.defineProperty(window, '__lh_len', {value: () => {
+    const b = apply(body, document, []);
+    return b ? apply(text, b, []).length : 0;
+  }, writable: false, configurable: false, enumerable: false});
 })()"""
 _TEXT = "n => window.__lh_text(n)"
+_LEN = "() => window.__lh_len()"
 _API: Any = None  # the tests' stand-in for playwright.async_api
 log = logging.getLogger(__name__)
 _now = time.monotonic  # the tests' clock
@@ -65,6 +79,7 @@ class Rendered:
     status: int
     text: str
     capped: bool
+    growing: bool = False
 
 
 class RenderError(Exception):
@@ -126,6 +141,57 @@ def render_error(api, e: Exception, proxy: Proxy, refusals: int, navigating: boo
         return RenderError("file")
     log.info("browser_fetch render failed: %s", _first_line(e)[:200])
     return RenderError("redirected" if navigating and proxy.refusals > refusals else "failed")
+
+
+async def _read(page) -> tuple[bool, str]:
+    got = await page.evaluate(_TEXT, FETCH_MAX_BODY_BYTES)
+    if not (isinstance(got, list) and len(got) == 2 and isinstance(got[0], bool) and isinstance(got[1], str)):
+        raise RenderError("failed")
+    return got[0], got[1]
+
+
+async def _length(page) -> int:
+    n = await page.evaluate(_LEN)
+    if not isinstance(n, int) or isinstance(n, bool):
+        raise RenderError("failed")
+    return n
+
+
+async def center_pointer(page) -> dict:
+    """Put the pointer mid-viewport, so a wheel scrolls the page's content and not a fixed header at (0,0)."""
+    view = page.viewport_size or {"width": 1280, "height": 720}
+    await page.mouse.move(view["width"] // 2, view["height"] // 2)
+    return view
+
+
+async def _scroll(page, until: float) -> tuple[bool, bool]:
+    """Wheel to the bottom until the text stops growing or `until`; whether it grew, and whether it was still growing at `until`."""
+    view = await center_pointer(page)
+    start = best = await _length(page)
+    idle = 0
+    while idle < SCROLL_IDLE and best < FETCH_MAX_BODY_BYTES and _now() < until:
+        await page.mouse.wheel(0, SCROLL_SCREENS * view["height"])
+        for _ in range(SCROLL_POLLS):
+            await page.wait_for_timeout(SCROLL_POLL_MS)
+            if (n := await _length(page)) > best + SCROLL_GROWTH:
+                best, idle = n, 0
+                break
+        else:
+            idle += 1
+    return best > start, idle < SCROLL_IDLE and best < FETCH_MAX_BODY_BYTES
+
+
+def _same_document(first: str, now: str) -> bool:
+    """`now` is `first` or deeper under it (a reader's /page/3), not a sibling article swapped in by replaceState."""
+    a, b = urlsplit(first), urlsplit(now)
+    head = [p for p in a.path.split("/") if p]
+    return (a.scheme, a.netloc) == (b.scheme, b.netloc) and [p for p in b.path.split("/") if p][:len(head)] == head
+
+
+def _kept(before: str, after: str) -> bool:
+    """The scrolled text still holds 90% of the first screen's lines over 20 characters: a virtualized list or a modal drops them."""
+    lines = {line.strip() for line in before.splitlines() if len(line.strip()) > 20}
+    return len(lines & {line.strip() for line in after.splitlines()}) >= 0.9 * len(lines)
 
 
 async def _cost_route(route) -> None:
@@ -231,13 +297,13 @@ class BrowserRuntime:
             raise RenderError("unavailable", REACH_FAILED)
         self._ua = f"{ua} LocalHarness/{__version__} (+https://localharness.dev)"
 
-    async def render(self, url: str) -> Rendered:
+    async def render(self, url: str, deadline: float = float("inf")) -> Rendered:
         self._cancel_idle()
         self._in_flight += 1
         try:
             browser, proxy = await self.ensure(), self._proxy
             async with self._slots:
-                return await self._render(browser, proxy, url)
+                return await self._render(browser, proxy, url, deadline)
         finally:
             self._in_flight -= 1
             self._arm_idle()
@@ -290,7 +356,7 @@ class BrowserRuntime:
             raise
         return context, flags
 
-    async def _render(self, browser, proxy: Proxy, url: str) -> Rendered:
+    async def _render(self, browser, proxy: Proxy, url: str, deadline: float = float("inf")) -> Rendered:
         api, context, navigating, refusals = self._api, None, False, 0
         try:
             context, _ = await self._new_context(browser)
@@ -301,12 +367,17 @@ class BrowserRuntime:
             if response and "application/pdf" in response.headers.get("content-type", ""):
                 raise RenderError("file")
             await page.wait_for_timeout(500)
-            got = await page.evaluate(_TEXT, FETCH_MAX_BODY_BYTES)
-            if not (isinstance(got, list) and len(got) == 2 and isinstance(got[0], bool) and isinstance(got[1], str)):
-                raise RenderError("failed")
-            capped, text = got
+            capped, text = await _read(page)
+            first, growing, until = page.url, False, min(_now() + SCROLL_S, deadline)
+            with contextlib.suppress(api.Error, RenderError, asyncio.TimeoutError):
+                if not capped and until > _now():
+                    grew, more_left = await asyncio.wait_for(_scroll(page, until), until - _now() + 2)
+                    if grew and _same_document(first, page.url):
+                        scrolled = await asyncio.wait_for(_read(page), READ_AFTER_SCROLL_S)
+                        if _kept(text, scrolled[1]):
+                            (capped, text), growing = scrolled, more_left
             text = re.sub(r"\n\s*\n\s*\n+", "\n\n", re.sub(r"[ \t]+", " ", text[:FETCH_MAX_BODY_BYTES])).strip()
-            return Rendered(page.url, response.status if response else 200, text, capped)
+            return Rendered(first, response.status if response else 200, text, capped, growing)
         except (api.TimeoutError, api.Error) as e:
             raise render_error(api, e, proxy, refusals, navigating) from None
         finally:
@@ -343,11 +414,14 @@ class BrowserRuntime:
 
 
 _DESCRIPTION = (
-    "Like web_fetch, but runs the page's JavaScript first (slow, up to 30 s). If web_fetch returned "
-    "\"low extractable text\" for an https URL, call this once with the same URL — web_fetch's "
-    "\"do NOT re-fetch\" means do not call web_fetch again, not this tool. Otherwise use web_fetch. "
-    "Same start_index and fetch_id; search the full page with web_page_query. "
-    "To click or type on the page, use browser_open.")
+    "Like web_fetch, but runs the page's JavaScript and scrolls until the page stops loading more (slow, "
+    "up to 45 s). Call this once with the same https URL when web_fetch returned \"low extractable text\" "
+    "or text that looks cut off (it stops mid-sentence, at a \"continue reading\" wall, or short of what the "
+    "page should hold) — web_fetch's \"do NOT re-fetch\" means do not call web_fetch again, not this tool. "
+    "Otherwise use web_fetch. Same start_index, fetch_id and save_to; search the full page with "
+    "web_page_query. To click or type on the page, use browser_open.")
+_STILL_LOADING = (f"[the page was still loading more as it scrolled; this is what loaded in {SCROLL_S} s, "
+                  "so the page holds more than this]")
 _CAPPED = (f"[rendered text capped at {FETCH_MAX_BODY_BYTES} characters — the rest of this page was not read; "
            "the retained text is a PREFIX, not the full page]")
 _NOT_HTTPS = "browser_fetch renders https pages only. For http://… use web_fetch."
@@ -388,16 +462,16 @@ def render_line(e: RenderError) -> str:
 
 _WEB = WebFetchTool(store=object()).info().parameters
 _PARAMETERS = {**_WEB, "properties": {
-    **{k: v for k, v in _WEB["properties"].items() if k != "save_to"},
-    "url": {**_WEB["properties"]["url"], "description": "The https URL to render."}}}
+    **_WEB["properties"], "url": {**_WEB["properties"]["url"], "description": "The https URL to render."}}}
 
 
 class BrowserFetchTool(Tool):
     timeout_s = NAV_TIMEOUT_S + 20
 
-    def __init__(self, runtime: BrowserRuntime, store: Any = None) -> None:
+    def __init__(self, runtime: BrowserRuntime, store: Any = None, boundary: Path | None = None) -> None:
         self._runtime = runtime
         self._store = store if store is not None else get_default_store()
+        self.boundary = boundary
 
     def info(self) -> ToolSchema:
         return ToolSchema(
@@ -407,18 +481,33 @@ class BrowserFetchTool(Tool):
             destructive=False, estimated_tokens=FETCH_DEFAULT_CHARS // 4)
 
     def bound_to(self, store: Any) -> "BrowserFetchTool":
-        return BrowserFetchTool(self._runtime, store)
+        return BrowserFetchTool(self._runtime, store, self.boundary)
 
-    async def _execute(self, url: str, max_chars: int = FETCH_DEFAULT_CHARS, start_index: int = 0) -> ToolResult:
+    async def _execute(self, url: str, max_chars: int = FETCH_DEFAULT_CHARS, start_index: int = 0,
+                       save_to: str | None = None) -> ToolResult:
+        deadline = _now() + self.timeout_s - 10
+        save_to = None if isinstance(save_to, str) and not save_to.strip() else save_to
+        if save_to is not None and not isinstance(save_to, str):
+            return self.err("save_to must be a file name", error_type="validation_error")
+        if save_to is not None and self.boundary is None:
+            return self.err(NO_PROJECT_FOLDER, error_type="validation_error")
         if refused := await refusal(url):
             return refused
         try:
-            page = await self._runtime.render(url)
+            page = await self._runtime.render(url, deadline)
         except RenderError as e:
             return self.err(render_line(e))
         if page.status >= 400:
             return self.err(_HTTP_FAILED.format(status=page.status))
         if len(page.text.strip()) < 80:
+            if save_to is not None:
+                return self.err("nothing saved: the rendered page has under 80 characters of text — it is empty "
+                                "or blocking the browser.", error_type="validation_error")
             return self.ok(f"{UNTRUSTED_BANNER}URL: {page.url}\n\n{_EMPTY}", url=page.url)
-        text = page.text + (f"\n{_CAPPED}" if page.capped else "")
+        text = page.text + (f"\n{_CAPPED}" if page.capped else "") + (f"\n{_STILL_LOADING}" if page.growing else "")
+        if save_to is not None:
+            saved = save_page(self._store, self.boundary, page.text, text, page.url, "", save_to, page.capped,
+                              "text/html")
+            grew = page.growing and saved.success
+            return saved.model_copy(update={"output": f"{saved.output}\n{_STILL_LOADING}"}) if grew else saved
         return retain_window(self._store, text, page.url, start_index, max_chars, refetch="browser_fetch")

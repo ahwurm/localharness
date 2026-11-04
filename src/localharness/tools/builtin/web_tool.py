@@ -265,7 +265,10 @@ def _write_download(boundary: Path, name: str, data: bytes) -> tuple[bool, int]:
             os.close(fd)
 
 
-def _save_page(store: Any, boundary: Path, text: str, stored: str, url: str, html: str,
+NO_PROJECT_FOLDER = "nothing saved: no project folder here — start localharness in a project folder"
+
+
+def save_page(store: Any, boundary: Path, text: str, stored: str, url: str, html: str,
                save_to: str, capped: bool, content_type: str) -> ToolResult:
     """Save the whole extracted `text` as a download and return the receipt in place of a window."""
     from localharness.agent.taint import DOWNLOADS
@@ -307,7 +310,7 @@ def _save_page(store: Any, boundary: Path, text: str, stored: str, url: str, htm
 
 def download_notice(tool_name: str, output: str) -> Optional[str]:
     """One line for the person when a saved page replaced a file or pushed older ones out; None otherwise."""
-    if tool_name != "web_fetch":
+    if tool_name not in ("web_fetch", "browser_fetch"):
         return None
     lines = output.splitlines()
     facts = [line.strip("()") for line in lines if line == _REPLACED_LINE
@@ -438,8 +441,7 @@ class WebFetchTool(Tool):
             if not isinstance(save_to, str):
                 return self.err("save_to must be a file name", error_type="validation_error")
             if self.boundary is None:
-                return self.err("nothing saved: no project folder here — start localharness in a "
-                                "project folder", error_type="validation_error")
+                return self.err(NO_PROJECT_FOLDER, error_type="validation_error")
         if not url.startswith(("http://", "https://")):  # the old wording (test_agent_loop pins it);
             return self.err(f"Invalid URL (must be http/https): {url!r}",  # netguard decides every hop
                             error_type="validation_error")
@@ -480,7 +482,7 @@ class WebFetchTool(Tool):
             note += f' Page title: "{title}"]' if title else "]"
             return self.ok(f"{UNTRUSTED_BANNER}URL: {final_url}\n\n{note}", url=final_url, content_type=ctype)
         if save_to is not None:
-            return _save_page(self._store, self.boundary, extracted, text, final_url, body, save_to,
+            return save_page(self._store, self.boundary, extracted, text, final_url, body, save_to,
                               capped, ctype)
         res = retain_window(self._store, text, final_url, start_index, max_chars, refetch="web_fetch")
         if not res.success:
