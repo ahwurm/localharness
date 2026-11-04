@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 log = logging.getLogger("localharness.agent.subagent")
 
 # Read-only toolset for the explore child (bare builtin names; see tools/builtin/__init__.py).
-EXPLORE_TOOLS: list[str] = ["read", "glob", "grep"]
+EXPLORE_TOOLS: list[str] = ["read", "glob", "grep", "skill"]
 
 # Every built-in child's budget (actions, minutes) lives in `org.children_budget`
 # (ChildrenBudgetConfig); the builders below take their entry as `budget=`. max_tool_calls is never
@@ -781,10 +781,7 @@ def _without_unoffered_optional_tools(agent_config: Any, child_registry: Any, na
 
 
 def _config_child_allowed(agent_config: Any) -> list[str]:
-    """Resolve a config child's effective allowlist: tools.add (or the safe default) minus deny,
-    with `agent`, `task` and `skill` always stripped (config children never delegate further, touch the
-    parent's task record or load skills). One source of truth so the grant-target safety check and
-    dispatch_config_subagent can't drift."""
+    """A config child's allowlist: tools.add (or the safe default) minus deny, with `agent`/`task`/`skill` entries stripped and the harness `skill` appended unless denied."""
     tool_cfg = getattr(agent_config, "tools", None)
     add = list(getattr(tool_cfg, "add", None) or []) or list(CONFIG_CHILD_DEFAULT_TOOLS)
     deny = set(getattr(tool_cfg, "deny", None) or [])
@@ -795,7 +792,8 @@ def _config_child_allowed(agent_config: Any) -> list[str]:
     # an explicit deny of `edit` still wins below.
     if "write" in add and "edit" not in add:
         add.append("edit")
-    return [t for t in add if t not in deny and t.split(".")[-1].split(":")[-1] not in {"agent", "task", "skill"}]
+    kept = [t for t in add if t not in deny and t.split(".")[-1].split(":")[-1] not in {"agent", "task", "skill"}]
+    return kept if "skill" in deny else [*kept, "skill"]
 
 
 _STATIC_TOOLSETS: dict[str, list[str]] = {
@@ -836,7 +834,7 @@ def builtin_toolset(name: str, base: Any) -> list[str] | None:
             _warn_host_dangerous(schema.name)
         elif is_bundled(tool):
             added.append(schema.name)
-    return [*WEB_TOOLS, *added]
+    return [*WEB_TOOLS, *added, "skill"]
 
 
 def _resolve_target_toolset(name: str, base: Any) -> list[str]:

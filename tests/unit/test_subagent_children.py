@@ -210,14 +210,14 @@ async def test_a_name_outside_the_allowlist_is_refused_and_the_base_is_untouched
         await runner.run_config_child(cfg, "t", tools=["web_fetch"])
     await runner.run_config_child(cfg, "t", tools=["read"])
     await runner.run_config_child(cfg, "t")
-    assert loops[1].held == {"read", "grep", "bash_exec"}
+    assert loops[1].held == {"read", "grep", "bash_exec", "skill"}
     assert base.has("web_fetch") and base.has("read") and base.has("agent")
 
 
 async def test_empty_tools_and_empty_grants_mean_no_narrowing_and_no_grant_check(base, loops):
     runner = make_runner(base, parent_store=ContentStore())
     result = await runner.run_config_child(config_child(add=("read", "bash_exec")), "t", tools=[], grant_handles=[])
-    assert result.tools is None and loops[0].held == {"read", "bash_exec"}
+    assert result.tools is None and loops[0].held == {"read", "bash_exec", "skill"}
 
 
 async def test_a_host_safe_grant_reads_the_parent_handle_through_the_child_store(base, loops):
@@ -332,9 +332,9 @@ async def test_the_web_researchers_discarded_zero_call_text_never_fills_raw(base
     assert "SUBAGENT RUN FAILED" in result.text
 
 
-def test_a_config_childs_allowlist_still_strips_task_agent_and_skill():
+def test_a_config_childs_allowlist_strips_task_agent_and_foreign_skill_but_holds_the_harness_skill():
     cfg = config_child(add=("read", "task", "agent", "skill", "plugin:p.skill", "mcp:x.agent", "grep"))
-    assert subagent._config_child_allowed(cfg) == ["read", "grep"]
+    assert subagent._config_child_allowed(cfg) == ["read", "grep", "skill"]
 
 
 async def test_a_nested_runner_carries_run_config_child_too(base, loops, monkeypatch):
@@ -428,14 +428,14 @@ async def test_executor_runs_through_the_real_child_with_its_row_pipeline_note_a
     assert loop.context_manager._pipeline is pipeline and isinstance(pipeline, CompactionPipeline)
     assert loop.kw["budget_labels"] == BudgetLabels("task_flow.executor", "task_flow.executor", None)
     assert loop.kw["request_note"]().startswith(CHILD_SENTENCE) and "step 1/2" in loop.kw["request_note"]()
-    assert loop.held == {"read", "write", "edit", "bash_exec"} and result.tools is None
+    assert loop.held == {"read", "write", "edit", "bash_exec", "skill"} and result.tools is None
     assert (loop.kw["config"].permissions.budget.max_actions, loop.kw["config"].permissions.budget.max_duration_minutes) == (24, 25)
 
 
 def test_executor_config_denies_tool_result_get_and_the_strip_set_removes_the_control_tools():
     config, pipeline, (row, budget) = build_executor_config(executor_flow())
-    assert config.tools.deny == ["tool_result_get"] and config.tools.add == ["read", "write", "edit", "bash_exec"]
-    assert subagent._config_child_allowed(config) == ["read", "write", "edit", "bash_exec"]
+    assert config.tools.deny == ["tool_result_get"] and config.tools.add == ["read", "write", "edit", "bash_exec", "skill"]
+    assert subagent._config_child_allowed(config) == ["read", "write", "edit", "bash_exec", "skill"]
     assert "tool_result_get" in build_executor_config(executor_flow(("read", "tool_result_get")))[0].tools.deny
     assert (row, budget) == ("task_flow.executor", ChildBudget(actions=24, minutes=25))
     assert pipeline._llm_stages[0].compact_md_path is COMPACT_DISABLED
@@ -453,7 +453,7 @@ async def test_explorer_holds_exactly_read_glob_and_grep_with_its_row(base, loop
     runner = make_runner(base)
     await runner.run_config_child(explorer_config(), "q", budget=("task_flow.explorer", ChildBudget(actions=12, minutes=6.0)))
     loop = loops[0]
-    assert loop.held == {"read", "glob", "grep"}
+    assert loop.held == {"read", "glob", "grep", "skill"}
     assert loop.kw["budget_labels"] == BudgetLabels("task_flow.explorer", "task_flow.explorer", None)
 
 

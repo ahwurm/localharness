@@ -1235,7 +1235,7 @@ def render_index(root: Path | None, machine_dir: Path, held: set[str], config_di
         "## Where things are",
         f"Project: {shown(root)}." if root is not None else "No project layer.",
         f"Skills: listed above. New ones go in {write}.{f' {tail}.' if tail else ''}" if "skill" in held else "",
-        "Agents: listed in the agent tool. A delegated agent never has skill or task"
+        "Agents: listed in the agent tool. A delegated agent never has task"
         f"{'; `/agents` lists them for the person' if slash else ''}." if "agent" in held else "",
     )
     return "\n".join(line for line in lines if line)

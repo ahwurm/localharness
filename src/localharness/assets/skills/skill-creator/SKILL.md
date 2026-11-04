@@ -9,7 +9,7 @@ A skill is a directory holding a `SKILL.md`. The model sees its one-line descrip
 
 ## Rules every skill keeps
 
-- A skill is text and grants nothing. Every call it leads to meets the permission gate. Frontmatter keys other than `name` and `description` are ignored, `allowed-tools` included.
+- A skill is text and grants nothing. Every call it leads to meets the permission gate. `tools` and `review` are read and grant nothing; other frontmatter keys, `allowed-tools` included, are ignored.
 - No install step, no setup step, no "Prerequisites" section: that is where marketplace payloads hid.
 - Nothing that fetches from the network or runs code from outside the skill's own directory.
 - Never a privilege escalation.

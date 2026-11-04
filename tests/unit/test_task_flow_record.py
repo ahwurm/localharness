@@ -1448,7 +1448,7 @@ async def test_explorer_runs_one_per_question_and_files_its_answer_under_it(tmp_
     await flow.run("new", "Objective: fix login")
     text = await flow.run("research", "where is login")
     (call,) = script.named("explorer")
-    assert call.config.tools.add == ["read", "glob", "grep"]
+    assert call.config.tools.add == ["read", "glob", "grep", "skill"]
     assert call.budget == ("task_flow.explorer", ChildBudget(actions=12, minutes=6.0)) and runner.CHILD_SENTENCE in call.task
     doc = flow.docs.read(1, "research.md")
     assert doc.startswith("## q1 · where is login") and RAW in doc and "explorer: explorer" in doc

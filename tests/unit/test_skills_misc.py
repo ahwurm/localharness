@@ -273,11 +273,13 @@ def _cfg(add):
     return SimpleNamespace(tools=SimpleNamespace(add=add, deny=[]))
 
 
-def test_config_children_never_hold_skill() -> None:
-    assert _config_child_allowed(_cfg(["read", "skill", "task", "agent"])) == ["read"]
-    assert _config_child_allowed(_cfg(["read", "mcp:skill", "plugin:example.skill"])) == ["read"]
-    assert _config_child_allowed(_cfg(["read", "skills", "skill-creator"])) == ["read", "skills", "skill-creator"]
-    assert _config_child_allowed(_cfg([])) == list(CONFIG_CHILD_DEFAULT_TOOLS)
+def test_config_children_hold_the_harness_skill_tool_and_no_foreign_one() -> None:
+    assert _config_child_allowed(_cfg(["read", "skill", "task", "agent"])) == ["read", "skill"]
+    assert _config_child_allowed(_cfg(["read", "mcp:skill", "plugin:example.skill"])) == ["read", "skill"]
+    assert _config_child_allowed(_cfg(["read", "skills", "skill-creator"])) == ["read", "skills", "skill-creator", "skill"]
+    assert _config_child_allowed(_cfg([])) == [*CONFIG_CHILD_DEFAULT_TOOLS, "skill"]
+    denied = SimpleNamespace(tools=SimpleNamespace(add=["read"], deny=["skill"]))
+    assert _config_child_allowed(denied) == ["read"]
 
 
 @pytest.fixture
@@ -296,17 +298,17 @@ def _yaml_child(add) -> AgentConfig:
 
 
 @pytest.mark.parametrize("add", [["read", "skill"], ["read", "mcp:skill"], ["read", "plugin:example.skill"]])
-async def test_no_config_child_registry_holds_the_skill_tool(root_registry, add) -> None:
+async def test_a_config_child_registry_holds_the_one_harness_skill_tool(root_registry, add) -> None:
     child = ToolRegistry.from_allowed(_config_child_allowed(_yaml_child(add)), base_registry=root_registry)
 
-    assert child.has("read")
-    assert not child.has("skill")
+    assert child.has("read") and child.has("skill")
+    assert [t.info().name for t in child.global_tools()].count("skill") == 1
 
 
 @pytest.mark.parametrize("name", [*LEAF_TOOLSETS, *subagent._WEB_ROLES])
-async def test_no_built_in_role_holds_the_skill_tool(root_registry, name) -> None:
+async def test_only_the_roles_that_choose_their_tools_hold_the_skill_tool(root_registry, name) -> None:
     toolset = LEAF_TOOLSETS[name] if name in LEAF_TOOLSETS else subagent.builtin_toolset(name, root_registry)
-    assert "skill" not in toolset, name
+    assert ("skill" in toolset) == (name == "explore" or name in subagent._WEB_ROLES), name
 
 
 DESCRIPTION = (
@@ -634,3 +636,26 @@ def test_spec_00_ap2_names_the_task_pipeline() -> None:
     if not spec.is_file():
         pytest.skip("spec 00 is local only")
     assert "The task pipeline is the second sanctioned fixed sequence" in spec.read_text(encoding="utf-8")
+
+
+async def test_a_child_loads_from_its_own_store_under_the_declared_tools_floor(tmp_path, monkeypatch, bus) -> None:
+    from tests.unit.test_agent_loop import _make_agent_loop
+
+    monkeypatch.setattr(skills, "PACKAGE_DIR", tmp_path / "pkg")
+    _skill(tmp_path / "cfg" / "skills", "reader", "---\nname: reader\ndescription: Reads.\ntools: [read]\n---\nRead it.\n")
+    root_store = ContentStore()
+    skill_set = SkillSet.discover(tmp_path / "cfg", None)
+    root = await _production_registry()
+    await root.register(SkillTool(skill_set, root_store, result_cap=lambda: 50_000), scope="global")
+    child = ToolRegistry.from_allowed(_config_child_allowed(_yaml_child(["read"])), base_registry=root)
+    cfg = AgentConfig(name="kid", role="r", tools=ToolConfig(add=["read", "skill"]))
+    loop = _make_agent_loop(lambda _r: None, [], bus, config=cfg, tool_registry=child)
+    child_store = loop._ctx._content_store
+    assert "- reader" in loop._skill_listing()
+    _skill(tmp_path / "cfg" / "skills", "writer", "---\nname: writer\ndescription: Writes.\ntools: [write]\n---\nW.\n")
+    assert "- writer" not in loop._skill_listing()
+    tool = child._tools["global"]["skill"]
+    refused = await tool.run(name="writer")
+    assert not refused.success and "write" in refused.error and "not loaded" in refused.error
+    assert (await tool.run(name="reader")).success
+    assert child_store._bodies and not root_store._bodies

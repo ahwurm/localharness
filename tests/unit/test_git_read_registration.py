@@ -308,7 +308,7 @@ def test_child_default_sets():
     from localharness.agent.subagent import CONFIG_CHILD_DEFAULT_TOOLS, EXPLORE_TOOLS
 
     assert CONFIG_CHILD_DEFAULT_TOOLS == ["read", "glob", "grep", "git_read"]
-    assert EXPLORE_TOOLS == ["read", "glob", "grep"]
+    assert EXPLORE_TOOLS == ["read", "glob", "grep", "skill"]
 
 
 async def test_default_child_over_a_registry_without_git_read_never_hears_of_it(mock_llm_client, bus):
