@@ -378,7 +378,7 @@ class _NoteCtx:
         self.fits_note = fits_note
         self._token_counter = type("TC", (), {"estimate_messages": staticmethod(lambda m: 0)})()
 
-    async def build_messages(self, messages, tools):
+    async def build_messages(self, messages, tools, **_):
         from localharness.agent.context import TokenBudget
         return list(messages), TokenBudget(total_limit=100, current_usage=0, tool_schema_tokens=0)
 
@@ -391,7 +391,7 @@ class _NoteCtx:
 
 def _note_loop(note, ctx):
     loop = object.__new__(AgentLoop)
-    loop._request_note, loop._ctx, loop._llm = note, ctx, object()
+    loop._request_note, loop._ctx, loop._llm, loop._tools = note, ctx, object(), None
     return loop
 
 

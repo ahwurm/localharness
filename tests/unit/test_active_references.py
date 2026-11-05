@@ -267,7 +267,7 @@ async def test_a_note_is_the_one_harness_message_after_the_lossy_transforms(tmp_
     loop = make_loop(mock_llm_client([]), bus, tmp_path)
     original_build = loop._ctx.build_messages
 
-    async def lossy(messages, tools):
+    async def lossy(messages, tools, **_):
         return await original_build([{"role": "user", "content": "old request"}], tools)
 
     loop._ctx.build_messages = lossy

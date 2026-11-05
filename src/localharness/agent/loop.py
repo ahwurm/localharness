@@ -1,4 +1,4 @@
-"""AgentLoop, Session, StuckDetector, BudgetTracker, KillWatcher, StepResult.
+"""AgentLoop, Session, BudgetTracker, KillWatcher, StepResult.
 
 ReAct while-loop execution engine for LocalHarness agents.
 """
@@ -16,9 +16,7 @@ import re
 import time
 import uuid
 from datetime import datetime
-from collections import Counter, deque
 from dataclasses import dataclass, field, replace
-from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal, NamedTuple, Optional
 
@@ -39,12 +37,15 @@ from localharness.core.types import (
     human_message,
     is_harness_message,
     provider_messages,
+    result_digest,
 )
 from localharness.core.content import redact_images, text_of, text_part
 from localharness.core.fence import fence_project_text
 from localharness.agent.context import (
     APPROX_CHARS_PER_TOKEN, fixed_tokens, floor_schemas, harness_floor, response_reserve)
-from localharness.agent.context import _WEB_STUB_PREFIX, ActiveReferenceError, ActiveReferenceOverflow
+from localharness.agent.context import (
+    BUDGET_NOTE_PREFIX, ActiveReferenceError, ActiveReferenceOverflow, _repeats,
+)
 from localharness.plugins.api import ContextBudget
 from localharness.tools.capabilities import CoResidenceError
 
@@ -173,22 +174,8 @@ class Session:
         return (self.elapsed_seconds() - self.excluded_seconds) / 60.0
 
 
-# ---------------------------------------------------------------------------
-# StuckDetector
-# ---------------------------------------------------------------------------
-
-class StuckState(Enum):
-    CLEAR = "clear"
-    RECOVERING = "recovering"
-    ESCALATE = "escalate"
-
-
 def compute_signature(tool_name: str, args: Any) -> str:
-    """The call-only signature of a tool name and its arguments (16 hex characters).
-
-    The stuck detector counts repeats by it and the loop stamps it on every tool message
-    so the request view can tell which later call superseded a failed one.
-    """
+    """The call-only signature of a tool name and its arguments (16 hex characters)."""
     canonical = f"{tool_name}:{json.dumps(args, sort_keys=True, separators=(',', ':'))}"
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
@@ -215,136 +202,11 @@ def _tool_message(
             ok=ok,
             denied=denied,
             staged=staged,
+            result=result_digest(content),
         ))
     except Exception:  # noqa: BLE001 — unstamped is the safe direction
         log.debug("could not stamp tool message for %s", getattr(tool_call, "name", "?"))
     return message
-
-
-class StuckDetector:
-    def __init__(
-        self,
-        window_size: int = 5,
-        recovery_threshold: int = 2,
-        escalation_threshold: int = 3,
-        max_nudges_per_turn: int = 3,
-        *,
-        call_only_multiplier: int = 3,
-        result_origin: Callable[[str], str] | None = None,
-    ) -> None:
-        self.window_size = window_size
-        self.recovery_threshold = recovery_threshold
-        self.escalation_threshold = escalation_threshold
-        self.max_nudges_per_turn = max_nudges_per_turn
-        self._window: deque[str] = deque(maxlen=window_size)
-        # Per-turn ladder state (the detector is constructed fresh per turn): which
-        # signatures we have already warned about, and how many warnings we have spent.
-        self._warned: dict[str, int] = {}
-        self._total_warnings = 0
-        # Per-turn call-only tally (never cleared by the nudge's window clear): the ceiling
-        # that bounds a loop whose trusted results keep changing (D-02, D-39).
-        self._call_counts: dict[str, int] = {}
-        self._ceiling = call_only_multiplier * escalation_threshold
-        self._result_origin = result_origin
-        # Set by classify() when the ceiling (not the window ladder) fired.
-        self.ceiling_hit: str | None = None
-
-    def compute_signature(self, tool_name: str, args: dict) -> str:
-        return compute_signature(tool_name, args)
-
-    def _trusted(self, tool_name: str) -> bool:
-        """True only when the injected lookup says exactly "trusted" for this tool.
-
-        Fails closed: no lookup, an exception, "untrusted" or an unknown tool all mean the
-        result is never folded into the signature (an untrusted page or server varying a
-        nonce must not buy an endless loop).
-        """
-        if self._result_origin is None:
-            return False
-        try:
-            return self._result_origin(tool_name) == "trusted"
-        except Exception:  # noqa: BLE001 — fail closed
-            return False
-
-    def record(self, tool_name: str, args: dict, result: tuple[bool, str], reread: bool = False) -> None:
-        """`reread` is a call whose earlier result was evicted from the request: it counts toward the ceiling, not the window."""
-        call_sig = self.compute_signature(tool_name, args)
-        if tool_name == "task":
-            last = next((ln for ln in reversed(result[1].splitlines()) if ln.strip()), "")
-            self._window.append(hashlib.sha256(f"{call_sig}:{last}".encode()).hexdigest()[:16])
-            return
-        self._call_counts[call_sig] = self._call_counts.get(call_sig, 0) + 1
-        if reread:
-            return
-        if self._trusted(tool_name):
-            ok, content = result
-            result_hash = hashlib.sha256(
-                json.dumps([bool(ok), content], ensure_ascii=False, separators=(",", ":")).encode()
-            ).hexdigest()[:16]
-            self._window.append(
-                hashlib.sha256(f"{call_sig}:{result_hash}".encode()).hexdigest()[:16]
-            )
-        else:
-            self._window.append(call_sig)
-
-    def call_count(self, signature: str) -> int:
-        """How many times this call-only signature was recorded this turn."""
-        return self._call_counts.get(signature, 0)
-
-    def check(self) -> StuckState:
-        if len(self._window) < self.recovery_threshold:
-            return StuckState.CLEAR
-        counts = Counter(self._window)
-        max_count = counts.most_common(1)[0][1]
-        if max_count >= self.escalation_threshold:
-            return StuckState.ESCALATE
-        if max_count >= self.recovery_threshold:
-            return StuckState.RECOVERING
-        return StuckState.CLEAR
-
-    def classify(self) -> tuple[StuckState, str]:
-        """Deterministic per-turn stuck ladder. Returns (action, most_repeated_signature).
-
-        Wraps the raw window read (check) with clean-slate-after-warning bookkeeping:
-        - fresh RECOVERING (a not-yet-warned signature under the nudge cap): warn once,
-          CLEAR the window, and record the warning → returns RECOVERING;
-        - a repeat of an ALREADY-warned signature (the model re-hit 2 identical even after
-          the clean slate — the warning demonstrably failed) → ESCALATE;
-        - RECOVERING once max_nudges_per_turn warnings are spent (varied flailing) → ESCALATE;
-        - a raw in-window ESCALATE (non-default thresholds) passes straight through;
-        - CLEAR passes through.
-
-        One call == one decision (it mutates on a warn), so the loop calls it exactly once
-        per iteration after recording that iteration's tool calls.
-        """
-        for call_sig, n in self._call_counts.items():
-            if n >= self._ceiling:
-                self.ceiling_hit = call_sig
-                return StuckState.ESCALATE, call_sig
-        raw = self.check()
-        sig = self.most_repeated_signature()
-        if raw != StuckState.RECOVERING:
-            return raw, sig
-        if sig in self._warned or self._total_warnings >= self.max_nudges_per_turn:
-            return StuckState.ESCALATE, sig
-        self._warned[sig] = self._warned.get(sig, 0) + 1
-        self._total_warnings += 1
-        self._window.clear()
-        return StuckState.RECOVERING, sig
-
-    def most_repeated_signature(self) -> str:
-        if not self._window:
-            return ""
-        return Counter(self._window).most_common(1)[0][0]
-
-    def recovery_message(self, repeated_signature: str) -> str:
-        return (
-            "You have attempted the same tool call multiple times with identical arguments "
-            "and received the same result. That approach is not working. "
-            "Consider a fundamentally different strategy: try different arguments, "
-            "use a different tool, or conclude that the information is not available this way. "
-            "If you are waiting on something external, say so and stop; do not poll."
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -365,8 +227,8 @@ def detect_degenerate_repetition(
     """True when a candidate final answer is one line repeated over and over (issue #152).
 
     Live receipt (2026-09-02): one narration line, 265 times, "\\n\\n"-separated, zero tool
-    calls — accepted as a finished task. StuckDetector cannot see this shape (it is fed
-    tool-call signatures only), so the check lives at the acceptance seam instead.
+    calls — accepted as a finished task. The stuck rule cannot see this shape (it reads
+    tool results only), so the check lives at the acceptance seam instead.
 
     Line-based and EXACT-match by design: normalize to non-empty stripped lines, then flag
     only `total >= min_lines` AND `unique/total <= max_unique_ratio`. Conservative on purpose
@@ -828,8 +690,8 @@ def _baton_nudge_message(closing: str, nudge_number: int) -> str:
     second nudge exists only where a user raised the knob, and by then the generic ask has
     demonstrably failed, so re-spending it verbatim is the weakest available move. Instead quote
     the model's own announced intent back at it and name the two acceptable exits (act, or say
-    you are done/blocked) — the same ladder shape StuckDetector.classify() already uses:
-    escalate on a repeat of an already-warned signature rather than repeat the warning. The echo
+    you are done/blocked) — a ladder that escalates on a repeat of an
+    already-warned signature rather than repeating the warning. The echo
     is the model's own words verbatim (deterministic, no summarizing), sliced to the module's
     existing evidence-preview width so a runaway closing sentence cannot bloat the nudge."""
     if nudge_number <= 1:
@@ -915,7 +777,7 @@ def _budget_note(session: Session, budget: BudgetTracker) -> str:
         )
     if not parts:
         return ""
-    note = f"\n\n[budget: {', '.join(parts)}]"
+    note = f"{BUDGET_NOTE_PREFIX}{', '.join(parts)}]"
     if nearly:
         note = (note[:-1] + " — wrap up NOW: give your final summary in your next reply,"
                             " before the limit cuts you off]")
@@ -1282,7 +1144,6 @@ class AgentLoop:
         self._template_margin_ratio = template_margin_ratio
         self._bus = bus
         self._ctx = context_manager
-        self._evicted_calls: frozenset[str] = frozenset()
         self._request_note = request_note
         # How the last run_turn ended ("complete", "error", "stuck", "budget_*", ...): a
         # delegating parent reads it to report the child's runtime-truth status.
@@ -2082,15 +1943,6 @@ class AgentLoop:
             minutes_bound_by=minutes_label,
         )
         self._live_turn = (session, budget)
-        sd_cfg = self._config.stuck_detector
-        stuck_detector = StuckDetector(
-            window_size=sd_cfg.window_size,
-            recovery_threshold=sd_cfg.recovery_threshold,
-            escalation_threshold=sd_cfg.escalation_threshold,
-            max_nudges_per_turn=sd_cfg.max_nudges_per_turn,
-            call_only_multiplier=sd_cfg.call_only_multiplier,
-            result_origin=getattr(self._tools, "result_origin", None),
-        )
         bg_cfg = self._config.baton_gate
         rg_cfg = self._config.repetition_guard
 
@@ -2272,6 +2124,7 @@ class AgentLoop:
                     raise ProviderConnectionError(f"{exc} {note}", cause=exc) from exc
                 raise
             _absorb_commit(session, self._ctx)
+            sent = len(session.messages)
 
             # 4. Publish heartbeat AFTER build_messages so utilization reflects post-compaction state (TELEM-01)
             raw_pct = ctx_budget.usage_fraction * 100.0
@@ -2738,8 +2591,8 @@ class AgentLoop:
 
                 # 9a2. Degenerate-repetition guard (#152): a candidate final answer that is one
                 # line repeated over and over is NOT an answer — the live receipt was 265
-                # identical lines, zero tool calls, published as TaskComplete. StuckDetector is
-                # structurally blind here (it only ever sees tool-call signatures). Runs FIRST
+                # identical lines, zero tool calls, published as TaskComplete. The stuck rule is
+                # structurally blind here (it only ever sees tool results). Runs FIRST
                 # among the tool-less gates: no downstream gate should spend a round-trip
                 # reasoning about garbage. One corrective nudge, then the turn ends through the
                 # same honest-failure pathway the parse-retry exhaustion above uses.
@@ -2923,8 +2776,8 @@ class AgentLoop:
                 # Dispatch cap (FIX 3): checked BEFORE actions_taken increments or an Action
                 # publishes, so a refusal is invisible to actions_taken/tool_call_count — it
                 # must not trip max_actions and kill the turn, and metrics should reflect real
-                # dispatches only. stuck_detector still sees it, so a model that keeps retrying
-                # the same disallowed call is still caught by the stuck ladder.
+                # dispatches only. the refusal is still a tool message, so a model that keeps
+                # retrying the same disallowed call is caught by the stuck rule.
                 if not budget.tool_call_allowed(session):
                     refusal_text = (
                         f"Tool call not executed: this task's tool-call budget "
@@ -2932,7 +2785,6 @@ class AgentLoop:
                         f"directly without calling any more tools."
                     )
                     session.push(_tool_message(tool_call, refusal_text, ok=False))
-                    stuck_detector.record(tool_call.name, tool_call.arguments, (False, refusal_text))
                     continue
 
                 # Publish tool_call action for terminal display
@@ -2973,7 +2825,6 @@ class AgentLoop:
                         output="[DENIED]",
                         error=f"{DENIED_OBSERVATION_PREFIX}{perm_result.reason}",
                     ))
-                    stuck_detector.record(tool_call.name, tool_call.arguments, (False, denied_text))
                     continue
 
                 # Counted only now, on the ALLOWED side of the gate. A call a human refused is
@@ -3041,11 +2892,6 @@ class AgentLoop:
                     artifact=artifact,
                 ))
 
-                # Hash the local result_content: step 11b appends the per-iteration budget note
-                # to the message afterwards, which would make every result look new.
-                stuck_detector.record(tool_call.name, tool_call.arguments, (not is_error, result_content),
-                                      reread=compute_signature(tool_call.name, tool_call.arguments) in self._evicted_calls)
-
             # 11b. Append budget status to the iteration's last tool result
             note = _budget_note(session, budget)
             if note and session.messages and session.messages[-1].get("role") == "tool":
@@ -3054,54 +2900,42 @@ class AgentLoop:
             # Tool calls parsed and executed — reset parse retry counter
             session.parse_retries = 0
 
-            # 12. Check stuck state (deterministic per-turn ladder: clean slate after a
-            # warning, escalate only on fresh evidence — #81)
-            stuck_state, repeated_sig = stuck_detector.classify()
-            if stuck_state == StuckState.RECOVERING:
-                await self._bus.publish(StuckRecovered(
-                    agent_id=session.agent_id,
-                    session_id=session.session_id,
-                    iteration=session.iteration,
-                    stuck_signature=repeated_sig or "",
-                ))
-                # Phase 14 REG-04: recovery wording is a mutable config component.
-                # #82: push it into durable session history (right here, after this
-                # iteration's tool results — the correct position) rather than a transient
-                # request-only append, so it survives every later build_messages and the
-                # history never shows the model replying to a message that isn't there.
-                session.push(harness_message(self._config.recovery_injection.message, "recovery"))
-                log.info(
-                    "Stuck recovery triggered for %s at iteration %d",
-                    self._config.name,
-                    session.iteration,
-                )
-            elif stuck_state == StuckState.ESCALATE:
+            # 12. Stuck rule: a tool message repeating a result the model still holds. One
+            # earlier copy reaches the next request as a pointer (the notice); two stop the turn.
+            view = [*request_messages, *session.messages[sent:]]
+            called = {c.id: c for c in tool_calls}
+            repeats = [
+                (i, copies, called[view[i].get("tool_call_id")])
+                for i, (copies, _) in sorted(_repeats(view, self._gate_family).items())
+                if i >= len(request_messages) and view[i].get("tool_call_id") in called
+            ]
+            for i, copies, _ in repeats:
+                if copies == 1:
+                    await self._bus.publish(StuckRecovered(
+                        agent_id=session.agent_id,
+                        session_id=session.session_id,
+                        iteration=session.iteration,
+                        stuck_signature=view[i]["_lh"]["outcome"]["call"],
+                    ))
+            stuck = next(((i, copies, call) for i, copies, call in repeats if copies >= 2), None)
+            if stuck is not None:
+                i, copies, call = stuck
                 session.terminated_reason = "stuck"
-                if stuck_detector.ceiling_hit is not None:
-                    escalation_detail = (
-                        f"The same tool call {stuck_detector.call_count(stuck_detector.ceiling_hit)} "
-                        f"times this turn (stuck_detector.call_only_multiplier × "
-                        f"escalation_threshold) at iteration {session.iteration}"
-                    )
-                else:
-                    escalation_detail = (
-                        f"Repeated identical tool calls at iteration {session.iteration}"
-                    )
+                tool = " ".join(call.name.split())[:64]
                 await self._bus.publish(Escalation(
                     agent_id=session.agent_id,
                     session_id=session.session_id,
                     reason="stuck_detected",
-                    detail=escalation_detail,
-                    stuck_signature=repeated_sig,
+                    detail=(f"`{tool}` returned the same result {copies + 1} times this turn, "
+                            f"after being told it was the same (iteration {session.iteration})"),
+                    stuck_signature=view[i]["_lh"]["outcome"]["call"],
                     iteration_at_escalation=session.iteration,
                 ))
-                log.warning(
+                log.info(
                     "Agent %s stuck after %d iterations, escalating",
                     self._config.name,
                     session.iteration,
                 )
-                # #83: return the model's partial work, not a dead notice. Telemetry
-                # (terminated_reason, Escalation, TurnFailed) stays unchanged above.
                 summary = await self._final_summary_on_stuck(
                     session, session.iteration, on_token
                 )
@@ -3271,6 +3105,10 @@ class AgentLoop:
             path = ""
         job = panel.docs.read_session("jtbd.md").strip() if panel.docs else ""
         return compose_request(path, findings, job, last, task)
+
+    @property
+    def _gate_family(self) -> Callable[[str], str | None] | None:
+        return getattr(self._tools, "gate_family", None)
 
     def _registered(self, kind):
         return None if self._tools is None else next((t for t in self._tools.global_tools() if isinstance(t, kind)), None)
@@ -3445,11 +3283,8 @@ class AgentLoop:
             return ""
 
     async def _pack_request(self, messages: list[Message], tools: list | None, note: str, *, compact: bool = True):
-        packed, budget = await self._ctx.build_messages(messages, tools, **({} if compact else {"compact": False}))
-        self._evicted_calls = frozenset(
-            m["_lh"]["outcome"]["call"] for m in packed
-            if m.get("role") == "tool" and str(m.get("content") or "").startswith(_WEB_STUB_PREFIX)
-            and isinstance(m.get("_lh"), dict) and "outcome" in m["_lh"])
+        packed, budget = await self._ctx.build_messages(
+            messages, tools, gate_family=self._gate_family, **({} if compact else {"compact": False}))
         if note:
             # Request-local, after every lossy transform: one current note, no growing log.
             packed = [*packed, harness_message(note, "request_note")]
@@ -3527,8 +3362,8 @@ class AgentLoop:
         it falls back to the turn's last assistant content (possibly empty). The stuck
         notice is delivered once, by the Escalation event: the reply carries none."""
         instruction = (
-            "[You have been stopped: you repeated the same tool call multiple times with "
-            "identical arguments. Do NOT call any tools.] In ONE reply, wrap up honestly "
+            "[You have been stopped: you kept requesting a result you already had. "
+            "Do NOT call any tools.] In ONE reply, wrap up honestly "
             "for the user: (1) what you completed so far, with concrete file paths or "
             "results; (2) what remains undone; (3) the single next step you would take. "
             "Partial work is valuable — report it plainly."

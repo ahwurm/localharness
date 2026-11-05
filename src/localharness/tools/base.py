@@ -68,7 +68,8 @@ class ToolSchema(BaseModel):
     # a tool that declares nothing is treated as ingesting attacker-controllable content, able to
     # change the host, returning untrusted results, and in no gate family (asked about in
     # `guarded`). Never provenance: which plugin contributed a tool is not a safety input (CORE-04).
-    # Readers: the permission gate (`gate_family`, agent/verdict.py `_kind`), the capability floor
+    # Readers: the permission gate (`gate_family`, agent/verdict.py `_kind`; the stuck rule's repeat
+    # fold reads it too, via ToolRegistry.gate_family), the capability floor
     # (`ingest`, `host`, tools/capabilities.py) and the context store (`result_origin`, via
     # ToolRegistry.result_origin); the oracle in tests/unit/test_tool_declarations.py pins every
     # builtin's declaration to today's classes.

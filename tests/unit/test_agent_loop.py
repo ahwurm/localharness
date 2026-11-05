@@ -1,12 +1,10 @@
-"""Tests for Session, StuckDetector, BudgetTracker, KillWatcher, and AgentLoop."""
+"""Tests for Session, BudgetTracker, KillWatcher, and AgentLoop."""
 import time
 import pytest
 from pathlib import Path
 
 from localharness.agent.loop import (
     Session,
-    StuckDetector,
-    StuckState,
     BudgetTracker,
     BudgetViolation,
     KillWatcher,
@@ -51,122 +49,6 @@ def test_session_messages_append_only_via_push():
     s.push({"role": "user", "content": "a"})
     s.push({"role": "user", "content": "b"})
     assert len(s.messages) == 2
-
-
-# ---------------------------------------------------------------------------
-# StuckDetector tests
-# ---------------------------------------------------------------------------
-
-def test_stuck_compute_signature_returns_16_chars():
-    sd = StuckDetector()
-    sig = sd.compute_signature("bash", {"cmd": "ls"})
-    assert len(sig) == 16
-    assert sig.isalnum()
-
-
-def test_stuck_compute_signature_order_independent():
-    sd = StuckDetector()
-    sig1 = sd.compute_signature("tool", {"a": 1, "b": 2})
-    sig2 = sd.compute_signature("tool", {"b": 2, "a": 1})
-    assert sig1 == sig2
-
-
-def test_stuck_clear_when_different_calls():
-    sd = StuckDetector(window_size=5, recovery_threshold=2, escalation_threshold=3)
-    sd.record("bash", {"cmd": "ls"}, (True, ""))
-    sd.record("bash", {"cmd": "pwd"}, (True, ""))
-    sd.record("bash", {"cmd": "echo"}, (True, ""))
-    assert sd.check() == StuckState.CLEAR
-
-
-def test_stuck_recovering_at_two_identical():
-    sd = StuckDetector(window_size=5, recovery_threshold=2, escalation_threshold=3)
-    sd.record("bash", {"cmd": "ls"}, (True, ""))
-    sd.record("bash", {"cmd": "ls"}, (True, ""))
-    assert sd.check() == StuckState.RECOVERING
-
-
-def test_stuck_escalate_at_three_identical():
-    sd = StuckDetector(window_size=5, recovery_threshold=2, escalation_threshold=3)
-    sd.record("bash", {"cmd": "ls"}, (True, ""))
-    sd.record("bash", {"cmd": "ls"}, (True, ""))
-    sd.record("bash", {"cmd": "ls"}, (True, ""))
-    assert sd.check() == StuckState.ESCALATE
-
-
-def test_stuck_recovery_message_nonempty():
-    sd = StuckDetector()
-    msg = sd.recovery_message("abcdef1234567890")
-    assert isinstance(msg, str) and len(msg) > 0
-
-
-def test_stuck_most_repeated_signature():
-    sd = StuckDetector(window_size=5)
-    sd.record("bash", {"cmd": "ls"}, (True, ""))
-    sd.record("bash", {"cmd": "ls"}, (True, ""))
-    sd.record("bash", {"cmd": "pwd"}, (True, ""))
-    sig_ls = sd.compute_signature("bash", {"cmd": "ls"})
-    assert sd.most_repeated_signature() == sig_ls
-
-
-def test_stuck_clear_when_window_too_small():
-    sd = StuckDetector(window_size=5, recovery_threshold=2, escalation_threshold=3)
-    sd.record("bash", {"cmd": "ls"}, (True, ""))
-    assert sd.check() == StuckState.CLEAR
-
-
-# --- #81: clean-slate-after-warning escalation ladder ---
-
-def _stuck_iter(sd, name):
-    """One loop-iteration's worth of bookkeeping: record a single tool call, then ask
-    the detector for its decision — mirrors loop.py's record-then-classify cadence."""
-    sd.record(name, {}, (True, ""))
-    state, _sig = sd.classify()
-    return state
-
-
-def test_stuck_clean_slate_no_rewarn_after_compliant_action():
-    """#81 (i): after a warning the window is wiped, so ONE compliant different call
-    stays CLEAR instead of re-triggering RECOVERING on stale counts (today it re-warns)."""
-    sd = StuckDetector()
-    assert _stuck_iter(sd, "A") == StuckState.CLEAR
-    assert _stuck_iter(sd, "A") == StuckState.RECOVERING   # 2 identical → warn + clean slate
-    assert _stuck_iter(sd, "B") == StuckState.CLEAR         # compliant change: no re-warn
-
-
-def test_stuck_escalates_when_warned_signature_reaccumulates():
-    """#81 (ii): warn → a different call → the SAME call twice again → ESCALATE (the
-    warning demonstrably failed once the model re-hit 2 identical after a clean slate)."""
-    sd = StuckDetector()
-    assert _stuck_iter(sd, "A") == StuckState.CLEAR
-    assert _stuck_iter(sd, "A") == StuckState.RECOVERING
-    assert _stuck_iter(sd, "B") == StuckState.CLEAR
-    assert _stuck_iter(sd, "A") == StuckState.CLEAR         # window [B, A]
-    assert _stuck_iter(sd, "A") == StuckState.ESCALATE      # window [B, A, A]: A already warned
-
-
-def test_stuck_never_escalates_when_model_truly_varies():
-    """#81 (iii): one warning, then genuinely different calls forever → never ESCALATE."""
-    sd = StuckDetector()
-    assert _stuck_iter(sd, "A") == StuckState.CLEAR
-    assert _stuck_iter(sd, "A") == StuckState.RECOVERING
-    for name in ["B", "C", "D", "E", "F", "G", "H", "I", "J"]:
-        assert _stuck_iter(sd, name) == StuckState.CLEAR
-
-
-def test_stuck_escalates_at_max_nudges_cap_across_distinct_signatures():
-    """#81 (iv): varied flailing — 4 distinct signatures each hit the 2-identical warn
-    threshold; the per-turn nudge cap (default 3) escalates the 4th regardless of sig."""
-    sd = StuckDetector()  # max_nudges_per_turn defaults to 3
-
-    def warn(name):
-        _stuck_iter(sd, name)          # first record after a clean slate → CLEAR
-        return _stuck_iter(sd, name)   # second → RECOVERING, or ESCALATE at the cap
-
-    assert warn("s1") == StuckState.RECOVERING
-    assert warn("s2") == StuckState.RECOVERING
-    assert warn("s3") == StuckState.RECOVERING
-    assert warn("s4") == StuckState.ESCALATE
 
 
 # ---------------------------------------------------------------------------
@@ -559,7 +441,7 @@ async def test_run_turn_stops_on_stuck_escalation(mock_llm_client, bus):
             from localharness.tools.base import ToolResult
             return ToolResult(output="same", success=True)
 
-    # Same tool call repeated 4 times will trigger ESCALATE at iteration 3
+    # The same call returning the same result 3 times stops the turn at iteration 3
     tc = ToolCallObj(id="tc-1", name="bash", arguments={"cmd": "ls"})
     responses = [Response(content=None, tool_calls=[tc])] * 10
     loop = _make_agent_loop(mock_llm_client, responses, bus, tool_registry=FakeRegistry())
@@ -571,40 +453,8 @@ async def test_run_turn_stops_on_stuck_escalation(mock_llm_client, bus):
     assert "stuck" not in summary.lower() and "escalat" not in summary.lower()
 
 
-@pytest.mark.asyncio
-async def test_run_turn_injects_recovery_on_recovering(mock_llm_client, bus):
-    """At 2 identical calls, recovery message is set; agent continues."""
-    Response = mock_llm_client.Response
-    ToolCallObj = mock_llm_client.ToolCall
-
-    class FakeRegistry:
-        def global_tools(self):
-            return []
-
-        def get_tools_for_agent(self, agent_id, division_id, tool_config):
-            return {}
-        async def dispatch(self, name, arguments, agent_id, division_id, tool_config):
-            from localharness.tools.base import ToolResult
-            return ToolResult(output="same", success=True)
-
-    tc_same = ToolCallObj(id="tc-1", name="bash", arguments={"cmd": "ls"})
-    tc_diff = ToolCallObj(id="tc-2", name="write", arguments={"path": "/tmp/x"})
-    # 2 same → triggers recovery; then different → clears; then finish
-    responses = [
-        Response(content=None, tool_calls=[tc_same]),
-        Response(content=None, tool_calls=[tc_same]),
-        Response(content=None, tool_calls=[tc_diff]),
-        Response(content="Recovery worked."),
-    ]
-    loop = _make_agent_loop(mock_llm_client, responses, bus, tool_registry=FakeRegistry())
-    summary = await loop.run_turn("task")
-    # Agent should complete normally (not stuck)
-    completed = bus.history(event_types=[TurnCompleted])
-    assert len(completed) == 1
-
-
 class _SameResultRegistry:
-    """Every dispatch returns the same output — used to drive the stuck detector."""
+    """Every dispatch returns the same output — used to drive the stuck rule."""
     def global_tools(self):
         return []
 
@@ -613,71 +463,6 @@ class _SameResultRegistry:
     async def dispatch(self, name, arguments, agent_id, division_id, tool_config):
         from localharness.tools.base import ToolResult
         return ToolResult(output="same", success=True)
-
-
-@pytest.mark.asyncio
-async def test_recovery_nudge_persisted_in_session_after_tool_result(mock_llm_client, bus):
-    """#82 (i): the stuck-recovery nudge is pushed into session.messages as a user message
-    positioned right after the iteration's tool result — durable history, not a transient
-    request-only append that leaves the model replying to a message that no longer exists."""
-    Response = mock_llm_client.Response
-    ToolCallObj = mock_llm_client.ToolCall
-
-    tc_same = ToolCallObj(id="a", name="bash", arguments={"cmd": "ls"})
-    responses = [
-        Response(content=None, tool_calls=[tc_same]),   # iter1
-        Response(content=None, tool_calls=[tc_same]),   # iter2 → RECOVERING (nudge pushed)
-        Response(content="done"),                        # iter3 → complete
-    ]
-    loop = _make_agent_loop(mock_llm_client, responses, bus, tool_registry=_SameResultRegistry())
-    nudge = loop._config.recovery_injection.message
-    await loop.run_turn("task")
-
-    msgs = loop._conversation
-    idxs = [i for i, m in enumerate(msgs)
-            if m.get("role") == "user" and m.get("content") == nudge]
-    assert len(idxs) == 1, "nudge must appear exactly once in durable session history"
-    assert msgs[idxs[0] - 1].get("role") == "tool", "nudge must land right after the tool result"
-
-
-@pytest.mark.asyncio
-async def test_recovery_nudge_reaches_next_request_and_persists(mock_llm_client, bus):
-    """#82 (ii)+(iii): the nudge is in the NEXT LLM request exactly once AND — unlike the old
-    transient request-only append — is STILL present one iteration later (the durability
-    regression: the old mechanism dropped it after a single build)."""
-    Response = mock_llm_client.Response
-    ToolCallObj = mock_llm_client.ToolCall
-
-    tc_same = ToolCallObj(id="a", name="bash", arguments={"cmd": "ls"})
-    tc_x = ToolCallObj(id="b", name="bash", arguments={"cmd": "pwd"})
-    tc_y = ToolCallObj(id="c", name="bash", arguments={"cmd": "whoami"})
-    responses = [
-        Response(content=None, tool_calls=[tc_same]),   # iter1 (call 0)
-        Response(content=None, tool_calls=[tc_same]),   # iter2 (call 1) → RECOVERING
-        Response(content=None, tool_calls=[tc_x]),      # iter3 (call 2): NEXT request
-        Response(content=None, tool_calls=[tc_y]),      # iter4 (call 3): durability
-        Response(content="done"),                        # iter5 (call 4): complete
-    ]
-    loop = _make_agent_loop(mock_llm_client, responses, bus, tool_registry=_SameResultRegistry())
-    nudge = loop._config.recovery_injection.message
-
-    requests: list = []
-    original = loop._llm.stream_complete
-
-    async def capturing(messages=None, tools=None, on_token=None):
-        requests.append(list(messages or []))
-        return await original(messages=messages, tools=tools, on_token=on_token)
-
-    loop._llm.stream_complete = capturing
-    await loop.run_turn("task")
-
-    def count_nudge(req):
-        return sum(1 for m in req if m.get("role") == "user" and m.get("content") == nudge)
-
-    assert count_nudge(requests[0]) == 0             # absent before recovery fires
-    assert count_nudge(requests[1]) == 0
-    assert count_nudge(requests[2]) == 1             # (ii) NEXT request: exactly once
-    assert count_nudge(requests[3]) == 1             # (iii) still present one iteration later
 
 
 @pytest.mark.asyncio
@@ -805,9 +590,9 @@ async def test_request_messages_go_through_context_manager(mock_llm_client, bus)
     build_called = []
 
     class TrackingContextManager(ContextManager):
-        def build_messages(self, messages, tool_schemas=None):
+        def build_messages(self, messages, tool_schemas=None, **kw):
             build_called.append(True)
-            return super().build_messages(messages, tool_schemas)
+            return super().build_messages(messages, tool_schemas, **kw)
 
     loop = _make_agent_loop(mock_llm_client, [Response(content="ok")], bus)
     loop._ctx = TrackingContextManager()
@@ -1550,7 +1335,7 @@ async def test_parse_failed_published_on_retry_increment():
 
 @pytest.mark.asyncio
 async def test_stuck_recovered_published_with_signature():
-    """Stub bus captures StuckRecovered with signature + iteration from RECOVERING branch."""
+    """Stub bus captures StuckRecovered with signature + iteration."""
     bus = AsyncMock()
     await bus.publish(StuckRecovered(
         agent_id="agent-1",
@@ -1584,129 +1369,6 @@ async def test_parse_failed_none_content_safe():
         raw_content_preview=(None or "")[:200],
     )
     assert ev.raw_content_preview == ""
-
-
-# ---------------------------------------------------------------------------
-# Phase 14 config-driven StuckDetector + recovery_injection
-# (14-02 extended AgentConfig + 14-03 wired the agent loop — now live)
-# ---------------------------------------------------------------------------
-
-
-def test_stuck_detector_reads_from_config():
-    """The agent loop must instantiate StuckDetector with values from
-    AgentConfig.stuck_detector, NOT hardcoded defaults (5/2/3)."""
-    from localharness.config.models import AgentConfig
-    cfg = AgentConfig(
-        name="test",
-        role="test",
-        stuck_detector={"window_size": 7, "recovery_threshold": 3, "escalation_threshold": 4},
-    )
-    assert cfg.stuck_detector.window_size == 7
-    assert cfg.stuck_detector.recovery_threshold == 3
-    assert cfg.stuck_detector.escalation_threshold == 4
-
-
-def test_recovery_message_from_config():
-    """AgentConfig.recovery_injection.message must be addressable via the registry."""
-    from localharness.config.models import AgentConfig
-    cfg = AgentConfig(
-        name="test",
-        role="test",
-        recovery_injection={"message": "custom recovery wording"},
-    )
-    assert cfg.recovery_injection.message == "custom recovery wording"
-
-
-# ---------------------------------------------------------------------------
-# Phase 14-03: AgentLoop reads stuck_detector + recovery_injection from AgentConfig
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_agent_loop_instantiates_stuck_detector_from_config(mock_llm_client, bus, monkeypatch):
-    """AgentLoop._execute_loop must build StuckDetector with values from
-    self._config.stuck_detector (not the hardcoded 5/2/3 literals)."""
-    from localharness.config.models import AgentConfig
-    from localharness.agent import loop as loop_mod
-
-    captured: dict = {}
-
-    real_init = loop_mod.StuckDetector.__init__
-
-    def spy_init(self, window_size=5, recovery_threshold=2, escalation_threshold=3,
-                 max_nudges_per_turn=3, **kw):
-        captured["window_size"] = window_size
-        captured["recovery_threshold"] = recovery_threshold
-        captured["escalation_threshold"] = escalation_threshold
-        captured["max_nudges_per_turn"] = max_nudges_per_turn
-        captured["call_only_multiplier"] = kw.get("call_only_multiplier")
-        real_init(self, window_size=window_size, recovery_threshold=recovery_threshold,
-                  escalation_threshold=escalation_threshold,
-                  max_nudges_per_turn=max_nudges_per_turn, **kw)
-
-    monkeypatch.setattr(loop_mod.StuckDetector, "__init__", spy_init)
-
-    cfg = AgentConfig(
-        name="test-agent",
-        role="t",
-        stuck_detector={"window_size": 7, "recovery_threshold": 3,
-                        "escalation_threshold": 4, "max_nudges_per_turn": 5,
-                        "call_only_multiplier": 4},
-    )
-    Response = mock_llm_client.Response
-    loop = _make_agent_loop(mock_llm_client, [Response(content="Done.")], bus, config=cfg)
-    await loop.run_turn("task")
-
-    assert captured == {"window_size": 7, "recovery_threshold": 3,
-                        "escalation_threshold": 4, "max_nudges_per_turn": 5,
-                        "call_only_multiplier": 4}
-
-
-@pytest.mark.asyncio
-async def test_agent_loop_stuck_detector_defaults_preserved(mock_llm_client, bus, monkeypatch):
-    """With default AgentConfig, StuckDetector still gets (5, 2, 3)."""
-    from localharness.config.models import AgentConfig
-    from localharness.agent import loop as loop_mod
-
-    captured: dict = {}
-    real_init = loop_mod.StuckDetector.__init__
-
-    def spy_init(self, window_size=5, recovery_threshold=2, escalation_threshold=3,
-                 max_nudges_per_turn=3, **kw):
-        captured["window_size"] = window_size
-        captured["recovery_threshold"] = recovery_threshold
-        captured["escalation_threshold"] = escalation_threshold
-        captured["max_nudges_per_turn"] = max_nudges_per_turn
-        captured["call_only_multiplier"] = kw.get("call_only_multiplier")
-        real_init(self, window_size=window_size, recovery_threshold=recovery_threshold,
-                  escalation_threshold=escalation_threshold,
-                  max_nudges_per_turn=max_nudges_per_turn, **kw)
-
-    monkeypatch.setattr(loop_mod.StuckDetector, "__init__", spy_init)
-
-    cfg = AgentConfig(name="test-agent", role="t")
-    Response = mock_llm_client.Response
-    loop = _make_agent_loop(mock_llm_client, [Response(content="Done.")], bus, config=cfg)
-    await loop.run_turn("task")
-
-    assert captured == {"window_size": 5, "recovery_threshold": 2,
-                        "escalation_threshold": 3, "max_nudges_per_turn": 3,
-                        "call_only_multiplier": 3}
-
-
-def test_agent_loop_uses_config_recovery_message_not_hardcoded():
-    """Source-level guarantee: loop reads self._config.recovery_injection.message,
-    no longer calls stuck_detector.recovery_message(repeated_sig)."""
-    import inspect
-    from localharness.agent import loop as loop_mod
-    src = inspect.getsource(loop_mod)
-    # Hardcoded form is gone
-    assert "StuckDetector(window_size=5, recovery_threshold=2, escalation_threshold=3)" not in src
-    # Config-driven access present
-    assert "self._config.stuck_detector" in src
-    assert "self._config.recovery_injection.message" in src
-    # Old call-site replaced (we no longer pass repeated_sig into recovery_message)
-    assert "stuck_detector.recovery_message(repeated_sig)" not in src
 
 
 # ---------------------------------------------------------------------------
