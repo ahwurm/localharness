@@ -1486,26 +1486,27 @@ def test_phone_task_doc_bites():
     assert len(check_phone_task_doc("## Nothing\n")) == len(PHONE_TASK_NEEDLES)
 
 
-STUCK_TASK_NEEDLES = (
-    "The `task` tool's results are declared untrusted, so its manifest counts as progress only through its last line, which the harness computes from the task record",
-    "repeated `task` calls are bounded by the flow cap, `/task stop` and the action budget rather than by the identical-call ceiling")
+STUCK_RULE_NEEDLES = (
+    "A turn stops as stuck when the same call returns, byte for byte, a result the model still holds in its request",
+    "output that keeps changing is never a repeat",
+    "is bounded by the action budget, the turn time limit and you")
 
 
-def check_stuck_task_doc(security_text: str) -> list[str]:
-    """SECURITY.md's prompt-injection section says a `task` result counts as progress only through the manifest's last line and what bounds repeated calls."""
+def check_stuck_rule_doc(security_text: str) -> list[str]:
+    """SECURITY.md's prompt-injection section says the stuck rule stops only an exact repeat of a held result and what bounds everything else."""
     body = " ".join((section(security_text, "## Threat model: prompt injection") or "").split())
-    return [f"SECURITY.md's prompt-injection section does not say {n}" for n in STUCK_TASK_NEEDLES if n not in body]
+    return [f"SECURITY.md's prompt-injection section does not say {n}" for n in STUCK_RULE_NEEDLES if n not in body]
 
 
-def test_stuck_task_doc_live():
-    assert check_stuck_task_doc(_read("SECURITY.md")) == []
+def test_stuck_rule_doc_live():
+    assert check_stuck_rule_doc(_read("SECURITY.md")) == []
 
 
-def test_stuck_task_doc_bites():
+def test_stuck_rule_doc_bites():
     text = _read("SECURITY.md")
-    for needle in STUCK_TASK_NEEDLES:
-        assert check_stuck_task_doc(_swap(text, needle, "x")) == [f"SECURITY.md's prompt-injection section does not say {needle}"]
-    assert len(check_stuck_task_doc("## Nothing\n")) == len(STUCK_TASK_NEEDLES)
+    for needle in STUCK_RULE_NEEDLES:
+        assert check_stuck_rule_doc(_swap(text, needle, "x")) == [f"SECURITY.md's prompt-injection section does not say {needle}"]
+    assert len(check_stuck_rule_doc("## Nothing\n")) == len(STUCK_RULE_NEEDLES)
 
 
 _ROOT_PARAGRAPH = (

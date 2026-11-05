@@ -89,13 +89,14 @@ async def test_an_empty_plain_text_body_is_past_the_end_at_zero(monkeypatch):
     assert store._fetch_seq == 0
 
 
-async def test_retain_window_names_the_refetching_tool_and_mints_one_id_per_call():
+async def test_retain_window_names_the_refetching_tool_and_reuses_the_id_of_an_unchanged_page():
     store = ContentStore()
     first = retain_window(store, "x" * 1200, "https://a.test/", 0, 500, "browser_fetch")
     second = retain_window(store, "x" * 1200, "https://a.test/", 0, 500, "browser_fetch")
+    other = retain_window(store, "x" * 1200, "https://b.test/", 0, 500, "browser_fetch")
     assert first.output.endswith("or browser_fetch start_index=500 for the next window]")
-    assert (first.metadata["fetch_id"], second.metadata["fetch_id"]) == ("pg-1", "pg-2")
-    assert first.output.replace("pg-1", "pg-2") == second.output
+    assert (first.metadata["fetch_id"], second.metadata["fetch_id"], other.metadata["fetch_id"]) == ("pg-1", "pg-1", "pg-2")
+    assert first.output == second.output
     for fid in ("pg-1", "pg-2"):
         assert (await WebPageQueryTool(store).run(fetch_id=fid, pattern="xxx")).success
     assert not inspect.iscoroutinefunction(retain_window)

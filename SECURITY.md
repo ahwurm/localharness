@@ -1328,17 +1328,15 @@ reached an agent through the inherited global scope therefore needed a separate 
 the checks knew what it was. Now every tool carries its own declarations, the three readers above
 read the same ones, and a tool that declares nothing gets the most restrictive values.
 
-**Untrusted output cannot delay a stuck escalation.** The stuck detector counts a changing result as
-progress only for a tool whose output the harness trusts, such as `bash_exec` or `agent`, as
-declared by `result_origin`. Output from a web page, an MCP server or memory cannot delay an
-escalation however much it varies, and a tool that declares nothing, or whose declaration cannot be
-read, counts as untrusted. Output an attacker can still influence through a trusted tool (a shell
-reading a file from a cloned repository, a delegated agent relaying a web summary) can delay the
-nudge. That case is bounded by the per-turn ceiling on identical calls
-(`stuck_detector.call_only_multiplier` times `escalation_threshold`, whatever the results are) and by
-you. The `task` tool's results are declared untrusted, so its manifest counts as progress only through
-its last line, which the harness computes from the task record; repeated `task` calls are bounded by
-the flow cap, `/task stop` and the action budget rather than by the identical-call ceiling.
+**The stuck rule catches only exact repeats of a result the model still has.** A turn stops as stuck
+when the same call returns, byte for byte, a result the model still holds in its request (not evicted to
+a stub, not compacted away). The second copy reaches the model as a pointer to the first, and asking
+again stops the turn. Whatever tool produced it, output that keeps changing is never a repeat, so a
+loop whose results vary (a poll, a shell reading a file in a cloned repository, a delegated agent
+relaying a web summary) is bounded by the action budget, the turn time limit and you, not by this rule.
+A successful call of a tool that declares the write family starts the count over, because a write may
+change what an earlier call would now see; a loop alternating writes and re-checks is bounded the same
+way. The `task` tool is compared like any other.
 
 **What this does NOT cover.** A declaration is believed. A tool that declares `ingest: none` while
 it actually fetches attacker-controlled text is treated as it says, and turning on a plugin you
@@ -2311,8 +2309,8 @@ own it has no action limit) and is not locked by `channels.remote_unattended: fa
 holds: the `bash_exec` or `python_exec` call that starts it passes the gate of the session that
 runs it like any other command, so a mode that asks before a shell command shows you the
 `env -u`; every tool call of the new session passes that session's own gate and deny patterns;
-its stuck detector runs whatever the channel (the hashed window and the per-turn ceiling on
-identical calls); the kill file (`~/.localharness/KILL` by default, set only in your machine
+its stuck rule runs whatever the channel (an exact repeat of a result the model still has stops
+the turn); the kill file (`~/.localharness/KILL` by default, set only in your machine
 config) stops it at its next iteration; and the `bash_exec` timeout (300 seconds at most) kills
 the command's process group, unless the command detaches itself (`setsid`, `nohup … &`). The Zed
 caveat above runs the other way: the marker can make a session you start look agent-launched, and

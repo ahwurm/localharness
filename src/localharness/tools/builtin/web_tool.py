@@ -156,7 +156,7 @@ def retain_window(store: Any, text: str, url: str, start: int, max_chars: int, r
         )
     # The tail folds the paging cursor and the fetch_id query into ONE notice: truncation is a
     # display decision, never data loss — the whole page stays queryable via web_page_query.
-    fid = store.put_web(text)
+    fid = store.put_web(text, url)
     window = text[start:start + cap]
     end = start + len(window)
     more = end < full_len

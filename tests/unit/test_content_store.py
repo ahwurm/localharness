@@ -86,6 +86,31 @@ def test_reset_restarts_pg_sequence():
     assert s.put_web("after reset") == "pg-1"
 
 
+def test_the_same_url_and_body_reuses_its_alias_and_anything_else_mints():
+    s = ContentStore()
+    first = s.put_web("page", "https://a.test/")
+    assert s.put_web("page", "https://a.test/") == first == "pg-1"
+    assert s.put_web("page", "https://b.test/") == "pg-2"
+    assert s.put_web("changed", "https://a.test/") == "pg-3"
+    assert s.put_web("page") == "pg-4" and s.put_web("page") == "pg-5"
+
+
+def test_a_refetch_after_the_lru_evicted_the_page_mints_a_new_alias():
+    s = ContentStore(max_web=1)
+    first = s.put_web("one", "https://a.test/")
+    s.put_web("two", "https://b.test/")
+    assert s.get(first) is None
+    assert s.put_web("one", "https://a.test/") == "pg-3"
+
+
+def test_reuse_restarts_with_reset_and_never_crosses_stores():
+    s, other = ContentStore(), ContentStore()
+    s.put_web("page", "https://a.test/")
+    s.reset()
+    assert s.put_web("page", "https://a.test/") == "pg-1"
+    assert other.put_web("page", "https://a.test/") == "pg-1" and other.get("pg-2") is None
+
+
 def test_web_bodies_are_lru_bounded_trusted_durable():
     s = ContentStore(max_web=2)
     a = s.put_web("web one")

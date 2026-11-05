@@ -147,6 +147,20 @@ async def test_web_fetch_retains_full_page_and_returns_fetch_id(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_refetching_an_unchanged_page_returns_the_same_fetch_id_and_output(monkeypatch):
+    store = ContentStore()
+    page = "lorem ipsum " * 800
+    _fake_httpx(monkeypatch, text=page, content_type="text/plain")
+    first = await WebFetchTool(store).run(url="https://example.test/big")
+    again = await WebFetchTool(store).run(url="https://example.test/big")
+    assert again.output == first.output and again.metadata["fetch_id"] == first.metadata["fetch_id"]
+
+    _fake_httpx(monkeypatch, text=page + "now different", content_type="text/plain")
+    changed = await WebFetchTool(store).run(url="https://example.test/big")
+    assert changed.metadata["fetch_id"] != first.metadata["fetch_id"]
+
+
+@pytest.mark.asyncio
 async def test_web_page_query_surfaces_content_past_the_inline_cap(monkeypatch):
     web_tool._reset_page_store()
     filler = "background prose. " * 400          # ~7200 chars of filler

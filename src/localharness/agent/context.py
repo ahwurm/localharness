@@ -322,6 +322,7 @@ class ContentStore:
         self._bodies: dict[str, tuple[str, Origin]] = {}
         self._web: "OrderedDict[str, None]" = OrderedDict()
         self._aliases: dict[str, str] = {}
+        self._web_ids: dict[tuple[str, str], str] = {}
         self._sources: dict[str, str] = {}
         self._fetch_seq = 0
         self._max_web = max_web
@@ -391,12 +392,18 @@ class ContentStore:
         self._bodies[h] = (body, "untrusted" if tainted else "trusted")
         return h
 
-    def put_web(self, body: str) -> str:
+    def put_web(self, body: str, url: str | None = None) -> str:
         """Retain a web body (ALWAYS untrusted), mint a per-agent pg-N alias, LRU-bound the web set.
-        Returns the pg-N alias — callers keep using pg-N exactly as before."""
+        Returns the pg-N alias; the same `url` and body while the page is still retained returns its alias."""
+        h = _content_handle(body)
+        if url and (alias := self._web_ids.get((url, h))) and self._aliases.get(alias) == h and h in self._web:
+            self._web.move_to_end(h)
+            return alias
         self._fetch_seq += 1
         alias = f"pg-{self._fetch_seq}"
-        h = self.put(body, origin="untrusted")
+        self.put(body, origin="untrusted")
+        if url:
+            self._web_ids[(url, h)] = alias
         self._aliases[alias] = h
         self._web[h] = None
         self._web.move_to_end(h)
@@ -405,6 +412,7 @@ class ContentStore:
             self._bodies.pop(old, None)
             for a in [a for a, hh in self._aliases.items() if hh == old]:
                 self._aliases.pop(a, None)
+            self._web_ids = {k: a for k, a in self._web_ids.items() if k[1] != old}
         return alias
 
     def get(self, ref: str) -> str | None:
@@ -446,6 +454,7 @@ class ContentStore:
         self._bodies.clear()
         self._web.clear()
         self._aliases.clear()
+        self._web_ids.clear()
         self._fetch_seq = 0
         self.clear_active_references()
 
