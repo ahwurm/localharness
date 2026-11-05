@@ -190,7 +190,7 @@ async def test_validation_error_recovery(tmp_path):
 
 @pytest.mark.asyncio
 async def test_stuck_escalation(tmp_path):
-    """Mock LLM repeats same tool call 3+ times → stuck detector escalates.
+    """Mock LLM repeats the same call and gets the same result 3 times → the turn stops as stuck.
 
     The stuck notice is the Escalation event's, delivered once (D-04/D-40/D-67): the turn's reply is
     the wrap-up summary, else the last assistant content, else empty — never stuck text. The turn
@@ -218,7 +218,7 @@ async def test_stuck_escalation(tmp_path):
     escalations = bus.history(event_types=[Escalation])
     assert len(escalations) == 1
     assert escalations[0].reason == "stuck_detected"
-    assert "repeated" in escalations[0].detail.lower() or "stuck" in escalations[0].detail.lower()
+    assert "returned the same result" in escalations[0].detail
 
     # The turn terminated as stuck, and its failure detail is exactly the returned reply
     failed = [e for e in bus.history(event_types=[TurnFailed]) if e.reason == "stuck_detected"]

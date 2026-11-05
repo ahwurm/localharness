@@ -20,14 +20,13 @@ from localharness.agent.gate_types import GateOutcome
 from localharness.agent.loop import (
     AgentLoop,
     Session,
-    StuckDetector,
     _tool_message,
     compute_signature,
 )
 from localharness.agent.permissions import PermissionEvaluator
 from localharness.config.models import AgentConfig, BudgetConfig, PermissionConfig
 from localharness.core.events import Observation
-from localharness.core.types import is_harness_message, provider_messages
+from localharness.core.types import is_harness_message, provider_messages, result_digest
 from localharness.memory.sqlite import MemoryStore
 from localharness.tools import Tool, ToolRegistry, ToolResult, ToolSchema
 from tests.conftest import FakeLLMResponse, FakeToolCall, MockLLMClient
@@ -114,9 +113,8 @@ def _outcome(call_name: str, args: dict, *, ok: bool, denied: bool = False, stag
 # Task 1: the stamp
 # ---------------------------------------------------------------------------
 
-def test_module_level_signature_matches_the_stuck_detector_method():
+def test_signature_is_sixteen_hex_and_ignores_argument_order():
     sig = compute_signature("read", {"path": "a"})
-    assert sig == StuckDetector().compute_signature("read", {"path": "a"})
     assert len(sig) == 16 and all(c in "0123456789abcdef" for c in sig)
     assert compute_signature("t", {"a": 1, "b": 2}) == compute_signature("t", {"b": 2, "a": 1})
 
@@ -134,8 +132,10 @@ async def test_a_failed_then_successful_dispatch_is_stamped_with_the_call_signat
 
     first, second = _tool_messages(loop)
     sig = compute_signature("probe", args)
-    assert first["_lh"] == {"outcome": {"call": sig, "ok": False, "denied": False, "staged": False}}
-    assert second["_lh"] == {"outcome": {"call": sig, "ok": True, "denied": False, "staged": False}}
+    assert first["_lh"] == {"outcome": {"call": sig, "ok": False, "denied": False, "staged": False,
+                                        "result": result_digest(first["content"])}}
+    assert second["_lh"] == {"outcome": {"call": sig, "ok": True, "denied": False, "staged": False,
+                                         "result": result_digest(second["content"])}}
     for message in (first, second):
         assert "origin" not in message["_lh"]
         assert "_lh" not in provider_messages([message])[0]
@@ -191,6 +191,7 @@ def test_the_helper_stamps_staged_and_leaves_an_unstampable_call_unstamped():
     staged = _tool_message(call, "x", ok=False, denied=True, staged=True)
     assert staged["_lh"]["outcome"] == {
         "call": compute_signature("probe", {"path": "a"}), "ok": False, "denied": True, "staged": True,
+        "result": result_digest("x"),
     }
     assert staged["role"] == "tool" and staged["tool_call_id"] == "tc" and staged["content"] == "x"
 
@@ -215,6 +216,7 @@ async def test_truncated_call_feedback_is_stamped_failed(bus):
     (msg,) = _tool_messages(loop)
     assert msg["_lh"]["outcome"] == {
         "call": compute_signature("probe", {"path": "a"}), "ok": False, "denied": False, "staged": False,
+        "result": result_digest(msg["content"]),
     }
 
 
@@ -261,6 +263,7 @@ async def test_step_path_stamps_denial_result_and_truncation(bus):
     msg = [m for m in session.messages if m["role"] == "tool"][-1]
     assert msg["_lh"]["outcome"] == {
         "call": compute_signature("probe", {"path": "a"}), "ok": False, "denied": False, "staged": False,
+        "result": result_digest(msg["content"]),
     }
 
     # denial

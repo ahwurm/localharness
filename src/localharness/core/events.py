@@ -601,18 +601,13 @@ class ParseFailed(BaseEvent):
 
 
 class StuckRecovered(BaseEvent):
-    """Published by the agent loop on every StuckState.RECOVERING transition.
-
-    SCEN-02 derives `stuck_recoveries` per scenario by counting these events. Note:
-    emitted once per RECOVERING decision (not once per re-entry into the state); the
-    loop calls stuck_detector.check() once per iteration so this naturally throttles.
-    """
+    """Published when a new tool message repeats exactly one earlier copy the model still holds."""
 
     event_type: str = "StuckRecovered"
     agent_id: AgentID
     session_id: SessionID
     iteration: int
-    stuck_signature: str  # from stuck_detector.most_repeated_signature()
+    stuck_signature: str
 
 
 class InputRouted(BaseEvent):
@@ -648,7 +643,7 @@ class ComponentMutated(BaseEvent):
     """
 
     event_type: str = "ComponentMutated"
-    path: str  # dot-path: e.g. "agent.stuck_detector.window_size"
+    path: str  # dot-path: e.g. "agent.baton_gate.max_nudges"
     before_value: Any  # int|float|str|bool|list|dict|None — JSON-primitive only
     after_value: Any
     layer: Literal["user", "experiment"]  # which overlay was written

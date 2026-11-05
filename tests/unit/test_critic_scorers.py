@@ -1,9 +1,8 @@
-"""Critics as scorers: the score line, the stall rule, the round index, provenance and the evicted re-read."""
+"""Critics as scorers: the score line, the stall rule, the round index, and provenance."""
 from __future__ import annotations
 
 import json
 
-from localharness.agent.loop import StuckDetector, StuckState
 from localharness.agent.subagent import provenance_note
 from localharness.orchestrator.task_flow.filer import Docs
 from localharness.orchestrator.task_flow.panel import (Finding, Panel, PanelRun, load_critic, parse, revision_request,
@@ -77,36 +76,6 @@ def test_provenance_flags_text_that_no_source_holds_and_passes_copied_text():
     invented = " ".join(f"other{i}" for i in range(130))
     note = provenance_note(invented, [source])
     assert note.startswith("2 of 2 stretches") and "other0 other1" in note
-
-
-def test_a_reread_of_an_evicted_result_counts_toward_the_ceiling_not_the_window():
-    d = StuckDetector()
-    for _ in range(4):
-        d.record("web_fetch", {"url": "u"}, (True, "x"), reread=True)
-    assert d.classify()[0] == StuckState.CLEAR and d.call_count(d.compute_signature("web_fetch", {"url": "u"})) == 4
-    d.record("web_fetch", {"url": "u"}, (True, "x"))
-    d.record("web_fetch", {"url": "u"}, (True, "x"))
-    assert d.classify()[0] == StuckState.RECOVERING
-
-
-async def test_the_loop_learns_which_calls_sit_behind_an_eviction_stub():
-    from types import SimpleNamespace
-    from localharness.agent.context import _WEB_STUB_PREFIX
-    from localharness.agent.loop import AgentLoop, compute_signature
-    sig = compute_signature("web_fetch", {"url": "u"})
-    stubbed = {"role": "tool", "tool_call_id": "1", "content": f"{_WEB_STUB_PREFIX} — web_fetch u; 900 chars dropped]",
-               "_lh": {"outcome": {"call": sig, "ok": True, "denied": False, "staged": False}}}
-    kept = {"role": "tool", "tool_call_id": "2", "content": "page text",
-            "_lh": {"outcome": {"call": "other", "ok": True, "denied": False, "staged": False}}}
-
-    async def build_messages(messages, tools, **_):
-        return [stubbed, kept], SimpleNamespace()
-
-    loop = object.__new__(AgentLoop)
-    loop._ctx = SimpleNamespace(build_messages=build_messages, _content_store=None)
-    loop._llm = SimpleNamespace(config=SimpleNamespace(tool_call_mode="native"))
-    await loop._pack_request([], None, "")
-    assert loop._evicted_calls == frozenset({sig})
 
 
 def test_a_blocker_line_on_screen_carries_its_fix():

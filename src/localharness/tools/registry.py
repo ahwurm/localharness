@@ -8,7 +8,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ValidationError, create_model
 from pydantic.fields import FieldInfo
 
-from localharness.tools.base import StoreBound, StoreReleasing, Tool, ToolProtocol, ToolResult, ToolSchema, ToolVetoed
+from localharness.tools.base import GateFamily, StoreBound, StoreReleasing, Tool, ToolProtocol, ToolResult, ToolSchema, ToolVetoed
 from localharness.tools.capabilities import (
     IngestViaExecError,
     assert_no_coresidence,
@@ -341,6 +341,12 @@ class ToolRegistry:
         if not tools:
             return "dangerous"
         return "safe" if all(t.info().host == "safe" for t in tools) else "dangerous"
+
+    def gate_family(self, name: str) -> GateFamily | None:
+        """The one family every bearer of `name` declares; None when unknown, undeclared or disagreeing."""
+        tools = self._tools_named(name) or self._tools_named(_bare_name(name))
+        families = {t.info().gate_family for t in tools}
+        return families.pop() if len(families) == 1 else None
 
     def _find_tool_by_name(self, name: str) -> ToolProtocol | None:
         for bucket in [

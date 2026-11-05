@@ -2,8 +2,6 @@
 from localharness.agent.loop import (
     AgentLoop,
     Session,
-    StuckDetector,
-    StuckState,
     BudgetTracker,
     BudgetViolation,
     KillWatcher,
@@ -15,8 +13,6 @@ from localharness.agent.permissions import PermissionEvaluator, PermissionResult
 __all__ = [
     "AgentLoop",
     "Session",
-    "StuckDetector",
-    "StuckState",
     "BudgetTracker",
     "BudgetViolation",
     "KillWatcher",

@@ -1,4 +1,5 @@
 """Shared primitive types used across all LocalHarness components."""
+import hashlib
 from dataclasses import dataclass
 from typing import Any, Literal, NewType, NotRequired, TypedDict
 
@@ -32,13 +33,15 @@ class ToolOutcome(TypedDict):
 
     ``call`` is the call-only signature of the tool name and arguments, ``ok`` is
     whether the call ran and succeeded, ``denied`` whether the permission gate refused
-    it and ``staged`` whether the gate staged it for a human.
+    it and ``staged`` whether the gate staged it for a human. ``result`` is the
+    :func:`result_digest` of the exact content the model was given.
     """
 
     call: str
     ok: bool
     denied: bool
     staged: bool
+    result: NotRequired[str]
 
 
 class ToolProvenance(TypedDict):
@@ -53,6 +56,10 @@ class ToolProvenance(TypedDict):
 
 # A message's private ``_lh`` key is a ``MessageProvenance`` (user messages) or a
 # ``ToolProvenance`` (tool messages); readers test the key they need, never the shape.
+
+
+def result_digest(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
 def human_message(content: Content, subtype: str = "request", turn: int | None = None) -> Message:

@@ -15,7 +15,7 @@ from typing import Any, Literal, NamedTuple
 
 from localharness.agent.taint import under_downloads
 from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
-from localharness.core.types import Message, provider_messages
+from localharness.core.types import Message, is_harness_message, provider_messages, result_digest
 from localharness.core.content import content_image_tokens, drop_images, text_of, with_text
 
 
@@ -581,6 +581,74 @@ def _drop_superseded_failures(
     if not dropped:
         return messages
     return [m for k, m in enumerate(messages) if k not in dropped]
+
+
+REPEAT_POINTER = "[same result as your identical call {k} tool results above]"
+BUDGET_NOTE_PREFIX = "\n\n[budget: "
+
+
+def _repeats(
+    messages: list[Message],
+    gate_family: Callable[[str], str | None] | None,
+) -> dict[int, tuple[int, int]]:
+    """Per tool message that repeats an earlier one still held: (earlier copies, tool results back to the first).
+
+    A repeat is the same stamped call with the same stamped result. A stub never counts (the model no
+    longer has it), nor does an unstamped message. A message from the person clears the count, and
+    so does a successful non-repeat call of a tool declaring the write family. Pure.
+    """
+    names = _call_meta(messages)
+    seen: dict[tuple[str, str], tuple[int, int]] = {}
+    found: dict[int, tuple[int, int]] = {}
+    ordinal = 0
+    for i, m in enumerate(messages):
+        role = m.get("role")
+        if role == "user" and not is_harness_message(m):
+            seen = {}
+        if role != "tool":
+            continue
+        ordinal += 1
+        outcome = _tool_outcome(m)
+        content = m.get("content")
+        if (outcome is None or not outcome.get("call") or not outcome.get("result")
+                or not isinstance(content, str) or content.startswith((_TOOL_STUB_PREFIX, _WEB_STUB_PREFIX))):
+            continue
+        key = (outcome["call"], outcome["result"])
+        if key in seen:
+            held, first = seen[key]
+            found[i] = (held, ordinal - first)
+            seen[key] = (held + 1, first)
+            continue
+        if outcome.get("ok") is True:
+            try:
+                family = gate_family(names.get(m.get("tool_call_id"), ("",))[0]) if gate_family else None
+            except Exception:  # noqa: BLE001 — fail closed: no reset
+                family = None
+            if family == "write":
+                seen = {}
+        seen[key] = (1, ordinal)
+    return found
+
+
+def _point_repeats(
+    messages: list[Message],
+    gate_family: Callable[[str], str | None] | None,
+) -> list[Message]:
+    """Request view only: a tool message with exactly one earlier held copy becomes a pointer to it.
+
+    The budget note rides on only when the text before it digests to the stamped result, so tool output
+    can never pose as one. Returns the input list itself when nothing changes; never mutates.
+    """
+    pointed = {i: k for i, (held, k) in _repeats(messages, gate_family).items() if held == 1}
+    if not pointed:
+        return messages
+    out = list(messages)
+    for i, k in pointed.items():
+        content = messages[i]["content"]
+        head, sep, tail = content.rpartition(BUDGET_NOTE_PREFIX)
+        note = sep + tail if sep and result_digest(head) == _tool_outcome(messages[i])["result"] else ""
+        out[i] = {**messages[i], "content": REPEAT_POINTER.format(k=k) + note}
+    return out
 
 
 def _evict_large_tool_results(
@@ -2254,6 +2322,7 @@ class ContextManager:
         tool_schemas: list[dict] | None = None,
         *,
         compact: bool = True,
+        gate_family: Callable[[str], str | None] | None = None,
     ) -> tuple[list[Message], TokenBudget]:
         """Return repaired messages + budget snapshot for the request that will be sent.
 
@@ -2386,8 +2455,9 @@ class ContextManager:
         # session yields the same prefix, so the cache holds. After the pipeline block so the
         # summary's count-based commit span and compaction's inputs saw the undropped list; the
         # out-of-view note, the floor, ensure_active_references and the returned budget see the
-        # request as it is sent.
+        # request as it is sent. A repeat of a held result is pointed to in the same way (never committed).
         repaired = _drop_superseded_failures(repaired, self._host)
+        repaired = _point_repeats(repaired, gate_family)
 
         # MOVE 0c EMERGENCY FLOOR (coordinator ruling: overflow must be IMPOSSIBLE). When — fire
         # cap reached, no safe cut, no pipeline at all — utilization still exceeds the budget, drop
