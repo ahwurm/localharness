@@ -174,20 +174,44 @@ def test_context_config_resolve_budget_pin_outranks_scalar():
     assert ContextConfig(max_context_tokens=8_000).resolve_budget("m") == (8_000, False)
 
 
-# --- Phase 14-02 Task 1: StuckDetectorConfig / RecoveryInjectionConfig / OrgConfig.hooks ---
+# --- retired agent sections: the stuck rule reads the chat, an old section loads with one notice ---
 
-def test_stuck_detector_config_defaults_mirror_loop_hardcode():
+_RETIRED_LOG = "localharness.config.models"
+
+
+def test_both_retired_sections_load_in_any_shape_with_one_notice_naming_both(caplog):
     from localharness.config.models import AgentConfig
-    cfg = AgentConfig(name="t", role="t")
-    assert cfg.stuck_detector.window_size == 5
-    assert cfg.stuck_detector.recovery_threshold == 2
-    assert cfg.stuck_detector.escalation_threshold == 3
+    with caplog.at_level("WARNING", logger=_RETIRED_LOG):
+        cfg = AgentConfig.model_validate({"name": "t", "role": "t", "stuck_detector": {"no_such": 1},
+                                          "recovery_injection": "not even a mapping"})
+    assert not hasattr(cfg, "stuck_detector") and not hasattr(cfg, "recovery_injection")
+    [record] = [r for r in caplog.records if r.name == _RETIRED_LOG]
+    assert "stuck_detector" in record.getMessage() and "recovery_injection" in record.getMessage()
 
 
-def test_stuck_detector_override():
+def test_one_retired_section_is_named_alone_and_none_makes_no_notice(caplog):
     from localharness.config.models import AgentConfig
-    cfg = AgentConfig(name="t", role="t", stuck_detector={"window_size": 7})
-    assert cfg.stuck_detector.window_size == 7
+    data = {"name": "t", "role": "t", "recovery_injection": {"message": "x"}}
+    with caplog.at_level("WARNING", logger=_RETIRED_LOG):
+        AgentConfig.model_validate(data)
+        AgentConfig.model_validate({"name": "t", "role": "t"})
+    [record] = [r for r in caplog.records if r.name == _RETIRED_LOG]
+    assert "recovery_injection" in record.getMessage() and "stuck_detector" not in record.getMessage()
+    assert data == {"name": "t", "role": "t", "recovery_injection": {"message": "x"}}
+
+
+def test_old_yaml_with_retired_sections_loads_through_the_loader(tmp_path):
+    import yaml
+    from localharness.config.loader import ConfigLoader
+    base = {"version": "1", "provider": {"provider_type": "vllm", "base_url": "http://localhost:8000/v1",
+                                         "default_model": "m"}}
+    (tmp_path / "config.yaml").write_text(yaml.dump(base), encoding="utf-8")
+    (tmp_path / "agents").mkdir()
+    (tmp_path / "agents" / "old.yaml").write_text(
+        yaml.dump({"name": "old", "role": "r", "stuck_detector": {"window_size": 9}}), encoding="utf-8")
+    (tmp_path / "overrides.yaml").write_text(
+        yaml.dump({"agent": {"recovery_injection": {"message": "x"}}}), encoding="utf-8")
+    assert ConfigLoader(config_dir=tmp_path).load_agent("old").name == "old"
 
 
 def test_max_subagent_depth_default_and_bounds():
@@ -201,25 +225,6 @@ def test_max_subagent_depth_default_and_bounds():
             AgentConfig(name="t", role="t", max_subagent_depth=bad)
 
 
-def test_recovery_injection_default_matches_loop_string():
-    from localharness.config.models import AgentConfig
-    cfg = AgentConfig(name="t", role="t")
-    expected = (
-        "You have attempted the same tool call multiple times with identical arguments "
-        "and received the same result. That approach is not working. "
-        "Consider a fundamentally different strategy: try different arguments, "
-        "use a different tool, or conclude that the information is not available this way. "
-        "If you are waiting on something external, say so and stop; do not poll."
-    )
-    assert cfg.recovery_injection.message == expected
-
-
-def test_recovery_injection_override():
-    from localharness.config.models import AgentConfig
-    cfg = AgentConfig(name="t", role="t", recovery_injection={"message": "custom"})
-    assert cfg.recovery_injection.message == "custom"
-
-
 def test_org_hooks_default_empty():
     from localharness.config.models import OrgConfig
     cfg = OrgConfig()
@@ -230,18 +235,6 @@ def test_org_hooks_accept_freeform_dict():
     from localharness.config.models import OrgConfig
     cfg = OrgConfig(hooks={"my_hook": {"enabled": True}})
     assert cfg.hooks["my_hook"]["enabled"] is True
-
-
-def test_stuck_detector_zero_window_raises():
-    from localharness.config.models import AgentConfig
-    with pytest.raises(ValidationError):
-        AgentConfig(name="t", role="t", stuck_detector={"window_size": 0})
-
-
-def test_stuck_detector_extra_forbid():
-    from localharness.config.models import AgentConfig
-    with pytest.raises(ValidationError):
-        AgentConfig(name="t", role="t", stuck_detector={"unknownField": 5})
 
 
 # -----------------------------------------------------------------------------

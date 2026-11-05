@@ -21,16 +21,14 @@ def _make_minimal_harness_cfg():
     )
 
 
-def test_six_distinct_surface_types(components_home):
-    """REG-04: catalogue exposes >=6 distinct top-level surface families.
+def test_four_distinct_surface_types(components_home):
+    """REG-04: catalogue exposes >=4 distinct top-level surface families.
 
     Surfaces enumerated:
       1. agent.role / agent.context.system_prompt_file
       2. tools.*.description
       3. org.context.compaction_threshold_pct
-      4. agent.stuck_detector.window_size
-      5. agent.recovery_injection.message
-      6. org.hooks (the dead hooks.<name>.config source is gone — 44-13)
+      4. org.hooks (the dead hooks.<name>.config source is gone — 44-13)
     """
     from localharness.registry.catalogue import build_catalogue, SURFACE_FAMILIES
 
@@ -52,8 +50,8 @@ def test_six_distinct_surface_types(components_home):
             if any(re.search(p, path) for p in patterns):
                 matched_families.add(family)
                 break
-    assert len(matched_families) >= 6, (
-        f"Expected >=6 surface families covered, got {matched_families}"
+    assert len(matched_families) >= 4, (
+        f"Expected >=4 surface families covered, got {matched_families}"
     )
 
 
@@ -66,8 +64,7 @@ def test_required_surfaces_present(components_home):
 
     required = {
         "org.context.compaction_threshold_pct",
-        "agent.stuck_detector.window_size",
-        "agent.recovery_injection.message",
+        "agent.baton_gate.max_nudges",
     }
     missing = required - set(entries.keys())
     assert not missing, f"Missing required surfaces: {missing}"
@@ -180,8 +177,8 @@ def _memory_plugin_rows():
 def test_agent_cfg_drives_agent_star_current_value(components_home):
     """WARNING-2: agent.* current_value must reflect the LIVE AgentConfig, not field defaults.
 
-    With agent_cfg=None the catalogue reports the StuckDetectorConfig default (window_size=5).
-    With a live AgentConfig carrying window_size=9, the catalogue MUST report 9 — this is the
+    With agent_cfg=None the catalogue reports the RepetitionGuardConfig default (min_lines=10).
+    With a live AgentConfig carrying min_lines=9, the catalogue MUST report 9 — this is the
     provenance the experiment/proposer call sites get wrong today (build_catalogue(cfg) with no
     agent_cfg=), making the recorded `before` value detached from the live overlay-resolved config.
     """
@@ -190,16 +187,16 @@ def test_agent_cfg_drives_agent_star_current_value(components_home):
 
     cfg = _make_minimal_harness_cfg()
 
-    # Baseline: no agent_cfg -> field default (5).
+    # Baseline: no agent_cfg -> field default (10).
     default_entries = build_catalogue(cfg, overlays={})
-    assert default_entries["agent.stuck_detector.window_size"].current_value == 5
+    assert default_entries["agent.repetition_guard.min_lines"].current_value == 10
 
     # Live: a resolved AgentConfig with the overlay value (9).
     live = AgentConfig.model_validate(
-        {"name": "bench-x", "role": "r", "stuck_detector": {"window_size": 9}}
+        {"name": "bench-x", "role": "r", "repetition_guard": {"min_lines": 9}}
     )
     live_entries = build_catalogue(cfg, overlays={}, agent_cfg=live)
-    assert live_entries["agent.stuck_detector.window_size"].current_value == 9, (
+    assert live_entries["agent.repetition_guard.min_lines"].current_value == 9, (
         "build_catalogue must thread agent_cfg into agent.* current_value so the recorded "
         "`before` value is the live overlay-resolved config (WARNING-2), not AgentConfig defaults."
     )
@@ -272,8 +269,8 @@ def test_agent_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 256, (
-        "catalogue should be 256 entries (184 + agent.purpose + agent.skills + the 2026-10 context.max_image_tokens field, "
+    assert len(entries) == 250, (
+        "catalogue should be 250 entries (184 + agent.purpose + agent.skills + the 2026-10 context.max_image_tokens field, "
         "one entry per root): the 223-entry v0.14 ledger minus the resonance "
         "rebuild's removals (agent.memory.write_gate_enabled x1, "
         "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
@@ -298,7 +295,6 @@ def test_agent_leaves_enumerate(components_home):
         "plus channels.unattended_max_actions x1, the two permissions.init_nulls_revision "
         "stamps (org and agent) x2 and the fourteen org.children_budget.* leaves (six entries "
         "of actions and minutes, lookup_share, review_share) x14 (the delegated-budget schema). "
-        "plus agent.stuck_detector.call_only_multiplier x1 (the per-turn call-only ceiling) "
         "plus the three window ratios x6 (org.context.tool_output_ratio, "
         "org.context.evict_ratio, org.context.result_cap_ratio and the three "
         "agent.context.* twins) "
@@ -307,7 +303,7 @@ def test_agent_leaves_enumerate(components_home):
         "plus instructions.max_ratio and instructions.children x2 (the machine-level "
         "project-instructions knobs) "
         "plus terminal.keys.nudge and terminal.keys.newline x2 (the machine-level chord lists) "
-        "plus server.engine_dir and server.engine_config x2 (the Strata record) plus autosense.strata_dir x1 minus context.microagents x2 (org and agent, the deleted key) plus agent.task_flow.* x8 (the global-only task pipeline section) minus the deleted self-review's enabled and max_passes leaves x2 plus agent.act_guard x1 (a critic's tool-less answer is its work). "
+        "plus server.engine_dir and server.engine_config x2 (the Strata record) plus autosense.strata_dir x1 minus context.microagents x2 (org and agent, the deleted key) plus agent.task_flow.* x8 (the global-only task pipeline section) minus the deleted self-review's enabled and max_passes leaves x2 plus agent.act_guard x1 (a critic's tool-less answer is its work) minus the retired stuck_detector.* and recovery_injection.message leaves x6. "
         f"got {len(entries)}"
     )
 
@@ -317,7 +313,7 @@ def test_agent_leaves_enumerate(components_home):
 # Adding `role_sections: RoleSectionsConfig` (four str fields) to AgentConfig makes
 # walk_model_fields recurse the nested BaseModel into
 # agent.role_sections.{identity,tool_use,stopping,output} with ZERO catalogue edit
-# (mirrors agent.stuck_detector.*). Catalogue 82 -> 86.
+# (mirrors agent.baton_gate.*). Catalogue 82 -> 86.
 # ---------------------------------------------------------------------------
 
 
@@ -358,8 +354,8 @@ def test_role_sections_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 256, (
-        "catalogue should be 256 entries (184 + agent.purpose + agent.skills + the 2026-10 context.max_image_tokens field, "
+    assert len(entries) == 250, (
+        "catalogue should be 250 entries (184 + agent.purpose + agent.skills + the 2026-10 context.max_image_tokens field, "
         "one entry per root): the 223-entry v0.14 ledger minus the resonance "
         "rebuild's removals (agent.memory.write_gate_enabled x1, "
         "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
@@ -384,7 +380,6 @@ def test_role_sections_leaves_enumerate(components_home):
         "plus channels.unattended_max_actions x1, the two permissions.init_nulls_revision "
         "stamps (org and agent) x2 and the fourteen org.children_budget.* leaves (six entries "
         "of actions and minutes, lookup_share, review_share) x14 (the delegated-budget schema). "
-        "plus agent.stuck_detector.call_only_multiplier x1 (the per-turn call-only ceiling) "
         "plus the three window ratios x6 (org.context.tool_output_ratio, "
         "org.context.evict_ratio, org.context.result_cap_ratio and the three "
         "agent.context.* twins) "
@@ -393,7 +388,7 @@ def test_role_sections_leaves_enumerate(components_home):
         "plus instructions.max_ratio and instructions.children x2 (the machine-level "
         "project-instructions knobs) "
         "plus terminal.keys.nudge and terminal.keys.newline x2 (the machine-level chord lists) "
-        "plus server.engine_dir and server.engine_config x2 (the Strata record) plus autosense.strata_dir x1 minus context.microagents x2 (org and agent, the deleted key) plus agent.task_flow.* x8 (the global-only task pipeline section) minus the deleted self-review's enabled and max_passes leaves x2 plus agent.act_guard x1 (a critic's tool-less answer is its work). "
+        "plus server.engine_dir and server.engine_config x2 (the Strata record) plus autosense.strata_dir x1 minus context.microagents x2 (org and agent, the deleted key) plus agent.task_flow.* x8 (the global-only task pipeline section) minus the deleted self-review's enabled and max_passes leaves x2 plus agent.act_guard x1 (a critic's tool-less answer is its work) minus the retired stuck_detector.* and recovery_injection.message leaves x6. "
         f"got {len(entries)}"
     )
 

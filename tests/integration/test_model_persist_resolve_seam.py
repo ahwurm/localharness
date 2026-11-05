@@ -137,7 +137,7 @@ def test_create_switch_persist_resolve(components_home, mock_llm_client):
     # persist path must touch ONLY provider.*/org.* and leave these untouched.
     atomic_write_overlay(
         home / "overrides.yaml",
-        {"agent": {"stuck_detector": {"window_size": 9}}, "org": {"log_level": "debug"}},
+        {"agent": {"repetition_guard": {"min_lines": 9}}, "org": {"log_level": "debug"}},
     )
 
     # 1. REAL creation flow deploys finance-helper.yaml (model: inherit) into home/agents/.
@@ -158,7 +158,7 @@ def test_create_switch_persist_resolve(components_home, mock_llm_client):
     assert overlay["org"]["default_model"] == "model-b"
     assert set(overlay["provider"]["available_models"]) == {"model-a", "model-b"}
     # Unrelated slices survive the write.
-    assert overlay["agent"]["stuck_detector"]["window_size"] == 9
+    assert overlay["agent"]["repetition_guard"]["min_lines"] == 9
     assert overlay["org"]["log_level"] == "debug"
 
     # ComponentMutated audit: one per path written, actor=cli, layer=user, after=model-b.

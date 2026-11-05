@@ -661,7 +661,7 @@ def _agent_with_self_check(config_dir: Path, name: str, self_check) -> Path:
 def _overrides_with_self_check(config_dir: Path, self_check) -> Path:
     path = config_dir / "overrides.yaml"
     path.write_text(
-        yaml.safe_dump({"agent": {"self_check": self_check, "recovery_injection": {"enabled": True}}},
+        yaml.safe_dump({"agent": {"self_check": self_check, "baton_gate": {"enabled": True}}},
                        sort_keys=False), encoding="utf-8")
     return path
 
@@ -718,7 +718,7 @@ def test_self_check_enabled_in_two_files_is_said_once(tmp_path):
 
     assert _start_receipt(cfg).count(SELF_CHECK_DROPPED) == 1
     assert "self_check" not in yaml.safe_load(agent.read_text())
-    assert yaml.safe_load(overrides.read_text()) == {"agent": {"recovery_injection": {"enabled": True}}}
+    assert yaml.safe_load(overrides.read_text()) == {"agent": {"baton_gate": {"enabled": True}}}
 
 
 def test_self_check_in_overrides_alone_rewrites_only_that_file(tmp_path):
@@ -744,7 +744,7 @@ def test_self_check_absent_leaves_every_file_alone(tmp_path):
     cfg = _current_config(tmp_path)
     agent = _write_agent_file(tmp_path, "scout", allow_patterns=_ABSENT)
     overrides = tmp_path / "overrides.yaml"
-    overrides.write_text(yaml.safe_dump({"agent": {"recovery_injection": {"enabled": True}}}), encoding="utf-8")
+    overrides.write_text(yaml.safe_dump({"agent": {"baton_gate": {"enabled": True}}}), encoding="utf-8")
     before = (agent.read_bytes(), overrides.read_bytes())
 
     assert load_plan(cfg)[1] is None

@@ -38,7 +38,7 @@ def test_load_overlay_round_trip(components_home):
     """atomic_write_overlay then load_overlay returns identical dict."""
     from localharness.config.overlay import atomic_write_overlay, load_overlay
     overlay_path = components_home / "overrides.yaml"
-    data = {"agent": {"stuck_detector": {"window_size": 7}}}
+    data = {"agent": {"repetition_guard": {"min_lines": 7}}}
     atomic_write_overlay(overlay_path, data)
     restored = load_overlay(overlay_path)
     assert restored == data

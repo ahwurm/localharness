@@ -7,12 +7,11 @@ the promotion gate compares a config against itself) hid behind 742 green tests.
 
 It drives the REAL `_build_default_run_slice` / `run_slice` (NO injected fake, NO
 monkeypatched `run_experiment`) and asserts the proposal arm (`with_overlay=True`) and the
-baseline arm (`with_overlay=False`) resolve a DIFFERENT live `AgentConfig.stuck_detector.
-window_size`.
+baseline arm (`with_overlay=False`) resolve a DIFFERENT live `AgentConfig.repetition_guard.min_lines`.
 
 RED before the Sites-1/2 wiring (today the bench ignores the overlay: experiment.py:280-283
 is a bare `pass`, and bench/runner.py:252 builds `AgentConfig(name, role)` from scratch, so
-both arms resolve the identical default window_size=5 → `{5}` != `{5, 9}` → the assertion
+both arms resolve the identical default min_lines=10 → `{10}` != `{10, 9}` → the assertion
 fails). GREEN after Plan 20-02 wires the worktree cascade into the bench.
 """
 from __future__ import annotations
@@ -80,8 +79,8 @@ def _make_corpus_repo(root):
 async def test_overlay_diverges_arms(tmp_path, monkeypatch):
     wt = _make_corpus_repo(tmp_path / "wt")
     # Materialize the candidate mutation INTO the worktree, exactly as run_experiment does
-    # (experiment.py:355): agent.stuck_detector.window_size 5 (default) -> 9.
-    exp.write_experiment_overlay(wt, "agent.stuck_detector.window_size", 9, annotation=int)
+    # (experiment.py:355): agent.repetition_guard.min_lines 10 (default) -> 9.
+    exp.write_experiment_overlay(wt, "agent.repetition_guard.min_lines", 9, annotation=int)
 
     # Capture the resolved AgentConfig that ACTUALLY reaches the loop, per arm — WITHOUT
     # completing a turn. Accept the FUTURE signature (agent_config kwarg) so this stays valid
@@ -93,8 +92,8 @@ async def test_overlay_diverges_arms(tmp_path, monkeypatch):
     # runner.py:252. To capture the config the loop is genuinely built from in BOTH eras, mirror
     # that fallback here: record the threaded agent_config when present (post-20-02), else
     # synthesize today's default exactly as the live builder does. This makes the captured value
-    # the real per-arm config — window_size=5 for both arms today (overlay ignored → RED), and
-    # 5 vs 9 once Plan 20-02 wires the worktree cascade (→ GREEN).
+    # the real per-arm config — min_lines=10 for both arms today (overlay ignored → RED), and
+    # 10 vs 9 once Plan 20-02 wires the worktree cascade (→ GREEN).
     from localharness.config.models import AgentConfig
 
     captured: dict = {}
@@ -143,7 +142,7 @@ async def test_overlay_diverges_arms(tmp_path, monkeypatch):
         "test-model",
         factory,
         annotation=int,
-        component="agent.stuck_detector.window_size",
+        component="agent.repetition_guard.min_lines",
         after=9,
     )
     base = await run_slice(wt, slice="train", with_overlay=False)  # baseline arm  # noqa: F841
@@ -152,12 +151,12 @@ async def test_overlay_diverges_arms(tmp_path, monkeypatch):
     # The captured cfgs are interleaved baseline-then-proposal across the two run_slice calls.
     cfgs = [c for c in captured.get("cfgs", []) if c is not None]
     assert cfgs, "no AgentConfig captured — _build_agent_loop was never reached (corpus invalid?)"
-    windows = {get_value(c, "stuck_detector.window_size") for c in cfgs}
-    # CAPABILITY assertion: the two arms must resolve DIFFERENT window_size (baseline 5 vs
+    windows = {get_value(c, "repetition_guard.min_lines") for c in cfgs}
+    # CAPABILITY assertion: the two arms must resolve DIFFERENT min_lines (baseline 10 vs
     # proposal 9). NOT a score lift, NOT a Welch verdict (CONTEXT/RESEARCH LOCKED).
-    assert windows == {5, 9}, (
+    assert windows == {10, 9}, (
         f"arms did not diverge — got window sizes {windows}; "
-        f"with_overlay=True must apply the experiment overlay (window_size=9), "
-        f"with_overlay=False must NOT (default 5). Today the bench ignores the overlay "
+        f"with_overlay=True must apply the experiment overlay (min_lines=9), "
+        f"with_overlay=False must NOT (default 10). Today the bench ignores the overlay "
         f"(experiment.py:280-283 is a no-op)."
     )

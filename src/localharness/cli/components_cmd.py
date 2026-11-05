@@ -484,7 +484,7 @@ def components_list(
 def components_get(
     path: str = typer.Argument(
         ...,
-        help="Dot-path of the component (e.g. agent.stuck_detector.window_size)",
+        help="Dot-path of the component (e.g. agent.baton_gate.max_nudges)",
     ),
     json_output: bool = typer.Option(False, "--json"),
     config_dir: Annotated[

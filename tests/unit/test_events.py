@@ -536,7 +536,7 @@ def test_component_mutated_frozen():
 
 def test_component_mutated_jsonl_round_trip():
     ev = ComponentMutated(
-        path="agent.stuck_detector.window_size",
+        path="agent.repetition_guard.min_lines",
         before_value=5,
         after_value=7,
         layer="experiment",
@@ -546,7 +546,7 @@ def test_component_mutated_jsonl_round_trip():
     line = ev.model_dump_json()
     restored = deserialize_event(line)
     assert isinstance(restored, ComponentMutated)
-    assert restored.path == "agent.stuck_detector.window_size"
+    assert restored.path == "agent.repetition_guard.min_lines"
     assert restored.before_value == 5
     assert restored.after_value == 7
     assert restored.layer == "experiment"

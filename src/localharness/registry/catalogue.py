@@ -250,7 +250,7 @@ def build_catalogue(
                 plugin=owned.get(path.split(".")[0]),
             )
 
-    # 2. Static agent-level paths (agent.role, agent.stuck_detector.*, agent.recovery_injection.*, etc.)
+    # 2. Static agent-level paths (agent.role, agent.baton_gate.*, agent.task_flow.*, etc.)
     #    Use provided agent_cfg or fall back to defaults so REG-04 surfaces always render.
     if agent_cfg is None:
         try:
@@ -329,7 +329,5 @@ SURFACE_FAMILIES = {
     "tool_description": (r"^tools\..+\.description$",),
     "compaction_threshold": (r"^org\.context\.compaction_threshold_pct$",
                              r"^agent\.context\.compaction_threshold_pct$"),
-    "stuck_detector": (r"^agent\.stuck_detector\.",),
-    "recovery_injection": (r"^agent\.recovery_injection\.",),
     "hook_config": (r"^org\.hooks$",),
 }

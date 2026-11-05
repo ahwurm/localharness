@@ -7,7 +7,7 @@ This file characterizes three intertwined findings (tests-only; zero ``src/`` ch
   ``compaction.*`` mutation lives OUTSIDE the ``agent`` subtree, so it is dropped and BOTH
   gate arms resolve the IDENTICAL ``AgentConfig`` — the Welch/Bonferroni gate then compares a
   config against itself (model-vs-itself noise). Contrast with the agent.* mutation in
-  test_experiment_overlay_e2e.py::test_overlay_diverges_arms (arms DO diverge ``{5, 9}``):
+  test_experiment_overlay_e2e.py::test_overlay_diverges_arms (arms DO diverge ``{10, 9}``):
   the asymmetry IS the finding.
 
 * **AUDIT-04b (provenance drift):** ``build_catalogue`` carries two provenance axes —
@@ -25,7 +25,7 @@ This file characterizes three intertwined findings (tests-only; zero ``src/`` ch
   ``_build_agent_loop`` to a ``_StubLoop`` (no ``run_turn``) and ``_run_loop`` to a no-op, so a
   real loop is NEVER constructed. We re-verify by WRAPPING (not replacing) the real builder and
   running one real turn per arm via the faithful-fake: the two arms construct DIFFERENT REAL
-  ``AgentLoop._config`` (``{5, 9}``) — strictly stronger than a captured config object.
+  ``AgentLoop._config`` (``{10, 9}``) — strictly stronger than a captured config object.
 
 SC9: this file never drives a holdout slice (TRAIN path only).
 """
@@ -357,8 +357,8 @@ async def test_overlay_divergence_real_loop(tmp_path, monkeypatch, faithful_fake
     capture-stub.
     """
     wt = _make_corpus_repo(tmp_path / "wt")
-    # An agent.* mutation that changes observable construction (the proven 5->9 window_size).
-    exp.write_experiment_overlay(wt, "agent.stuck_detector.window_size", 9, annotation=int)
+    # An agent.* mutation that changes observable construction (the proven 10->9 min_lines).
+    exp.write_experiment_overlay(wt, "agent.repetition_guard.min_lines", 9, annotation=int)
 
     # WRAP the real builder: construct the genuine AgentLoop, then record it. No loop placeholder,
     # no run-loop no-op — the loop genuinely runs.
@@ -380,21 +380,21 @@ async def test_overlay_divergence_real_loop(tmp_path, monkeypatch, faithful_fake
         "test-model",
         factory,
         annotation=int,
-        component="agent.stuck_detector.window_size",
+        component="agent.repetition_guard.min_lines",
         after=9,
     )
     await run_slice(wt, slice="train", with_overlay=False)  # baseline arm
     await run_slice(wt, slice="train", with_overlay=True)  # proposal arm
 
-    # THE AUDIT-06 closure: the REAL loops' configs diverge (baseline 5 vs proposal 9), and they
+    # THE AUDIT-06 closure: the REAL loops' configs diverge (baseline 10 vs proposal 9), and they
     # are genuine AgentLoops (have run_turn) — NOT the capture-stub's bare loop placeholder.
     assert len(built) >= 2, "fewer than two real AgentLoops constructed — both arms must build one"
     cfgs = [l._config for l in built]
-    windows = {get_value(c, "stuck_detector.window_size") for c in cfgs}
+    windows = {get_value(c, "repetition_guard.min_lines") for c in cfgs}
     # Proven by real construction, NOT a captured config object (the Phase-20 stub never built a loop).
-    assert windows == {5, 9}, (
+    assert windows == {10, 9}, (
         f"real arms did not diverge — got window sizes {windows}; the proposal arm "
-        f"(with_overlay=True) must construct a loop with window_size=9, the baseline (False) with 5"
+        f"(with_overlay=True) must construct a loop with min_lines=9, the baseline (False) with 10"
     )
     assert all(hasattr(l, "run_turn") for l in built), (
         "constructed loops lack run_turn — these must be REAL AgentLoops, not the capture-stub's "
