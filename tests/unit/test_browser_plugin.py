@@ -1094,19 +1094,18 @@ async def test_no_line_names_the_allowlist_and_only_the_not_https_line_names_web
     assert [line for line in lines if "web_fetch" in line] == [NOT_HTTPS]
 
 
-async def test_the_same_url_twice_gives_two_fetch_ids_with_equal_windows(fetch):
+async def test_the_same_unchanged_url_twice_gives_one_fetch_id_and_equal_output(fetch):
     tool, store = fetch
     one, two = await tool.run(url="https://example.com/a"), await tool.run(url="https://example.com/a")
-    assert (one.metadata["fetch_id"], two.metadata["fetch_id"]) == ("pg-1", "pg-2")
-    assert one.output.split("\n\n[chars")[0] == two.output.split("\n\n[chars")[0]
-    for fid in ("pg-1", "pg-2"):
-        assert (await WebPageQueryTool(store).run(fetch_id=fid, pattern="needle")).success
+    assert (one.metadata["fetch_id"], two.metadata["fetch_id"]) == ("pg-1", "pg-1")
+    assert one.output == two.output
+    assert (await WebPageQueryTool(store).run(fetch_id="pg-1", pattern="needle")).success
 
 
-async def test_two_concurrent_calls_on_one_bound_copy_get_distinct_fetch_ids(fetch):
+async def test_two_concurrent_calls_on_one_bound_copy_for_one_page_share_a_fetch_id(fetch):
     tool, store = fetch
     a, b = await asyncio.gather(tool.run(url="https://example.com/a"), tool.run(url="https://example.com/a"))
-    assert {a.metadata["fetch_id"], b.metadata["fetch_id"]} == {"pg-1", "pg-2"}
+    assert {a.metadata["fetch_id"], b.metadata["fetch_id"]} == {"pg-1"}
 
 
 async def test_info_is_stable_and_never_touches_the_runtime(world, runtime):
@@ -1122,7 +1121,7 @@ async def test_bound_copies_share_one_browser_and_keep_their_own_store(fetch, wo
     a, b = await asyncio.gather(one.run(url="https://example.com/a"), two.run(url="https://example.com/b"))
     assert (a.metadata["fetch_id"], b.metadata["fetch_id"]) == ("pg-1", "pg-1") and len(world.launches) == 1
     again = await one.run(url="https://example.com/a")
-    assert again.metadata["fetch_id"] == "pg-2"
+    assert again.metadata["fetch_id"] == "pg-1"
     assert not (await WebPageQueryTool(s2).run(fetch_id="pg-2", pattern="needle")).success
 
 
