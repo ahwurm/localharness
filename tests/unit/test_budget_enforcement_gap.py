@@ -74,8 +74,8 @@ def _budget_scenario(
 def _never_completes_read_plan(n: int):
     """A faithful-fake tool_plan that emits `n` benign `read` calls of the staged target with
     VARIED args (cycling `offset`) so each tool-call SIGNATURE is distinct — the loop's
-    StuckDetector (window_size=5, escalation_threshold=3, loop.py:64-92) escalates only on a
-    REPEATED signature, so varied offsets never collapse the run early. Bounded at `n` so a
+    stuck rule stops a turn only on a repeated call and result, so varied offsets never collapse
+    the run early. Bounded at `n` so a
     NON-enforcing loop terminates (it runs the whole plan then echoes) instead of hanging.
     """
     target = "/tmp/bench_fixtures/single_read_target.txt"

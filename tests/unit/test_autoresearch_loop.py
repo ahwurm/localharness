@@ -153,7 +153,7 @@ def test_reaches_gate_arm_truth_table():
     from localharness.autoresearch.experiment import reaches_gate_arm
 
     assert reaches_gate_arm("agent.role")
-    assert reaches_gate_arm("agent.stuck_detector.repeated_threshold")
+    assert reaches_gate_arm("agent.repetition_guard.min_lines")
     assert reaches_gate_arm("org.context")                     # the whole subtree counts
     assert reaches_gate_arm("org.permissions.budget.max_actions")
     assert not reaches_gate_arm("version")                     # a real catalogue entry, invisible to both arms
@@ -475,10 +475,10 @@ async def test_adopt_refuses_sealed_surface(archive_store, seeded_archive, tmp_g
 
 async def test_adopt_refuses_invalid_config(archive_store, seeded_archive, tmp_git_repo, components_home):
     """An after-value that makes HarnessConfig.model_validate(merged) fail → no overlay write."""
-    # agent.stuck_detector.threshold has a numeric constraint; a non-coercible after fails validation.
+    # agent.repetition_guard.min_lines has a numeric constraint; a non-coercible after fails validation.
     [bad] = await seeded_archive(
         archive_store,
-        [dict(id="adopt-bad", component="agents.main.stuck_detector.repeated_threshold", status="promoted",
+        [dict(id="adopt-bad", component="agents.main.repetition_guard.min_lines", status="promoted",
               diff=json.dumps({"before": 3, "after": "not-an-int"}))],
     )
     with pytest.raises(Exception):  # AdoptionRefused or a validation error — either way no write

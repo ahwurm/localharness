@@ -170,13 +170,13 @@ def test_a_lower_only_budget_raise_in_an_agent_file_is_a_notice(tmp_path):
     assert notice.text in loader.agent_warnings
 
 
-def test_a_workspace_stuck_detector_in_an_agent_file_is_a_notice(tmp_path):
+def test_a_workspace_task_flow_in_an_agent_file_is_a_notice(tmp_path):
     loader, ws = _layers(tmp_path)
-    path = _agent_file(ws, AGENT, {"stuck_detector": {"escalation_threshold": 50}})
+    path = _agent_file(ws, AGENT, {"task_flow": {"flow_cap_minutes": 50}})
     loader.load_agent(AGENT)
 
     [notice] = loader.notices
-    assert (notice.subject, notice.file) == ("stuck_detector", str(path))
+    assert (notice.subject, notice.file) == ("task_flow", str(path))
     assert notice.text in loader.agent_warnings
 
 
@@ -430,7 +430,7 @@ def test_without_a_reporter_the_notice_lands_on_the_loader_once(tmp_path, caplog
 
 
 @pytest.mark.parametrize("ws_file, subject", [
-    ({"stuck_detector": {"escalation_threshold": 50}}, "stuck_detector"),
+    ({"task_flow": {"flow_cap_minutes": 50}}, "task_flow"),
     ({"permissions": {"budget": {"max_actions": 99}}}, "permissions.budget.max_actions"),
     ({"permissions": {"budget": {"max_duration_minutes": 9999.0}}},
      "permissions.budget.max_duration_minutes"),

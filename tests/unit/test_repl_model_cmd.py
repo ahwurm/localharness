@@ -467,7 +467,7 @@ async def test_model_swap_preserves_unrelated_overlay_keys(tmp_path, components_
     atomic_write_overlay(
         overlay_path,
         {
-            "agent": {"stuck_detector": {"window_size": 9}},
+            "agent": {"repetition_guard": {"min_lines": 9}},
             "org": {"log_level": "debug"},
         },
     )
@@ -476,7 +476,7 @@ async def test_model_swap_preserves_unrelated_overlay_keys(tmp_path, components_
     await repl._handle_slash("/model model-b")
 
     overlay = load_overlay(overlay_path)
-    assert overlay["agent"]["stuck_detector"]["window_size"] == 9  # untouched
+    assert overlay["agent"]["repetition_guard"]["min_lines"] == 9  # untouched
     assert overlay["org"]["log_level"] == "debug"  # unrelated harness key survives
     assert overlay["provider"]["default_model"] == "model-b"
     assert overlay["org"]["default_model"] == "model-b"

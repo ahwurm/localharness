@@ -58,8 +58,7 @@ def test_welch_regression_empty_and_size1_returns_false_not_raises():
 def test_holdout_path_lacks_train_guard_asymmetry():
     """STATS-01 post-fix: the HOLDOUT path now has a symmetric len(hnames) < 2 guard.
 
-    The 14-03 / test_agent_loop_uses_config_recovery_message_not_hardcoded precedent:
-    prove the guard via ``inspect.getsource`` WITHOUT executing anything.
+    Prove the guard via ``inspect.getsource`` WITHOUT executing anything.
     After STATS-01, the source-level pin finds the symmetric guard present — the asymmetry
     documented by AUDIT-05b is now closed.
     """

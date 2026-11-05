@@ -580,7 +580,7 @@ section (`memory.embedding_model`: the model sentence-transformers loads, and a 
 imports Python from) is re-resolved by `_narrow_agent_global_only`. Never marked GLOBAL_ONLY on the
 plugin's AgentConfigModel: the resolver refuses such a plugin (plugins/resolve.py)."""
 
-AGENT_CORE_GLOBAL_ONLY_SECTIONS: frozenset[str] = frozenset({"stuck_detector", "task_flow"})
+AGENT_CORE_GLOBAL_ONLY_SECTIONS: frozenset[str] = frozenset({"task_flow"})
 """Core agent-file SECTIONS only the global layer may set. A workspace agent file (and a workspace
 overlay of a built-in) gets such a section restored WHOLE from the global layer: the global
 `agents/<name>.yaml` section, else the global overrides' `agent:` section, else the schema default.
@@ -2345,7 +2345,7 @@ class ConfigLoader:
         """The raw `head` section as the GLOBAL layer alone sets it for agent `stem`: its
         agents/<stem>.yaml's section merged over (when `overlay`) the global overrides' `agent:`
         section, in step 5b's order, so the restore is exactly what a global-only load of the agent
-        holds (WR-03: a key the operator set through `components set agent.stuck_detector.*` is
+        holds (WR-03: a key the operator set through `components set agent.task_flow.*` is
         not lost because the agent file also has the section). Either alone when only one has it,
         else _UNSET. A section that is not a mapping counts as absent, and so does a file that does
         not parse. Returns a copy: the caller may edit it, the file's dict stays untouched."""
@@ -2865,7 +2865,7 @@ class ConfigLoader:
         base's own dump and is none of the repo's doing.
         """
         # The core sections only the global layer may set come back whole (the global
-        # agents/<name>.yaml section, else the built-in's own): `stuck_detector` is restored whole
+        # agents/<name>.yaml section, else the built-in's own): `task_flow` is restored whole
         # here, as at `load_agent_file`. The overrides' `agent:` section never reaches a built-in.
         # Before the permissions narrowing and its early return.
         for section in sorted(AGENT_CORE_GLOBAL_ONLY_SECTIONS):
@@ -2947,7 +2947,7 @@ class ConfigLoader:
                 budget[field] = value
                 continue
             if value is not None:
-                # SECURITY.md promises the key AND the file (IN-08), as the stuck_detector note
+                # SECURITY.md promises the key AND the file (IN-08), as the global-only note
                 # above names it.
                 report(f"permissions.budget.{field}", ws_file, value,
                        f"ignoring permissions.budget.{field} in {ws_file!r}: "

@@ -971,87 +971,6 @@ class ScheduleConfig(BaseModel):
         return v
 
 
-class StuckDetectorConfig(BaseModel):
-    """Stuck-loop detection knobs. Extracted from StuckDetector class defaults
-    in agent/loop.py so they become addressable via component registry (REG-04).
-    """
-    model_config = ConfigDict(frozen=False, extra="forbid")
-
-    window_size: int = Field(
-        default=5,
-        ge=1,
-        le=100,
-        description=(
-            "Number of recent tool-call signatures to keep in the sliding window. "
-            "Larger window = more lenient stuck detection."
-        ),
-    )
-    recovery_threshold: int = Field(
-        default=2,
-        ge=1,
-        le=100,
-        description=(
-            "Number of identical signatures in the window that triggers RECOVERING state "
-            "(injects recovery_injection.message into the conversation)."
-        ),
-    )
-    escalation_threshold: int = Field(
-        default=3,
-        ge=1,
-        le=100,
-        description=(
-            "Number of identical signatures in the window that triggers ESCALATE state "
-            "(terminates the turn with stuck reason)."
-        ),
-    )
-    max_nudges_per_turn: int = Field(
-        default=3,
-        ge=1,
-        le=100,
-        description=(
-            "Per-turn cap on stuck-recovery warnings before escalating regardless of "
-            "signature. After a warning the window is cleared for a clean slate, so a "
-            "compliant model is never re-nudged on stale counts; a model that keeps "
-            "flailing with varied calls still escalates once it has burned this many nudges."
-        ),
-    )
-    call_only_multiplier: int = Field(
-        default=3,
-        ge=1,
-        le=10,
-        description=(
-            "Per-turn ceiling on the same tool call regardless of its result: the turn "
-            "escalates once one call (same tool, same arguments) has been made "
-            "call_only_multiplier x escalation_threshold times. Bounds a loop whose "
-            "trusted-origin results keep changing (a poll that never finishes), which the "
-            "windowed ladder reads as progress."
-        ),
-    )
-
-
-class RecoveryInjectionConfig(BaseModel):
-    """Recovery prompt injected into the conversation when StuckState.RECOVERING.
-    Extracted from StuckDetector.recovery_message hardcoded string so the wording
-    becomes a mutable component (REG-04).
-    """
-    model_config = ConfigDict(frozen=False, extra="forbid")
-
-    message: str = Field(
-        default=(
-            "You have attempted the same tool call multiple times with identical arguments "
-            "and received the same result. That approach is not working. "
-            "Consider a fundamentally different strategy: try different arguments, "
-            "use a different tool, or conclude that the information is not available this way. "
-            "If you are waiting on something external, say so and stop; do not poll."
-        ),
-        min_length=1,
-        description=(
-            "Message injected into the conversation when stuck recovery fires. "
-            "Mutable via `localharness components set agent.recovery_injection.message <value>`."
-        ),
-    )
-
-
 class BatonGateConfig(BaseModel):
     """Deterministic baton gate at the loop's tool-less acceptance seam (issue #84).
 
@@ -1094,8 +1013,8 @@ class RepetitionGuardConfig(BaseModel):
     """Degenerate-repetition tripwire at the loop's tool-less acceptance seam (issue #152).
 
     A candidate final answer that is one line repeated over and over is not an answer, but
-    the acceptance gate took any non-empty non-sentinel text verbatim and `StuckDetector`
-    structurally cannot see it (it is fed tool-call signatures only, so a zero-tool-call turn
+    the acceptance gate took any non-empty non-sentinel text verbatim and the stuck rule
+    structurally cannot see it (it reads tool results only, so a zero-tool-call turn
     never reaches it). When enabled (default), such a reply earns ONE corrective nudge; a
     second degenerate reply in the same turn ends the turn as a failure instead of shipping the
     repetition as the result. Distinct from `sentinel.duplicate_*` (autoresearch eval only).
@@ -1221,6 +1140,9 @@ class CruncherConfig(BaseModel):
             "Mutable via `localharness components set agent.cruncher.mem_limit_mb <int>`."
         ),
     )
+
+
+_RETIRED_AGENT_KEYS = ("stuck_detector", "recovery_injection")
 
 
 class AgentConfig(BaseModel):
@@ -1400,29 +1322,12 @@ class AgentConfig(BaseModel):
         ),
     )
 
-    # --- Stuck detection / recovery (REG-04 surfaces 4 + 5) ---
-    stuck_detector: StuckDetectorConfig = Field(
-        default_factory=StuckDetectorConfig,
-        description=(
-            "Stuck-loop detection knobs. Addressable via "
-            "`agent.stuck_detector.{window_size,recovery_threshold,escalation_threshold}`."
-        ),
-    )
-
     task_flow: TaskFlowConfig = Field(
         default_factory=lambda: TaskFlowConfig(),
         description=(
             "The task pipeline's panels, revisions and budgets, held within its code limits. "
             "Global-only as a whole. Addressable via "
             "`agent.task_flow.{panels,revisions,critics,executor,explorer,flow_cap_minutes}`."
-        ),
-    )
-
-    recovery_injection: RecoveryInjectionConfig = Field(
-        default_factory=RecoveryInjectionConfig,
-        description=(
-            "Recovery message injected when StuckState.RECOVERING. "
-            "Addressable via `agent.recovery_injection.message`."
         ),
     )
 
@@ -1486,6 +1391,16 @@ class AgentConfig(BaseModel):
         default_factory=list,
         description="Free-form tags for organizing and filtering agents.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def drop_retired_sections(cls, data: Any) -> Any:
+        """The stuck rule reads the chat, so its old sections are ignored with one notice, never an error."""
+        if not isinstance(data, dict) or not (gone := [k for k in _RETIRED_AGENT_KEYS if k in data]):
+            return data
+        log.warning("agent config keys %s are retired and ignored: the stuck rule now reads the chat; "
+                    "delete them from your config", ", ".join(gone))
+        return {k: v for k, v in data.items() if k not in _RETIRED_AGENT_KEYS}
 
     @field_validator("name")
     @classmethod

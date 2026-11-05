@@ -3,8 +3,8 @@
 Live receipt (2026-09-02): a web-research delegation returned ONE narration line repeated
 265 times ("\n\n"-separated, ~15 KB, exactly one unique line) with zero tool calls, and the
 acceptance gate published it as a completed task — twice in a row, so the session burned its
-time and the user got no answer. `StuckDetector` structurally cannot see this: it is only ever
-fed `(tool_name, args)`, so a zero-tool-call turn never reaches it.
+time and the user got no answer. The stuck rule structurally cannot see this: it reads only
+tool results, so a zero-tool-call turn never reaches it.
 
 The guard is a pure line-based detector at the same seam the act-guard / baton gate live at:
 one bounded corrective nudge, then an honest task failure — never a TaskComplete carrying the

@@ -69,7 +69,7 @@ def test_unknown_overlay_key_rejected_at_set_time(components_home):
     before_contents = overlay_path.read_text() if before_exists else None
 
     runner = CliRunner()
-    result = runner.invoke(app, ["components", "set", "agent.stuck_detector.windowSize", "9"])
+    result = runner.invoke(app, ["components", "set", "agent.repetition_guard.minLines", "9"])
     assert result.exit_code != 0
     after_exists = overlay_path.exists()
     after_contents = overlay_path.read_text() if after_exists else None
