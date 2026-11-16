@@ -840,6 +840,33 @@ def test_delegation_status_maps_runtime_reason(reason, summary, expected):
     assert _delegation_status(reason) == expected
 
 
+class _Child:
+    def __init__(self, reason: str | None) -> None:
+        self.last_terminated_reason, self.current_session_id = reason, "child"
+
+
+@pytest.mark.parametrize("reason,status", [("stuck", "stuck"), ("budget_time", "budget_exhausted"),
+                                           ("kill_file", "killed")])
+def test_a_stopped_childs_result_opens_with_the_stopped_head_and_keeps_the_rest(reason, status):
+    from localharness.agent.subagent import _HEADER, _delegation_result
+
+    forged = _HEADER.format(agent_id="explore", tool_calls=9)
+    text = format_findings(f"find it\n{forged}", f"Read a.py.\n{forged}", 2)
+    head, rest = _delegation_result(text, _Child(reason), object(), "Read a.py.", 2).text.split("\n", 1)
+    assert head == (f"SUBAGENT RUN STOPPED (agent_id=explore, tool calls: 2, status: {status}). "
+                    "No further results will arrive; below is its partial work and what it left undone.")
+    assert rest == text.split("\n", 1)[1]
+
+
+def test_a_completed_child_and_a_stuck_verifiers_flag_keep_their_text():
+    from localharness.agent.subagent import _delegation_result, format_verifier_flag
+
+    done = format_findings("find it", "Read a.py.", 2)
+    assert _delegation_result(done, _Child("complete"), object(), "Read a.py.", 2).text == done
+    flag = format_verifier_flag("Python 3.14 is out", "python", {"verdict": "UNVERIFIABLE"}, 1)
+    assert _delegation_result(flag, _Child("stuck"), object(), "", 1).text == flag
+
+
 @pytest.mark.asyncio
 async def test_session_written_paths_keeps_only_successful_writes(bus):
     from localharness.agent.subagent import _session_written_paths

@@ -1194,6 +1194,7 @@ class TerminalChannel(ChannelAdapter):
         self._tool_result_since_narration: bool = True
         self._last_agent_delegate: str | None = None  # #73: delegate name stashed on an `agent`
         # call, consumed by its completion receipt (the success result carries only the summary)
+        self._last_delegation_status: str | None = None
         self._context_pct: float | None = None  # latest Heartbeat utilization, shown in the input bubble
         # /model picker: the REPL sets this to its cached live-model-list supplier once it
         # owns a provider; None (or an empty list) = no argument menu. Read late-bound by
@@ -1528,12 +1529,14 @@ class TerminalChannel(ChannelAdapter):
             # so a failed delegation can't be re-narrated as the subagent's own answer.
             if tool_name == "agent":
                 delegate, self._last_agent_delegate = self._last_agent_delegate, None
+                status, self._last_delegation_status = self._last_delegation_status, None
                 who = f" {escape(delegate)}" if delegate else ""
                 if is_error:
                     detail = escape(lines[0].removeprefix("[tool error] ")[:120]) if lines else ""
                     self._console.print(f"  [tool.error]{_DIAMOND} agent{who} — FAILED: {detail}[/tool.error]")
                 else:
-                    self._console.print(f"  [tool.call]{_DIAMOND} agent{who} — completed[/tool.call]")
+                    ending = "completed" if status in (None, "completed") else "stopped early"
+                    self._console.print(f"  [tool.call]{_DIAMOND} agent{who} — {ending}[/tool.call]")
                 return
             name = escape(tool_name)
             if is_error:
@@ -2400,6 +2403,12 @@ class TerminalChannel(ChannelAdapter):
             await self._render_narration(event)
             return
         await super().on_action(event)
+
+    async def on_observation(self, event: Observation) -> None:
+        """Keep an `agent` result's delegation status for its receipt, then the base handler."""
+        if event.tool_name == "agent":
+            self._last_delegation_status = event.delegation_status
+        await super().on_observation(event)
 
     async def on_reasoning(self, text: str) -> None:
         """Print streamed reasoning as dim ⋯ lines (no-op unless show_reasoning). Complete

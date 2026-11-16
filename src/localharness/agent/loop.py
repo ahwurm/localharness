@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, NamedTuple, Optional, get_args
 
 from localharness.agent.gate import (
     DENIED_OBSERVATION_PREFIX,
@@ -28,7 +28,7 @@ from localharness.agent.gate import (
 )
 from localharness.agent.gate_types import GateOutcome, ToolMeta
 from localharness.agent.taint import DISPATCHING
-from localharness.agent.verdict import call_paths
+from localharness.agent.verdict import DELEGATE_TOOLS, call_paths
 from localharness.core.types import (
     Message,
     ToolOutcome,
@@ -1930,7 +1930,7 @@ class AgentLoop:
             context_overflow_limit,
             is_context_overflow,
         )
-        from localharness.core.events import Action, AffordanceCued, ArtifactRef, Observation, Escalation, Heartbeat, TaskComplete, ParseFailed, StuckRecovered
+        from localharness.core.events import Action, AffordanceCued, ArtifactRef, DelegationStatus, Observation, Escalation, Heartbeat, TaskComplete, ParseFailed, StuckRecovered
         from pydantic import ValidationError
         self._presence_penalty_next = None  # a degenerate retry's penalty lasts one turn
         self._thinking_off_next = False  # so does a reasoning cut's thinking-off retry
@@ -2843,6 +2843,7 @@ class AgentLoop:
                 result_truncated = False
                 original_length: int | None = None
                 artifact: ArtifactRef | None = None
+                delegation_status: DelegationStatus | None = None
                 if self._tools is not None:
                     try:
                         result = await self._dispatch_tool(session, tool_call)
@@ -2866,6 +2867,9 @@ class AgentLoop:
                                 artifact = ArtifactRef.model_validate(raw)
                             except (ValidationError, TypeError, ValueError):
                                 log.debug("dropped invalid artifact metadata from %s", tool_call.name)
+                        status = result.metadata.get("status") if result.success else None
+                        if tool_call.name in DELEGATE_TOOLS and status in get_args(DelegationStatus):
+                            delegation_status = status
                     except Exception as exc:
                         result_content = f"Error: {exc}"
                         is_error = True
@@ -2890,6 +2894,7 @@ class AgentLoop:
                     original_length=original_length if result_truncated else len(result_content),
                     error=result_content if is_error else None,
                     artifact=artifact,
+                    delegation_status=delegation_status,
                 ))
 
             # 11b. Append budget status to the iteration's last tool result

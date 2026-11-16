@@ -686,11 +686,10 @@ class ChannelAdapter(ABC):
 
     async def on_escalation(self, event: Escalation) -> None:
         """Default handler for Escalation events."""
-        await self.send_error(
-            error=f"Agent {event.agent_id} escalated: {event.reason}",
-            detail=event.detail,
-            agent_id=event.agent_id,
-        )
+        error = f"Agent {event.agent_id} escalated: {event.reason}"
+        if event.reason == "stuck_detected":
+            error = f"Agent {event.agent_id} stopped: it kept repeating a call"
+        await self.send_error(error=error, detail=event.detail, agent_id=event.agent_id)
 
     async def on_heartbeat(self, event: Heartbeat) -> None:
         """Default handler for Heartbeat events. Default: no-op."""

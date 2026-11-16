@@ -400,6 +400,9 @@
 // from the token, never the token itself.
 const LS = window.localStorage;
 const FAILED_HINT = " \u00b7 stuck? + starts a fresh chat";  // the failure row names the escape (live 2026-10-09)
+const escalationText = (d) => d.reason === "stuck_detected"
+  ? d.agent_id + " stopped — " + (d.detail || "")
+  : "escalated — " + d.reason + ": " + (d.detail || "");
 // PAIRING (A2). The enrolment QR encodes `https://host/#t=<token>`, and the FRAGMENT is the
 // reason that is allowed: a fragment is never sent to a server, so it lands in no access log,
 // no proxy log and no Referer — which is what the "never put the token in a URL" rule is
@@ -663,7 +666,7 @@ function onEvent(name, data) {
         `${(data.post_usage_fraction * 100).toFixed(0)}% — older detail summarized`));
       break;
     case "Escalation":
-      add(el("div", "row err", "escalated — " + data.reason + ": " + (data.detail || "")));
+      add(el("div", "row err", escalationText(data)));
       break;
     case "InputRouted":
       add(el("div", "row sys", `input routed: ${data.decision} (${data.tier} — ${data.rule_or_reason})`));
@@ -1466,7 +1469,7 @@ function renderSpine(lines, container) {
       withCode(r, d.summary || "");
     } else if (d.event_type === "Escalation") {
       // The live reducer's row, so a stuck turn keeps its one notice in an ended chat.
-      r = el("div", "row err", "escalated — " + d.reason + ": " + (d.detail || ""));
+      r = el("div", "row err", escalationText(d));
     } else if (d.event_type === "TurnFailed") {
       if (d.reason === "stuck_detected") {
         // The escalation row above is the notice; this is the reply summary, shown as itself.

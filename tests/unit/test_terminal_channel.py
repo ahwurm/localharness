@@ -818,11 +818,11 @@ def _agent_action(delegate: str, task: str = "Write three puns about databases."
     )
 
 
-def _agent_observation(output: str, error: str | None):
+def _agent_observation(output: str, error: str | None, **extra):
     from localharness.core.events import Observation
     return Observation(
         agent_id="orchestrator", session_id="s1", observation_type="tool_result",
-        tool_call_id="tc1", tool_name="agent", output=output, error=error,
+        tool_call_id="tc1", tool_name="agent", output=output, error=error, **extra,
     )
 
 
@@ -908,6 +908,27 @@ class TestAgentDelegationReceipt:
         await ch.on_action(_agent_action("joke-writer", **extra))
         await ch.on_observation(_agent_observation(output="done", error=None))
         assert "◆ agent joke-writer — completed" in out.getvalue()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["stuck", "budget_exhausted", "killed", "error"])
+    async def test_a_child_that_did_not_complete_says_stopped_early(self, status):
+        ch, out = self._pipe()
+        await ch.on_action(_agent_action("web-researcher"))
+        await ch.on_observation(_agent_observation(output="SUBAGENT RUN COMPLETE (agent_id=web-researcher, "
+                                                   "tool calls: 3).", error=None, delegation_status=status))
+        assert "◆ agent web-researcher — stopped early" in out.getvalue()
+        assert "— completed" not in out.getvalue()
+
+    @pytest.mark.asyncio
+    async def test_the_status_is_cleared_once_read_and_the_text_never_moves_it(self):
+        ch, out = self._pipe()
+        for output, status in [("partial", "stuck"),
+                               ("SUBAGENT RUN STOPPED (agent_id=joke-writer, tool calls: 1, status: stuck).", None),
+                               ("done", "completed")]:
+            await ch.on_action(_agent_action("joke-writer"))
+            await ch.on_observation(_agent_observation(output=output, error=None, delegation_status=status))
+        receipts = [line.split(" — ")[-1] for line in out.getvalue().splitlines() if " — " in line]
+        assert receipts == ["stopped early", "completed", "completed"]
 
 
 # ---------------------------------------------------------------------------

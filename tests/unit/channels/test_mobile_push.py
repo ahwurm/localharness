@@ -403,6 +403,18 @@ async def test_an_escalation_on_the_bus_reaches_the_push_sender(tmp_path):
 
     assert len(recorder.sent) == 1
     assert recorder.sent[0].data["class"] == push.CLASS_NEEDS_YOU
+    assert recorder.sent[0].body == "same tool, same args, six times"
+
+
+async def test_a_subagents_escalation_does_not_push(tmp_path):
+    from localharness.core.events import Escalation
+
+    bus, channel, recorder = await _pushable(tmp_path)
+    await bus.publish(Escalation(session_id="s1", parent_id="root-1", agent_id="researcher",
+                                 reason="stuck_detected", detail="d", iteration_at_escalation=4))
+    await channel.flush_push()
+
+    assert recorder.sent == []
 
 
 async def test_a_long_turn_finishing_with_nobody_attached_pushes(tmp_path):
