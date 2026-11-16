@@ -2343,7 +2343,7 @@ class ConfigLoader:
         """The raw `head` section as the GLOBAL layer alone sets it for agent `stem`: its
         agents/<stem>.yaml's section merged over (when `overlay`) the global overrides' `agent:`
         section, in step 5b's order, so the restore is exactly what a global-only load of the agent
-        holds (WR-03: a key the operator set through `components set agent.task_flow.*` is
+        holds (a key the operator set through `components set agent.task_flow.*` is
         not lost because the agent file also has the section). Either alone when only one has it,
         else _UNSET. A section that is not a mapping counts as absent, and so does a file that does
         not parse. Returns a copy: the caller may edit it, the file's dict stays untouched."""
