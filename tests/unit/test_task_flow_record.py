@@ -13,6 +13,7 @@ from localharness.core.caps import Caps
 from localharness.core.events import CompactionTriggered, Observation
 from localharness.core.types import human_message
 from localharness.orchestrator.task_flow import TaskFlow, runner
+from localharness.core.run_folder import SCRATCH_SENTENCE
 from localharness.orchestrator.task_flow.filer import PLAN_SHAPE, Docs, digest, parse_plan, rerecord
 from localharness.orchestrator.task_flow.panel import FENCE_CLOSE, FENCE_LABEL
 from localharness.orchestrator.task_flow.record import (
@@ -1125,7 +1126,7 @@ def make_flow(tmp_path, answers=None, cap=None, bus=None, messages=TYPED):
     script, rows, excluded = Script(**(answers or {})), [], []
     config = AgentConfig(name="root", role="r", task_flow=TaskFlowConfig(flow_cap_minutes=cap))
     flow = TaskFlow(run_config_child=script, emit=lambda *row: rows.append(row), exclude=excluded.append,
-                    docs=Docs(root, True, "a"), config=config, root_tools=ROOT_TOOLS, messages=lambda: messages, bus=bus)
+                    docs=Docs(root, True, "a", tmp_path / "scratch"), config=config, root_tools=ROOT_TOOLS, messages=lambda: messages, bus=bus)
     return flow, script, rows, excluded
 
 
@@ -1144,12 +1145,13 @@ async def test_flow_tracer_one_new_call_files_decisions_reviews_it_and_names_the
     assert [c.name for c in script.calls] == ["jtbd"]
 
 
-def test_open_makes_the_tasks_private_scratch_folder_under_the_scratchpad(tmp_path):
+def test_open_makes_the_tasks_private_scratch_folder_under_the_scratch_root(tmp_path):
     flow, *_ = make_flow(tmp_path)
     flow.open("fix login", 1)
     scratch = flow.docs.scratch(1)
-    assert scratch == flow.docs.state_dir / "scratchpad" / "a" / "t1" and scratch.is_dir()
+    assert scratch == tmp_path / "scratch" / "t1" and scratch.is_dir()
     assert scratch.stat().st_mode & 0o777 == 0o700 and "tasks" not in scratch.parts
+    assert not (flow.docs.state_dir / "scratchpad").exists()
 
 
 async def test_the_executor_and_every_critic_brief_name_the_scratch_folder(tmp_path):
@@ -1242,7 +1244,7 @@ async def test_run_unit_a_malformed_plan_returns_the_shape_and_leaves_the_stage_
     await flow.run("new", "Objective: fix login")
     flow.record.flags["plan"] = True
     calls = len(script.calls)
-    assert await flow.run("plan", "## Step 2\nfiles: a\ndepends_on: none\ndone: x") == PLAN_SHAPE
+    assert await flow.run("plan", "## Step 2\nfiles: a\ndepends_on: none\ndone: x") == f"{PLAN_SHAPE} {SCRATCH_SENTENCE}"
     assert flow.docs.read(1, "plan.md") is None and flow.record.stage == "new"
     assert flow.record.flags["plan"] is True and len(script.calls) == calls
 
@@ -1564,7 +1566,7 @@ async def test_refile_a_shape_refused_doc_consumes_nothing_and_resets_nothing(tm
     counts.used, counts.previous, counts.blockers = 2, 3, 1
     flow.record.flags["plan"] = True
     before = flow.docs.read(1, "plan.md")
-    assert await flow.run("plan", "no steps here") == PLAN_SHAPE
+    assert await flow.run("plan", "no steps here") == f"{PLAN_SHAPE} {SCRATCH_SENTENCE}"
     assert flow.record.flags["plan"] is True and (counts.used, counts.previous, counts.blockers) == (2, 3, 1)
     assert flow.docs.read(1, "plan.md") == before
 

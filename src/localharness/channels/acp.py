@@ -1274,6 +1274,7 @@ class AcpChannel(ChannelAdapter):
             await self.send_message(event.summary)
         if line := reply_line(event):
             await self.send_notice(line)
+        await self.send_told(event)
 
     async def send_wrapup_reply(self, event: TurnFailed, text: str | None = None) -> None:
         """A stuck or budget-stopped turn's wrap-up, on the same terms as `on_task_complete`: only

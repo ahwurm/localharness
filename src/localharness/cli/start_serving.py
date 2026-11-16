@@ -275,7 +275,8 @@ async def launch_floor(agent_config: Any, skills: tuple = (), *, root: Path | No
         schemas = []
     # agent and task register after this count and the slash form is the longer one: over-prices, never under
     held = {s.name for s in schemas} | {"agent", "task"} | ({"skill"} if skills else set())
-    index = render_index(root, machine_dir, held, config_dir_flag, slash=True) if machine_dir is not None else ""
+    index = render_index(root, machine_dir, held, config_dir_flag, slash=True,
+                         scratch=machine_dir / "run" / ("0" * 12) / "scratch") if machine_dir is not None else ""
     prompt = base_system_prompt(agent_config, tool_call_mode="native", guardrails="", skills=render_listing(skills),
                                 index=index)
     return harness_floor(fixed_tokens(TokenCounter(offline=True), prompt, schemas), agent_config.max_tokens)

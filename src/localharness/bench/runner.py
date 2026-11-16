@@ -648,7 +648,7 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
             run_config_child=_agent_runner.run_config_child,
             emit=lambda unit, state, commands, tail: log.info("bench flow %s: %s", unit, state),
             exclude=lambda seconds: loop.exclude(seconds),
-            docs=Docs(flow_dir, False, agent_config.name),
+            docs=Docs(flow_dir, False, agent_config.name, flow_dir / "scratch"),
             config=agent_config, root_tools=scenario.tools_allowed, llm=llm_client,
             token_counter=token_counter, bus=bus,
             messages=lambda: loop.messages(), turn=lambda: loop.turn)

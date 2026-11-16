@@ -189,6 +189,27 @@ def reply_line(event: Any) -> str | None:
     return notice("reply", verdict, commands, tail)
 
 
+_TASK_FOLDER = re.compile(r"t[0-9]+")
+_TOLD_NAMES = 5
+
+
+def told_line(names: Sequence[str], *, phone: bool = False, tail: bool = True) -> str | None:
+    """The line that says where a reply's scratch files are and when they go; None with no names."""
+    if not names:
+        return None
+    end = "the chat ends or the server stops" if phone else "the session ends"
+    groups: dict[str, list[str]] = {}
+    for name in names[:_TOLD_NAMES]:
+        head = name.split("/")[0]
+        folder = head if "/" in name and _TASK_FOLDER.fullmatch(head) else ""
+        groups.setdefault(folder, []).append('"' + one_line(name.rsplit("/", 1)[-1])[:Caps.LINE] + '"')
+    parts = [f"scratch, gone when {f'{folder} is cleared or replaced, ' + ('' if phone else 'or ') if folder else ''}{end}: " + ", ".join(quoted)
+             for folder, quoted in groups.items()]
+    if len(names) > _TOLD_NAMES:
+        parts[-1] += f" and {len(names) - _TOLD_NAMES} more"
+    return f"{NOTICE_MARK} " + "; ".join(parts) + (" · ask for a copy in your project to keep it" if tail else "")
+
+
 def permission_denied_reason(error: str | None) -> str | None:
     """The reason out of a denied observation's error text, or None if it is an ordinary error.
 
@@ -600,6 +621,15 @@ class ChannelAdapter(ABC):
             agent_id=event.agent_id,
         )
         if line := reply_line(event):
+            await self.send_notice(line)
+        await self.send_told(event)
+
+    _told = False
+
+    async def send_told(self, event: TaskComplete) -> None:
+        """The told-about line for the scratch files the reply names; its tail shows once."""
+        if line := told_line(event.scratch_files, tail=not self._told):
+            self._told = True
             await self.send_notice(line)
 
     async def on_turn_failed(self, event: TurnFailed) -> None:

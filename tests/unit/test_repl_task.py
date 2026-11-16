@@ -456,7 +456,7 @@ def test_task_command_new_closes_the_open_task_naming_its_newest_doc_and_opens_o
         flow.record.filed[(key, None)] = Row(digest("x"))
     reply = command(flow, "new next one")
     shown = f" · /task show t3/{newest}" * bool(newest)
-    assert reply.lines == (f"◆ t3 closed{shown} · not resumable, folder kept",
+    assert reply.lines == (f"◆ t3 closed{shown} · not resumable, docs kept",
                            "◆ t4 interview open · /task plan (skips the questions)")
     assert flow.record.id == 4 and flow.docs.path(3, "").is_dir()
     assert reply.turn == ("next one", "typed")
@@ -688,7 +688,7 @@ def test_task_command_stale_plan_names_the_file_and_the_accept_name(tmp_path):
 
 def test_task_command_stale_doc_with_a_name_accept_cannot_take_suggests_no_accept(tmp_path):
     flow = staged(tmp_path, decisions="pass", plan="pass")
-    line = verbs._refusal(flow.record, need("edited since filed", doc="odd name.md"))
+    line = verbs._refusal(flow, flow.record, need("edited since filed", doc="odd name.md"))
     assert line == "◆ t1 odd name.md edited since filed"
 
 
@@ -1144,7 +1144,7 @@ def test_status_paused_ends_the_line_with_paused_and_the_second_row_names_the_co
     executed(flow, 2, "blocked", 2)
     flow.record.paused = True
     assert bare(flow) == ("t1 · fix login · step 2/5 blocked · paused",
-                          "◆ t1 paused · /task run (retries) · clear (deletes the folder)")
+                          "◆ t1 paused · /task run (retries) · clear (deletes t1)")
 
 
 def test_status_with_no_task_is_the_no_task_row_or_one_line_naming_the_folder_on_disk_and_an_old_record_adds_one(tmp_path):
@@ -1591,7 +1591,7 @@ async def test_repl_clear_with_an_open_task_pauses_it_and_prints_the_paused_row(
     assert flow.note() != ""
     assert await repl._handle_slash("/clear")
     assert channel.sent == [CLEARED] and agent.cleared
-    assert channel.notices == ["◆ t1 paused · /task run · clear (deletes the folder)"]
+    assert channel.notices == ["◆ t1 paused · /task run · clear (deletes t1)"]
     assert flow.record.paused is True and flow.note() == ""
 
 

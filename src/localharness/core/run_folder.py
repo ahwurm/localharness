@@ -1,6 +1,7 @@
 """A session's run folder: the agent's scratch, deleted when the session ends."""
 from __future__ import annotations
 
+import contextlib
 import errno
 import functools
 import hmac
@@ -39,6 +40,7 @@ SCRATCH_SENTENCE = (
 REMOVING_LINE = "Removing scratch… (Ctrl+C leaves it for the next start)"
 END_WAIT_S = 2.0
 _SLOW_AFTER_S = 1.0
+_TOLD_VISIT_CAP = 2000
 _ID = re.compile(r"[0-9a-f]{12}")
 _DELETING = re.compile(r"\.deleting-[0-9a-f]{12}")
 _MARKER = re.compile(r"[0-9a-f]{32}")
@@ -388,3 +390,21 @@ def foreign_count(config_dir: Path) -> int:
         os.close(parent)
     return found
 
+
+
+def told(scratch: Path, since: float, reply: str) -> tuple[str, ...]:
+    """Files under scratch made since `since` whose names the reply holds, as sorted posix paths relative to scratch."""
+    found, stack, seen = [], [""], 0
+    while stack and seen < _TOLD_VISIT_CAP:
+        rel = stack.pop()
+        with contextlib.suppress(OSError), os.scandir(scratch / rel) as entries:
+            for entry in entries:
+                seen += 1
+                if seen > _TOLD_VISIT_CAP:
+                    break
+                name = f"{rel}/{entry.name}" if rel else entry.name
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(name)
+                elif entry.name in reply and entry.stat(follow_symlinks=False).st_mtime >= since:
+                    found.append(name)
+    return tuple(sorted(found))

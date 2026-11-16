@@ -210,6 +210,9 @@ class TaskComplete(BaseEvent):
     ending: Optional[Literal["fixed", "asked"]] = Field(
         default=None, description="How a blocked reply ended: its last fix shipped unchecked, or the root asked the person; None otherwise."
     )
+    scratch_files: tuple[str, ...] = Field(
+        default=(), description="Scratch files this reply names that the turn made, relative to the scratch folder; empty with no scratch."
+    )
 
 
 class Action(BaseEvent):

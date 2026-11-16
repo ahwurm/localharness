@@ -34,7 +34,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 import structlog
 
-from localharness.channels.base import ChannelAdapter, _call_receipt, reply_line, sanitize_for_display
+from localharness.channels.base import ChannelAdapter, _call_receipt, reply_line, sanitize_for_display, told_line
 from localharness.channels.errors import NotInteractiveError
 from localharness.core.bus import EventBus
 from localharness.core.content import image_label
@@ -761,6 +761,9 @@ class MobileChannel(ChannelAdapter):
             if root:
                 self._reply_verdict = (event.verdict, event.finding, event.ending)
                 if line := reply_line(event):
+                    self.push(Notice(session_id=self.session_id, text=line, style="system.info"))
+                if line := told_line(event.scratch_files, phone=True, tail=not self._told):
+                    self._told = True
                     self.push(Notice(session_id=self.session_id, text=line, style="system.info"))
         elif isinstance(event, PermissionStaged):
             # NOT gated on `root`: a subagent's parked call needs a human exactly as much as the

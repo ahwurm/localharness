@@ -6,7 +6,7 @@ import hashlib
 import os
 import re
 import stat
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Iterable
 from localharness.channels.base import one_line, sanitize_for_display
 from localharness.core.caps import Caps
 from localharness.core.private_files import (
-    PRIVATE_DIR_MODE, NotRegularFile, atomic_write_text, in_background, open_regular, remove_dir,
+    PRIVATE_DIR_MODE, NotRegularFile, atomic_write_text, in_background, open_private_dir, open_regular, remove_dir,
 )
 from localharness.orchestrator.task_flow.record import Counts, Record, Row
 
@@ -30,6 +30,7 @@ _TASK_DOC = re.compile(r"(?:(?:decisions|research|plan|step-[1-9][0-9]*)(?:-revi
 _NAMEABLE = re.compile(r"(decisions|research|plan|step-([1-9][0-9]*)|review)\.md")
 _RANK = {"decisions": 0, "research": 1, "plan": 2, "review": 4}
 _ATTEMPTS = 8
+_SCRATCH_COUNT_CAP = 100
 OLD_RECORD = "task.json"
 PLAN_SHAPE = ("plan.md needs `## Step N` headings numbered 1..n in order, each with `files:` (under the task's scratch folder "
               "or the project, never the task folder), `depends_on:` (earlier steps only, or none) and `done:` lines")
@@ -334,11 +335,19 @@ def manifest(filed: Iterable[str], child: str = "", verdict: str = "", doc: str 
     return "\n".join(p for p in parts if p)
 
 
+def _remove_and_close(name: str, fd: int) -> None:
+    try:
+        remove_dir(name, fd)
+    finally:
+        os.close(fd)
+
+
 @dataclass
 class Docs:
     state_dir: Path
     workspace_layer: bool
     agent: str
+    scratch_root: Path | None = None
     adopted: set[int] = field(default_factory=set, init=False)
 
     def __post_init__(self) -> None:
@@ -475,9 +484,39 @@ class Docs:
     def path(self, task: int, name: str) -> Path:
         return self.state_dir / "agents" / self.agent / "tasks" / f"t{task}" / name
 
-    def scratch(self, task: int) -> Path:
+    def scratch(self, task: int) -> Path | None:
         """Where a task's own output files go: the agent may write here, never in the task folder."""
-        return self.state_dir / "scratchpad" / self.agent / f"t{task}"
+        return self.scratch_root / f"t{task}" if self.scratch_root else None
+
+    def make_scratch(self, task: int) -> None:
+        if self.scratch_root is None:
+            return
+        fd = open_private_dir(self.scratch_root)
+        try:
+            with suppress(FileExistsError):
+                os.mkdir(f"t{task}", PRIVATE_DIR_MODE, dir_fd=fd)
+        finally:
+            os.close(fd)
+
+    def scratch_files(self, task: int) -> int:
+        """Files under the task's scratch, counted without following a link and stopped at 101."""
+        root, n = self.scratch(task), 0
+        stack = [root] if root and not root.is_symlink() else []
+        while stack and n <= _SCRATCH_COUNT_CAP:
+            with suppress(OSError), os.scandir(stack.pop()) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(entry.path)
+                    else:
+                        n += 1
+        return min(n, _SCRATCH_COUNT_CAP + 1)
+
+    def remove_scratch(self, task: int) -> None:
+        """Hands the task's scratch to the remover on a daemon thread without waiting."""
+        if self.scratch_root is None:
+            return
+        with suppress(OSError):
+            in_background(_remove_and_close, f"t{task}", open_private_dir(self.scratch_root, create=False))
 
     def append_section(self, task: int, doc: str, section: str) -> str:
         if not _REVIEW_DOC.fullmatch(doc):

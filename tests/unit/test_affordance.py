@@ -215,8 +215,9 @@ async def test_the_launch_floor_prices_the_slash_index_with_agent_and_task_held(
     fixed, _ = _spy_floor(monkeypatch)
     await start_serving.launch_floor(_ROOT, found.skills, machine_dir=cfg)
     await start_serving.launch_floor(_ROOT, (), machine_dir=cfg)
-    assert fixed[0][0].endswith("\n\n" + render_index(None, cfg, {"agent", "task", "skill"}, False, True))
-    assert fixed[1][0].endswith("\n\n" + render_index(None, cfg, {"agent", "task"}, False, True))
+    scratch = cfg / "run" / ("0" * 12) / "scratch"
+    assert fixed[0][0].endswith("\n\n" + render_index(None, cfg, {"agent", "task", "skill"}, False, True, scratch))
+    assert fixed[1][0].endswith("\n\n" + render_index(None, cfg, {"agent", "task"}, False, True, scratch))
     assert "Skills: " not in fixed[1][0]
     counter = TokenCounter(offline=True)
 
@@ -288,7 +289,7 @@ async def test_the_launch_floor_prices_the_index_the_root_sends(tmp_path, monkey
     fixed, _ = _spy_floor(monkeypatch)
     await _start_async(None, False, False, str(tmp_path))
     (loop,) = agents
-    assert loop._index and fixed[0][0].endswith("\n\n" + loop._index)
+    assert loop._index and "\n\n" + loop._index + "\nScratch: " in fixed[0][0]
 
 
 # --- index start wiring ---------------------------------------------------------------------------

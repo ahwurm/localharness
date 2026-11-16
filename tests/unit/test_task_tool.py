@@ -5,6 +5,7 @@ import pytest
 
 from localharness.agent.subagent import _config_child_allowed
 from localharness.core.caps import Caps
+from localharness.core.run_folder import SCRATCH_SENTENCE
 from localharness.orchestrator.task_flow import FOLLOW_UP
 from localharness.orchestrator.task_flow.record import STAGES, TOOL_STAGES, Row
 from localharness.tools.builtin.task_tool import TaskTool
@@ -171,7 +172,7 @@ def test_description_is_one_line_per_stage_in_tool_stage_order_the_same_every_ca
     text = tool.info().description
     head, where, *lines, done = text.splitlines()
     assert str(Caps.DOC) in head and "one unit" in head and "next" in head
-    assert "scratch folder" in where and "not yours to write" in where
+    assert SCRATCH_SENTENCE in where and "not yours to write" in where
     assert done.startswith("done:") and "review.md" in done and tool.info().parameters["properties"]["stage"]["enum"][-1] == "done"
     assert [line.split(":")[0] for line in lines] == list(TOOL_STAGES)
     for line in lines:

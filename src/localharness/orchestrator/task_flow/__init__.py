@@ -4,11 +4,11 @@ from contextlib import suppress
 
 from typing import Any, Awaitable, Callable, Iterable
 
-from localharness.orchestrator.task_flow.filer import Docs
+from localharness.orchestrator.task_flow.filer import Docs, Refused
 from localharness.channels.base import one_line
 from localharness.core.caps import Caps
 from localharness.orchestrator.task_flow.panel import WEB_CRITIC_TOOLS, FlowCap, Panel, critic_names, typed_turns
-from localharness.orchestrator.task_flow.record import Record, Row, clear_turn, limited, open_task, set_stage
+from localharness.orchestrator.task_flow.record import Record, Row, clear_turn, limited, open_task, scratch_clause, set_stage
 from localharness.orchestrator.task_flow.runner import FOLLOW_UP, root_note, run_unit
 
 __all__ = ["TaskFlow"]
@@ -29,7 +29,7 @@ class TaskFlow:
         self.record, self.excluded, self.turn = record, 0.0, turn
         if record is not None:
             docs.adopted.add(record.id)
-        self.called, self.said, self.sentence = set[str](), set[str](), ""
+        self.called, self.said, self.sentence, self.counted = set[str](), set[str](), "", dict[int, int]()
         self.armed: str | None = None
         self.unit: tuple[str, int] | None = None
         self.busy = self.model_opened = False
@@ -39,9 +39,22 @@ class TaskFlow:
     def open(self, objective: str, turn: int) -> Record:
         self.record = open_task(self.docs.new_task(), objective, turn)
         set_stage(self.record, "opened")
-        with suppress(OSError):
-            self.docs.scratch(self.record.id).mkdir(parents=True, exist_ok=True, mode=0o700)
+        with suppress(OSError, Refused):
+            self.docs.make_scratch(self.record.id)
         return self.record
+
+    def scratch_count(self, task: int) -> int:
+        """The task's scratch file count, scanned once a turn."""
+        if task not in self.counted:
+            self.counted[task] = self.docs.scratch_files(task)
+        return self.counted[task]
+
+    def drop_scratch(self, task: int) -> int:
+        """Removes a task's scratch and returns how many files it held."""
+        n = self.scratch_count(task)
+        self.docs.remove_scratch(task)
+        self.counted.pop(task, None)
+        return n
 
     def open_for_model(self) -> Record | None:
         """The model's open, once a turn and only on the person's message of this turn, which becomes the objective."""
@@ -49,10 +62,13 @@ class TaskFlow:
         if self.model_opened or not turns or turns[-1][0] != self.turn() or not turns[-1][1].strip():
             return None
         self.model_opened = True
+        old = self.record
+        removed = scratch_clause(self.drop_scratch(old.id)) if old else ""
         record = self.open(turns[-1][1], turns[-1][0])
         if self.emit:
             with suppress(Exception):
-                self.emit(f"t{record.id}", "opened by the model", ("/task clear (removes it)",), one_line(turns[-1][1])[:Caps.LINE])
+                self.emit(f"t{record.id}", "opened by the model", ("/task clear (removes it)",),
+                          " · ".join(filter(None, (f"{removed} removed" * bool(removed), one_line(turns[-1][1])[:Caps.LINE]))))
         return record
 
     def close(self, doc: str) -> str:
@@ -96,4 +112,5 @@ class TaskFlow:
         self.excluded, self.reply_panel.jtbd_stood = 0.0, False
         self.called.clear()
         self.said.clear()
+        self.counted.clear()
         self.sentence, self.armed, self.unit, self.busy, self.model_opened = "", None, None, False, False

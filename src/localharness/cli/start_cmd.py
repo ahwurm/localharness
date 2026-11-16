@@ -3201,7 +3201,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             run_config_child=_run_agent.run_config_child,
             emit=lambda *row: flow_sink[0](*row) if flow_sink else None,
             exclude=lambda seconds: agent_loop.exclude(seconds),
-            docs=Docs(state_dir, workspace is not None, agent_config.name),
+            docs=Docs(state_dir, workspace is not None, agent_config.name, scratch),
             config=agent_config, root_tools=(), llm=llm, token_counter=token_counter, bus=bus,
             messages=lambda: agent_loop.messages(), turn=lambda: agent_loop.turn,
             record=resume.task if resume is not None and not resume.slept else None,
@@ -3267,7 +3267,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # the loop reads it live against the gate, so an interactive terminal root stays unbounded.
             unattended_max_actions=harness.channels.unattended_max_actions,
             project_instructions=instructions_handle,
-            index=render_index(root, cfg_path, held, config_dir_flag, slash=acp_channel is None),
+            index=render_index(root, cfg_path, held, config_dir_flag, slash=acp_channel is None, scratch=scratch),
             affordances=affordances,
             # PAPI-04: the memory slot — the lifecycle's; its occupant (the memory plugin) feeds the
             # prompt's memory section.

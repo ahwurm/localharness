@@ -15,6 +15,7 @@ from localharness.channels.base import one_line
 from localharness.config.models import CRITIC_NAME, AgentConfig, BudgetConfig, PermissionConfig, ToolConfig
 from localharness.core.caps import Caps
 from localharness.core.events import CompactionTriggered, Observation
+from localharness.core.run_folder import SCRATCH_SENTENCE
 from localharness.orchestrator.task_flow.filer import (
     Refused, StepLog, answered, file_answer, last_section, manifest, parse_plan, render_section, rerecord)
 from localharness.orchestrator.task_flow.panel import Finding, PanelInputs, PanelResult, PanelRun, fence, typed_turns, unit_floor
@@ -87,9 +88,15 @@ def root_note(flow: TaskFlow) -> str:
     return "\n".join(p for p in (pointer, interview, scratch_line(flow), flow.sentence) if p)
 
 
+NO_SCRATCH = "Files this task produces go in the project; the task folder is not yours to write."
+
+
 def scratch_line(flow: TaskFlow) -> str:
     """Where the task's output files go; the task folder itself is the harness's and refuses the agent's writes."""
-    return f"Files this task produces go under {flow.docs.scratch(flow.record.id)} or the project; the task folder is not yours to write." if flow.record else ""
+    if not flow.record:
+        return ""
+    where = flow.docs.scratch(flow.record.id)
+    return f"Your scratch for this task is {where}. {SCRATCH_SENTENCE} The task folder is not yours to write." if where else NO_SCRATCH
 
 
 def _exclude(flow: TaskFlow, seconds: float) -> None:
@@ -223,7 +230,7 @@ async def _file(flow: TaskFlow, boundary: str, unit: Unit, carried: str | None) 
         return f"{name} is over {Caps.DOC} bytes; file it shorter"
     sections = parse_plan(carried) if unit.boundary == "plan" else None
     if isinstance(sections, str):
-        return sections
+        return f"{sections} {SCRATCH_SENTENCE}" if flow.docs.scratch_root else sections
     digest, _ = flow.docs.write(record.id, name, carried)
     file_doc(record, unit.boundary, (name, None), digest)
     record.filed_turn[unit.boundary] = flow.turn()

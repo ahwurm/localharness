@@ -41,6 +41,7 @@ from localharness.core.types import (
 )
 from localharness.core.content import redact_images, text_of, text_part
 from localharness.core.fence import fence_project_text
+from localharness.core.run_folder import SCRATCH_SENTENCE, told
 from localharness.agent.context import (
     APPROX_CHARS_PER_TOKEN, fixed_tokens, floor_schemas, harness_floor, response_reserve)
 from localharness.agent.context import (
@@ -1036,11 +1037,9 @@ def base_system_prompt(cfg, *, tool_call_mode: str, guardrails: str, skills: str
     # Date only (no clock time) so the vLLM prefix cache churns daily, not per-turn.
     _now = datetime.now().astimezone()
     system_prompt += f"\n\nToday's date: {_now.strftime('%A, %Y-%m-%d')} ({_now.tzname()})"
-    system_prompt += (
-        f"\n\nWorking directory: {Path.cwd()}"
-        "\nUnless the user names another location, create any files or folders you make "
-        "under this working directory."
-    )
+    system_prompt += f"\n\nWorking directory: {Path.cwd()}"
+    if SCRATCH_SENTENCE not in index:
+        system_prompt += "\nUnless the user names another location, create any files or folders you make under this working directory."
     system_prompt += (
         "\n\nWhen you start a distinct phase of a multi-step task, first state what you are "
         'about to do in one short line (e.g. "Pulling the data…") before making the tool calls.'
@@ -1068,7 +1067,8 @@ def base_system_prompt(cfg, *, tool_call_mode: str, guardrails: str, skills: str
     return system_prompt
 
 
-def render_index(root: Path | None, machine_dir: Path, held: set[str], config_dir_flag: bool, slash: bool) -> str:
+def render_index(root: Path | None, machine_dir: Path, held: set[str], config_dir_flag: bool, slash: bool,
+                 scratch: Path | None = None) -> str:
     """The root's map of the project and where its skills and agents live and enter a task."""
     from shlex import quote
     from localharness.channels.base import one_line
@@ -1092,6 +1092,7 @@ def render_index(root: Path | None, machine_dir: Path, held: set[str], config_di
         f"Skills: listed above. New ones go in {write}.{f' {tail}.' if tail else ''}" if "skill" in held else "",
         "Agents: listed in the agent tool. A delegated agent never has task"
         f"{'; `/agents` lists them for the person' if slash else ''}." if "agent" in held else "",
+        f"Scratch: {shown(scratch)}. {SCRATCH_SENTENCE}" if scratch else "",
     )
     return "\n".join(line for line in lines if line)
 
@@ -2735,6 +2736,7 @@ class AgentLoop:
                     blockers=blockers,
                     notes=notes,
                     ending=ending,
+                    scratch_files=told(scratch, session.turn_started, summary) if (scratch := getattr(self._gate, "scratch", None)) else (),
                 ))
                 if panel is not None and panel.on_delivered and verdict is not None and not off:
                     try:

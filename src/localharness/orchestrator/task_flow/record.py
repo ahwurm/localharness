@@ -372,9 +372,9 @@ LINES: dict[str, Line] = {
     "halted cap": Line("halted", ("<next> (continues)",), "cap <n> min hit · clean",
                        "the flow cap is spent for this turn; the person continues"),
     "not started": Line("<stage> not started", ("/task <verb>",), "the model answered instead"),
-    "done": Line("done", ("/task show review",)),
-    "closed": Line("closed", ("/task show tN/<doc>",), "not resumable, folder kept"),
-    "paused": Line("paused", ("<next>", "clear (deletes the folder)")),
+    "done": Line("done", ("/task show review",), "<kept>"),
+    "closed": Line("closed", ("/task show tN/<doc>",), "not resumable, docs kept<removed>"),
+    "paused": Line("paused", ("<next>", "clear (deletes tN<also>)")),
     "run needs a plan": Line("run needs a plan", ("/task plan",), "",
                              "run needs a passed or accepted plan; call stage=plan"),
     "decisions unfiled": Line("decisions unfiled", (), "", "the interview is open; ask, or file stage=new first"),
@@ -399,6 +399,10 @@ LINES: dict[str, Line] = {
     "edited since filed": Line("<doc> edited since filed", ("/task accept <doc> (uses your edit)",), "",
                                "the doc changed after it was filed; the person accepts it"),
 }
+
+
+def scratch_clause(n: int) -> str:
+    return "" if n <= 0 else f"{'100+' if n > 100 else n} scratch file{'s' * (n != 1)}"
 
 
 @dataclass(frozen=True)

@@ -4,22 +4,29 @@ from __future__ import annotations
 from typing import Any
 
 from localharness.core.caps import Caps
+from localharness.core.run_folder import SCRATCH_SENTENCE
 from localharness.orchestrator.task_flow import TaskFlow
+from localharness.orchestrator.task_flow.runner import NO_SCRATCH
 from localharness.orchestrator.task_flow.record import STAGES, TOOL_STAGES, valid_question
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 
 BOUNDARY = {row.stage: boundary for boundary, row in STAGES.items() if row.stage}
 TAKES = {"new": "doc", "plan": "doc", "research": "question", "done": "doc"}
 TAKEN_BY = {"doc": "new and plan", "question": "research"}
-DESCRIPTION = "\n".join([
-    ("Each call runs one unit of the open task and names the next. When the person asks for work of several steps and no "
-     "task is open, open one: new with a doc of the objective and how you will do it; the task's objective is the person's "
-     f"latest message. A doc is at most {Caps.DOC} bytes."),
-    "Files the task produces go under the scratch folder your note names, or the project; the task folder is not yours to write.",
-    *(f"{stage}: reads {', '.join(STAGES[BOUNDARY[stage]].reads)}, writes {', '.join(STAGES[BOUNDARY[stage]].writes)}; "
-      f"takes {TAKES.get(stage, 'nothing')}" for stage in TOOL_STAGES),
-    "done: closes a task you finished before any plan, once decisions.md is filed; the critics then read your reply as the result; takes doc (the result in a few lines, filed as review.md)",
-])
+
+
+def description(flow: TaskFlow) -> str:
+    scratch = (f"Scratch is the folder your note names. {SCRATCH_SENTENCE} The task folder is not yours to write."
+               if flow.docs.scratch_root else NO_SCRATCH)
+    return "\n".join([
+        ("Each call runs one unit of the open task and names the next. When the person asks for work of several steps and no "
+         "task is open, open one: new with a doc of the objective and how you will do it; the task's objective is the person's "
+         f"latest message. A doc is at most {Caps.DOC} bytes."),
+        scratch,
+        *(f"{stage}: reads {', '.join(STAGES[BOUNDARY[stage]].reads)}, writes {', '.join(STAGES[BOUNDARY[stage]].writes)}; "
+          f"takes {TAKES.get(stage, 'nothing')}" for stage in TOOL_STAGES),
+        "done: closes a task you finished before any plan, once decisions.md is filed; the critics then read your reply as the result; takes doc (the result in a few lines, filed as review.md)",
+    ])
 
 
 def _bad(stage: str, doc: Any, question: Any, extra: dict) -> str | None:
@@ -50,7 +57,7 @@ class TaskTool(Tool):
         return ToolSchema(
             name="task", group="task",
             gate_family="allow", ingest="none", host="safe", result_origin="untrusted",
-            description=DESCRIPTION,
+            description=description(self._flow),
             parameters={
                 "type": "object",
                 "properties": {
