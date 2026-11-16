@@ -601,7 +601,7 @@ class ParseFailed(BaseEvent):
 
 
 class StuckRecovered(BaseEvent):
-    """Published when a new tool message repeats exactly one earlier copy the model still holds."""
+    """Published on a call's first repeat of a result the model still holds."""
 
     event_type: str = "StuckRecovered"
     agent_id: AgentID

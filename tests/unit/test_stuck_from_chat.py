@@ -1,9 +1,4 @@
-"""The stuck rule reads the chat: a repeat is the same call returning the same result the model still holds.
-
-The loop stamps each tool message with the digest of the exact content it gave the model. A pure fold over
-the request finds the messages that repeat an earlier held copy; the request shows the second copy as a
-pointer, and a third ends the turn. The session, the bus and history.jsonl keep every full body.
-"""
+"""The stuck rule reads the chat: a repeat is a call returning again a result the model still holds from it."""
 from __future__ import annotations
 
 import logging
@@ -59,6 +54,13 @@ def _found(messages: list[dict], family=_family) -> list[tuple[int, int]]:
     return [_repeats(messages, family).get(i) for i in ts]
 
 
+def _checked(*results: str) -> list[dict]:
+    """`read a` returning each result in turn, with a distinct successful edit between each two."""
+    reads = [_exchange(f"r{n}", "read", A, r) for n, r in enumerate(results)]
+    edits = [_exchange(f"e{n}", "edit", B, f"wrote {n}") for n in range(len(results))]
+    return _chat(*[ex for pair in zip(reads, edits) for ex in pair][:-1])
+
+
 # ---------------------------------------------------------------------------
 # The fold
 # ---------------------------------------------------------------------------
@@ -73,9 +75,14 @@ def test_a_copy_further_back_reports_how_far():
     assert _found(chat) == [None, None, (1, 2)]
 
 
-def test_the_third_copy_counts_two():
+def test_the_third_copy_counts_two_one_result_back():
     chat = _chat(*(_exchange(str(i), "read", A, "x") for i in range(3)))
-    assert _found(chat) == [None, (1, 1), (2, 2)]
+    assert _found(chat) == [None, (1, 1), (2, 1)]
+
+
+def test_after_its_pointer_a_call_repeating_another_result_counts_two():
+    chat = _chat(*(_exchange(str(i), "read", A, r) for i, r in enumerate("xxyy")))
+    assert _found(chat) == [None, (1, 1), None, (2, 1)]
 
 
 def test_the_same_call_with_a_different_result_is_not_a_repeat():
@@ -105,12 +112,24 @@ def test_a_copy_compacted_away_is_simply_absent():
     assert _found(chat) == [None]
 
 
-def test_a_successful_write_family_call_starts_the_count_over():
-    chat = _chat(_exchange("1", "read", A, "x"), _exchange("2", "edit", A, "done"), _exchange("3", "read", A, "x"))
+def test_a_check_that_stayed_the_same_after_a_write_is_not_a_repeat():
+    chat = _chat(_exchange("1", "read", A, "x"), _exchange("2", "edit", B, "done"), _exchange("3", "read", A, "x"))
     assert _found(chat) == [None, None, None]
+    assert _found(_checked("OK", "OK", "OK")) == [None] * 5
 
 
-def test_a_failed_write_a_repeated_write_and_a_failing_lookup_never_reset():
+def test_the_same_check_with_no_write_since_is_a_repeat():
+    chat = _chat(_exchange("1", "read", A, "x"), _exchange("2", "edit", B, "done"), _exchange("3", "read", A, "x"),
+                 _exchange("4", "read", A, "x"))
+    assert _found(chat) == [None, None, None, (1, 1)]
+
+
+def test_a_result_the_call_had_moved_away_from_counts_whatever_the_writes():
+    assert _found(_checked("x", "y", "x")) == [None, None, None, None, (1, 4)]
+    assert _found(_checked("x", "y", "x", "y"))[::2] == [None, None, (1, 4), (2, 4)]
+
+
+def test_a_failed_write_a_repeated_write_and_a_failing_lookup_never_count_as_a_write():
     failed_write = _chat(_exchange("1", "read", A, "x"), _exchange("2", "edit", A, "no", ok=False),
                          _exchange("3", "read", A, "x"))
     assert _found(failed_write)[2] == (1, 2)
@@ -123,11 +142,12 @@ def test_a_failed_write_a_repeated_write_and_a_failing_lookup_never_reset():
         assert _found(chat, family)[2] == (1, 2)
 
 
-def test_a_message_from_the_person_starts_the_count_over_and_a_harness_message_does_not():
-    person = [*_chat(_exchange("1", "read", A, "x")), human_message("again please"), *_exchange("2", "read", A, "x")]
-    assert _found(person) == [None, None]
-    harness = [*_chat(_exchange("1", "read", A, "x")), harness_message("nudge", "n"), *_exchange("2", "read", A, "x")]
-    assert _found(harness) == [None, (1, 1)]
+def test_a_message_from_the_person_clears_what_was_returned_and_told_and_a_harness_message_does_not():
+    told = _chat(_exchange("1", "read", A, "x"), _exchange("2", "read", A, "x"))
+    person = [*told, human_message("again please"), *_exchange("3", "read", A, "x"), *_exchange("4", "read", A, "x")]
+    assert _found(person) == [None, (1, 1), None, (1, 1)]
+    harness = [*told, harness_message("nudge", "n"), *_exchange("3", "read", A, "x")]
+    assert _found(harness) == [None, (1, 1), (2, 1)]
 
 
 def test_tool_calls_as_objects_or_dicts_both_resolve_names():
@@ -255,7 +275,7 @@ async def test_the_second_call_warns_through_the_next_request_and_the_third_stop
     assert loop.last_terminated_reason == "stuck"
     (esc,) = bus.history(event_types=[Escalation])
     assert esc.reason == "stuck_detected" and esc.stuck_signature == sig
-    assert esc.detail == "`probe` returned the same result 3 times this turn, after being told it was the same (iteration 3)"
+    assert esc.detail == "`probe` repeated a result it had already returned this turn, after being told so (iteration 3)"
     wrapup = llm.seen[-1][-1]["content"]
     assert "you kept requesting a result you already had" in wrapup
     assert [e.reason for e in bus.history(event_types=[TurnFailed])] == ["stuck_detected"]
@@ -287,6 +307,21 @@ async def test_a_write_family_success_between_repeats_prevents_the_stop(bus):
 
 
 @pytest.mark.asyncio
+async def test_a_check_cycling_through_values_between_edits_is_stopped_by_its_second_revisit(bus):
+    probe = _Named("probe", None, body=lambda n: ("10 words", "12 words")[(n - 1) % 2])
+    registry = await _registry(probe, _Named("edit", "write", body=lambda n: f"wrote {n}"))
+    llm = _RecordingLLM([*(_call(i, "edit" if i % 2 == 0 else "probe") for i in range(1, 8)),
+                         FakeLLMResponse(content="Stopped.")])
+    loop = _loop(llm, bus, registry)
+    await loop.run_turn("task")
+    assert probe.calls == 4 and loop.last_terminated_reason == "stuck"
+    assert [e.iteration for e in bus.history(event_types=[StuckRecovered])] == [5]
+    (esc,) = bus.history(event_types=[Escalation])
+    assert esc.detail == "`probe` repeated a result it had already returned this turn, after being told so (iteration 7)"
+    assert [m["content"] for m in llm.seen[6] if m["role"] == "tool"][4] == REPEAT_POINTER.format(k=4)
+
+
+@pytest.mark.asyncio
 async def test_a_new_turn_inherits_no_count_and_the_first_call_after_a_stop_reaches_the_model_whole(bus):
     llm = _RecordingLLM([_call(1), _call(2), FakeLLMResponse(content="One."),
                          _call(3), FakeLLMResponse(content="Two.")])
@@ -315,4 +350,4 @@ async def test_a_tool_name_with_a_newline_reaches_the_detail_on_one_line(bus):
     loop = _loop(llm, bus, registry)
     await loop.run_turn("task")
     (esc,) = bus.history(event_types=[Escalation])
-    assert "\n" not in esc.detail and esc.detail.startswith("`pro be` returned")
+    assert "\n" not in esc.detail and esc.detail.startswith("`pro be` repeated")

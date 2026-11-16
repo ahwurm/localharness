@@ -600,20 +600,17 @@ def _repeats(
     messages: list[Message],
     gate_family: Callable[[str], str | None] | None,
 ) -> dict[int, tuple[int, int]]:
-    """Per tool message that repeats an earlier one still held: (earlier copies, tool results back to the first).
-
-    A repeat is the same stamped call with the same stamped result. A stub never counts (the model no
-    longer has it), nor does an unstamped message. A message from the person clears the count, and
-    so does a successful non-repeat call of a tool declaring the write family. Pure.
-    """
+    """Index -> (1 on the call's first repeat since the person spoke, else 2; tool results back to its last held copy)."""
     names = _call_meta(messages)
-    seen: dict[tuple[str, str], tuple[int, int]] = {}
+    ever: dict[tuple[str, str], int] = {}
+    last: dict[str, tuple[str, int]] = {}
+    told: set[str] = set()
     found: dict[int, tuple[int, int]] = {}
-    ordinal = 0
+    writes = ordinal = 0
     for i, m in enumerate(messages):
         role = m.get("role")
         if role == "user" and not is_harness_message(m):
-            seen = {}
+            ever, last, told, writes = {}, {}, set(), 0
         if role != "tool":
             continue
         ordinal += 1
@@ -622,20 +619,19 @@ def _repeats(
         if (outcome is None or not outcome.get("call") or not outcome.get("result")
                 or not isinstance(content, str) or content.startswith((_TOOL_STUB_PREFIX, _WEB_STUB_PREFIX))):
             continue
-        key = (outcome["call"], outcome["result"])
-        if key in seen:
-            held, first = seen[key]
-            found[i] = (held, ordinal - first)
-            seen[key] = (held + 1, first)
-            continue
-        if outcome.get("ok") is True:
+        call, result = key = (outcome["call"], outcome["result"])
+        # A repeat: a result the call had moved away from (a cycle), or the same result with no write since.
+        if key in ever and (last[call][0] != result or last[call][1] == writes):
+            found[i] = (2 if call in told else 1, ordinal - ever[key])
+            told.add(call)
+        elif outcome.get("ok") is True:
             try:
                 family = gate_family(names.get(m.get("tool_call_id"), ("",))[0]) if gate_family else None
-            except Exception:  # noqa: BLE001 — fail closed: no reset
+            except Exception:  # noqa: BLE001 — fail closed: not a write
                 family = None
-            if family == "write":
-                seen = {}
-        seen[key] = (1, ordinal)
+            writes += family == "write"
+        ever[key] = ordinal
+        last[call] = (result, writes)
     return found
 
 
@@ -643,11 +639,7 @@ def _point_repeats(
     messages: list[Message],
     gate_family: Callable[[str], str | None] | None,
 ) -> list[Message]:
-    """Request view only: a tool message with exactly one earlier held copy becomes a pointer to it.
-
-    The budget note rides on only when the text before it digests to the stamped result, so tool output
-    can never pose as one. Returns the input list itself when nothing changes; never mutates.
-    """
+    """Request view only: a call's first repeat becomes a pointer to the latest held copy; the input list when none."""
     pointed = {i: k for i, (held, k) in _repeats(messages, gate_family).items() if held == 1}
     if not pointed:
         return messages
@@ -655,6 +647,7 @@ def _point_repeats(
     for i, k in pointed.items():
         content = messages[i]["content"]
         head, sep, tail = content.rpartition(BUDGET_NOTE_PREFIX)
+        # The note rides on only when the text before it digests to the stamp, so tool output cannot pose as one.
         note = sep + tail if sep and result_digest(head) == _tool_outcome(messages[i])["result"] else ""
         out[i] = {**messages[i], "content": REPEAT_POINTER.format(k=k) + note}
     return out

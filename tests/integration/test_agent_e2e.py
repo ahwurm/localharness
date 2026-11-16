@@ -218,7 +218,7 @@ async def test_stuck_escalation(tmp_path):
     escalations = bus.history(event_types=[Escalation])
     assert len(escalations) == 1
     assert escalations[0].reason == "stuck_detected"
-    assert "returned the same result" in escalations[0].detail
+    assert "repeated" in escalations[0].detail
 
     # The turn terminated as stuck, and its failure detail is exactly the returned reply
     failed = [e for e in bus.history(event_types=[TurnFailed]) if e.reason == "stuck_detected"]
