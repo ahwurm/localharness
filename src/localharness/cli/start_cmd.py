@@ -3094,6 +3094,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             trusted_for_run=trust_flag,
             config_dir=cfg_path,  # the session's own tools folder and settings files are guarded
             state_dirs=(state_dir,),
+            run=run,
+            scratch=scratch,
         )
         if resume is not None and resume.gate_mode != gate.mode:
             from localharness.agent.gate_types import MODE_STRICTNESS

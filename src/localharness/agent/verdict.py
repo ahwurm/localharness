@@ -58,7 +58,7 @@ from localharness.agent.gate_types import (
     VerdictResult,
 )
 from localharness.agent.permissions import PermissionResult
-from localharness.agent.shell_classify import copy_operands
+from localharness.agent.shell_classify import copy_operands, moved_into
 from localharness.agent.taint import DOWNLOADS, TAINTED_ASK_CLASSES, content_key, under_downloads
 from localharness.config.paths import WORKSPACE_DIR_NAME, global_config_dir
 from localharness.tools.base import GateFamily
@@ -228,6 +228,11 @@ DOWNLOADS_WRITE_REASON = (
     "the downloads folder holds pages saved from the web and only web_fetch and browser_fetch write it; "
     "re-fetch with save_to, or edit a copy in the workspace")
 DOWNLOAD_EXEC_DETAIL = "runs a file saved from the web"
+MOVE_INTO_RUN_REASON = "moves {source} into this session's scratch, which is deleted when the session ends"
+SCRATCH_ASK_REASON = "writes this session's scratch (deleted when it ends): {path}"
+SCRATCH_OPTIONS_LEGEND = "[y]es once   [a]lways (this session)   [n]o   [N]ever (this session)"
+_RUN_VARIABLE = re.compile(r"\$\{?(?:LOCALHARNESS_SCRATCH|TMPDIR)\b")
+_CD_INTO_RUN_VARIABLE = re.compile(r"(?:^|[;&|(\s])(?:cd|pushd)\s+[\"']?\$\{?(?:LOCALHARNESS_SCRATCH|TMPDIR)\b")
 SAVED_PAGES_NOTE = " — the agent has read pages saved from the web ({source})."
 SAVED_PAGES_ALWAYS = ' "Always" trusts saved pages for the rest of this session.'
 WRITTEN_FILE_REASON = "runs a file the agent wrote after reading pages saved from the web ({path})"
@@ -405,6 +410,10 @@ class GateContext:
     """The saved page(s) the calling agent has read, as the ask line names them; None when it has read none."""
     written: Optional[Callable[[Path], Optional[str]]] = None
     """The digest of a file the calling agent wrote since it read saved pages, or None."""
+    run: Optional[Path] = None
+    """This session's run folder, wherever it was made."""
+    scratch: Optional[Path] = None
+    """This session's scratch; None when it has none."""
 
 
 # ------------------------------------------------------------------- internals
@@ -835,6 +844,36 @@ def _removal_asks(
     return asks
 
 
+def _move_asks(segments, anchor: Optional[Path], ctx: GateContext, command: str) -> list[_Ask]:
+    """The ungrantable ask for a move into the run folder: what is moved in is removed with the folder."""
+    if ctx.run is None:
+        return []
+    cd_names_run = _CD_INTO_RUN_VARIABLE.search(command) is not None
+    asks: list[_Ask] = []
+    for segment in segments:
+        moved = moved_into(segment.argv)
+        if moved is None:
+            continue
+        destination = moved[1]
+        if _RUN_VARIABLE.search(destination):
+            into = True
+        elif segment.unresolvable_write:
+            into = cd_names_run
+        else:
+            into = any((place := _resolve(raw, anchor)) is not None and _within(ctx.run, place)
+                       for raw in (destination, *segment.write_targets))
+        if not into:
+            continue
+        for source in segment.removal_targets:
+            place = None if segment.unresolvable_removal or source == "{}" else _resolve(source, anchor)
+            if place is None or not _within(ctx.run, place):
+                asks.append(_ask_record(
+                    "shell-destructive", source, MOVE_INTO_RUN_REASON.format(source=source),
+                    grantable=False, allowed_in_auto=False,
+                ))
+    return asks
+
+
 def _truncate(text: str) -> str:
     flat = " ".join(text.split())
     if len(flat) <= DISPLAY_ARG_MAX_CHARS:
@@ -1003,6 +1042,9 @@ def _decide(
         ordered = blacklisted
     primary = ordered[0]
     grantable = all(a.grantable for a in ordered)
+    keys = tuple((a.klass, a.key) for a in ordered if a.grantable and a.key)
+    scratch_only = grantable and ctx.scratch is not None and bool(keys) and all(
+        key == str(ctx.scratch) for _, key in keys)
     if grantable and ctx.mode == "trusted" and not severe:
         return VerdictResult(Verdict.ALLOW, f"trusted mode: {primary.klass} allowed without asking")
     groups = _grouped_reasons(ordered)
@@ -1023,8 +1065,9 @@ def _decide(
             grantable=grantable,
             reason=reason,
             display=display,
-            grant_keys=tuple((a.klass, a.key) for a in ordered if a.grantable and a.key),
+            grant_keys=keys,
             auto_entry=next((a.auto_entry for a in ordered if a.auto_entry), None),
+            options_legend=SCRATCH_OPTIONS_LEGEND if scratch_only else None,
         ),
     )
 
@@ -1106,6 +1149,11 @@ def _target_asks(
             continue
         if resolved is not None and _within(ctx.boundary, resolved):
             continue
+        if resolved is not None and ctx.scratch is not None and _within(ctx.scratch, resolved):
+            key = str(ctx.scratch)
+            if not (_granted(ctx, "edit-outside", key) and _refused(ctx, "edit-outside", key) is None):
+                asks.append(_ask_record("edit-outside", key, SCRATCH_ASK_REASON.format(path=resolved)))
+            continue
         if resolved is not None:
             key, where = str(resolved.parent), str(resolved)
             granted = _granted_directory(ctx, "edit-outside", resolved.parent)
@@ -1148,10 +1196,33 @@ def _private_reason(path: Path, ctx: GateContext, removal: bool) -> Optional[str
     return None
 
 
+def _in_run_folder(path: Path, ctx: GateContext) -> bool:
+    """Is ``path`` under ``<config dir>/run`` and not inside this session's scratch?"""
+    shown = str(path).casefold()
+    if ctx.scratch is not None and _within(ctx.scratch, path):
+        return False
+    return any(
+        shown == base or shown.startswith(base + os.sep)
+        for base in (str(folder / "run").casefold() for folder in _config_dirs(ctx))
+    )
+
+
+def _run_denial(ctx: GateContext) -> VerdictResult:
+    mine = f"this session's scratch is {ctx.scratch}" if ctx.scratch else "this session has no scratch"
+    return VerdictResult(Verdict.DENY, f"belongs to another session's run folder or to run/ itself; {mine}")
+
+
+def _run_text_deny(words: Iterable[str], ctx: GateContext) -> Optional[VerdictResult]:
+    """DENY a word that spells the run folder through a variable (``$HOME/.localharness/run/x``), which resolution cannot place."""
+    if any("$" in word and ".localharness/run" in word.casefold() for word in words):
+        return _run_denial(ctx)
+    return None
+
+
 def _private_deny(
     targets: Iterable[tuple[str, bool]], anchor: Optional[Path], ctx: GateContext
 ) -> Optional[VerdictResult]:
-    """DENY for the first ``(target, is_removal)`` that lands in harness state, in every mode and ahead of every ask."""
+    """DENY for the first ``(target, is_removal)`` that lands in harness state or another session's run folder, in every mode and ahead of every ask."""
     for raw, removal in targets:
         for path in _named_file(raw, anchor):
             if not removal and under_downloads(path):
@@ -1159,10 +1230,36 @@ def _private_deny(
             reason = _private_reason(path, ctx, removal)
             if reason is not None:
                 return VerdictResult(Verdict.DENY, reason)
+            if _in_run_folder(path, ctx):
+                return _run_denial(ctx)
     return None
 
 
-def _private_shell_targets(segments: Iterable[ShellSegment]) -> Iterable[tuple[str, bool]]:
+def _link_sources(segment: ShellSegment, anchor: Optional[Path]) -> Iterable[str]:
+    """The sources of an ``ln``; a symbolic link's relative source is read from the folder the link sits in."""
+    rest = segment.argv[1:]
+    ops = copy_operands(rest)
+    symbolic = any(t == "--symbolic" or (t[:1] == "-" and t[1:2] != "-" and "s" in t) for t in rest)
+    if not symbolic or segment.unresolvable_write or not segment.write_targets:
+        yield from ops.sources
+        return
+    for index, source in enumerate(ops.sources):
+        if source.startswith(("/", "~")):
+            yield source
+            continue
+        link = segment.write_targets[index if ops.into and index < len(segment.write_targets) else 0]
+        if ops.destination is None:
+            folder = ""
+        elif ops.into or not ((place := _resolve(link, anchor)) is not None and place.is_dir()):
+            folder = posixpath.dirname(link)
+        else:
+            folder = link
+        yield posixpath.join(folder, source)
+
+
+def _private_shell_targets(
+    segments: Iterable[ShellSegment], anchor: Optional[Path]
+) -> Iterable[tuple[str, bool]]:
     """Every static target the segments write, delete or link, in segment order; a link's source is one too."""
     for segment in segments:
         if not segment.unresolvable_write:
@@ -1171,7 +1268,7 @@ def _private_shell_targets(segments: Iterable[ShellSegment]) -> Iterable[tuple[s
         if not segment.unresolvable_removal:
             yield from ((target, True) for target in segment.removal_targets)
         if segment.argv and Path(segment.argv[0]).name.casefold() == "ln":
-            yield from ((source, False) for source in copy_operands(segment.argv[1:]).sources)
+            yield from ((source, False) for source in _link_sources(segment, anchor))
 
 
 def _evaluate_write(
@@ -1189,7 +1286,7 @@ def _evaluate_write(
         )], salient="")
     raw = _write_target(tool_name, params)
     if raw:
-        denied = _private_deny(((raw, False),), Path(ctx.workspace), ctx)
+        denied = _private_deny(((raw, False),), Path(ctx.workspace), ctx) or _run_text_deny((raw,), ctx)
         if denied is not None:
             return denied
     target = ((raw, _resolve(raw, ctx.workspace)),) if raw else ((MISSING_TARGET_DISPLAY, None),)
@@ -1351,7 +1448,8 @@ def _evaluate_shell(
     non_read_only = tuple(s for s in classified.segments if not s.read_only)
 
     anchor = _shell_anchor(tool_name, params, ctx)
-    denied = _private_deny(_private_shell_targets(classified.segments), anchor, ctx)
+    denied = _private_deny(_private_shell_targets(classified.segments, anchor), anchor, ctx) or _run_text_deny(
+        (*(w for s in classified.segments for w in s.write_targets), *(w for s in non_read_only for w in s.argv)), ctx)
     if denied is not None:
         return denied
 
@@ -1382,6 +1480,7 @@ def _evaluate_shell(
     ))
 
     asks += _removal_asks(non_read_only, anchor, ctx, settings, classified.segments)
+    asks += _move_asks(non_read_only, anchor, ctx, command)
 
     for segment in classified.segments:
         for path in _run_paths(segment, anchor, settings):

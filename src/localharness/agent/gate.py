@@ -41,9 +41,11 @@ from localharness.agent.gate_types import (
     Decision,
     GateOutcome,
     GateSettings,
+    Grant,
     Mode,
     PendingCall,
     PermissionRequest,
+    Refusal,
     ToolMeta,
     Verdict,
 )
@@ -391,6 +393,8 @@ class PermissionGate:
         trusted_for_run: bool = False,
         config_dir: Optional[Path] = None,
         state_dirs: Iterable[Path] = (),
+        run: Any = None,
+        scratch: Optional[Path] = None,
     ) -> None:
         self.boundary = boundary
         self.workspace = Path(workspace)
@@ -435,6 +439,10 @@ class PermissionGate:
         LOCALHARNESS_DIR): the tools folder and settings files the two self-extension rules guard.
         None: global_config_dir()."""
         self.state_dirs = tuple(Path(d).resolve() for d in state_dirs)
+        self.run = run
+        self.scratch = scratch
+        self.held: dict = run.held if run is not None else {}
+        """The session's scratch answers, kept on the run so a rebuilt gate still has them; never written to grants.yaml."""
 
         self._config_deny = deny
         self._warned_cannot_ask = False
@@ -584,8 +592,10 @@ class PermissionGate:
         return GateContext(
             boundary=self.boundary,
             workspace=self.workspace,
-            grants=self.grants.lookup,
-            refusals=self.grants.refused,
+            grants=self._held_or(Grant, self.grants.lookup),
+            refusals=self._held_or(Refusal, self.grants.refused),
+            run=self.run.path if self.run is not None else None,
+            scratch=self.scratch,
             mode=self.mode,
             can_ask=self.asker is not None,
             has_review_surface=self.has_review_surface,
@@ -595,6 +605,12 @@ class PermissionGate:
             state_dirs=self.state_dirs,
             **marks,
         )
+
+    def _held_or(self, kind: type, lookup):
+        def look(workspace, klass, key):
+            held = self.held.get((klass, key))
+            return held if isinstance(held, kind) else lookup(workspace, klass, key)
+        return look
 
     # ---------------------------------------------------------------- check
 
@@ -1010,15 +1026,17 @@ class PermissionGate:
                 if marked and klass in TAINTED_ASK_CLASSES:
                     self.taint.trust()
                     continue
-                self.grants.add(
-                    new_grant(
-                        key=key,
-                        klass=klass,
-                        workspace=self.workspace,
-                        channel=self.channel_name,
-                        session_id=session_id,
-                    )
+                grant = new_grant(
+                    key=key,
+                    klass=klass,
+                    workspace=self.workspace,
+                    channel=self.channel_name,
+                    session_id=session_id,
                 )
+                if self.scratch is not None and key == str(self.scratch):
+                    self.held[(klass, key)] = grant
+                else:
+                    self.grants.add(grant)
             return True
         refused = (
             request.grant_keys or ((request.klass, request.key),)
@@ -1026,13 +1044,15 @@ class PermissionGate:
             else ((request.klass, request.key),)
         )
         for klass, key in refused:
-            self.grants.add_refusal(
-                new_refusal(
-                    key=key,
-                    klass=klass,
-                    workspace=self.workspace,
-                    channel=self.channel_name,
-                    session_id=session_id,
-                )
+            refusal = new_refusal(
+                key=key,
+                klass=klass,
+                workspace=self.workspace,
+                channel=self.channel_name,
+                session_id=session_id,
             )
+            if self.scratch is not None and key == str(self.scratch):
+                self.held[(klass, key)] = refusal
+            else:
+                self.grants.add_refusal(refusal)
         return True

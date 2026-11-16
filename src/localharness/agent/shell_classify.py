@@ -4466,6 +4466,9 @@ def removal_operands(signature: str, argv: tuple[str, ...]) -> list[str]:
         return _find_removal_roots(argv)
     if argv[0] == "rsync":
         return _rsync_removal_operands(argv[1:])
+    if argv[0] in TAR_FAMILY or argv[0] == "zip":
+        moved = moved_into(argv)
+        return list(moved[0]) if moved else []
     start = 0
     if signature.startswith(tuple(f"{runner} " for runner in COMPOSING_RUNNERS)):
         start = next((i for i, token in enumerate(argv) if token in REMOVAL_VERBS), len(argv))
@@ -4497,6 +4500,50 @@ def _find_removal_roots(argv: Sequence[str]) -> list[str]:
     return []
 
 
+RSYNC_REMOVE_FLAGS = ("--remove-source-files", "--remove-sent-files")
+
+
+def moved_into(argv: Sequence[str]) -> tuple[tuple[str, ...], str] | None:
+    """The sources a ``mv``, ``rsync --remove-*``, ``tar --remove-files`` or ``zip -m`` takes away and the place they go to, as written."""
+    if not argv:
+        return None
+    head, rest = argv[0], list(argv[1:])
+    if head == "mv":
+        ops = copy_operands(rest)
+        return (ops.sources, ops.destination) if ops.destination is not None else None
+    positionals = [token for token in rest if not token.startswith("-")]
+    if head == "rsync":
+        removes = any(token in RSYNC_REMOVE_FLAGS for token in rest)
+        return (tuple(positionals[:-1]), positionals[-1]) if removes and len(positionals) >= 2 else None
+    if head == "zip":
+        moves = any(token == "--move" or (token[:1] == "-" and token[1:2] != "-" and "m" in token) for token in rest)
+        return (tuple(positionals[1:]), positionals[0]) if moves and len(positionals) >= 2 else None
+    if head in TAR_FAMILY and "--remove-files" in rest:
+        archive, operands = _tar_archive(rest)
+        return (tuple(operands), archive) if archive is not None else None
+    return None
+
+
+def _tar_archive(rest: Sequence[str]) -> tuple[str | None, list[str]]:
+    archive: str | None = None
+    operands: list[str] = []
+    index = 0
+    while index < len(rest):
+        token = rest[index]
+        index += 1
+        if token.startswith("--"):
+            name, eq, value = token.partition("=")
+            if name == "--file":
+                archive, index = (value, index) if eq else (rest[index] if index < len(rest) else None, index + 1)
+        elif token.startswith("-") and token != "-":
+            if "f" in token:
+                tail = token.partition("f")[2]
+                archive, index = (tail, index) if tail else (rest[index] if index < len(rest) else None, index + 1)
+        else:
+            operands.append(token)
+    return archive, operands
+
+
 def _rsync_removal_operands(rest: Sequence[str]) -> list[str]:
     """What an ``rsync`` removes: every source under ``--remove-source-files``, the destination under
     ``--delete`` / ``--delete-*`` / ``--del`` (WR-08 it3). The positionals are read as ``_copy_targets`` reads
@@ -4504,7 +4551,7 @@ def _rsync_removal_operands(rest: Sequence[str]) -> list[str]:
     options = [token for token in rest if token.startswith("--")]
     positionals = [token for token in rest if not token.startswith("-")]
     out: list[str] = []
-    if "--remove-source-files" in options:
+    if any(option in RSYNC_REMOVE_FLAGS for option in options):
         out += positionals[:-1]
     if any(option in ("--delete", "--del") or option.startswith("--delete-") for option in options):
         out += positionals[-1:]
@@ -5102,7 +5149,7 @@ def copy_operands(rest: Sequence[str]) -> CopyOperands:
             break
         if token.startswith("--"):
             name, eq, value = token.partition("=")
-            if name in TARGET_DIRECTORY_FLAGS:
+            if name in TARGET_DIRECTORY_FLAGS or (len(name) >= 3 and TARGET_DIRECTORY_FLAGS[1].startswith(name)):
                 if eq:
                     target = value
                 elif index < len(rest):
