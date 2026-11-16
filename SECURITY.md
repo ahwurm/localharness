@@ -560,8 +560,8 @@ read and argue with. Each step below says what it does in `auto`.
      replaces that list; for `.agents/skills/` it takes away only the removal ask, and a write there
      still asks. Everything else under one (agents,
      divisions, tools, session state, memory, history, the audit log, the kill file) is the harness
-     being *used* and is not protected, except each agent's `tasks/` and `sessions/` folders, which the
-     deny class below refuses; naming what is protected rather than what is exempt also
+     being *used* and is not protected, except each agent's `tasks/` and `sessions/` folders and the `run/` folder
+     (this session's own scratch excepted), which the deny class below refuses; naming what is protected rather than what is exempt also
      means a new kind of runtime state added there is allowed by default rather than becoming a
      prompt nobody wanted. Two of those entries, `config.yaml` and `overrides.yaml`, never reach
      this step from the agent's write and edit tools or from a shell write the gate can read: those
@@ -584,6 +584,21 @@ read and argue with. Each step below says what it does in `auto`.
      and neither are the write forms that name no static target under those folders: `cp -r` of a folder that
      holds a `tasks` or `sessions` entry into `agents/<name>`, `tar -x -C`, `rsync`, `git checkout`
      aimed at `agents/<name>` or a folder above the two, and a non-recursive `chmod` at any target.
+
+     The same class refuses a write, delete, move or link whose target, or a link's source, lands under `run/`
+     of either config directory (the session's and the default one, compared without regard to case), except
+     inside this session's own `scratch/`. Each session's run folder holds its scratch (see
+     [Scratch](#scratch)), so another session's folder and `run/` itself are refused. A relative `ln -s`
+     source is read against the folder the link sits in, and a word that holds a variable and names
+     `.localharness/run` (`$HOME/.localharness/run/…`) is refused by its text. A move into scratch is a
+     separate ask, never granted by an "always" and put to you in `auto` too: `mv`, `rsync
+     --remove-source-files` or `--remove-sent-files`, `tar --remove-files` and `zip -m` whose destination is in
+     this run, spelled by path, through `$LOCALHARNESS_SCRATCH` or `$TMPDIR`, after a `cd` to either,
+     through `--target…` or `find -exec mv {}`, with a source outside it. The reason is that the folder is deleted
+     when the session ends, so the move would delete what it moved in; `cp` does not ask. Neither row sees what an
+     interpreter does (`python -c`, `python_exec`) or what a script moves or writes at run time, a relative
+     archive made after a `cd` into scratch's own path (`cd <scratch> && zip -m a.zip ~/x`, `tar` likewise), or
+     the source of a hard link made with `ln`.
    - **A system directory.** `/etc`, `/usr`, `/bin`, `/sbin`, `/lib` (and `/lib64`), `/boot`,
      `/var` except `/var/tmp`, `/opt`, `/root`, `/srv`, macOS `/System`, `/Library` and
      `/Applications`, Windows `C:\Windows`, `C:\Program Files*` and `C:\ProgramData`.
@@ -1013,7 +1028,7 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   target written after a `cd` or `env -C` whose directory the classifier cannot read (`cd $HOME &&
   echo x > .bashrc`). It
   cannot be resolved before the shell expands it, so it is treated as an out-of-project write
-  (parked in `auto`, asked in `guarded`) — and once
+  (allowed in `auto`, asked in `guarded`) — and once
   you answer "always" for that unresolved shape, a later expansion of the same shape to a different
   path passes on that grant.
 - **Program text handed to a non-shell interpreter is never read.** `python3 -c`, `perl -e`, an
@@ -1072,7 +1087,7 @@ treat that as a defect in the gate and report it, not as something to click thro
 
 ## What `localharness start` writes without asking
 
-Five things happen on a start that are worth knowing about, because each writes into your config
+Six things happen on a start that are worth knowing about, because each writes into your config
 directory and none stops to ask.
 
 **Your `config.yaml` gains any newly-shipped default deny patterns.** New releases add to the
@@ -1136,6 +1151,10 @@ folder on first run, owner-only and executable (0700). It is idempotent — pres
 it is a warning rather than a blocked start. It is the only file `start` installs from the
 package, and it is never listed as one of your tool scripts.
 
+**A start makes the session's run folder and sweeps `run/`.** See [Scratch](#scratch). The sweep removes
+only the folders no live session holds that this machine made or that were left half made, on a short
+background thread, and says nothing.
+
 ## What `localharness start` contacts
 
 A local-first harness should reach nothing at start but what you configured. A start reaches the
@@ -1194,11 +1213,13 @@ owner-only `strata/` folder), agent files written by `agent create`, by a start 
 in-session creation workflow, autoresearch's archive, run journals and budget file, the task folders
 `agents/<name>/tasks/t<n>/` with their docs and the session docs `sessions/jtbd.md` and
 `sessions/reply-review.md` (each written through that no-follow walk and replaced atomically, never
-through a link), and `plugins/README.md`. `/task show` prints a task doc only after its digest
+through a link), the run folders `run/<id>/` (owner-only, 0700, made at a start and deleted at its end; `run/` is
+owner-only, with a `.gitignore` of `*`), and `plugins/README.md`. Task scratch is no longer written under
+`<state_dir>/scratchpad/`; folders already there are left alone. `/task show` prints a task doc only after its digest
 matches what was filed; an edited doc is headed by the line saying so instead. A folder this session
 did not make is shown read-only, headed `not adopted · not made by this session`. The header
 `/task accept` prints first is display, not a confirmation. `/task clear` removes only the open task's
-folder and an old `task.json`. Each model response's row in `history.jsonl` records the model name, the
+folder and an old `task.json`, and the task's scratch. Each model response's row in `history.jsonl` records the model name, the
 server-reported prompt and completion token counts and the call's duration (numbers and a name,
 nothing else from the response), and the file stays owner-only (0600). The same writers make the
 same files owner-only in a project's `.localharness/` (its sessions, history and memory). The one script `start` installs,
@@ -1234,6 +1255,39 @@ above them is what keeps other accounts out. Files an older release created keep
 folder's 0700 closes them, `localharness doctor` counts the ones other accounts could read, and
 `chmod -R go-rwx` on the folder makes each private. A temporary file a crash left behind keeps
 its old mode.
+
+## Scratch
+
+Each session gets a run folder, `<config dir>/run/<12 hex>/`, made at a start and deleted when the session ends.
+It holds `scratch/`, the agent's own files, and `t/`, which the bash tool's `TMPDIR` names. A task's scratch is
+`scratch/t<N>/`; it is removed when you `/task clear`, when the next task opens and with the session, and every
+line that says so carries the count of files. A mobile chat and an ACP session each make and end their own run.
+The agent is told the scratch path and that it is deleted, and a reply that names a scratch file the turn made
+is followed by one dim line giving its lifetime.
+
+- **Writes to scratch are judged as any write outside the project.** Silent in `auto`, asked in `guarded` with
+  an "always" that holds for this session only and is never written to `grants.yaml` (it also survives a
+  `/plugins` restart), and a severe ask once the agent has read saved pages. Another session's folder and
+  `run/` itself are refused outright (the deny class above), and a move into scratch asks.
+- **Only the bash tool's environment carries `LOCALHARNESS_SCRATCH` and `TMPDIR`.** MCP servers do not.
+- **The sweep acts on a lock and a marker.** A start removes folders in `run/` that no live session holds
+  (each holds an exclusive lock on its folder for its life) and that carry this machine's marker or were left
+  half made. The marker is an HMAC of the machine id, never the id. A folder of another machine, as a synced
+  config folder carries, and a folder with scratch but no marker are left, and `localharness doctor` counts
+  them. A lock that cannot be read leaves the folder.
+- **The remover never follows a link.** It opens every folder without following links, unlinks a link rather than
+  entering it, and leaves a folder on another device or owned by another account, reporting it.
+- **A slow removal does not hold the exit.** A session waits about two seconds for it, says `Removing
+  scratch…`, and leaves the rest as `run/.deleting-<id>` for the next start.
+- **The fallback.** When `run/` is a link, another account's, or on a folder whose locks are not enforced, the
+  run goes to a new folder under the system temp folder and is removed at the end; `localharness doctor` names
+  the cause. Where the run cannot be made at all, the session starts without scratch.
+
+**What this does NOT cover.** A session confined to a workspace (`permissions.workspace_root`) has no scratch.
+A config folder inside the project makes scratch an in-project path, so writes there are ordinary project
+writes. A config folder synced between machines should exclude `run/` from the sync: another machine's
+folders are left alone, never removed. An interpreter or script can still move a file into scratch, and the
+session's end deletes it.
 
 ## What ends up in logs
 

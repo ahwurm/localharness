@@ -4,6 +4,23 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [Unreleased]
+
+### Added
+- **a run folder per session** — `<config dir>/run/<id>/` holds the agent's scratch and the bash tool's `TMPDIR`, and is deleted when the session ends. A start removes folders a dead session left; a mobile chat and an ACP session each keep their own. The agent is told the scratch path and that it is deleted.
+- **a line after a reply that names a scratch file** — says where the file is and when it goes, and asks for a copy in the project to keep it.
+- **`localharness doctor` rows** — name why sessions fall back to the system temp folder when `run/` is a link, another account's or on a folder without enforced locks, and count run folders of other machines.
+
+### Changed
+- **task scratch moves** from `<state_dir>/scratchpad/` into the run folder. Folders already under `scratchpad/` are left alone and nothing new is written there.
+- **`/task clear` and the next task remove a task's scratch**, and each line says how many files. A done task's scratch stays until then.
+- **mobile protocol 13** — `TaskComplete` gains an additive `scratch_files`; the page does not show it yet.
+
+### Security
+- **`run/` is refused** — writes, removals and link sources under another session's run folder or `run/` itself are denied in every mode, `$HOME` spellings included.
+- **a move into scratch always asks** — `mv`, `rsync --remove-source-files`, `tar --remove-files` and `zip -m` into the run ask in every mode, since the folder is deleted at the end. Interpreters and scripts are not seen.
+- **scratch writes** are asked in `guarded`, with an "always" that holds for the session and is never written to `grants.yaml`.
+
 ## [0.28.0] — 2026-11-16
 
 **The stuck rule reads the chat: a repeat is a result the model already has.** A call that returns what the model still holds this turn comes back as a one-line pointer instead of the whole text, and asking again after that stops the turn. A scroll that moved the page, or a check that changed or stayed the same after an edit, is never counted, and the old window, thresholds and per-tool rules are gone. A stopped turn says so in plain words, and a stopped helper or reviewer no longer prints an error over a reply that succeeded.
