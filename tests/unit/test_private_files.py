@@ -278,7 +278,7 @@ def test_presence_file_is_born_private(tmp_path, no_chmod):
 def test_memory_log_is_born_private(tmp_path, no_chmod):
     from localharness.cli.start_cmd import _route_memory_logs_to_file
 
-    path = _route_memory_logs_to_file(tmp_path)  # conftest restores the shared logger afterwards
+    path = Path(_route_memory_logs_to_file(tmp_path).baseFilename)  # conftest restores the shared logger afterwards
     assert path.exists() and _mode(path) == 0o600
 
 

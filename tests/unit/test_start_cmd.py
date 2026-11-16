@@ -84,8 +84,9 @@ def test_context_logs_routed_to_a_file_and_still_propagate(tmp_path):
     root_h.setLevel(logging.DEBUG)
     logging.getLogger().addHandler(root_h)
     try:
-        log_path = _route_context_logs(tmp_path)
-        assert _route_context_logs(tmp_path) == log_path and len(ctx.handlers) == before + 1
+        handler = _route_context_logs(tmp_path)
+        log_path = Path(handler.baseFilename)
+        assert _route_context_logs(tmp_path) is handler and len(ctx.handlers) == before + 1
         ctx.info("emergency floor reached")
         for h in ctx.handlers:
             h.flush()
@@ -114,7 +115,9 @@ def test_memory_logs_routed_to_file_not_repl_console(tmp_path):
     root_h.setLevel(logging.DEBUG)
     root.addHandler(root_h)
     try:
-        log_path = _route_memory_logs_to_file(tmp_path)
+        handler = _route_memory_logs_to_file(tmp_path)
+        log_path = Path(handler.baseFilename)
+        assert _route_memory_logs_to_file(tmp_path) is handler
         # exact lines the mining + consolidation paths actually emit today
         logging.getLogger("localharness.memory.mining").warning(
             "mining B4(ii): retracted resurrected stale value"

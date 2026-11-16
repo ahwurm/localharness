@@ -1279,7 +1279,7 @@ def _attach_window_report(harness: Any, provider_type: str, served: int | None, 
     return report, undo
 
 
-def _route_memory_logs_to_file(agent_dir: Path) -> Path:
+def _route_memory_logs_to_file(agent_dir: Path) -> logging.FileHandler:
     """Interactive REPL only: send the memory subsystem's stdlib logs to a file instead of
     the terminal (#20). consolidation.py + mining.py log via `logging.getLogger(__name__)`
     and the interactive start path configures no handler, so their WARNING/EXCEPTION records
@@ -1290,12 +1290,9 @@ def _route_memory_logs_to_file(agent_dir: Path) -> Path:
     `logging.basicConfig` and never call this — non-interactive channels are untouched."""
     log_path = agent_dir / "memory.log"
     mem_log = logging.getLogger("localharness.memory")
-    already = any(
-        isinstance(h, logging.FileHandler)
-        and getattr(h, "baseFilename", None) == str(log_path)
-        for h in mem_log.handlers
-    )
-    if not already:
+    handler = next((h for h in mem_log.handlers if isinstance(h, logging.FileHandler)
+                    and getattr(h, "baseFilename", None) == str(log_path)), None)
+    if handler is None:
         touch_private(log_path)
         handler = logging.FileHandler(log_path, encoding="utf-8")
         handler.setFormatter(
@@ -1304,19 +1301,21 @@ def _route_memory_logs_to_file(agent_dir: Path) -> Path:
         mem_log.addHandler(handler)
     mem_log.setLevel(logging.DEBUG)   # the file keeps full detail…
     mem_log.propagate = False         # …and nothing bubbles to root/lastResort (the stderr leak)
-    return log_path
+    return handler
 
-def _route_context_logs(agent_dir: Path) -> Path:
+def _route_context_logs(agent_dir: Path) -> logging.FileHandler:
     """Interactive REPL only: the context manager's floor and compaction records go to `<agent_dir>/context.log`, not the terminal."""
     log_path = agent_dir / "context.log"
     ctx_log = logging.getLogger("localharness.agent.context")
-    if not any(isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", None) == str(log_path) for h in ctx_log.handlers):
+    handler = next((h for h in ctx_log.handlers if isinstance(h, logging.FileHandler)
+                    and getattr(h, "baseFilename", None) == str(log_path)), None)
+    if handler is None:
         touch_private(log_path)
         handler = logging.FileHandler(log_path, encoding="utf-8")
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
         ctx_log.addHandler(handler)
     ctx_log.setLevel(logging.DEBUG)
-    return log_path
+    return handler
 
 
 async def _probe_llm(
@@ -1714,6 +1713,14 @@ def _skill_start_lines(skill_set) -> list[str]:
     )
 
 
+STAGE_S = 3.0
+
+
+def _stage(private: bool):
+    """A private run's teardown stage gives up after STAGE_S; a normal run's is unbounded (memory's dreaming may need longer)."""
+    return asyncio.timeout(STAGE_S if private else None)
+
+
 async def _start_async(agent_name: str | None, verbose: bool, debug: bool, config_dir: str | None,
                        channel_mode: str = "terminal", subagents: bool = False,
                        model_override: str | None = None, list_models: bool = False,
@@ -1721,7 +1728,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                        acp_channel: Any = None, mobile_channel: Any = None,
                        resume: Resume | None = None, trust_project: bool = False,
                        fresh_thread: bool = False, preset: str | None = None,
-                       run: "RunFolder | None" = None) -> Restart | None:
+                       run: "RunFolder | None" = None, guard: Any = None) -> Restart | None:
     """Async entry point: discover agent, wire dependencies, run REPL.
 
     `trust_project`: `--trust-project` — this run trusts the project it stands in, recording
@@ -2756,8 +2763,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     bus = EventBus(persist_path=events_path)
     # #20: keep background consolidation/mining logs off the interactive terminal (file only)
     # — otherwise their stdlib WARNING/EXCEPTION records leak onto the REPL via lastResort.
-    _route_memory_logs_to_file(agent_dir)
-    _route_context_logs(agent_dir)
+    log_handlers = (("localharness.memory", _route_memory_logs_to_file(agent_dir)),
+                    ("localharness.agent.context", _route_context_logs(agent_dir)))
     sitting_id = str(uuid.uuid4())  # SESS-01: one session per SITTING, minted once
     if resume is not None:  # a rebuild is a new sitting: memory's sessions.id is a primary key
         log.info("session %s resumes %s after %s", sitting_id, resume.previous_sitting_id,
@@ -3668,6 +3675,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         )
 
         repl_cell.append(repl)  # late binding: the supplier now answers repl.server_recovery()
+        if guard is not None:
+            guard.repl(asyncio.current_task())
         await repl.run()
         request = repl.restart_request or (
             SLEEP_ACTION if mobile_channel is not None and mobile_channel.sleeping else None)
@@ -3691,6 +3700,14 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         _exit_reason = "error"
         raise  # finally still records the session; behavior for callers unchanged
     finally:
+        if guard is not None:
+            guard.teardown()
+        if private and restart_request is None:
+            bus.stop_persisting()
+            for logger_name, handler in log_handlers:
+                logging.getLogger(logger_name).removeHandler(handler)
+                logging.getLogger(logger_name).addHandler(logging.NullHandler())
+                handler.close()
         if disk_resume is not None and not bound:
             # The wake failed (or was abandoned) before a session existed: the thread is still
             # asleep, and the next message gets to try again.
@@ -3703,7 +3720,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # handles its own file closing on GC/process exit)
         if mcp_manager:
             try:
-                await mcp_manager.shutdown()
+                async with _stage(private):
+                    await mcp_manager.shutdown()
             except Exception as exc:
                 # Swallow — a teardown failure must not replace the real exit reason — but never
                 # silently: an MCP server that refuses to die is a diagnosable thing.
@@ -3712,7 +3730,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             session_info.exit_reason = _exit_reason  # memory's stop() records it on the session row
         if plugin_result is not None:
             try:
-                await stop_plugins(plugin_result)  # reverse start order, each stop contained
+                async with _stage(private):
+                    await stop_plugins(plugin_result)  # reverse start order, each stop contained
             except Exception as exc:  # noqa: BLE001
                 log.debug("plugin shutdown failed: %s", exc)
         set_plugin_rows(())  # the rows are process-wide: they leave with the session
@@ -3721,7 +3740,13 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # the gates — and the close-out summary above is pure. Closing it earlier would risk
         # pulling the pool out from under an in-flight shutdown write; closing it never leaked a
         # pool per session (and one more per /model swap).
-        await llm.aclose()
+        try:
+            async with _stage(private):
+                await llm.aclose()
+        except TimeoutError:
+            if not private:
+                raise
+            log.debug("llm close timed out")
     return restart_request
 
 
@@ -3831,14 +3856,26 @@ def start_app(
     if private and not list_models and (cfg / "config.yaml").exists():
         _refuse_private_run(run, cfg)
     resume: Resume | None = None
+
+    def say(line: str) -> None:
+        err_console.print(line, style="dim", markup=False, soft_wrap=True)
+
+    guard = None
+    if private and run is not None:
+        from localharness.core.interrupt import install
+        guard = install(("SIGTERM", "SIGHUP"), lambda: run.ending or end(run, say=say))
     try:
         while True:
-            restart = asyncio.run(_start_async(
-                resume.agent_name if resume is not None else agent, verbose, debug, config_dir,
-                channel, subagents and resume is None, model, list_models, no_input,
-                show_reasoning=show_reasoning, resume=resume, trust_project=trust_project,
-                # the preset is asked for once: a restart for /plugins rebuilds on whatever now serves
-                preset=wanted if resume is None else None, run=run))
+            try:
+                restart = asyncio.run(_start_async(
+                    resume.agent_name if resume is not None else agent, verbose, debug, config_dir,
+                    channel, subagents and resume is None, model, list_models, no_input,
+                    show_reasoning=show_reasoning, resume=resume, trust_project=trust_project,
+                    # the preset is asked for once: a restart for /plugins rebuilds on whatever now serves
+                    preset=wanted if resume is None else None, run=run, guard=guard))
+            finally:
+                if guard is not None:
+                    guard.idle()
             if restart is None or channel != "terminal":
                 return
             # The REPL ended for /plugins and the session is fully torn down: run the plugin's
@@ -3860,6 +3897,10 @@ def start_app(
                 skipped_check=outcome.skipped_check, step_stopped=outcome.stopped)
     except KeyboardInterrupt:
         console.print("\nGoodbye.")
+    except asyncio.CancelledError:
+        pass
     finally:
         with contextlib.suppress(KeyboardInterrupt):
-            end(run, say=lambda line: err_console.print(line, style="dim", markup=False, soft_wrap=True))
+            end(run, say=say)
+        if guard is not None:
+            guard.restore()

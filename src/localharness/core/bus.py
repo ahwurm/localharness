@@ -80,6 +80,9 @@ class EventBus:
             self._persist_path = None
             self._session_dir = None
 
+    def stop_persisting(self) -> None:
+        self._persist_path = None
+
     # ------------------------------------------------------------------
     # Publish
     # ------------------------------------------------------------------
