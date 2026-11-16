@@ -301,7 +301,7 @@ async def test_the_second_call_warns_through_the_next_request_and_the_third_stop
     assert loop.last_terminated_reason == "stuck"
     (esc,) = bus.history(event_types=[Escalation])
     assert esc.reason == "stuck_detected" and esc.stuck_signature == sig
-    assert esc.detail == "`probe` repeated a result it had already returned this turn, after being told so (iteration 3)"
+    assert esc.detail == "`probe` repeated a result it already had (step 3)"
     wrapup = llm.seen[-1][-1]["content"]
     assert "you kept requesting a result you already had" in wrapup
     assert [e.reason for e in bus.history(event_types=[TurnFailed])] == ["stuck_detected"]
@@ -343,7 +343,7 @@ async def test_a_check_cycling_through_values_between_edits_is_stopped_by_its_se
     assert probe.calls == 4 and loop.last_terminated_reason == "stuck"
     assert [e.iteration for e in bus.history(event_types=[StuckRecovered])] == [5]
     (esc,) = bus.history(event_types=[Escalation])
-    assert esc.detail == "`probe` repeated a result it had already returned this turn, after being told so (iteration 7)"
+    assert esc.detail == "`probe` repeated a result it already had (step 7)"
     assert [m["content"] for m in llm.seen[6] if m["role"] == "tool"][4] == REPEAT_POINTER.format(k=4)
 
 

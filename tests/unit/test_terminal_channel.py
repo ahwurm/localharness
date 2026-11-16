@@ -809,20 +809,20 @@ class TestMarkupSafetyAndCompactCalls:
 # ---------------------------------------------------------------------------
 
 
-def _agent_action(delegate: str, task: str = "Write three puns about databases.", **extra):
+def _agent_action(delegate: str, task: str = "Write three puns about databases.", tc: str = "tc1", **extra):
     from localharness.core.events import Action
     return Action(
         agent_id="orchestrator", session_id="s1", action_type="tool_call",
-        tool_call_id="tc1", tool_name="agent",
+        tool_call_id=tc, tool_name="agent",
         tool_params={"agent_id": delegate, "task": task, **extra},
     )
 
 
-def _agent_observation(output: str, error: str | None, **extra):
+def _agent_observation(output: str, error: str | None, tc: str = "tc1", **extra):
     from localharness.core.events import Observation
     return Observation(
         agent_id="orchestrator", session_id="s1", observation_type="tool_result",
-        tool_call_id="tc1", tool_name="agent", output=output, error=error, **extra,
+        tool_call_id=tc, tool_name="agent", output=output, error=error, **extra,
     )
 
 
@@ -910,25 +910,39 @@ class TestAgentDelegationReceipt:
         assert "◆ agent joke-writer — completed" in out.getvalue()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("status", ["stuck", "budget_exhausted", "killed", "error"])
-    async def test_a_child_that_did_not_complete_says_stopped_early(self, status):
+    @pytest.mark.parametrize("status,words", [
+        ("stuck", "it kept repeating a call"), ("budget_exhausted", "out of budget"), ("killed", "kill file"),
+        ("error", "it errored"), ("failed", "no tool calls")])
+    async def test_a_child_that_did_not_complete_says_it_stopped_early_and_why(self, status, words):
         ch, out = self._pipe()
         await ch.on_action(_agent_action("web-researcher"))
         await ch.on_observation(_agent_observation(output="SUBAGENT RUN COMPLETE (agent_id=web-researcher, "
                                                    "tool calls: 3).", error=None, delegation_status=status))
-        assert "◆ agent web-researcher — stopped early" in out.getvalue()
+        assert f"◆ agent web-researcher — stopped early — {words}" in out.getvalue()
         assert "— completed" not in out.getvalue()
 
     @pytest.mark.asyncio
-    async def test_the_status_is_cleared_once_read_and_the_text_never_moves_it(self):
+    async def test_each_receipt_reads_its_own_call_and_the_text_never_moves_it(self):
         ch, out = self._pipe()
         for output, status in [("partial", "stuck"),
                                ("SUBAGENT RUN STOPPED (agent_id=joke-writer, tool calls: 1, status: stuck).", None),
                                ("done", "completed")]:
             await ch.on_action(_agent_action("joke-writer"))
             await ch.on_observation(_agent_observation(output=output, error=None, delegation_status=status))
-        receipts = [line.split(" — ")[-1] for line in out.getvalue().splitlines() if " — " in line]
-        assert receipts == ["stopped early", "completed", "completed"]
+        receipts = [line.split(" — ", 1)[-1] for line in out.getvalue().splitlines() if " — " in line]
+        assert receipts == ["stopped early — it kept repeating a call", "completed", "completed"]
+        assert ch._delegates == {}
+
+    @pytest.mark.asyncio
+    async def test_a_nested_delegation_names_each_delegate_on_its_own_receipt(self):
+        ch, out = self._pipe()
+        await ch.on_action(_agent_action("web-researcher", tc="root"))
+        await ch.on_action(_agent_action("search-verifier", tc="child"))
+        await ch.on_observation(_agent_observation(output="x", error=None, tc="child", delegation_status="stuck"))
+        await ch.on_observation(_agent_observation(output="y", error=None, tc="root", delegation_status="completed"))
+        receipts = [line.strip() for line in out.getvalue().splitlines() if " — " in line]
+        assert receipts == ["◆ agent search-verifier — stopped early — it kept repeating a call",
+                            "◆ agent web-researcher — completed"]
 
 
 # ---------------------------------------------------------------------------

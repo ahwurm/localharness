@@ -8,7 +8,7 @@ from localharness.agent.loop import AgentLoop
 from localharness.agent.permissions import PermissionEvaluator
 from localharness.agent.subagent import _delegation_status
 from localharness.config.models import AgentConfig, PermissionConfig
-from localharness.core.events import DelegationStatus, Observation
+from localharness.core.events import DELEGATION_WORDS, DelegationStatus, Observation
 from localharness.tools.base import Tool
 
 
@@ -46,20 +46,22 @@ async def _status(mock_llm_client, bus, tool: str, result) -> str | None:
     return obs.delegation_status
 
 
-def test_the_field_holds_exactly_the_statuses_a_delegation_can_end_with():
+def test_the_field_and_its_words_hold_exactly_the_statuses_a_delegation_can_end_with():
     reasons = [None, "complete", "budget_actions", "kill_file", "stuck", "error"]
-    assert set(get_args(DelegationStatus)) == {_delegation_status(r) for r in reasons}
+    runtime = {_delegation_status(r) for r in reasons} | {"failed"}
+    assert set(get_args(DelegationStatus)) == set(DELEGATION_WORDS) == runtime
+    assert all(DELEGATION_WORDS.values()) and DELEGATION_WORDS["failed"] == "no tool calls"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", ["stuck", "budget_exhausted", "killed", "completed"])
+@pytest.mark.parametrize("status", ["stuck", "budget_exhausted", "killed", "completed", "failed"])
 async def test_an_agent_observation_carries_the_runtime_status(mock_llm_client, bus, status):
     assert await _status(mock_llm_client, bus, "agent", Tool.ok(None, "partial", status=status)) == status
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool,result", [
-    ("agent", Tool.ok(None, "x", status="failed")),
+    ("agent", Tool.ok(None, "x", status="partial")),
     ("agent", Tool.ok(None, "x", status=["stuck"])),
     ("agent", Tool.err(None, "boom", status="stuck")),
     ("probe", Tool.ok(None, "x", status="stuck")),

@@ -53,6 +53,7 @@ from localharness.core.bus import EventBus
 from localharness.core.private_files import touch_private
 from localharness.channels.input_router import FORCE_PREFIX
 from localharness.core.events import (
+    DELEGATION_WORDS,
     Action,
     CompactionTriggered,
     ConsolidationFinished,
@@ -1192,9 +1193,8 @@ class TerminalChannel(ChannelAdapter):
         # after a tool result has rendered since the last one — never two dim lines in a row.
         # Starts True so the turn's first narration prints.
         self._tool_result_since_narration: bool = True
-        self._last_agent_delegate: str | None = None  # #73: delegate name stashed on an `agent`
-        # call, consumed by its completion receipt (the success result carries only the summary)
-        self._last_delegation_status: str | None = None
+        # Each `agent` call's delegate by call id, for its receipt: the result carries only the summary.
+        self._delegates: dict[str, str | None] = {}
         self._context_pct: float | None = None  # latest Heartbeat utilization, shown in the input bubble
         # /model picker: the REPL sets this to its cached live-model-list supplier once it
         # owns a provider; None (or an empty list) = no argument menu. Read late-bound by
@@ -1476,11 +1476,6 @@ class TerminalChannel(ChannelAdapter):
             group = None if self.verbose else next((g for g in _BURST_GROUPS if tool_name in g[0]), None)
             if group is None:
                 self._close_burst()
-                if tool_name == "agent":
-                    # Stash the delegate for the completion receipt (send_tool_result): a
-                    # SUCCESS Observation carries only the summary, not who ran it (#73).
-                    d = arguments.get("agent_id")
-                    self._last_agent_delegate = _delegate_label(d, arguments.get("tools")) if isinstance(d, str) else None
                 summary = _tool_call_summary(tool_name, arguments)
                 # no_wrap + ellipsis: a long preview stays ONE physical line (cropped to
                 # the terminal), never wrapping the view open (FIX B).
@@ -1523,21 +1518,8 @@ class TerminalChannel(ChannelAdapter):
                 self._burst_refresh(burst)
                 return
             self._close_burst()
-            # #73: delegation-outcome receipt. Every `agent` completion prints a truthful,
-            # system-style line whose status is taken from the TOOL RESULT (is_error), not the
-            # model's later narration, and whose name is the delegate stashed from this call —
-            # so a failed delegation can't be re-narrated as the subagent's own answer.
             if tool_name == "agent":
-                delegate, self._last_agent_delegate = self._last_agent_delegate, None
-                status, self._last_delegation_status = self._last_delegation_status, None
-                who = f" {escape(delegate)}" if delegate else ""
-                if is_error:
-                    detail = escape(lines[0].removeprefix("[tool error] ")[:120]) if lines else ""
-                    self._console.print(f"  [tool.error]{_DIAMOND} agent{who} — FAILED: {detail}[/tool.error]")
-                else:
-                    ending = "completed" if status in (None, "completed") else "stopped early"
-                    self._console.print(f"  [tool.call]{_DIAMOND} agent{who} — {ending}[/tool.call]")
-                return
+                return  # on_observation printed this call's receipt
             name = escape(tool_name)
             if is_error:
                 first = escape(lines[0][:120]) if lines else ""
@@ -2402,13 +2384,32 @@ class TerminalChannel(ChannelAdapter):
             await self.flush_reasoning()  # the generation is over: print its last partial line
             await self._render_narration(event)
             return
+        if event.tool_name == "agent" and event.tool_call_id:
+            params = event.tool_params or {}
+            d = params.get("agent_id")
+            self._delegates[event.tool_call_id] = _delegate_label(d, params.get("tools")) if isinstance(d, str) else None
         await super().on_action(event)
 
     async def on_observation(self, event: Observation) -> None:
-        """Keep an `agent` result's delegation status for its receipt, then the base handler."""
+        """An `agent` result prints its own call's receipt first; then the base handler runs."""
         if event.tool_name == "agent":
-            self._last_delegation_status = event.delegation_status
+            await self._agent_receipt(self._delegates.pop(event.tool_call_id or "", None), event)
         await super().on_observation(event)
+
+    async def _agent_receipt(self, delegate: str | None, event: Observation) -> None:
+        """The status comes from the result and the runtime, never the model's narration of it."""
+        first = (event.output or event.error or "").strip().split("\n")[0]
+        who = f" {escape(delegate)}" if delegate else ""
+        status = event.delegation_status
+        async with self._output_lock:
+            self._stop_thinking()
+            self._close_burst()
+            if event.error is not None:
+                detail = escape(first.removeprefix("[tool error] ")[:120])
+                self._console.print(f"  [tool.error]{_DIAMOND} agent{who} — FAILED: {detail}[/tool.error]")
+            else:
+                ending = "completed" if status in (None, "completed") else f"stopped early — {DELEGATION_WORDS[status]}"
+                self._console.print(f"  [tool.call]{_DIAMOND} agent{who} — {ending}[/tool.call]")
 
     async def on_reasoning(self, text: str) -> None:
         """Print streamed reasoning as dim ⋯ lines (no-op unless show_reasoning). Complete

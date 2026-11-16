@@ -267,7 +267,11 @@ class Action(BaseEvent):
     signature: Optional[str] = None
 
 
-DelegationStatus = Literal["completed", "budget_exhausted", "killed", "stuck", "error"]
+DelegationStatus = Literal["completed", "stuck", "budget_exhausted", "killed", "error", "failed"]
+DELEGATION_WORDS: dict[DelegationStatus, str] = {
+    "completed": "completed", "stuck": "it kept repeating a call", "budget_exhausted": "out of budget",
+    "killed": "kill file", "error": "it errored", "failed": "no tool calls",
+}
 
 
 class Observation(BaseEvent):

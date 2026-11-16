@@ -90,7 +90,7 @@ async def test_a_recording_channel_sees_exactly_one_error_for_a_stuck_turn(mock_
     await _stuck_turn(mock_llm_client, bus, wrapup)
 
     (esc,) = bus.history(event_types=[Escalation])
-    assert chan.errors == [(f"Agent {esc.agent_id} stopped: it kept repeating a call", esc.detail)]
+    assert chan.errors == [("Stopped: it kept repeating a call — its partial work follows", esc.detail)]
     # CR-51: the reply reaches the person as a plain message, once, with no stuck text in it.
     assert chan.sent == sent
     # the bus still carries both events
@@ -98,19 +98,33 @@ async def test_a_recording_channel_sees_exactly_one_error_for_a_stuck_turn(mock_
     assert len(bus.history(event_types=[TurnFailed])) == 1
 
 
+_CHILD_STOP = Escalation(agent_id="child", session_id="s", parent_id="p", reason="stuck_detected",
+                         detail="`read` repeated a result it already had (step 4)", iteration_at_escalation=4)
+
+
 @pytest.mark.asyncio
-async def test_a_child_stuck_turn_posts_the_escalation_and_no_failed_status_line():
+async def test_a_child_stuck_turn_prints_nothing_its_receipt_tells_it():
     chan = _Recorder(bus=object())
     await chan.on_turn_failed(TurnFailed(
         agent_id="child", session_id="s", parent_id="p", reason="stuck_detected",
         detail="partial", iterations=4, duration_seconds=1.0))
+    await chan.on_escalation(_CHILD_STOP)
     assert chan.sent == [] and chan.errors == []
-    await chan.on_escalation(Escalation(
-        agent_id="child", session_id="s", parent_id="p", reason="stuck_detected",
-        detail="`read` repeated a result it had already returned this turn, after being told so (iteration 4)",
-        iteration_at_escalation=4))
-    assert chan.errors == [("Agent child stopped: it kept repeating a call", "`read` repeated a result it had "
-                            "already returned this turn, after being told so (iteration 4)")] and chan.sent == []
+
+
+@pytest.mark.asyncio
+async def test_the_terminal_prints_nothing_for_a_childs_stuck_stop(tmp_path):
+    from io import StringIO
+
+    from rich.console import Console
+
+    from localharness.channels.terminal import TERMINAL_THEME, TerminalChannel
+    from localharness.core.bus import EventBus
+
+    ch = TerminalChannel(EventBus(), {}, history_file=str(tmp_path / ".hist"))
+    ch._console = ch._err_console = Console(file=StringIO(), force_terminal=False, width=120, theme=TERMINAL_THEME)
+    await ch.on_escalation(_CHILD_STOP)
+    assert ch._console.file.getvalue() == ""
 
 
 @pytest.mark.asyncio

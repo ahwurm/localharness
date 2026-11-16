@@ -574,6 +574,16 @@ async def test_each_reply_panel_rewrites_reply_review_with_its_verdict_and_first
     assert store.read_session("reply-review.md") == "## round 1 · blockers 0\nround 1\nverdict: pass\n"
 
 
+async def test_a_critic_cut_short_is_one_record_line_never_a_screen_line_or_a_note(tmp_path):
+    store, rows = docs_in(tmp_path), []
+    subject = Panel(sequenced({"quality": [answered("[NOTE] one small thing — e", "budget_actions")]}), LIMITS, docs=store)
+    subject.emit = lambda *row: rows.append(row)
+    await subject.run(REPLY, draft_inputs())
+    lines = store.read_session("reply-review.md").splitlines()
+    assert lines[-2:] == ["- quality: cut short — out of budget", "verdict: pass"]
+    assert rows == [("quality", "pass", (), "1 note")]
+
+
 async def test_status_text_promises_no_recheck_without_a_revise_callback():
     seen = []
     base = sequenced({})

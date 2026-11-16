@@ -15,10 +15,12 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, NamedTuple
 
 import yaml
 
+from localharness.agent.subagent import _delegation_status
 from localharness.channels.base import one_line, sanitize_for_display
 from localharness.config.models import CRITIC_NAME, AgentConfig, BudgetConfig, ChildBudget, PermissionConfig, ToolConfig
 from localharness.core.caps import Caps
 from localharness.core.content import text_of
+from localharness.core.events import DELEGATION_WORDS, DelegationStatus
 from localharness.orchestrator.task_flow.filer import FENCE_RUN, Refused, flat, render_section
 from localharness.orchestrator.task_flow.record import (LIMITS, SENSED, Limits, Unit, limited, panel_critics,
                                                         panel_minutes, printed_bound, review_label)
@@ -89,6 +91,7 @@ class Parsed:
     readable: bool
     clean: bool
     score: int | None = None
+    status: DelegationStatus = "completed"
 
 
 def _scored(critic: str, m: re.Match) -> Finding:
@@ -142,6 +145,11 @@ def _loose(critic: str, line: str) -> Finding | None:
 
 
 def parse(critic: str, raw: str, terminated_reason: str | None) -> Parsed:
+    """What a critic wrote, and how its run ended."""
+    return replace(_read(critic, raw), status=_delegation_status(terminated_reason))
+
+
+def _read(critic: str, raw: str) -> Parsed:
     """What a critic wrote, read as it comes: exact lines when it kept the shape, loose lines when it did not, and NONE alone as a clean pass."""
     lines = [line.strip() for line in _HARNESS_NOTE.sub("", raw).split("\n") if line.strip()]
     lines = ["NONE" if _TAG_NONE.fullmatch(line) else line for line in lines]
@@ -355,6 +363,7 @@ class PanelRun:
     findings: tuple[Finding, ...]
     verdict: str
     finished: bool
+    cut: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -610,7 +619,7 @@ class Panel:
         parsed, job = apply_jtbd(parse(name, head, result.terminated_reason), tail, shown, self.docs if inputs.turns else None)
         if inputs.turns:
             return parsed, job
-        return Parsed(name, (*parsed.findings, *_NO_TURN.findings), False, False), ""
+        return Parsed(name, (*parsed.findings, *_NO_TURN.findings), False, False, status=parsed.status), ""
 
     async def _once(self, inputs: PanelInputs, names: tuple[str, ...], phase: str, later: int,
                     cap: FlowCap | None) -> tuple[PanelRun, str]:
@@ -669,7 +678,8 @@ class Panel:
 
     def _settle(self, inputs: PanelInputs, parsed: list[Parsed], finished: bool) -> PanelRun:
         findings = tuple(f for p in parsed for f in p.findings)
-        run = PanelRun(sum(f.tag == "BLOCKER" for f in findings), findings, _verdict(parsed, finished), finished)
+        cut = tuple(f"{p.critic}: cut short — {DELEGATION_WORDS[p.status]}" for p in parsed if p.status != "completed")
+        run = PanelRun(sum(f.tag == "BLOCKER" for f in findings), findings, _verdict(parsed, finished), finished, cut)
         self._parts = None
         if inputs.on_run:
             inputs.on_run(run)
@@ -695,7 +705,7 @@ class Panel:
             return
         with suppress(Refused, OSError):
             self.docs.write_session("reply-draft.md", draft, whole=True)
-            section = render_section(self.round, run.findings, verdict, run.blockers, " · ".join(parts[:-2]))
+            section = render_section(self.round, run.findings, verdict, run.blockers, " · ".join(parts[:-2]), run.cut)
             self.docs.append_session("reply-review.md", section, fresh=self.round == 1)
 
     async def _announce(self, names: tuple[str, ...], limit: int) -> None:
