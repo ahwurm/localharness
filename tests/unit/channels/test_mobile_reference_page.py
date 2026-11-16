@@ -876,8 +876,9 @@ console.log(JSON.stringify(hist.children.map((r) => ({ cls: r.className, text: t
 
 # --- D-67: a stuck root turn is announced once, live and in history -------------------------
 
-_ESC = ('{seq: 2, reason: "stuck_detected", '
-        'detail: "Repeated identical tool calls at iteration 7"}')
+_DETAIL = "`probe` repeated a result it had already returned this turn, after being told so (iteration 7)"
+_ESC = f'{{seq: 2, agent_id: "orchestrator", reason: "stuck_detected", detail: "{_DETAIL}"}}'
+_STOPPED = f"orchestrator stopped — {_DETAIL}"
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
@@ -885,10 +886,12 @@ def test_a_stuck_root_turn_shows_one_notice_live_and_the_reply_summary_alone(pag
     rendered = _drive(page, HELLO + f"""
 onEvent("Escalation", {_ESC});
 onEvent("TurnFailed", {{seq: 3, reason: "stuck_detected", detail: "PARTIAL WORK"}});
+onEvent("Escalation", {{seq: 4, agent_id: "orchestrator", reason: "no_progress", detail: "d"}});
 report();
 """, tmp_path)
-    assert len([r for r in rendered if "stuck_detected" in r["text"]]) == 1, rendered
-    assert rendered[-1] == {"cls": "row sys", "text": "PARTIAL WORK"}, rendered
+    assert [r["text"] for r in rendered if r["cls"] == "row err"] == [_STOPPED, "escalated — no_progress: d"], rendered
+    assert not any("stuck_detected" in r["text"] for r in rendered), rendered
+    assert rendered[-2] == {"cls": "row sys", "text": "PARTIAL WORK"}, rendered
     assert not any("turn failed —" in r["text"] for r in rendered), rendered
 
 
@@ -903,7 +906,7 @@ onEvent("Escalation", {_ESC});
 onEvent("TurnFailed", {{seq: 3, reason: "stuck_detected", detail: ""}});
 report();
 """, tmp_path)
-    assert len([r for r in rendered if "stuck_detected" in r["text"]]) == 1, rendered
+    assert len([r for r in rendered if r["text"] == _STOPPED]) == 1, rendered
     assert not any(r["cls"] == "row sys" and not r["text"] for r in rendered), rendered
     assert not any("turn failed —" in r["text"] for r in rendered), rendered
     assert len(rendered) == len(base), "an empty summary must add no row at all"
@@ -923,15 +926,16 @@ report();
 def test_a_stuck_root_turn_shows_one_notice_in_the_history_replay(page, tmp_path):
     lines = """[
   JSON.stringify({seq: 1, event_type: "UserMessage", content: "go"}),
-  JSON.stringify({seq: 2, event_type: "Escalation", reason: "stuck_detected",
-                  detail: "Repeated identical tool calls at iteration 7"}),
+  JSON.stringify({seq: 2, event_type: "Escalation", agent_id: "orchestrator", reason: "stuck_detected",
+                  detail: "{_DETAIL}"}),
   JSON.stringify({seq: 3, event_type: "TurnFailed", reason: "stuck_detected",
                   detail: "PARTIAL WORK"}),
   JSON.stringify({seq: 4, event_type: "TurnFailed", parent_id: "c", reason: "stuck_detected",
                   detail: "child partial"}),
-]"""
+]""".replace("{_DETAIL}", _DETAIL)
     rendered = _drive(page, f"\nrenderSpine({lines}, log); report();", tmp_path)
-    assert len([r for r in rendered if "stuck_detected" in r["text"]]) == 1, rendered
+    assert [r["text"] for r in rendered if r["cls"] == "row err"] == [_STOPPED], rendered
+    assert not any("stuck_detected" in r["text"] for r in rendered), rendered
     assert [r["text"] for r in rendered if r["cls"] == "row sys"] == ["PARTIAL WORK"], rendered
     assert not any("turn failed — stuck_detected" in r["text"] for r in rendered), rendered
     assert not any("subagent failed" in r["text"] for r in rendered), rendered
@@ -940,11 +944,14 @@ def test_a_stuck_root_turn_shows_one_notice_in_the_history_replay(page, tmp_path
     later = lines[:-1] + """  JSON.stringify({seq: 5, event_type: "UserMessage", content: "again"}),
   JSON.stringify({seq: 6, event_type: "TurnFailed", reason: "provider_error",
                   detail: "connection reset"}),
+  JSON.stringify({seq: 7, event_type: "Escalation", agent_id: "orchestrator", reason: "no_progress",
+                  detail: "d"}),
 ]"""
     rendered = _drive(page, f"\nrenderSpine({later}, log); report();", tmp_path)
     assert any("turn failed — provider_error: connection reset" in r["text"]
                for r in rendered), rendered
-    assert len([r for r in rendered if "stuck_detected" in r["text"]]) == 1, rendered
+    assert "escalated — no_progress: d" in [r["text"] for r in rendered], rendered
+    assert len([r for r in rendered if r["text"] == _STOPPED]) == 1, rendered
 
 
 def test_the_stuck_branches_are_present_without_a_js_engine(page):

@@ -84,16 +84,15 @@ async def test_a_failed_wrapup_leaves_the_last_assistant_content_or_nothing(mock
 
 
 @pytest.mark.asyncio
-async def test_a_recording_channel_sees_exactly_one_error_for_a_stuck_turn(mock_llm_client, bus):
+@pytest.mark.parametrize("wrapup,sent", [("partial work", ["partial work"]), (None, [])])
+async def test_a_recording_channel_sees_exactly_one_error_for_a_stuck_turn(mock_llm_client, bus, wrapup, sent):
     chan = _subscribe(bus)
-    await _stuck_turn(mock_llm_client, bus, "partial work")
+    await _stuck_turn(mock_llm_client, bus, wrapup)
 
-    assert len(chan.errors) == 1
-    error, _detail = chan.errors[0]
-    assert "escalated: stuck_detected" in error
-    assert not any("turn failed" in e for e, _ in chan.errors)
+    (esc,) = bus.history(event_types=[Escalation])
+    assert chan.errors == [(f"Agent {esc.agent_id} stopped: it kept repeating a call", esc.detail)]
     # CR-51: the reply reaches the person as a plain message, once, with no stuck text in it.
-    assert chan.sent == ["partial work"]
+    assert chan.sent == sent
     # the bus still carries both events
     assert len(bus.history(event_types=[Escalation])) == 1
     assert len(bus.history(event_types=[TurnFailed])) == 1
@@ -108,8 +107,18 @@ async def test_a_child_stuck_turn_posts_the_escalation_and_no_failed_status_line
     assert chan.sent == [] and chan.errors == []
     await chan.on_escalation(Escalation(
         agent_id="child", session_id="s", parent_id="p", reason="stuck_detected",
-        detail="Repeated identical tool calls at iteration 4", iteration_at_escalation=4))
-    assert len(chan.errors) == 1 and chan.sent == []
+        detail="`read` repeated a result it had already returned this turn, after being told so (iteration 4)",
+        iteration_at_escalation=4))
+    assert chan.errors == [("Agent child stopped: it kept repeating a call", "`read` repeated a result it had "
+                            "already returned this turn, after being told so (iteration 4)")] and chan.sent == []
+
+
+@pytest.mark.asyncio
+async def test_another_escalation_reason_keeps_its_headline():
+    chan = _Recorder(bus=object())
+    await chan.on_escalation(Escalation(agent_id="a", session_id="s", reason="no_progress", detail="d",
+                                        iteration_at_escalation=2))
+    assert chan.errors == [("Agent a escalated: no_progress", "d")]
 
 
 @pytest.mark.asyncio

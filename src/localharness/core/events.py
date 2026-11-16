@@ -267,6 +267,9 @@ class Action(BaseEvent):
     signature: Optional[str] = None
 
 
+DelegationStatus = Literal["completed", "budget_exhausted", "killed", "stuck", "error"]
+
+
 class Observation(BaseEvent):
     """Represents the result of executing an action."""
 
@@ -290,6 +293,8 @@ class Observation(BaseEvent):
     # never from output text. Additive/default-None: every replayed JSONL line stays valid; an older
     # line carrying the unreleased v2 image field loads (unknown keys are ignored) and shows no picture.
     artifact: Optional[ArtifactRef] = None
+    # How a delegated child's run ended: the runtime's status, never its text, and only for the core delegate tool.
+    delegation_status: Optional[DelegationStatus] = None
 
 
 class DelegationRequest(BaseEvent):

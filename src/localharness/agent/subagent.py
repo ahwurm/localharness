@@ -698,6 +698,14 @@ def _delegation_status(reason: str | None) -> str:
     return {"kill_file": "killed", "stuck": "stuck"}.get(reason, "error")
 
 
+_HEADER = ("SUBAGENT RUN COMPLETE (agent_id={agent_id}, tool calls: {tool_calls}). "
+           "No further results will arrive; everything below is the finished output.")
+_HEADER_RE = re.compile(re.escape(_HEADER).replace(r"\{agent_id\}", r"(?P<agent_id>[^)]+)")
+                        .replace(r"\{tool_calls\}", r"(?P<tool_calls>\d+)"))
+_STOPPED_HEADER = ("SUBAGENT RUN STOPPED (agent_id={agent_id}, tool calls: {tool_calls}, status: {status}). "
+                   "No further results will arrive; below is its partial work and what it left undone.")
+
+
 def _format_subagent_result(agent_id: str, task: str, summary: str, tool_calls_used: int) -> str:
     """Shared findings wrapper (FIX 1 + FIX 3): the FIRST line states completion unambiguously —
     previously the header opened with the CHILD's own narration-shaped summary right after a
@@ -706,10 +714,7 @@ def _format_subagent_result(agent_id: str, task: str, summary: str, tool_calls_u
     (agent_id, task, tool-call count) is kept, just reframed. FIX 3: an announce-shaped child
     final is labeled NO RESULT (see _no_conclusion_note) instead of being inherited as a finding.
     """
-    header = (
-        f"SUBAGENT RUN COMPLETE (agent_id={agent_id}, tool calls: {tool_calls_used}). "
-        "No further results will arrive; everything below is the finished output."
-    )
+    header = _HEADER.format(agent_id=agent_id, tool_calls=tool_calls_used)
     body = (summary or "").strip() or "(no findings)"
     note = _no_conclusion_note(summary)
     if note:
@@ -1518,11 +1523,15 @@ def _session_outputs(bus: Any, session_id: str | None) -> list[str]:
 def _delegation_result(text: str, child_loop: Any, bus: Any, summary: str,
                        tool_calls: int) -> DelegationResult:
     reason = getattr(child_loop, "last_terminated_reason", None)  # test fakes may lack it
+    status = _delegation_status(reason)
+    head, sep, rest = text.partition("\n")
+    if status != "completed" and (header := _HEADER_RE.fullmatch(head)):
+        text = _STOPPED_HEADER.format(**header.groupdict(), status=status) + sep + rest
     sid = child_loop.current_session_id
     if note := provenance_note(summary, _session_outputs(bus, sid)):
         text = f"{text}\n\nMeasured by the harness: {note}"
     return DelegationResult(
-        text, status=_delegation_status(reason), terminated_reason=reason,
+        text, status=status, terminated_reason=reason,
         tool_calls=tool_calls, artifacts=_session_written_paths(bus, sid),
         child_session_id=sid, handoff=parse_handoff(summary), raw=summary)
 
