@@ -1056,6 +1056,36 @@ def test_the_0_27_7_changelog_entry_bites():
     assert check_0_27_7_entry(_swap(good, RELEASE_0_27_7_HEADER, "## [0.27.7] — 2026-11-05")) == missing
 
 
+RELEASE_0_28_0_HEADER = "## [0.28.0] — 2026-11-16"
+RELEASE_0_28_0_NEEDLES = (
+    "### Changed", "### Removed", "### Fixed", "### Known limitations",
+    "same result as your identical call", "stopped early", "stuck_detector", "recovery_injection",
+    "fetch_id", "Ctrl-C", "1,646",
+)
+
+
+def check_0_28_0_entry(text: str) -> list[str]:
+    """CHANGELOG's 0.28.0 entry exists, names the pointer, the stop, the retired settings, the page id and the limits."""
+    found = re.search(rf"^{re.escape(RELEASE_0_28_0_HEADER)}\n.*?(?=^## \[|\Z)", text, re.M | re.S)
+    if not found:
+        return [f"CHANGELOG has no {RELEASE_0_28_0_HEADER} entry"]
+    flat = " ".join(found.group(0).split())
+    return [f"CHANGELOG's 0.28.0 entry does not say {n}" for n in RELEASE_0_28_0_NEEDLES if n not in flat]
+
+
+def test_the_0_28_0_changelog_entry_live():
+    assert check_0_28_0_entry(_read("CHANGELOG.md")) == []
+
+
+def test_the_0_28_0_changelog_entry_bites():
+    good = _read("CHANGELOG.md")
+    for needle in RELEASE_0_28_0_NEEDLES:
+        assert check_0_28_0_entry(_swap(good, needle, "x")) == [f"CHANGELOG's 0.28.0 entry does not say {needle}"], needle
+    missing = [f"CHANGELOG has no {RELEASE_0_28_0_HEADER} entry"]
+    assert check_0_28_0_entry(_swap(good, RELEASE_0_28_0_HEADER, "## [0.28.0] — 2026-11-17")) == missing
+
+
+
 def _good_changelog() -> str:
     return (
         "# Changelog\n\n## [Unreleased]\n\nThis release adds plugins.\n\n### Added\n"
