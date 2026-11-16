@@ -1328,15 +1328,16 @@ reached an agent through the inherited global scope therefore needed a separate 
 the checks knew what it was. Now every tool carries its own declarations, the three readers above
 read the same ones, and a tool that declares nothing gets the most restrictive values.
 
-**The stuck rule catches only exact repeats of a result the model still has.** A turn stops as stuck
-when the same call returns, byte for byte, a result the model still holds in its request (not evicted to
-a stub, not compacted away). The second copy reaches the model as a pointer to the first, and asking
-again stops the turn. Whatever tool produced it, output that keeps changing is never a repeat, so a
-loop whose results vary (a poll, a shell reading a file in a cloned repository, a delegated agent
-relaying a web summary) is bounded by the action budget, the turn time limit and you, not by this rule.
-A successful call of a tool that declares the write family starts the count over, because a write may
-change what an earlier call would now see; a loop alternating writes and re-checks is bounded the same
-way. The `task` tool is compared like any other.
+**The stuck rule catches only exact repeats of a result the model still has.** A call repeats when it
+returns, byte for byte, a result it already returned this turn that the model still holds in its request
+(not evicted to a stub, not compacted away). A result it returned before returning a different one (a
+cycle) counts whatever writes came between; the same result as its last one counts only when no
+successful call of a tool that declares the write family came since, because a write may change what a
+re-check would see. The first repeat reaches the model as a pointer to the earlier copy, and the call's
+next repeat stops the turn. Whatever tool produced it, output that never repeats is never caught, so a
+loop whose results keep changing (a poll, a shell reading a file in a cloned repository, a delegated
+agent relaying a web summary) is bounded by the action budget, the turn time limit and you, not by this
+rule. The `task` tool is compared like any other.
 
 **What this does NOT cover.** A declaration is believed. A tool that declares `ingest: none` while
 it actually fetches attacker-controlled text is treated as it says, and turning on a plugin you
