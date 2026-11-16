@@ -1333,12 +1333,13 @@ returns, byte for byte, a result it already returned this turn that the model st
 (not evicted to a stub, not compacted away). A result it returned before returning a different one (a
 cycle) counts whatever writes came between; the same result as its last one counts only when no
 successful call of a tool that declares the write family came since, because a write may change what a
-re-check would see. The first repeat reaches the model as a pointer to the earlier copy, and the call's
-next repeat stops the turn. Whatever tool produced it, output that never repeats is never caught: a web
+re-check would see. The first repeat reaches the model as a pointer to the earlier copy; after that, the
+same result again with nothing written since stops the turn, and a cycle only ever points. Whatever tool produced it, output that never repeats is never caught: a web
 page, an MCP server or a plugin tool whose output varies can now keep a loop going, where the old rule
 compared its results by the call alone and stopped the ninth identical call. A loop whose results keep
 changing (a poll, a shell reading a file in a cloned repository, a delegated agent relaying a web
-summary) is not bounded by this rule. An interactive terminal or Zed session has no default action or
+summary), or a check cycling through results it already returned, is not bounded by this rule. An
+interactive terminal or Zed session has no default action or
 time limit (`max_actions` and `max_duration_minutes` are unset), so such a loop runs until you press
 Ctrl+C (or cancel in Zed), the kill file stops it, or a limit you set ends it;
 `channels.unattended_max_actions` is the only default cap, for sessions with no local operator. The
@@ -2315,8 +2316,8 @@ own it has no action limit) and is not locked by `channels.remote_unattended: fa
 holds: the `bash_exec` or `python_exec` call that starts it passes the gate of the session that
 runs it like any other command, so a mode that asks before a shell command shows you the
 `env -u`; every tool call of the new session passes that session's own gate and deny patterns;
-its stuck rule runs whatever the channel, though it stops only exact repeats and cycles and does not
-bound a loop whose output keeps changing; the kill file (`~/.localharness/KILL` by default, set only
+its stuck rule runs whatever the channel, though it stops only an exact repeat after its pointer and does
+not bound a loop whose output keeps changing or cycles; the kill file (`~/.localharness/KILL` by default, set only
 in your machine config) stops it at its next iteration; and the `bash_exec` timeout (300 seconds at most) kills
 the command's process group, unless the command detaches itself (`setsid`, `nohup … &`). The Zed
 caveat above runs the other way: the marker can make a session you start look agent-launched, and
