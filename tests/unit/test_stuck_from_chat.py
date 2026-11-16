@@ -139,7 +139,13 @@ def test_the_same_check_with_no_write_since_is_a_repeat():
 
 def test_a_result_the_call_had_moved_away_from_counts_whatever_the_writes():
     assert _found(_checked("x", "y", "x")) == [None, None, None, None, _pointer(4)]
-    assert _found(_checked("x", "y", "x", "y"))[::2] == [None, None, _pointer(4), _stop(4)]
+    assert _found(_checked("x", "y", "x", "y"))[::2] == [None, None, _pointer(4), _pointer(4)]
+
+
+def test_an_exact_repeat_after_a_cycles_pointer_stops():
+    chat = _chat(_exchange("1", "read", A, "x"), _exchange("e1", "edit", B, "wrote 1"), _exchange("2", "read", A, "y"),
+                 _exchange("e2", "edit", B, "wrote 2"), _exchange("3", "read", A, "x"), _exchange("4", "read", A, "x"))
+    assert _found(chat) == [None, None, None, None, _pointer(4), _stop(1)]
 
 
 def test_a_failed_write_a_repeated_write_and_a_failing_lookup_never_count_as_a_write():
@@ -333,17 +339,16 @@ async def test_a_write_family_success_between_repeats_prevents_the_stop(bus):
 
 
 @pytest.mark.asyncio
-async def test_a_check_cycling_through_values_between_edits_is_stopped_by_its_second_revisit(bus):
+async def test_a_check_cycling_through_values_between_edits_points_at_each_revisit_and_never_stops(bus):
     probe = _Named("probe", None, body=lambda n: ("10 words", "12 words")[(n - 1) % 2])
     registry = await _registry(probe, _Named("edit", "write", body=lambda n: f"wrote {n}"))
     llm = _RecordingLLM([*(_call(i, "edit" if i % 2 == 0 else "probe") for i in range(1, 8)),
-                         FakeLLMResponse(content="Stopped.")])
+                         FakeLLMResponse(content="Done.")])
     loop = _loop(llm, bus, registry)
     await loop.run_turn("task")
-    assert probe.calls == 4 and loop.last_terminated_reason == "stuck"
-    assert [e.iteration for e in bus.history(event_types=[StuckRecovered])] == [5]
-    (esc,) = bus.history(event_types=[Escalation])
-    assert esc.detail == "`probe` repeated a result it already had (step 7)"
+    assert probe.calls == 4 and loop.last_terminated_reason == "complete"
+    assert [e.iteration for e in bus.history(event_types=[StuckRecovered])] == [5, 7]
+    assert bus.history(event_types=[Escalation]) == []
     assert [m["content"] for m in llm.seen[6] if m["role"] == "tool"][4] == REPEAT_POINTER.format(k=4)
 
 

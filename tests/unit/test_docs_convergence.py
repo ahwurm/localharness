@@ -1492,7 +1492,8 @@ STUCK_RULE_NEEDLES = (
     "output that never repeats is never caught: a web page, an MCP server or a plugin tool whose output varies can now keep a loop going",
     "An interactive terminal or Zed session has no default action or time limit",
     "`channels.unattended_max_actions` is the only default cap, for sessions with no local operator",
-    "it stops only exact repeats and cycles and does not bound a loop whose output keeps changing")
+    "the same result again with nothing written since stops the turn, and a cycle only ever points",
+    "it stops only an exact repeat after its pointer and does not bound a loop whose output keeps changing or cycles")
 _STUCK_RULE_SECTIONS = ("## Threat model: prompt injection", "### A paired phone or Discord account")
 
 

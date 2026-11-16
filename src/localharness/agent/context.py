@@ -627,8 +627,9 @@ def repeats(
             continue
         call, result = key = (outcome["call"], outcome["result"])
         # A repeat: a result the call had moved away from (a cycle), or the same result with no write since.
-        if key in ever and (last[call][0] != result or last[call][1] == writes):
-            found[i] = Repeat(call in told, ordinal - ever[key])
+        # A cycle only points: a count near its target lands on earlier values while the model still works.
+        if key in ever and ((cycle := last[call][0] != result) or last[call][1] == writes):
+            found[i] = Repeat(call in told and not cycle, ordinal - ever[key])
             told.add(call)
         elif outcome.get("ok") is True:
             # A missing, unknown or raising family lookup counts as not a write, so toward stopping.
