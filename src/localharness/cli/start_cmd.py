@@ -43,6 +43,7 @@ from localharness.plugins.channels import (OWN_COMMAND, accepted_channels, chann
 from localharness.provider.runtimes import RUNTIMES, has_engine_config, row_of
 
 if TYPE_CHECKING:
+    from localharness.core.run_folder import RunFolder
     from localharness.provider.lifecycle import ServerRecovery
 
 console = Console()
@@ -1681,7 +1682,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                        no_input: bool = False, show_reasoning: bool = False,
                        acp_channel: Any = None, mobile_channel: Any = None,
                        resume: Resume | None = None, trust_project: bool = False,
-                       fresh_thread: bool = False, preset: str | None = None) -> Restart | None:
+                       fresh_thread: bool = False, preset: str | None = None,
+                       run: "RunFolder | None" = None) -> Restart | None:
     """Async entry point: discover agent, wire dependencies, run REPL.
 
     `trust_project`: `--trust-project` — this run trusts the project it stands in, recording
@@ -2735,11 +2737,15 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     _boundary, _boundary_warning = narrow_boundary(
         _derived, getattr(agent_config.permissions, "workspace_root", None)
     )
+    from localharness.core.run_folder import scratch_of
+
+    scratch = scratch_of(run, agent_config.permissions.workspace_root)
     # workspace_root (issue #15): opt-in; None (default) leaves write/edit/bash unconfined.
     await register_builtin_tools(
         tool_registry,
         workspace_root=agent_config.permissions.workspace_root,
         boundary=_boundary,
+        run=run,
     )
 
     # --- 3. Hook system (soft) ---
@@ -3769,6 +3775,9 @@ def start_app(
             gc.collect()
     elif not list_models and channel == "terminal":
         _models_that_arrived(config_dir, wanted, no_input)
+    from localharness.core.run_folder import begin, end
+
+    run = None if list_models else begin(resolve_config_dir(config_dir))
     resume: Resume | None = None
     try:
         while True:
@@ -3777,7 +3786,7 @@ def start_app(
                 channel, subagents and resume is None, model, list_models, no_input,
                 show_reasoning=show_reasoning, resume=resume, trust_project=trust_project,
                 # the preset is asked for once: a restart for /plugins rebuilds on whatever now serves
-                preset=wanted if resume is None else None))
+                preset=wanted if resume is None else None, run=run))
             if restart is None or channel != "terminal":
                 return
             # The REPL ended for /plugins and the session is fully torn down: run the plugin's
@@ -3799,3 +3808,6 @@ def start_app(
                 skipped_check=outcome.skipped_check, step_stopped=outcome.stopped)
     except KeyboardInterrupt:
         console.print("\nGoodbye.")
+    finally:
+        with contextlib.suppress(KeyboardInterrupt):
+            end(run, say=lambda line: err_console.print(line, style="dim", markup=False, soft_wrap=True))

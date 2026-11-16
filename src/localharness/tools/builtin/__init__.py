@@ -14,6 +14,7 @@ async def register_builtin_tools(
     eviction_store=None,
     workspace_root: str | None = None,
     boundary: Path | None = None,
+    run: Any = None,
 ) -> None:
     """Register all built-in tools at global scope. Call once at harness startup.
 
@@ -24,7 +25,8 @@ async def register_builtin_tools(
     bash_exec working_dir must resolve inside it; None (default) = unconfined.
     `boundary`: the gate's effective session boundary (start passes it). When given and git_read's
     pins pass, `git_read` is registered rooted there; None (no boundary, the bench, components, the
-    mobile replay) registers none; a pin failure registers none and says nothing - doctor explains."""
+    mobile replay) registers none; a pin failure registers none and says nothing - doctor explains.
+    `run`: the session's run folder; its scratch and temp folder reach the bash tool's environment."""
     from localharness.tools.builtin.bash_tool import BashExecTool
     from localharness.tools.builtin.chunk_tool import ChunkTool
     from localharness.tools.builtin.edit_tool import EditTool
@@ -37,7 +39,7 @@ async def register_builtin_tools(
 
     for tool in [GlobTool(), GrepTool(), ReadTool(),
                  WriteTool(workspace_root=workspace_root), EditTool(workspace_root=workspace_root),
-                 BashExecTool(workspace_root=workspace_root),
+                 BashExecTool(workspace_root=workspace_root, run=run),
                  WebSearchTool(), WebFetchTool(boundary=boundary),
                  WebPageQueryTool(result_cap=lambda: registry.result_size_cap_chars),
                  ChunkTool(), LoadDocumentTool()]:

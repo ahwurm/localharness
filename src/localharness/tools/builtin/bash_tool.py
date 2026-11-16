@@ -5,6 +5,7 @@ import os
 import re
 import signal
 from pathlib import Path
+from typing import Any
 
 from localharness.core.which import which_outside_cwd
 from localharness.tools.builtin.paths import resolve_user_path
@@ -253,6 +254,10 @@ async def _kill_and_reap(
 class BashExecTool(Tool):
     timeout_s: float = 60.0
 
+    def __init__(self, workspace_root: str | None = None, run: Any = None) -> None:
+        super().__init__(workspace_root)
+        self.run_folder = run
+
     def info(self) -> ToolSchema:
         return ToolSchema(
             name="bash_exec",
@@ -348,7 +353,8 @@ class BashExecTool(Tool):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
-                env={**os.environ, "LOCALHARNESS_COMMIT": "1"},
+                env={**os.environ, "LOCALHARNESS_COMMIT": "1",
+                     **(self.run_folder.command_env(self.workspace_root) if self.run_folder else {})},
                 **({} if os.name == "nt" else {"start_new_session": True}),
             )
             job = _WindowsJob() if os.name == "nt" else None

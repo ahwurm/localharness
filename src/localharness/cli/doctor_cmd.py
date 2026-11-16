@@ -307,6 +307,21 @@ def _read_only(path: Path) -> bool:
         return False
 
 
+def _print_run_folder(cfg_path: Path) -> None:
+    """Info rows: why sessions keep scratch in the temp folder, and run folders another machine left."""
+    import tempfile
+
+    from localharness.core.run_folder import fallback_cause, foreign_count
+
+    if cause := fallback_cause(cfg_path):
+        console.print(_INFO + " " + escape(
+            f"run/ is {cause}: sessions use {tempfile.gettempdir()} and remove it at exit; "
+            "use --config-dir <local folder>"), soft_wrap=True)
+    if n := foreign_count(cfg_path):
+        console.print(_INFO + " " + escape(
+            f"{n} run folders of another machine: left alone; exclude run/ from the sync"), soft_wrap=True)
+
+
 def _print_private_files(cfg_path: Path) -> None:
     """One warn row when the config folder is not owner-only, worded by why `start` has not made it
     so: a folder of this account's it has not tightened yet, one another account owns, or one on a
@@ -801,6 +816,7 @@ def doctor(
         _print_migration_state(cfg_path, harness)
         _print_exposure(harness)
         _print_private_files(cfg_path)
+        _print_run_folder(cfg_path)
     # D-59: computed independently of `harness`; boundary None or no repository prints nothing.
     _print_git_read(workspace, getattr(getattr(root_agent, "permissions", None), "workspace_root", None))
 

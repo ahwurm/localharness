@@ -885,7 +885,11 @@ class AcpChannel(ChannelAdapter):
         consolidation, the LLM client) runs on the way out exactly as it does for a REPL.
         """
         from localharness.cli.start_cmd import _start_async
+        from localharness.config.paths import resolve_config_dir
+        from localharness.core.run_folder import begin, end
 
+        run = await asyncio.to_thread(begin, resolve_config_dir(self._config_dir))
+        loop = asyncio.get_running_loop()
         try:
             await _start_async(
                 agent_name=None,
@@ -895,6 +899,7 @@ class AcpChannel(ChannelAdapter):
                 channel_mode="acp",
                 no_input=True,
                 acp_channel=self,
+                run=run,
             )
         except asyncio.CancelledError:
             raise
@@ -910,6 +915,8 @@ class AcpChannel(ChannelAdapter):
             # Set unconditionally: a failed bring-up must release the waiting prompt, or the
             # user watches a status line forever.
             self._ready.set()
+            await asyncio.to_thread(
+                end, run, lambda line: asyncio.run_coroutine_threadsafe(self.send_message(line), loop))
 
     async def serve(
         self, *, bus: Any, agent_loop: Any, gate: Any, tool_registry: Any, instructions: Any = None,

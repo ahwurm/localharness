@@ -5,7 +5,6 @@ import errno
 import hashlib
 import os
 import re
-import shutil
 import stat
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -14,7 +13,9 @@ from typing import TYPE_CHECKING, Iterable
 
 from localharness.channels.base import one_line, sanitize_for_display
 from localharness.core.caps import Caps
-from localharness.core.private_files import PRIVATE_DIR_MODE, NotRegularFile, atomic_write_text, open_regular
+from localharness.core.private_files import (
+    PRIVATE_DIR_MODE, NotRegularFile, atomic_write_text, in_background, open_regular, remove_dir,
+)
 from localharness.orchestrator.task_flow.record import Counts, Record, Row
 
 if TYPE_CHECKING:
@@ -126,15 +127,6 @@ def _lstat_in(fd: int | Path, name: str) -> os.stat_result:
 
 def _unlink_in(fd: int | Path, name: str) -> None:
     os.unlink(fd / name) if isinstance(fd, Path) else os.unlink(name, dir_fd=fd)
-
-
-def _rmtree_in(fd: int | Path, name: str) -> None:
-    if not isinstance(fd, Path):
-        shutil.rmtree(name, dir_fd=fd)
-    elif _is_link(st := os.lstat(fd / name)) or not stat.S_ISDIR(st.st_mode):
-        raise OSError(errno.ENOTDIR, "a link or not a folder", str(fd / name))
-    else:
-        shutil.rmtree(fd / name)
 
 
 def _open_regular_in(fd: int | Path, name: str) -> int:
@@ -405,7 +397,7 @@ class Docs:
             with self._dir("tasks", f"t{task}", create=False) as fd:
                 held = sorted(_listing(fd))
             with self._dir("tasks", create=False) as fd:
-                _rmtree_in(fd, f"t{task}")
+                in_background(remove_dir, f"t{task}", fd).result()
         except FileNotFoundError:
             held = []
         except OSError as e:

@@ -13,11 +13,15 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import stat
+import sys
 import tempfile
+import threading
 from collections.abc import Callable
+from concurrent.futures import Future
 from pathlib import Path
-from typing import Optional
+from typing import Any, NamedTuple, Optional
 
 log = logging.getLogger(__name__)
 
@@ -313,3 +317,190 @@ def readable_by_others(root: Path, limit: int = 10_000) -> list[Path]:
         if seen >= limit:
             break
     return found
+
+
+class Removed(NamedTuple):
+    files: int
+    left: tuple[str, ...]
+
+
+_DIR_FLAGS = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+              | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
+_MAX_HELD = 64  # one descriptor per depth level
+
+
+def in_background(fn: Callable[..., Any], *args: Any) -> "Future[Any]":
+    """Run `fn(*args)` on a daemon thread; the future carries its result or its exception."""
+    fut: Future[Any] = Future()
+
+    def run() -> None:
+        try:
+            fut.set_result(fn(*args))
+        except BaseException as e:  # noqa: BLE001 - handed to whoever waits on the future
+            fut.set_exception(e)
+
+    threading.Thread(target=run, daemon=True).start()
+    return fut
+
+
+def _open_dir(name: str, dir_fd: int) -> int:
+    """Open the directory `name` inside `dir_fd` without following a link; one that its mode keeps
+    us out of is made 0700 through an O_PATH descriptor first (Linux)."""
+    try:
+        return os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
+    except PermissionError:
+        if not sys.platform.startswith("linux") or not hasattr(os, "O_PATH"):
+            raise
+    held = os.open(name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+    try:
+        st = os.fstat(held)
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid():
+            raise PermissionError(errno.EACCES, "not a directory of ours", name)
+        os.chmod(f"/proc/self/fd/{held}", PRIVATE_DIR_MODE)
+    finally:
+        os.close(held)
+    return os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
+
+
+def _own(fd: int, dev: int) -> bool:
+    """True when the open directory is on the base device and ours; a mode lacking u+rwx is fixed."""
+    st = os.fstat(fd)
+    if st.st_dev != dev or st.st_uid != os.geteuid():
+        return False
+    if st.st_mode & 0o700 != 0o700:
+        os.fchmod(fd, PRIVATE_DIR_MODE)
+    return True
+
+
+def empty_dir(fd: int, label: str = ".") -> Removed:
+    """Empty the open directory `fd` without following a link or leaving its device; `files` counts
+    what was unlinked and `left` names what could not be removed. `fd` stays open and stays."""
+    dev = os.fstat(fd).st_dev
+    if not _own(fd, dev):
+        return Removed(0, (label,))
+    files, left = 0, []
+    stack: list[list[Any]] = [[fd, label, os.listdir(fd), False, False]]  # fd, path, names, relisted, kept
+    while stack:
+        frame = stack[-1]
+        dfd, path, names = frame[0], frame[1], frame[2]
+        if names:
+            name = names.pop()
+            here = f"{path}/{name}"
+            try:
+                is_dir = stat.S_ISDIR(os.lstat(name, dir_fd=dfd).st_mode)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                left.append(here)
+                frame[4] = True
+                continue
+            if not is_dir:
+                try:
+                    os.unlink(name, dir_fd=dfd)
+                    files += 1
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    left.append(here)
+                    frame[4] = True
+                continue
+            if len(stack) >= _MAX_HELD:
+                left.append(here)
+                frame[4] = True
+                continue
+            try:
+                child = _open_dir(name, dfd)
+            except FileNotFoundError:
+                continue
+            except OSError as e:
+                if e.errno in (errno.ELOOP, errno.ENOTDIR):  # swapped for a link since the lstat
+                    try:
+                        os.unlink(name, dir_fd=dfd)
+                        files += 1
+                        continue
+                    except OSError:
+                        pass
+                left.append(here)
+                frame[4] = True
+                continue
+            try:
+                if not _own(child, dev):
+                    os.close(child)
+                    left.append(here)
+                    frame[4] = True
+                    continue
+                stack.append([child, here, os.listdir(child), False, False])
+            except OSError:
+                os.close(child)
+                left.append(here)
+                frame[4] = True
+            continue
+        if len(stack) == 1:
+            break
+        stack.pop()
+        os.close(dfd)
+        parent = stack[-1]
+        name = path.rsplit("/", 1)[1]
+        if frame[4]:
+            parent[4] = True
+            continue
+        try:
+            os.rmdir(name, dir_fd=parent[0])
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            if e.errno in (errno.ENOTEMPTY, errno.EEXIST) and not frame[3]:
+                try:  # something landed since the listing: one more pass over the same folder
+                    again = _open_dir(name, parent[0])
+                    stack.append([again, path, os.listdir(again), True, False])
+                    continue
+                except OSError:
+                    pass
+            left.append(path)
+            parent[4] = True
+    return Removed(files, tuple(left))
+
+
+def remove_dir(name: str, dir_fd: "int | Path") -> Removed:
+    """Remove the directory `name` inside `dir_fd` (a descriptor; a checked Path on Windows) and all it holds; a link or file at `name` is just unlinked."""
+    if isinstance(dir_fd, Path):
+        target = dir_fd / name
+        try:
+            st = os.lstat(target)
+        except FileNotFoundError:
+            return Removed(0, ())
+        if not stat.S_ISDIR(st.st_mode) or getattr(st, "st_file_attributes", 0) & 0x400:
+            target.unlink()
+            return Removed(1, ())
+        count = sum(len(files) for _, _, files in os.walk(target))
+        shutil.rmtree(target)
+        return Removed(count, ())
+    try:
+        kind = os.lstat(name, dir_fd=dir_fd).st_mode
+    except FileNotFoundError:
+        return Removed(0, ())
+    if not stat.S_ISDIR(kind):
+        os.unlink(name, dir_fd=dir_fd)
+        return Removed(1, ())
+    try:
+        fd = _open_dir(name, dir_fd)
+    except FileNotFoundError:
+        return Removed(0, ())
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.ENOTDIR):
+            os.unlink(name, dir_fd=dir_fd)
+            return Removed(1, ())
+        return Removed(0, (name,))
+    try:
+        removed = empty_dir(fd, name)
+    finally:
+        os.close(fd)
+    if removed.left:
+        return removed
+    try:
+        os.rmdir(name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return Removed(removed.files, (name,))
+    return removed
