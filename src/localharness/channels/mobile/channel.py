@@ -777,7 +777,7 @@ class MobileChannel(ChannelAdapter):
             if policy is not None:
                 policy.resolved(self.session_id, pending_id=getattr(event, "pending_id", None))
         elif isinstance(event, Escalation):
-            if root and policy is not None:
+            if root and policy is not None and event.reason != "stuck_detected":
                 self._push_fire(policy.needs_you(
                     self.session_id, kind="escalation",
                     detail=(getattr(event, "detail", "") or "")[:PUSH_SUMMARY_CHARS],

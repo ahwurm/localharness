@@ -266,13 +266,15 @@ def _quote(text: str) -> str:
     return _HEADING_LINE.sub(lambda _: "\\#", sanitize_for_display(text))
 
 
-def render_section(round_n: int | None, findings: Iterable[Finding], verdict: str, blockers: int, scores: str = "") -> str:
+def render_section(round_n: int | None, findings: Iterable[Finding], verdict: str, blockers: int, scores: str = "",
+                   cut: Iterable[str] = ()) -> str:
     if verdict not in VERDICTS:
         raise ValueError(f"{verdict!r} is not a review verdict")
     head = "## accepted by the person" if round_n is None else f"## round {round_n} · blockers {blockers}"
     rows = (f"- [{f.tag}] {flat(' — '.join(p for p in (f.rule, f.evidence, getattr(f, 'fix', '') and f'to 9: {f.fix}') if p), 3 * Caps.FINDING)}"
             + (f" ({flat(f.critic)})" if f.critic else "") for f in findings)
-    return "\n".join([head, *([flat(scores, Caps.BLOCK)] if scores else []), *rows, f"verdict: {verdict}"])
+    return "\n".join([head, *([flat(scores, Caps.BLOCK)] if scores else []), *rows, *(f"- {c}" for c in cut),
+                      f"verdict: {verdict}"])
 
 
 def _sections(text: str) -> list[str]:

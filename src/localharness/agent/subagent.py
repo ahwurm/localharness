@@ -32,6 +32,7 @@ from localharness.config.models import (
 from localharness.tools.builtin.agent_tool import BUILTIN_AGENT_NAMES, INVALID_AGENT_NAME, DelegationArgError
 
 if TYPE_CHECKING:
+    from localharness.core.events import DelegationStatus
     from localharness.plugins.api import MemoryWriteHandle
     from localharness.provider.lifecycle import ServerRecovery
 
@@ -689,7 +690,7 @@ def parse_handoff(text: str) -> dict | None:
         return None
 
 
-def _delegation_status(reason: str | None) -> str:
+def _delegation_status(reason: str | None) -> DelegationStatus:
     """Runtime-truth delegation status: only how the child's turn ended, never its prose."""
     if reason in (None, "complete"):
         return "completed"

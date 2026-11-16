@@ -406,12 +406,13 @@ async def test_an_escalation_on_the_bus_reaches_the_push_sender(tmp_path):
     assert recorder.sent[0].body == "same tool, same args, six times"
 
 
-async def test_a_subagents_escalation_does_not_push(tmp_path):
+@pytest.mark.parametrize("parent_id,reason", [("root-1", "no progress"), (None, "stuck_detected")])
+async def test_a_subagents_escalation_and_a_stuck_stop_do_not_push(tmp_path, parent_id, reason):
     from localharness.core.events import Escalation
 
     bus, channel, recorder = await _pushable(tmp_path)
-    await bus.publish(Escalation(session_id="s1", parent_id="root-1", agent_id="researcher",
-                                 reason="stuck_detected", detail="d", iteration_at_escalation=4))
+    await bus.publish(Escalation(session_id="s1", parent_id=parent_id, agent_id="researcher",
+                                 reason=reason, detail="d", iteration_at_escalation=4))
     await channel.flush_push()
 
     assert recorder.sent == []

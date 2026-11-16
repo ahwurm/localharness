@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, NamedTuple, Optional, get_args
+from typing import TYPE_CHECKING, Any, Callable, Literal, NamedTuple, Optional
 
 from localharness.agent.gate import (
     DENIED_OBSERVATION_PREFIX,
@@ -1921,7 +1921,7 @@ class AgentLoop:
             context_overflow_limit,
             is_context_overflow,
         )
-        from localharness.core.events import Action, AffordanceCued, ArtifactRef, DelegationStatus, Observation, Escalation, Heartbeat, TaskComplete, ParseFailed, StuckRecovered
+        from localharness.core.events import DELEGATION_WORDS, Action, AffordanceCued, ArtifactRef, DelegationStatus, Observation, Escalation, Heartbeat, TaskComplete, ParseFailed, StuckRecovered
         from pydantic import ValidationError
         self._presence_penalty_next = None  # a degenerate retry's penalty lasts one turn
         self._thinking_off_next = False  # so does a reasoning cut's thinking-off retry
@@ -2853,7 +2853,7 @@ class AgentLoop:
                             except (ValidationError, TypeError, ValueError):
                                 log.debug("dropped invalid artifact metadata from %s", tool_call.name)
                         status = result.metadata.get("status") if result.success else None
-                        if tool_call.name in DELEGATE_TOOLS and status in get_args(DelegationStatus):
+                        if tool_call.name in DELEGATE_TOOLS and isinstance(status, str) and status in DELEGATION_WORDS:
                             delegation_status = status
                     except Exception as exc:
                         result_content = f"Error: {exc}"
@@ -2918,8 +2918,7 @@ class AgentLoop:
                     agent_id=session.agent_id,
                     session_id=session.session_id,
                     reason="stuck_detected",
-                    detail=(f"{tool} repeated a result it had already returned this turn, "
-                            f"after being told so (iteration {session.iteration})"),
+                    detail=f"{tool} repeated a result it already had (step {session.iteration})",
                     stuck_signature=view[i]["_lh"]["outcome"]["call"],
                     iteration_at_escalation=session.iteration,
                 ))

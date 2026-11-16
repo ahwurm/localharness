@@ -876,9 +876,9 @@ console.log(JSON.stringify(hist.children.map((r) => ({ cls: r.className, text: t
 
 # --- D-67: a stuck root turn is announced once, live and in history -------------------------
 
-_DETAIL = "`probe` repeated a result it had already returned this turn, after being told so (iteration 7)"
+_DETAIL = "`probe` repeated a result it already had (step 7)"
 _ESC = f'{{seq: 2, agent_id: "orchestrator", reason: "stuck_detected", detail: "{_DETAIL}"}}'
-_STOPPED = f"orchestrator stopped — {_DETAIL}"
+_STOPPED = f"stopped — {_DETAIL}"
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
@@ -910,6 +910,16 @@ report();
     assert not any(r["cls"] == "row sys" and not r["text"] for r in rendered), rendered
     assert not any("turn failed —" in r["text"] for r in rendered), rendered
     assert len(rendered) == len(base), "an empty summary must add no row at all"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_a_childs_escalation_draws_no_row_live(page, tmp_path):
+    base = _drive(page, HELLO + "report();", tmp_path)
+    rendered = _drive(page, HELLO + f"""
+onEvent("Escalation", {{seq: 4, parent_id: "p", agent_id: "web-researcher", reason: "stuck_detected", detail: "{_DETAIL}"}});
+report();
+""", tmp_path)
+    assert rendered == base, rendered
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
