@@ -24,7 +24,7 @@ def project(tmp_path, monkeypatch):
 
 
 def fetch(project, save_to="x.md", url="http://example.com/page", **kw):
-    return WebFetchTool(ContentStore(), boundary=project).run(url=url, save_to=save_to, **kw)
+    return WebFetchTool(ContentStore(), save_root=project).run(url=url, save_to=save_to, **kw)
 
 
 def downloads(project):
@@ -49,7 +49,7 @@ async def test_a_page_past_the_window_is_saved_whole_without_a_cap_notice(projec
 async def test_the_saved_page_stays_queryable_by_its_fetch_id(project, monkeypatch):
     _serve(monkeypatch, lambda request: _text(BIG))
     store = ContentStore()
-    res = await WebFetchTool(store, boundary=project).run(url="http://example.com/p", save_to="q.md")
+    res = await WebFetchTool(store, save_root=project).run(url="http://example.com/p", save_to="q.md")
     hit = await WebPageQueryTool(store).run(fetch_id=res.metadata["fetch_id"], pattern="line 1500")
     assert "line 1500 of the saved page" in hit.output
 

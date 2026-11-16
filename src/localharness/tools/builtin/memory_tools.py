@@ -180,6 +180,18 @@ class MemorySearchTool(Tool):
         return self.ok("\n".join(lines), match_count=len(hits))
 
 
+PRIVATE_REMEMBER = (
+    "Save one fact to this private session's memory; it is deleted when the session ends. "
+    "Use a short stable name and a self-contained content sentence."
+)
+
+
+def _private() -> bool:
+    from localharness.core.run_folder import current
+    run = current()
+    return bool(run and run.private)
+
+
 class MemoryRememberTool(Tool):
     """Persist one durable fact as a bet (memory spec, write side). Writes route through
     MemoryStore.store_fact — supersede-not-overwrite + read-back-verified; birth truth is
@@ -198,7 +210,7 @@ class MemoryRememberTool(Tool):
             name="remember",
             group="memory",
             gate_family="allow", ingest="none", host="safe", result_origin="trusted",
-            description=(
+            description=PRIVATE_REMEMBER if _private() else (
                 "Save one durable fact to your persistent memory so future sessions can use it. "
                 "Use a short stable name (e.g. 'deploy-requires-vpn') and a self-contained "
                 "content sentence. Writing an existing name with new content supersedes the old "
@@ -304,7 +316,8 @@ class MemoryRememberTool(Tool):
         except Exception as exc:
             return self.err(f"Remember failed: {exc}")
         return self.ok(
-            f"Remembered '{fact.key}' (read-back verified).",
+            f"Remembered '{fact.key}' for this private session (read-back verified)." if _private()
+            else f"Remembered '{fact.key}' (read-back verified).",
             fact_key=fact.key,
         )
 

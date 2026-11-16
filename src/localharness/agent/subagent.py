@@ -1302,16 +1302,19 @@ def _parse_verifier_verdict(summary: str) -> dict:
 
 
 def _verification_ledger_path() -> Any:
-    """`LOCALHARNESS_VERIFICATION_LEDGER_DIR` or `reports/<UTC-date>/`, relative to cwd."""
+    """`LOCALHARNESS_VERIFICATION_LEDGER_DIR`, else `reports/<UTC-date>/` relative to cwd (in `<run>/state/` when private)."""
     import datetime
     from pathlib import Path
 
+    from localharness.core.run_folder import current
+
     base = os.environ.get("LOCALHARNESS_VERIFICATION_LEDGER_DIR")
+    run = current()
     if base:
         d = Path(base)
     else:
         day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-        d = Path("reports") / day
+        d = (run.state / "reports" if run and run.private else Path("reports")) / day
     d.mkdir(parents=True, exist_ok=True)
     return d / "verification-ledger.jsonl"
 

@@ -94,7 +94,8 @@ class MemoryPlugin(MemorySlotPlugin):
                                   global_base_dir=str(ctx.paths.global_config_dir), bus=ctx.bus)
         # The global twin: constructed, NOT opened (the router opens it lazily, as a non-owner, only
         # if recall_scope asks). No bus — a subscription would let auto-diary write into the global
-        # store. Gated on a workspace: without one state_dir IS the global dir (same file twice).
+        # store. Gated on a workspace: without one state_dir IS the global dir (same file twice),
+        # except in a private session, whose state_dir is its own folder and which reads no twin.
         if ctx.paths.workspace is not None:
             self._twin = MemoryStore(agent_id=s.agent_id, division_id=division, org_id="default",
                                      base_dir=str(ctx.paths.global_config_dir),

@@ -71,9 +71,10 @@ class RunFolder:
         return self._ender is not None
 
     def command_env(self, workspace_root: str | None = None) -> dict[str, str]:
+        marker = {"LOCALHARNESS_COMMIT": "private"} if self.private else {}
         if scratch_of(self, workspace_root) is None:
-            return {}
-        return {"LOCALHARNESS_SCRATCH": str(self.scratch), "TMPDIR": str(self.path / "t")}
+            return marker
+        return {**marker, "LOCALHARNESS_SCRATCH": str(self.scratch), "TMPDIR": str(self.path / "t")}
 
 
 _current: RunFolder | None = None
@@ -123,7 +124,7 @@ def _machine_id() -> str:
     return socket.gethostname()
 
 
-def _native() -> bool:
+def native() -> bool:
     return fcntl is not None and hasattr(os, "O_NOFOLLOW") and os.open in os.supports_dir_fd
 
 
@@ -138,7 +139,7 @@ def begin(config_dir: Path, private: bool = False) -> RunFolder | None:
     if not (config_dir / "config.yaml").exists():
         return None
     try:
-        run = _begin(config_dir, private) if _native() else _fallback(private)
+        run = _begin(config_dir, private) if native() else _fallback(private)
     except OSError as e:
         where = config_dir / "run" if e.errno == errno.ENOSPC else "the run folder"
         log.warning("no scratch this session: %s: %s", where, e.strerror or e)
@@ -324,7 +325,7 @@ def _finish(run: RunFolder) -> tuple[str, ...]:
 def sweep(where: "int | Path") -> None:
     """Remove the run folders nobody holds that are this machine's or half made; leave the rest. `where` is an open `run/` or the config folder."""
     if not isinstance(where, int):
-        if not _native():
+        if not native():
             return
         try:
             fd = open_private_dir(Path(where) / "run", create=False)
@@ -382,7 +383,7 @@ def _has(fd: int, name: str) -> bool:
 
 def fallback_cause(config_dir: Path) -> str | None:
     """Why sessions cannot use `<config dir>/run`, for doctor; None when they can."""
-    if not _native():
+    if not native():
         return None
     run = Path(config_dir) / "run"
     try:

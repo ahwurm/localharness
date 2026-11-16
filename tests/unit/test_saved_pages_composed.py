@@ -38,7 +38,7 @@ async def test_the_work_on_saved_pages_is_silent_and_the_same_code_asks_once(bus
     ws.mkdir()
     monkeypatch.chdir(ws)
 
-    researcher = WebFetchTool(boundary=ws)
+    researcher = WebFetchTool(save_root=ws)
     for i in (1, 2, 3):
         saved = await researcher.run(url=f"http://example.com/p{i}", save_to=f"p{i}.txt")
         assert saved.success and (ws / SAVED / f"p{i}.txt").read_text() == PAGES[f"/p{i}"]

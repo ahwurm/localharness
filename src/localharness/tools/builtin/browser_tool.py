@@ -468,10 +468,10 @@ _PARAMETERS = {**_WEB, "properties": {
 class BrowserFetchTool(Tool):
     timeout_s = NAV_TIMEOUT_S + 20
 
-    def __init__(self, runtime: BrowserRuntime, store: Any = None, boundary: Path | None = None) -> None:
+    def __init__(self, runtime: BrowserRuntime, store: Any = None, save_root: Path | None = None) -> None:
         self._runtime = runtime
         self._store = store if store is not None else get_default_store()
-        self.boundary = boundary
+        self.save_root = save_root
 
     def info(self) -> ToolSchema:
         return ToolSchema(
@@ -481,7 +481,7 @@ class BrowserFetchTool(Tool):
             destructive=False, estimated_tokens=FETCH_DEFAULT_CHARS // 4)
 
     def bound_to(self, store: Any) -> "BrowserFetchTool":
-        return BrowserFetchTool(self._runtime, store, self.boundary)
+        return BrowserFetchTool(self._runtime, store, self.save_root)
 
     async def _execute(self, url: str, max_chars: int = FETCH_DEFAULT_CHARS, start_index: int = 0,
                        save_to: str | None = None) -> ToolResult:
@@ -489,7 +489,7 @@ class BrowserFetchTool(Tool):
         save_to = None if isinstance(save_to, str) and not save_to.strip() else save_to
         if save_to is not None and not isinstance(save_to, str):
             return self.err("save_to must be a file name", error_type="validation_error")
-        if save_to is not None and self.boundary is None:
+        if save_to is not None and self.save_root is None:
             return self.err(NO_PROJECT_FOLDER, error_type="validation_error")
         if refused := await refusal(url):
             return refused
@@ -506,7 +506,7 @@ class BrowserFetchTool(Tool):
             return self.ok(f"{UNTRUSTED_BANNER}URL: {page.url}\n\n{_EMPTY}", url=page.url)
         text = page.text + (f"\n{_CAPPED}" if page.capped else "") + (f"\n{_STILL_LOADING}" if page.growing else "")
         if save_to is not None:
-            saved = save_page(self._store, self.boundary, page.text, text, page.url, "", save_to, page.capped,
+            saved = save_page(self._store, self.save_root, page.text, text, page.url, "", save_to, page.capped,
                               "text/html")
             grew = page.growing and saved.success
             return saved.model_copy(update={"output": f"{saved.output}\n{_STILL_LOADING}"}) if grew else saved

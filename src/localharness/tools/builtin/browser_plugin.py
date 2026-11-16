@@ -177,7 +177,7 @@ class BrowserPlugin(Plugin):
         self._runtime = BrowserRuntime(ctx.config)
         fetch = next((t for t in ctx.tools.global_tools() if isinstance(t, WebFetchTool)), None)
         session = (cls(self._runtime) for cls in (BrowserOpenTool, BrowserClickTool, BrowserTypeTool, BrowserScrollTool))
-        return [BrowserFetchTool(self._runtime, boundary=getattr(fetch, "boundary", None)), *session]
+        return [BrowserFetchTool(self._runtime, save_root=getattr(fetch, "save_root", None)), *session]
 
     async def stop(self, ctx: PluginContext) -> None:
         if self._runtime is not None:

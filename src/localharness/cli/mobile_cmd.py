@@ -211,8 +211,12 @@ def mobile_cmd(
              "live session is written to disk and torn down. The next message wakes it and the "
              "conversation continues. 0: never sleep.",
     )] = SLEEP_AFTER_DEFAULT_MIN,
+    private: Annotated[bool, typer.Option("--private", hidden=True)] = False,
 ) -> None:
     """Serve the phone UI and its event API (see docs/mobile.md)."""
+    if private:
+        from localharness.cli.start_cmd import PRIVATE_MOBILE_LINE, _refuse_private
+        _refuse_private(PRIVATE_MOBILE_LINE)
     # FIRST: channels.mobile's package init imports starlette, so the hint must precede any channels.mobile
     # import (without the extra, that import raised before the hint could print).
     try:

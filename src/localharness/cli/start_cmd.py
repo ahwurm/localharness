@@ -164,6 +164,44 @@ def _channel_refusal(channel_mode: str, resolution: Any) -> str | None:
     return CHANNEL_PLUGIN_NOT_ON.format(name=channel_mode, plugin=entry.name, state=state, fix=fix)
 
 
+PRIVATE_MOBILE_LINE = "private chats on the phone are not available yet"
+PRIVATE_ACP_LINE = ("acp has no private mode (Zed keeps its own thread history); "
+                    "start a terminal session with localharness start --private.")
+PRIVATE_PLATFORM_LINE = ("{name} keeps the conversation on its servers; "
+                         "start a terminal session with localharness start --private.")
+PRIVATE_LINKED_RUN_LINE = "{path} is a link or another account's; remove it, or use --config-dir <local folder>."
+PRIVATE_UNLOCKED_LINE = "this folder does not enforce file locks; use --config-dir <local folder>."
+PRIVATE_NEEDS_POSIX_LINE = "private sessions need POSIX file locks; use WSL on Windows."
+PRIVATE_NO_RUN_LINE = "no run folder for a private session; use --config-dir <local folder>."
+
+
+def _refuse_private(line: str) -> None:
+    err_console.print(line, markup=False, soft_wrap=True)
+    raise typer.Exit(2)
+
+
+def _refuse_private_channel(channel_mode: str) -> None:
+    if channel_mode == "terminal":
+        return
+    if channel_mode not in channel_names():
+        _refuse_unbuildable_channel(channel_mode)
+    _refuse_private({"mobile": PRIVATE_MOBILE_LINE, "acp": PRIVATE_ACP_LINE}.get(
+        channel_mode, PRIVATE_PLATFORM_LINE.format(name=channel_mode)))
+
+
+def _refuse_private_run(run: Any, cfg: Path) -> None:
+    """Refuse a private start whose run folder is missing or only the temp fallback."""
+    from localharness.core.run_folder import end, fallback_cause, native
+    if run is None:
+        _refuse_private(PRIVATE_NO_RUN_LINE)
+    if run.parent is not None:
+        return
+    end(run)
+    cause = fallback_cause(cfg)
+    _refuse_private(PRIVATE_LINKED_RUN_LINE.format(path=cfg / "run") if cause in ("a link", "another account's")
+                    else PRIVATE_UNLOCKED_LINE if native() else PRIVATE_NEEDS_POSIX_LINE)
+
+
 MOBILE_NEEDS_ITS_OWN_COMMAND = OWN_COMMAND_ERROR.format(name="mobile", why=_own_command(None, None)["mobile"][0])
 """Shown verbatim. A refusal naming the alternatives is the difference between a typo costing a
 second and a typo costing a session."""
@@ -1864,7 +1902,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # applies, else exactly `cfg_path`, so a workspace-less session is byte-identical (LAYR-03). Two
     # locals rather than one widened value: everything that must stay global says so by name, and a
     # future change to what one means cannot silently drag the other.
-    state_dir = workspace if workspace is not None else cfg_path
+    private = run is not None and run.private
+    state_dir = run.state if private else workspace if workspace is not None else cfg_path
     try:
         harness = loader.load_harness()
     except Exception as exc:
@@ -2830,7 +2869,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 )
                 plugin_result = await start_plugins(
                     plugin_resolution, bus=bus, registry=tool_registry, hooks=hook_system, llm=llm,
-                    paths=PluginPaths(global_config_dir=cfg_path, workspace=workspace,
+                    paths=PluginPaths(global_config_dir=cfg_path, workspace=None if private else workspace,
                                       state_dir=state_dir),
                     session=session_info,
                 )
@@ -3335,10 +3374,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # unlocked appends, so two live sessions on one agent can interleave and a long append
         # can tear — a hazard that is latent today and reachable by habit, since running the
         # terminal while a phone is attached is a normal thing to do, not an exotic one.
-        await _announce_presence(
-            channel, config_dir=config_dir, agent=agent_config.name,
-            channel_mode=channel_mode, session_id=sitting_id, workspace=state_dir,
-        )
+        if not private:
+            await _announce_presence(
+                channel, config_dir=config_dir, agent=agent_config.name,
+                channel_mode=channel_mode, session_id=sitting_id, workspace=state_dir,
+            )
 
         # --- Determine returning user ---
         is_returning = events_path.exists() and events_path.stat().st_size > 0
@@ -3750,8 +3790,15 @@ def start_app(
              "MCP servers start without the trust question and the session runs as trusted. For CI "
              "and scripts; LOCALHARNESS_TRUST_PROJECT=1 does the same for any command.",
     )] = False,
+    private: Annotated[bool, typer.Option(
+        "--private",
+        help="A session that keeps nothing: no saved memory, no records naming the project, no state "
+             "on disk afterwards. Files the agent writes into your project stay.",
+    )] = False,
 ) -> None:
     """Launch the agent REPL. Zero to chatting in one command."""
+    if private:
+        _refuse_private_channel(channel)
     if preset is not None and scripts is not None and preset != scripts:
         err_console.print(PRESET_CONFLICT_LINE.format(a=preset, b=scripts), markup=False, soft_wrap=True)
         raise typer.Exit(2)
@@ -3779,7 +3826,10 @@ def start_app(
         _models_that_arrived(config_dir, wanted, no_input)
     from localharness.core.run_folder import begin, end
 
-    run = None if list_models else begin(resolve_config_dir(config_dir))
+    cfg = resolve_config_dir(config_dir)
+    run = None if list_models else begin(cfg, private=private)
+    if private and not list_models and (cfg / "config.yaml").exists():
+        _refuse_private_run(run, cfg)
     resume: Resume | None = None
     try:
         while True:

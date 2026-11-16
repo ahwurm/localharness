@@ -37,10 +37,11 @@ async def register_builtin_tools(
     from localharness.tools.builtin.web_tool import WebFetchTool, WebPageQueryTool, WebSearchTool
     from localharness.tools.builtin.write_tool import WriteTool
 
+    save_root = run.state if run is not None and run.private else boundary
     for tool in [GlobTool(), GrepTool(), ReadTool(),
                  WriteTool(workspace_root=workspace_root), EditTool(workspace_root=workspace_root),
                  BashExecTool(workspace_root=workspace_root, run=run),
-                 WebSearchTool(), WebFetchTool(boundary=boundary),
+                 WebSearchTool(), WebFetchTool(save_root=save_root),
                  WebPageQueryTool(result_cap=lambda: registry.result_size_cap_chars),
                  ChunkTool(), LoadDocumentTool()]:
         await registry.register(tool, scope="global")
@@ -75,7 +76,7 @@ def bind_agent_store_tools(registry: ToolRegistry, store: Any) -> None:
     from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
     from localharness.tools.builtin.web_tool import WebFetchTool, WebPageQueryTool
     fetch = next((t for t in registry.global_tools() if isinstance(t, WebFetchTool)), None)
-    for tool in (WebFetchTool(store, boundary=getattr(fetch, "boundary", None)),
+    for tool in (WebFetchTool(store, save_root=getattr(fetch, "save_root", None)),
                  WebPageQueryTool(store, result_cap=lambda: registry.result_size_cap_chars),
                  ToolResultGetTool(store),
                  ChunkTool(store), LoadDocumentTool(store)):

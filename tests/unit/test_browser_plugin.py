@@ -884,7 +884,7 @@ async def test_save_to_writes_the_scrolled_text_to_the_downloads_folder(world, r
     public_web(monkeypatch)
     world.pages[A] = (200, LINES, "text/html")
     grows(world, LINES + "\n" + "closing line " * 20)
-    tool = BrowserFetchTool(runtime, ContentStore(), boundary=tmp_path)
+    tool = BrowserFetchTool(runtime, ContentStore(), save_root=tmp_path)
     got = await tool.run(url=A, save_to="part one.txt")
     saved = (tmp_path / ".localharness" / "downloads" / "part-one.txt").read_text()
     assert got.success and saved.rstrip().endswith("closing line") and "\n[" not in saved
@@ -896,7 +896,7 @@ async def test_a_save_cut_short_by_the_deadline_says_so_in_the_receipt(world, ru
     ticking(monkeypatch)
     world.pages[A] = (200, LINES, "text/html")
     grows(world, *(LINES + "\n" + "more " * (40 * n) for n in range(1, 200)))
-    got = await BrowserFetchTool(runtime, ContentStore(), boundary=tmp_path).run(url=A, save_to="a.txt")
+    got = await BrowserFetchTool(runtime, ContentStore(), save_root=tmp_path).run(url=A, save_to="a.txt")
     assert got.output.startswith(UNTRUSTED_BANNER + "saved ") and got.output.endswith(browser_tool._STILL_LOADING)
     assert "still loading" not in (tmp_path / ".localharness" / "downloads" / "a.txt").read_text()
 
@@ -904,13 +904,13 @@ async def test_a_save_cut_short_by_the_deadline_says_so_in_the_receipt(world, ru
 async def test_a_near_empty_page_saves_nothing(world, runtime, monkeypatch, tmp_path):
     public_web(monkeypatch)
     world.pages[A] = (200, "tiny", "text/html")
-    got = await BrowserFetchTool(runtime, ContentStore(), boundary=tmp_path).run(url=A, save_to="a.txt")
+    got = await BrowserFetchTool(runtime, ContentStore(), save_root=tmp_path).run(url=A, save_to="a.txt")
     assert not got.success and got.error.startswith("nothing saved") and not (tmp_path / ".localharness").exists()
 
 
 async def test_an_empty_save_to_is_no_save(fetch, world, tmp_path):
     tool, _ = fetch
-    got = await BrowserFetchTool(tool._runtime, ContentStore(), boundary=tmp_path).run(url=A, save_to="  ")
+    got = await BrowserFetchTool(tool._runtime, ContentStore(), save_root=tmp_path).run(url=A, save_to="  ")
     assert got.success and "fetch_id=" in got.output and not (tmp_path / ".localharness").exists()
 
 
@@ -1335,8 +1335,8 @@ async def test_tools_returns_fetch_and_the_four_session_tools_over_the_one_runti
 
 async def test_browser_fetch_saves_where_web_fetch_does(cache, world, tmp_path):
     install_shell(cache)
-    tools = await BrowserPlugin().tools(plugin_ctx(tmp_path, tools=[WebFetchTool(boundary=tmp_path / "proj")]))
-    assert tools[0].boundary == tmp_path / "proj" == tools[0].bound_to(ContentStore()).boundary
+    tools = await BrowserPlugin().tools(plugin_ctx(tmp_path, tools=[WebFetchTool(save_root=tmp_path / "proj")]))
+    assert tools[0].save_root == tmp_path / "proj" == tools[0].bound_to(ContentStore()).save_root
 
 
 async def test_stop_with_nothing_started_does_nothing(cache, world, tmp_path):

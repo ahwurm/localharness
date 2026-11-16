@@ -95,6 +95,16 @@ def _global_roster_note(g: Any) -> str:
 
 
 # --------------------------------------------------------------------------- dispatch
+PRIVATE_EMPTY = "Memory starts empty in a private session; your project's memory is untouched."
+PRIVATE_PROMOTE = "A private session keeps nothing; have the agent write it into a file."
+
+
+def _private() -> bool:
+    from localharness.core.run_folder import current
+    run = current()
+    return bool(run and run.private)
+
+
 async def dispatch(store: Any, arg: str, *, promote_target: Any = None,
                    workspace_identity: str = "") -> str:
     """Route a `/memory` argument string to a subcommand renderer. `store` is an opened MemoryStore
@@ -119,6 +129,8 @@ async def dispatch(store: Any, arg: str, *, promote_target: Any = None,
     if sub == "search":
         return await render_search(store, rest)
     if sub == "promote":
+        if _private():
+            return PRIVATE_PROMOTE
         return await render_promote(store, rest, promote_target=promote_target,
                                     workspace_identity=workspace_identity)
     return ("Unknown /memory subcommand. Use /memory (overview), /memory show <id>, "
@@ -132,7 +144,7 @@ async def render_overview(store: Any) -> str:
     groups = await store.list_groups(named_only=True, limit=12)
     facts = await store.recent_facts(limit=_PAGE)
     if not groups and not facts:
-        return "Memory is empty — nothing has been remembered yet."
+        return PRIVATE_EMPTY if _private() else "Memory is empty — nothing has been remembered yet."
     lines: list[str] = []
     if groups:
         lines.append("Groups (bound while dreaming):")

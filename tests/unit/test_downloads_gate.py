@@ -67,7 +67,7 @@ async def check(g: PermissionGate, tool: str, params: dict, meta: ToolMeta = SHE
 async def test_a_saved_page_runs_only_after_a_person_answers(proj, tmp_path, monkeypatch):
     public_web(monkeypatch)
     _serve(monkeypatch, lambda request: _text("echo from the web\n" * 50))
-    saved = await WebFetchTool(boundary=proj).run(url="http://example.com/x", save_to="fetched.sh")
+    saved = await WebFetchTool(save_root=proj).run(url="http://example.com/x", save_to="fetched.sh")
     assert saved.success and (proj / SAVED / "fetched.sh").exists()
 
     asker = Asker()

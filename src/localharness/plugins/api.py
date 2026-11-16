@@ -298,8 +298,8 @@ class PluginPaths:
     """Where things live for one plugin — every path computed by core, never by the plugin.
 
     - `global_config_dir`: the always-global config layer (GUARDRAILS.md's home too).
-    - `workspace`: the workspace layer's .localharness/, if one applies; else None.
-    - `state_dir`: where this session's agent state lives (the workspace layer or the global dir).
+    - `workspace`: the workspace layer's .localharness/, if one applies; else None (always None in a private session).
+    - `state_dir`: where this session's agent state lives (the workspace layer or the global dir; a private session's `<run>/state/`).
     - `artifact_dir`: `<state_dir>/artifacts/<name>/` if the plugin sets wants_artifacts; else None
       (PAPI-10)."""
 

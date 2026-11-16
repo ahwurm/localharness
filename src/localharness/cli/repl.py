@@ -521,7 +521,9 @@ class OrchestratorREPL:
         and never follows a workspace (C2), so the two properties answer opposite questions from
         the same session and must stay textually distinct.
         """
-        return self._workspace if self._workspace is not None else self._config_dir
+        run = getattr(self._session_gate(), "run", None)
+        workspace = None if run is not None and run.private else self._workspace
+        return workspace if workspace is not None else self._config_dir
 
     @property
     def queued(self) -> tuple[str, ...]:

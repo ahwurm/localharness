@@ -226,14 +226,14 @@ def _trim_downloads(dfd: int, keep: str) -> int:
     return removed
 
 
-def _write_download(boundary: Path, name: str, data: bytes) -> tuple[bool, int]:
-    """Write `data` to <boundary>/.localharness/downloads/<name> through no symlink, as a new file; returns (replaced, removed). Raises OSError."""
+def _write_download(save_root: Path, name: str, data: bytes) -> tuple[bool, int]:
+    """Write `data` to <save_root>/.localharness/downloads/<name> through no symlink, as a new file; returns (replaced, removed). Raises OSError."""
     from localharness.agent.taint import DOWNLOADS
 
     fds: list[int] = []
     tmp = f".tmp-{secrets.token_hex(8)}"
     try:
-        fds.append(_open_dir(str(Path(boundary) / DOWNLOADS[0]), create=True))
+        fds.append(_open_dir(str(Path(save_root) / DOWNLOADS[0]), create=True))
         dfd = _open_dir(DOWNLOADS[1], fds[0], create=True)
         fds.append(dfd)
         os.fchmod(dfd, 0o700)
@@ -268,7 +268,7 @@ def _write_download(boundary: Path, name: str, data: bytes) -> tuple[bool, int]:
 NO_PROJECT_FOLDER = "nothing saved: no project folder here — start localharness in a project folder"
 
 
-def save_page(store: Any, boundary: Path, text: str, stored: str, url: str, html: str,
+def save_page(store: Any, save_root: Path, text: str, stored: str, url: str, html: str,
                save_to: str, capped: bool, content_type: str) -> ToolResult:
     """Save the whole extracted `text` as a download and return the receipt in place of a window."""
     from localharness.agent.taint import DOWNLOADS
@@ -287,11 +287,13 @@ def save_page(store: Any, boundary: Path, text: str, stored: str, url: str, html
         text = data[:FETCH_MAX_BODY_BYTES].decode("utf-8", errors="ignore")
         data, capped = text.encode("utf-8"), True
     try:
-        replaced, removed = _write_download(boundary, name, data)
+        replaced, removed = _write_download(save_root, name, data)
     except OSError as exc:
         return refuse(f"the downloads folder cannot be written safely ({exc.strerror or exc})")
     fid = store.put_web(stored)
-    shown = "/".join((*DOWNLOADS, name))
+    from localharness.core.run_folder import current
+    run = current()
+    shown = str(Path(save_root).joinpath(*DOWNLOADS, name)) if run and run.private else "/".join((*DOWNLOADS, name))
     lines = [f"saved {len(text)} chars to {shown} (fetch_id={fid})",
              f"first: {' '.join(text[:1000].split())[:200]}",
              f"last: {' '.join(text[-1000:].split())[-200:]}"]
@@ -387,10 +389,10 @@ class WebSearchTool(Tool):
 class WebFetchTool(Tool):
     timeout_s = 25.0
 
-    def __init__(self, store: Any = None, boundary: Optional[Path] = None) -> None:
+    def __init__(self, store: Any = None, save_root: Optional[Path] = None) -> None:
         # Per-agent ContentStore (bound via bind_agent_store_tools); bare tools share the default.
         self._store = store if store is not None else get_default_store()
-        self.boundary = boundary
+        self.save_root = save_root
 
     def info(self) -> ToolSchema:
         return ToolSchema(
@@ -440,7 +442,7 @@ class WebFetchTool(Tool):
         if save_to is not None:
             if not isinstance(save_to, str):
                 return self.err("save_to must be a file name", error_type="validation_error")
-            if self.boundary is None:
+            if self.save_root is None:
                 return self.err(NO_PROJECT_FOLDER, error_type="validation_error")
         if not url.startswith(("http://", "https://")):  # the old wording (test_agent_loop pins it);
             return self.err(f"Invalid URL (must be http/https): {url!r}",  # netguard decides every hop
@@ -482,7 +484,7 @@ class WebFetchTool(Tool):
             note += f' Page title: "{title}"]' if title else "]"
             return self.ok(f"{UNTRUSTED_BANNER}URL: {final_url}\n\n{note}", url=final_url, content_type=ctype)
         if save_to is not None:
-            return save_page(self._store, self.boundary, extracted, text, final_url, body, save_to,
+            return save_page(self._store, self.save_root, extracted, text, final_url, body, save_to,
                               capped, ctype)
         res = retain_window(self._store, text, final_url, start_index, max_chars, refetch="web_fetch")
         if not res.success:
