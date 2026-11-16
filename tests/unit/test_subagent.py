@@ -920,6 +920,21 @@ async def test_config_child_brief_has_budget_and_returns_delegation_result(mock_
 
 
 @pytest.mark.asyncio
+async def test_a_critic_handed_the_web_toolset_draws_no_unknown_skill_warning(mock_llm_client, bus, recwarn):
+    from localharness.agent.subagent import builtin_toolset, dispatch_config_subagent
+    from localharness.orchestrator.task_flow.panel import load_critic
+
+    base = await _builtin_registry()
+    critic = load_critic("factual", builtin_toolset("web-researcher", base))
+    assert "skill" in critic.tools.add and "skill" in critic.tools.deny
+    result = await dispatch_config_subagent(
+        "check the reply", agent_config=critic, llm=mock_llm_client([mock_llm_client.Response(content="NONE")]),
+        bus=bus, base_registry=base, parent_session_id="p", permission_evaluator=PermissionEvaluator())
+    assert result.raw == "NONE"
+    assert not [w for w in recwarn if "unknown tool 'skill'" in str(w.message)]
+
+
+@pytest.mark.asyncio
 async def test_web_zero_call_failure_is_status_failed(mock_llm_client, bus):
     from localharness.agent.subagent import dispatch_web_subagent
 

@@ -770,10 +770,11 @@ CHUNK_SUMMARIZER_ROLE = (
 CONFIG_CHILD_DEFAULT_TOOLS: list[str] = ["read", "glob", "grep", "git_read"]
 
 
-# Built-in tools a session registers only when it can (git_read needs a repository at the boundary). A
-# child that lists one in `tools.add` in a session without it holds nothing for that name, and the
-# loop's per-turn "unknown tool" warning would be misleading: it is not unknown, it was not offered.
-OPTIONAL_BUILTIN_TOOLS: tuple[str, ...] = ("git_read",)
+# Built-in tools a child holds only when its registry can supply them: git_read needs a repository at the
+# boundary, skill a skill to load and a child that does not deny it (a critic does). A child that lists one in
+# `tools.add` without holding it would draw the loop's per-turn "unknown tool" warning, which misleads: it was
+# not offered.
+OPTIONAL_BUILTIN_TOOLS: tuple[str, ...] = ("git_read", "skill")
 
 
 def _without_unoffered_optional_tools(agent_config: Any, child_registry: Any, narrowed: bool = False) -> Any:
