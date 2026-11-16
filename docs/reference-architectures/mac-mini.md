@@ -124,7 +124,7 @@ Run on the actual base mini; promotion to TESTED requires the first two:
 
 - [ ] **Decode ≥9.5 tok/s single-stream at 48–64k prompt depth** (the bar)
 - [ ] **64k session with zero swap** (`memory_pressure` nominal, `vm_stat` swapouts = 0)
-- [ ] TTFT at 8k/32k/64k cold vs prefix-cached (informs stuck-detector thresholds, gaps §8)
+- [ ] TTFT at 8k/32k/64k cold vs prefix-cached (gaps §8)
 - [ ] Tool-call success rate through vllm-metal's parser vs llama.cpp `--jinja` hermes, against `bench/` scenarios (gaps §5 — no published BFCL for this model)
 - [ ] Thinking-mode token accounting (reasoning traces vs `max_tokens`, gaps §6)
 - [ ] KV q8_0 variant (llama.cpp `--cache-type-k/v q8_0`): quality delta vs ~1 GB savings

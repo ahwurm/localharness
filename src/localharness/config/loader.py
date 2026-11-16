@@ -1928,9 +1928,7 @@ class ConfigLoader:
 
         # 5c'. The core sections only the global layer may set (AGENT_CORE_GLOBAL_ONLY_SECTIONS),
         #      restored WHOLE for a workspace file: the global section, else the schema default.
-        #      Never key by key — a workspace file that omits `escalation_threshold` would fall to
-        #      the schema's looser default over a stricter global one (spec 17 §6). A file that
-        #      declared the section differently earns one note; one that left it out, none.
+        #      A file that declared the section differently earns one note; one that left it out, none.
         if self._local_dir is not None and in_layer(path, self._local_dir):
             for section in sorted(AGENT_CORE_GLOBAL_ONLY_SECTIONS):
                 restored = self._global_agent_section(path.stem, section)

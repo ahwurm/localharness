@@ -596,16 +596,22 @@ REPEAT_POINTER = "[same result as your identical call {k} tool results above]"
 BUDGET_NOTE_PREFIX = "\n\n[budget: "
 
 
-def _repeats(
+class Repeat(NamedTuple):
+    """A repeated result: `told` once its call already had the pointer (a stop), `back` tool results to the latest held copy."""
+    told: bool
+    back: int
+
+
+def repeats(
     messages: list[Message],
     gate_family: Callable[[str], str | None] | None,
-) -> dict[int, tuple[int, int]]:
-    """Index -> (1 on the call's first repeat since the person spoke, else 2; tool results back to its last held copy)."""
+) -> dict[int, Repeat]:
+    """Each tool message repeating a result its call returned since the person spoke, by index."""
     names = _call_meta(messages)
     ever: dict[tuple[str, str], int] = {}
     last: dict[str, tuple[str, int]] = {}
     told: set[str] = set()
-    found: dict[int, tuple[int, int]] = {}
+    found: dict[int, Repeat] = {}
     writes = ordinal = 0
     for i, m in enumerate(messages):
         role = m.get("role")
@@ -622,12 +628,13 @@ def _repeats(
         call, result = key = (outcome["call"], outcome["result"])
         # A repeat: a result the call had moved away from (a cycle), or the same result with no write since.
         if key in ever and (last[call][0] != result or last[call][1] == writes):
-            found[i] = (2 if call in told else 1, ordinal - ever[key])
+            found[i] = Repeat(call in told, ordinal - ever[key])
             told.add(call)
         elif outcome.get("ok") is True:
+            # A missing, unknown or raising family lookup counts as not a write, so toward stopping.
             try:
                 family = gate_family(names.get(m.get("tool_call_id"), ("",))[0]) if gate_family else None
-            except Exception:  # noqa: BLE001 — fail closed: not a write
+            except Exception:  # noqa: BLE001
                 family = None
             writes += family == "write"
         ever[key] = ordinal
@@ -640,7 +647,7 @@ def _point_repeats(
     gate_family: Callable[[str], str | None] | None,
 ) -> list[Message]:
     """Request view only: a call's first repeat becomes a pointer to the latest held copy; the input list when none."""
-    pointed = {i: k for i, (held, k) in _repeats(messages, gate_family).items() if held == 1}
+    pointed = {i: r.back for i, r in repeats(messages, gate_family).items() if not r.told}
     if not pointed:
         return messages
     out = list(messages)
