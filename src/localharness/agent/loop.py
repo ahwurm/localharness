@@ -2900,8 +2900,8 @@ class AgentLoop:
             # Tool calls parsed and executed — reset parse retry counter
             session.parse_retries = 0
 
-            # 12. Stuck rule: a tool message repeating a result the model still holds. One
-            # earlier copy reaches the next request as a pointer (the notice); two stop the turn.
+            # 12. Stuck rule: a call's first repeat of a result the model still holds reaches the
+            # next request as a pointer (the notice); its next repeat stops the turn.
             view = [*request_messages, *session.messages[sent:]]
             called = {c.id: c for c in tool_calls}
             repeats = [
@@ -2917,17 +2917,17 @@ class AgentLoop:
                         iteration=session.iteration,
                         stuck_signature=view[i]["_lh"]["outcome"]["call"],
                     ))
-            stuck = next(((i, copies, call) for i, copies, call in repeats if copies >= 2), None)
+            stuck = next(((i, call) for i, copies, call in repeats if copies >= 2), None)
             if stuck is not None:
-                i, copies, call = stuck
+                i, call = stuck
                 session.terminated_reason = "stuck"
                 tool = " ".join(call.name.split())[:64]
                 await self._bus.publish(Escalation(
                     agent_id=session.agent_id,
                     session_id=session.session_id,
                     reason="stuck_detected",
-                    detail=(f"`{tool}` returned the same result {copies + 1} times this turn, "
-                            f"after being told it was the same (iteration {session.iteration})"),
+                    detail=(f"`{tool}` repeated a result it had already returned this turn, "
+                            f"after being told so (iteration {session.iteration})"),
                     stuck_signature=view[i]["_lh"]["outcome"]["call"],
                     iteration_at_escalation=session.iteration,
                 ))
