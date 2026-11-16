@@ -5,6 +5,7 @@ import pytest
 
 from localharness.agent.subagent import _config_child_allowed
 from localharness.core.caps import Caps
+from localharness.orchestrator.task_flow import FOLLOW_UP
 from localharness.orchestrator.task_flow.record import STAGES, TOOL_STAGES, Row
 from localharness.tools.builtin.task_tool import TaskTool
 from localharness.tools import base
@@ -235,7 +236,7 @@ async def test_done_closes_a_task_finished_before_any_plan_once_decisions_passed
     flow.settle_close("pass")
     assert flow.record.stage == "done" and flow.record.closing is None
     assert flow.docs.read(1, "review.md") == "the note is at scratch/note.md" and flow.record.filed[("review.md", None)].verdict == "pass"
-    assert (await tool._execute(stage="done", doc="again")).output == "a task past its plan ends through its steps"
+    assert (await tool._execute(stage="done", doc="again")).output == f"t1 is already done; {FOLLOW_UP}"
 
 
 async def test_done_with_no_task_open_says_so(tmp_path):

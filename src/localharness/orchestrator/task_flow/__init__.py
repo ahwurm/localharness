@@ -9,7 +9,7 @@ from localharness.channels.base import one_line
 from localharness.core.caps import Caps
 from localharness.orchestrator.task_flow.panel import WEB_CRITIC_TOOLS, FlowCap, Panel, critic_names, typed_turns
 from localharness.orchestrator.task_flow.record import Record, Row, clear_turn, limited, open_task, set_stage
-from localharness.orchestrator.task_flow.runner import root_note, run_unit
+from localharness.orchestrator.task_flow.runner import FOLLOW_UP, root_note, run_unit
 
 __all__ = ["TaskFlow"]
 
@@ -60,6 +60,8 @@ class TaskFlow:
         record = self.record
         if record is None:
             return "no task is open"
+        if record.stage == "done":
+            return f"t{record.id} is already done; {FOLLOW_UP}"
         if record.stage not in ("new", "research", "plan"):
             return "a task past its plan ends through its steps"
         if ("decisions.md", None) not in record.filed:

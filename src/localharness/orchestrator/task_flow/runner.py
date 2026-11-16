@@ -70,12 +70,17 @@ def _verdict(record: Record) -> str:
     return (row.verdict or "") if row else ""
 
 
+FOLLOW_UP = "a follow-up is answered in your reply, with no task call"
+
+
 def root_note(flow: TaskFlow) -> str:
     """The root's request note: one pointer line, and the interview sentence while `new` has no doc."""
     record = flow.record
     if record is None or record.paused:
         return ""
-    boundary = boundary_of("run", record) if record.stage == "run" else "task" if record.stage == "done" else record.stage
+    if record.stage == "done":
+        return "\n".join((one_line(f"t{record.id} \u00b7 done \u00b7 {FOLLOW_UP}")[:Caps.LINE], scratch_line(flow)))
+    boundary = boundary_of("run", record) if record.stage == "run" else record.stage
     head = " ".join(p for p in (record.stage, _verdict(record)) if p)
     pointer = one_line(f"t{record.id} \u00b7 {head} \u00b7 {next_line(record, boundary, flow.limits)}")[:Caps.LINE]
     interview = INTERVIEW_SENTENCE if record.stage == "new" and ("decisions.md", None) not in record.filed else ""

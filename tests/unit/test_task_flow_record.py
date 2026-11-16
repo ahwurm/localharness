@@ -1748,7 +1748,7 @@ async def test_note_follows_the_run_stage_to_the_step_and_the_done_stage_to_done
     await flow.run("step")
     assert flow.note().split("\n")[0] == "t1 · run unreviewed · next: run · step 1 panel"
     flow.record.stage = "done"
-    assert flow.note().split("\n")[0] == "t1 · done pass · next: done"
+    assert flow.note().split("\n")[0] == f"t1 · done · {runner.FOLLOW_UP}"
 
 
 def test_note_the_executors_provider_is_the_child_sentence_and_a_header_within_the_line_cap():
