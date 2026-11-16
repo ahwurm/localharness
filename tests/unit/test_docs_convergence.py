@@ -1487,13 +1487,14 @@ def test_phone_task_doc_bites():
 
 
 STUCK_RULE_NEEDLES = (
-    "A turn stops as stuck when the same call returns, byte for byte, a result the model still holds in its request",
-    "output that keeps changing is never a repeat",
+    "A call repeats when it returns, byte for byte, a result it already returned this turn that the model still holds in its request",
+    "A result it returned before returning a different one (a cycle) counts whatever writes came between",
+    "output that never repeats is never caught",
     "is bounded by the action budget, the turn time limit and you")
 
 
 def check_stuck_rule_doc(security_text: str) -> list[str]:
-    """SECURITY.md's prompt-injection section says the stuck rule stops only an exact repeat of a held result and what bounds everything else."""
+    """SECURITY.md's prompt-injection section says the stuck rule stops only an exact repeat of a held result, a cycle whatever the writes, and what bounds everything else."""
     body = " ".join((section(security_text, "## Threat model: prompt injection") or "").split())
     return [f"SECURITY.md's prompt-injection section does not say {n}" for n in STUCK_RULE_NEEDLES if n not in body]
 
