@@ -1272,10 +1272,11 @@ ordinary tools, and those bytes sit behind a severity gate instead of the floor.
 agent (or a subagent it dispatches while in that state) reads a saved page, destructive shell
 (inside the project too), inline interpreters, `python_exec`, running a file it wrote since, and
 writes outside the project ask in every mode, with the page named in the ask. Stored "always"
-answers do not cover them, and an "always" for code covers that exact code until `/clear` or a new
-session. Reading, writing and editing inside the project, a redirect into it and a listing stay
-silent. Only `web_fetch` writes the folder, and running a file from it asks every time, with no
-"always", whether or not the agent has read a page.
+answers do not cover them. An "always" on one that offers it trusts saved pages for the rest of the
+session (the ask says so): no agent is marked by a saved page from then on, so your mode alone
+decides what you are asked, and `/clear` does not undo it. Reading, writing and editing inside the
+project, a redirect into it and a listing stay silent. Only `web_fetch` writes the folder, and
+running a file from it asks every time, with no "always", whether or not the agent has read a page.
 
 The separation is on by default. Only your machine-level config can turn it off
 (`org.enforce_capability_floor: false`); a project's value for that setting is ignored, with a

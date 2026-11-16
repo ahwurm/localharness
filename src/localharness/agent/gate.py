@@ -580,8 +580,7 @@ class PermissionGate:
     def context(self, deny: Optional[DenyFn] = None, agent_id: Optional[str] = None) -> GateContext:
         """The :class:`GateContext` for one call, gathered from this session's state."""
         marks = {} if agent_id is None else dict(
-            tainted_by=self.taint.source(agent_id), written=partial(self.taint.written, agent_id),
-            content_grants=self.taint.grants(agent_id))
+            tainted_by=self.taint.source(agent_id), written=partial(self.taint.written, agent_id))
         return GateContext(
             boundary=self.boundary,
             workspace=self.workspace,
@@ -1009,7 +1008,7 @@ class PermissionGate:
             marked = self.taint.source(request.agent_id) is not None
             for klass, key in request.grant_keys or ((request.klass, request.key),):
                 if marked and klass in TAINTED_ASK_CLASSES:
-                    self.taint.grant(request.agent_id, key)
+                    self.taint.trust()
                     continue
                 self.grants.add(
                     new_grant(

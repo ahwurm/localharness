@@ -8,6 +8,7 @@ from localharness.agent.gate import PermissionGate
 from localharness.agent.gate_types import Decision
 from localharness.agent.loop import AgentLoop
 from localharness.agent.permissions import PermissionEvaluator
+from localharness.agent.verdict import SAVED_PAGES_ALWAYS
 from localharness.config.grants import GrantStore
 from localharness.config.models import AgentConfig
 from localharness.core.events import PermissionAsked, PermissionStaged
@@ -70,8 +71,8 @@ async def test_the_work_on_saved_pages_is_silent_and_the_same_code_asks_once(bus
     assert (ws / "summary.md").read_text() == "final\nmore\n"
     assert not bus.history(event_types=[PermissionAsked]) and not bus.history(event_types=[PermissionStaged])
 
-    gate.set_mode("guarded")
+    gate.set_mode("trusted")
     await root(*(_call(i, "python_exec", code="print(6 * 7)") for i in (7, 8, 9)))
     assert len(bus.history(event_types=[PermissionAsked])) == 1
-    assert len(answers) == 1 and answers[0].display.endswith("(p1.txt and 2 more).")
+    assert len(answers) == 1 and answers[0].display.endswith(f"(p1.txt and 2 more).{SAVED_PAGES_ALWAYS}")
     assert not bus.history(event_types=[PermissionStaged])

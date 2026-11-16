@@ -46,18 +46,23 @@ def content_key(data: str | bytes) -> str:
 class _State:
     sources: dict[str, None] = field(default_factory=dict)
     written: dict[str, str] = field(default_factory=dict)
-    grants: set[str] = field(default_factory=set)
 
 
 class Taint:
-    """Per agent: the saved pages it has read, the files it wrote since, and the exact-content grants given meanwhile."""
+    """Per agent: the saved pages it has read and the files it wrote since; nothing once the person trusts saved pages."""
 
     def __init__(self) -> None:
         self._agents: dict[str, _State] = {}
+        self.trusted = False
+
+    def trust(self) -> None:
+        """The person's "always" on a saved-page ask: saved pages stop marking anyone for the rest of the session."""
+        self.trusted = True
+        self._agents.clear()
 
     def note_read(self, agent_id: str, tool_name: str, paths: Iterable[Path | str]) -> bool:
         hits = [Path(p).name for p in paths if under_downloads(p)]
-        if not hits:
+        if not hits or self.trusted:
             return False
         self._agents.setdefault(agent_id, _State()).sources.update(dict.fromkeys(hits))
         log.debug("%s read saved pages through %s: %s", agent_id, tool_name, hits)
@@ -84,14 +89,6 @@ class Taint:
     def written(self, agent_id: str, path: Path | str) -> Optional[str]:
         state = self._agents.get(agent_id)
         return state.written.get(os.path.realpath(path)) if state else None
-
-    def grant(self, agent_id: str, key: str) -> None:
-        if (state := self._agents.get(agent_id)) is not None:
-            state.grants.add(key)
-
-    def grants(self, agent_id: str) -> frozenset[str]:
-        state = self._agents.get(agent_id)
-        return frozenset(state.grants) if state else frozenset()
 
     def inherit(self, parent: str, child: str) -> None:
         if (state := self._agents.get(parent)) is not None:

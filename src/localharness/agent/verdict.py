@@ -229,6 +229,7 @@ DOWNLOADS_WRITE_REASON = (
     "re-fetch with save_to, or edit a copy in the workspace")
 DOWNLOAD_EXEC_DETAIL = "runs a file saved from the web"
 SAVED_PAGES_NOTE = " — the agent has read pages saved from the web ({source})."
+SAVED_PAGES_ALWAYS = ' "Always" trusts saved pages for the rest of this session.'
 WRITTEN_FILE_REASON = "runs a file the agent wrote after reading pages saved from the web ({path})"
 
 MISSING_TARGET_DISPLAY = "<no path argument>"
@@ -402,8 +403,6 @@ class GateContext:
     config folders the gate knows are always guarded."""
     tainted_by: Optional[str] = None
     """The saved page(s) the calling agent has read, as the ask line names them; None when it has read none."""
-    content_grants: frozenset[str] = frozenset()
-    """Exact-content "always" answers given while `tainted_by` is set; the only grants a severe ask honours."""
     written: Optional[Callable[[Path], Optional[str]]] = None
     """The digest of a file the calling agent wrote since it read saved pages, or None."""
 
@@ -918,7 +917,7 @@ def _granted(ctx: GateContext, klass: str, key: str) -> bool:
     whole verdict rather than in each branch that remembered to check.
     """
     if _severe(ctx, klass, ""):
-        return key in ctx.content_grants
+        return False
     if ctx.mode in MODES_WITHOUT_GRANTS:
         return False
     return ctx.grants(ctx.workspace, klass, key) is not None
@@ -1011,7 +1010,7 @@ def _decide(
     body = "; ".join(f"{klass} — {text}" for klass, text in groups)
     display = f"{tool_name}: {_truncate(salient)}  ({body})" if salient else f"{tool_name}  ({body})"
     if ctx.tainted_by is not None and any(a.klass in TAINTED_ASK_CLASSES for a in ordered):
-        note = SAVED_PAGES_NOTE.format(source=ctx.tainted_by)
+        note = SAVED_PAGES_NOTE.format(source=ctx.tainted_by) + (SAVED_PAGES_ALWAYS if grantable else "")
         reason, display = reason + note, display + note
     return VerdictResult(
         verdict=Verdict.ASK,

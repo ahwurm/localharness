@@ -21,6 +21,7 @@ from localharness.agent.taint import Taint, content_key
 from localharness.agent.verdict import (
     DOWNLOAD_EXEC_DETAIL,
     DOWNLOADS_WRITE_REASON,
+    SAVED_PAGES_ALWAYS,
     SAVED_PAGES_NOTE,
     WRITTEN_FILE_REASON,
     GateContext,
@@ -180,26 +181,23 @@ async def test_rm_rf_build_runs_in_auto_until_the_agent_reads_a_saved_page(make)
     assert parked.rendering.endswith(f" — {NOTE} (a.md).") and not asker.calls
 
 
-async def test_python_inline_asks_once_then_always_covers_that_exact_code_until_the_state_clears(make):
+async def test_always_on_a_saved_page_ask_trusts_saved_pages_for_the_rest_of_the_session(make):
     asker = Asker("allow_always")
     r = await make("guarded", asker=asker)
     await r.read("a.md")
     await r.run(sh("python -c 'print(1)'"))
     assert len(asker.calls) == 1 and r.shell.ran == ["python -c 'print(1)'"]
-    assert asker.calls[0].display.endswith(f" — {NOTE} (a.md).")
+    assert asker.calls[0].display.endswith(f" — {NOTE} (a.md).{SAVED_PAGES_ALWAYS}")
     signature = classify_shell("python -c 'print(1)'", GateSettings()).segments[0].signature
     assert r.gate.grants.lookup(r.ws, "interpreter-inline", signature) is None
-    assert r.gate.taint.grants(AGENT), "the answer is kept on the gate's mark"
-
-    await r.run(sh("python -c 'print(1)'"))
-    assert len(asker.calls) == 1, "the identical call ran without asking"
-    await r.run(sh("python -c 'print(2)'"))
-    assert len(asker.calls) == 2, "different code asks again"
+    assert r.gate.taint.trusted and r.marked() is None
 
     r.gate.reset_context_state()
     r.gate.set_mode("auto")
-    await r.run(sh("python -c 'print(3)'"))
-    assert len(asker.calls) == 2 and r.shell.ran[-1] == "python -c 'print(3)'"
+    await r.read("b.md")
+    assert r.marked() is None, "a page saved later marks no one"
+    await r.run(sh("python -c 'print(2)'"))
+    assert len(asker.calls) == 1 and r.shell.ran[-1] == "python -c 'print(2)'"
 
 
 async def test_a_stored_grant_does_not_cover_inline_code_while_marked(make):
@@ -458,11 +456,14 @@ def test_the_taint_object_counts_distinct_sources():
     assert not taint.note_read("a", "read", [Path("/p/notes.md")])
     taint.note_read("a", "read", [Path("/p/.localharness/downloads/x.md")])
     assert taint.source("a") == "x.md"
-    taint.grant("a", "k")
     taint.inherit("a", "b")
-    assert taint.source("b") == "x.md" and taint.grants("b") == frozenset()
+    assert taint.source("b") == "x.md"
     taint.end("a")
-    assert taint.source("a") is None and taint.grants("a") == frozenset()
+    assert taint.source("a") is None and taint.source("b") == "x.md"
+    taint.trust()
+    assert taint.trusted and taint.source("b") is None
+    assert not taint.note_read("b", "read", [Path("/p/.localharness/downloads/y.md")])
+    assert taint.source("b") is None
 
 
 def test_no_ask_refusal_or_reason_says_taint(tmp_path):

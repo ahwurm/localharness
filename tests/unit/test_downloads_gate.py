@@ -11,6 +11,7 @@ from localharness.agent.gate_types import Decision, GateSettings, ToolMeta, Verd
 from localharness.agent.verdict import (
     DOWNLOAD_EXEC_DETAIL,
     DOWNLOADS_WRITE_REASON,
+    SAVED_PAGES_ALWAYS,
     GateContext,
     evaluate,
 )
@@ -153,7 +154,7 @@ def test_an_inline_interpreter_asks_in_every_mode_when_marked(proj, mode):
         Verdict.ASK if mode == "guarded" else Verdict.ALLOW)
     marked = shell("python -c 'print(1)'", ctx(proj, mode, tainted_by="a.md"))
     assert marked.verdict is Verdict.ASK and marked.request.klass == "interpreter-inline"
-    assert marked.request.display.endswith(SAVED_NOTE)
+    assert marked.request.display.endswith(SAVED_NOTE + SAVED_PAGES_ALWAYS)
 
 
 @pytest.mark.parametrize("mode", MODES)
