@@ -1489,14 +1489,17 @@ def test_phone_task_doc_bites():
 STUCK_RULE_NEEDLES = (
     "A call repeats when it returns, byte for byte, a result it already returned this turn that the model still holds in its request",
     "A result it returned before returning a different one (a cycle) counts whatever writes came between",
-    "output that never repeats is never caught",
-    "is bounded by the action budget, the turn time limit and you")
+    "output that never repeats is never caught: a web page, an MCP server or a plugin tool whose output varies can now keep a loop going",
+    "An interactive terminal or Zed session has no default action or time limit",
+    "`channels.unattended_max_actions` is the only default cap, for sessions with no local operator",
+    "it stops only exact repeats and cycles and does not bound a loop whose output keeps changing")
+_STUCK_RULE_SECTIONS = ("## Threat model: prompt injection", "### A paired phone or Discord account")
 
 
 def check_stuck_rule_doc(security_text: str) -> list[str]:
-    """SECURITY.md's prompt-injection section says the stuck rule stops only an exact repeat of a held result, a cycle whatever the writes, and what bounds everything else."""
-    body = " ".join((section(security_text, "## Threat model: prompt injection") or "").split())
-    return [f"SECURITY.md's prompt-injection section does not say {n}" for n in STUCK_RULE_NEEDLES if n not in body]
+    """SECURITY.md says the stuck rule stops only exact repeats of a held result and cycles, what it cannot bound, and what does."""
+    body = " ".join(" ".join(section(security_text, h) or "" for h in _STUCK_RULE_SECTIONS).split())
+    return [f"SECURITY.md's stuck-rule text does not say {n}" for n in STUCK_RULE_NEEDLES if n not in body]
 
 
 def test_stuck_rule_doc_live():
@@ -1506,7 +1509,7 @@ def test_stuck_rule_doc_live():
 def test_stuck_rule_doc_bites():
     text = _read("SECURITY.md")
     for needle in STUCK_RULE_NEEDLES:
-        assert check_stuck_rule_doc(_swap(text, needle, "x")) == [f"SECURITY.md's prompt-injection section does not say {needle}"]
+        assert check_stuck_rule_doc(_swap(text, needle, "x")) == [f"SECURITY.md's stuck-rule text does not say {needle}"]
     assert len(check_stuck_rule_doc("## Nothing\n")) == len(STUCK_RULE_NEEDLES)
 
 
