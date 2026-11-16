@@ -4,6 +4,29 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.28.0] — 2026-11-16
+
+**The stuck rule reads the chat: a repeat is a result the model already has.** A call that returns what the model still holds this turn comes back as a one-line pointer instead of the whole text, and asking again after that stops the turn. A scroll that moved the page, or a check that changed or stayed the same after an edit, is never counted, and the old window, thresholds and per-tool rules are gone. A stopped turn says so in plain words, and a stopped helper or reviewer no longer prints an error over a reply that succeeded.
+
+### Changed
+- **stuck detection** — a tool result the model still holds from the same call this turn reaches it as `[same result as your identical call N tool results above]`, and the same call repeating after that stops the turn. A check that returns what it returned last time after an edit is never counted; a call cycling back to a result it already returned gets the pointer too, whatever edits came between, but only the same result again with nothing changed stops the turn. The 9-identical-call cap is gone, so a count that changes after each edit is no longer stopped midway. Replayed over 1,646 logged turns: no false fires (9 before) and 143 real repeats caught (98 before).
+- **a stopped turn** reads `Stopped: it kept repeating a call — its partial work follows`, with the repeated tool below it, then the partial work. A stopped helper's receipt reads `— stopped early — <why>` and its parent is told `SUBAGENT RUN STOPPED`; a reviewer cut short is noted in `/task show reply`, not on screen; the phone sends one push for a stopped turn.
+- **an unchanged page keeps its `fetch_id`** when `web_fetch`, `browser_fetch` or a browser snapshot fetches it again.
+
+### Removed
+- **the `stuck_detector` and `recovery_injection` settings** — a config that still sets them loads with one notice naming them.
+
+### Fixed
+- A web-researcher scrolling a long page was stopped as stuck while every scroll moved the page.
+- The stuck warning printed a second time onto the terminal, and a stopped helper's receipt said `completed`.
+- A raw `UserWarning … unknown tool 'skill'` printed on every reviewed reply.
+
+### Known limitations
+- A loop whose output never repeats (a ticking clock, a feed, or a page or MCP server whose output keeps changing) is not stopped by this rule: in an interactive session it runs until you press Ctrl-C, use the kill file or set `max_actions` or `max_duration_minutes`; `channels.unattended_max_actions` caps unattended sessions.
+- Polling inside one shell command (`for i in …; do …; sleep …; done`) repeats no call and is not seen.
+- An edit made through the shell (`sed -i`) does not count as an edit, so an unchanged check after one counts as a repeat. A check that keeps landing on earlier values after edits gets the pointer each time but is never stopped, so a loop that never converges runs until you stop it.
+- Repeats whose results differ only by page noise (a rotating sidebar, character-count jitter) are not caught.
+
 ## [0.27.7] — 2026-11-04
 
 **Web pages reach your files whole, and a skill says how its work is checked.** A helper can save a page whole into the project instead of retelling it, `browser_fetch` scrolls until a page stops loading more, an agent that has read a saved page asks before it runs or deletes anything, and a skill's `review:` block picks the critics that check work done under it, pointed at the files rather than the reply.
