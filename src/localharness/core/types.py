@@ -1,5 +1,6 @@
 """Shared primitive types used across all LocalHarness components."""
 import hashlib
+import json
 from dataclasses import dataclass
 from typing import Any, Literal, NewType, NotRequired, TypedDict
 
@@ -58,8 +59,15 @@ class ToolProvenance(TypedDict):
 # ``ToolProvenance`` (tool messages); readers test the key they need, never the shape.
 
 
+def compute_signature(tool_name: str, args: Any) -> str:
+    """The call-only signature of a tool name and its arguments."""
+    canonical = f"{tool_name}:{json.dumps(args, sort_keys=True, separators=(',', ':'))}"
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
 def result_digest(text: str) -> str:
-    return hashlib.sha256(text.encode()).hexdigest()[:16]
+    """128 bits: a server writing both results could forge a 64-bit "same result" in about 2^32 tries."""
+    return hashlib.sha256(text.encode()).hexdigest()[:32]
 
 
 def human_message(content: Content, subtype: str = "request", turn: int | None = None) -> Message:

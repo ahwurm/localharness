@@ -337,16 +337,23 @@ class ToolRegistry:
         is "safe" only when EVERY tool bearing it declares "safe"; any dangerous bearer, or a name no
         registered tool answers to, fails closed (dangerous). Read by the context manager to decide
         whether a superseded failure may leave the request view."""
-        tools = self._tools_named(name) or self._tools_named(_bare_name(name))
+        tools = self._bearers(name)
         if not tools:
             return "dangerous"
         return "safe" if all(t.info().host == "safe" for t in tools) else "dangerous"
 
+    def knows(self, name: str) -> bool:
+        """Whether a registered tool answers to `name`, resolved as `gate_family` and `host` resolve it."""
+        return bool(self._bearers(name))
+
     def gate_family(self, name: str) -> GateFamily | None:
         """The one family every bearer of `name` declares; None when unknown, undeclared or disagreeing."""
-        tools = self._tools_named(name) or self._tools_named(_bare_name(name))
-        families = {t.info().gate_family for t in tools}
+        families = {t.info().gate_family for t in self._bearers(name)}
         return families.pop() if len(families) == 1 else None
+
+    def _bearers(self, name: str) -> list[ToolProtocol]:
+        """The tools answering to `name`, or else to its bare TOOL form (`mcp:TOOL`, `plugin:PLUGIN.TOOL`)."""
+        return self._tools_named(name) or self._tools_named(_bare_name(name))
 
     def _find_tool_by_name(self, name: str) -> ToolProtocol | None:
         for bucket in [

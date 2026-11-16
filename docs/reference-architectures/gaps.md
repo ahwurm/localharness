@@ -134,13 +134,13 @@ ever serves less. `preserve_first/last_n_messages` defaults similarly assume a r
 ## §8 Deep-context prefill latency (architecture B)
 
 Prefill at 48–64k prompt depth is compute-bound on the M4 and can take minutes cold —
-indistinguishable from a hang to the stuck-detector, and timeout material under §1.
+timeout material under §1. The stuck rule has no thresholds now: it reads repeated results, never time.
 Prefix caching (default in vllm-metal and llama-server) makes it once-per-session, but
 the first deep turn and any cache eviction still pay it.
 
 - **Document:** measure TTFT at 8k/32k/64k in the B validation checklist.
-- **Fix:** per-architecture stuck-detector thresholds; treat slow first token at depth
-  as prefill, not stall; surface prefill progress where the runtime exposes it.
+- **Fix:** treat slow first token at depth as prefill, not stall; surface prefill progress
+  where the runtime exposes it.
 
 ## §9 Bench matrix assumes architecture A
 

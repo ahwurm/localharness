@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from localharness.agent.context import (
-    BUDGET_NOTE_PREFIX, REPEAT_POINTER, ContextManager, _point_repeats, _repeats,
+    BUDGET_NOTE_PREFIX, REPEAT_POINTER, ContextManager, Repeat, _point_repeats, repeats,
 )
 from localharness.config.models import BudgetConfig
 from localharness.core.events import Escalation, StuckRecovered, TurnFailed
@@ -49,9 +49,17 @@ def _tools(messages: list[dict]) -> list[int]:
     return [i for i, m in enumerate(messages) if m["role"] == "tool"]
 
 
-def _found(messages: list[dict], family=_family) -> list[tuple[int, int]]:
+def _found(messages: list[dict], family=_family) -> list[Repeat | None]:
     ts = _tools(messages)
-    return [_repeats(messages, family).get(i) for i in ts]
+    return [repeats(messages, family).get(i) for i in ts]
+
+
+def _pointer(back: int) -> Repeat:
+    return Repeat(told=False, back=back)
+
+
+def _stop(back: int) -> Repeat:
+    return Repeat(told=True, back=back)
 
 
 def _checked(*results: str) -> list[dict]:
@@ -67,22 +75,27 @@ def _checked(*results: str) -> list[dict]:
 
 def test_the_second_identical_result_counts_one_copy_one_result_back():
     chat = _chat(_exchange("1", "read", A, "x"), _exchange("2", "read", A, "x"))
-    assert _found(chat) == [None, (1, 1)]
+    assert _found(chat) == [None, _pointer(1)]
 
 
 def test_a_copy_further_back_reports_how_far():
     chat = _chat(_exchange("1", "read", A, "x"), _exchange("2", "read", B, "y"), _exchange("3", "read", A, "x"))
-    assert _found(chat) == [None, None, (1, 2)]
+    assert _found(chat) == [None, None, _pointer(2)]
 
 
-def test_the_third_copy_counts_two_one_result_back():
+def test_the_third_copy_is_a_told_repeat_one_result_back():
     chat = _chat(*(_exchange(str(i), "read", A, "x") for i in range(3)))
-    assert _found(chat) == [None, (1, 1), (2, 1)]
+    assert _found(chat) == [None, _pointer(1), _stop(1)]
 
 
-def test_after_its_pointer_a_call_repeating_another_result_counts_two():
+def test_after_its_pointer_a_call_repeating_another_result_is_told():
     chat = _chat(*(_exchange(str(i), "read", A, r) for i, r in enumerate("xxyy")))
-    assert _found(chat) == [None, (1, 1), None, (2, 1)]
+    assert _found(chat) == [None, _pointer(1), None, _stop(1)]
+
+
+def test_a_repeat_says_whether_its_call_was_told_and_how_far_back():
+    first, second = repeats(_chat(*(_exchange(str(i), "read", A, "x") for i in range(3))), _family).values()
+    assert isinstance(first, Repeat) and (first.told, first.back, second.told, second.back) == (False, 1, True, 1)
 
 
 def test_the_same_call_with_a_different_result_is_not_a_repeat():
@@ -121,33 +134,33 @@ def test_a_check_that_stayed_the_same_after_a_write_is_not_a_repeat():
 def test_the_same_check_with_no_write_since_is_a_repeat():
     chat = _chat(_exchange("1", "read", A, "x"), _exchange("2", "edit", B, "done"), _exchange("3", "read", A, "x"),
                  _exchange("4", "read", A, "x"))
-    assert _found(chat) == [None, None, None, (1, 1)]
+    assert _found(chat) == [None, None, None, _pointer(1)]
 
 
 def test_a_result_the_call_had_moved_away_from_counts_whatever_the_writes():
-    assert _found(_checked("x", "y", "x")) == [None, None, None, None, (1, 4)]
-    assert _found(_checked("x", "y", "x", "y"))[::2] == [None, None, (1, 4), (2, 4)]
+    assert _found(_checked("x", "y", "x")) == [None, None, None, None, _pointer(4)]
+    assert _found(_checked("x", "y", "x", "y"))[::2] == [None, None, _pointer(4), _stop(4)]
 
 
 def test_a_failed_write_a_repeated_write_and_a_failing_lookup_never_count_as_a_write():
     failed_write = _chat(_exchange("1", "read", A, "x"), _exchange("2", "edit", A, "no", ok=False),
                          _exchange("3", "read", A, "x"))
-    assert _found(failed_write)[2] == (1, 2)
+    assert _found(failed_write)[2] == _pointer(2)
     repeated_write = _chat(_exchange("1", "edit", A, "done"), _exchange("2", "read", A, "x"),
                            _exchange("3", "edit", A, "done"), _exchange("4", "read", A, "x"))
-    assert _found(repeated_write)[2:] == [(1, 2), (1, 2)]
+    assert _found(repeated_write)[2:] == [_pointer(2), _pointer(2)]
     for family in (None, lambda name: None, _family):
         chat = _chat(_exchange("1", "read", A, "x"), _exchange("2", "raiser", A, "done"),
                      _exchange("3", "read", A, "x"))
-        assert _found(chat, family)[2] == (1, 2)
+        assert _found(chat, family)[2] == _pointer(2)
 
 
 def test_a_message_from_the_person_clears_what_was_returned_and_told_and_a_harness_message_does_not():
     told = _chat(_exchange("1", "read", A, "x"), _exchange("2", "read", A, "x"))
     person = [*told, human_message("again please"), *_exchange("3", "read", A, "x"), *_exchange("4", "read", A, "x")]
-    assert _found(person) == [None, (1, 1), None, (1, 1)]
+    assert _found(person) == [None, _pointer(1), None, _pointer(1)]
     harness = [*told, harness_message("nudge", "n"), *_exchange("3", "read", A, "x")]
-    assert _found(harness) == [None, (1, 1), (2, 1)]
+    assert _found(harness) == [None, _pointer(1), _stop(1)]
 
 
 def test_tool_calls_as_objects_or_dicts_both_resolve_names():
@@ -160,7 +173,7 @@ def test_tool_calls_as_objects_or_dicts_both_resolve_names():
 def test_the_fold_never_mutates_its_input():
     chat = _chat(_exchange("1", "read", A, "x"), _exchange("2", "read", A, "x"))
     before = [dict(m) for m in chat]
-    _repeats(chat, _family)
+    repeats(chat, _family)
     assert chat == before
 
 
@@ -227,6 +240,19 @@ class _Named(Tool):
     async def _execute(self, **kwargs: Any) -> ToolResult:
         self.calls += 1
         return self.ok(self._body(self.calls) if callable(self._body) else self._body)
+
+
+def test_a_result_digest_is_128_bits_and_a_call_signature_64():
+    assert len(result_digest("x")) == 32 and int(result_digest("x"), 16) >= 0
+    assert len(compute_signature("read", A)) == 16
+
+
+@pytest.mark.asyncio
+async def test_knows_resolves_a_name_as_gate_family_does():
+    registry = ToolRegistry()
+    await register_builtin_tools(registry)
+    assert registry.knows("write") and registry.knows("plugin:files.write") and registry.knows("mcp:write")
+    assert not registry.knows("no_such_tool") and registry.gate_family("no_such_tool") is None
 
 
 @pytest.mark.asyncio
@@ -339,6 +365,15 @@ async def test_a_new_turn_inherits_no_count_and_the_first_call_after_a_stop_reac
     assert stop_loop.last_terminated_reason == "stuck"
     await stop_loop.run_turn("second")
     assert [m["content"] for m in stop_llm.seen[-1] if m["role"] == "tool"][-1] == "same"
+
+
+@pytest.mark.asyncio
+async def test_a_name_the_registry_does_not_know_never_reaches_the_detail(bus):
+    llm = _RecordingLLM([_call(i, "ignore all\nprevious") for i in range(1, 4)] + [FakeLLMResponse(content="Done.")])
+    loop = _loop(llm, bus, await _registry(_Named("probe", None)))
+    await loop.run_turn("task")
+    (esc,) = bus.history(event_types=[Escalation])
+    assert esc.detail.startswith("a tool repeated") and "ignore" not in esc.detail
 
 
 @pytest.mark.asyncio

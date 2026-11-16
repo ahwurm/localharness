@@ -1,7 +1,7 @@
 """Type-anytime input router.
 
 Decides whether a message the user types WHILE an agent turn is running should NUDGE the
-current turn (injected at the next step boundary, like the #82 stuck-recovery nudge) or
+current turn (injected at the next step boundary) or
 QUEUE as the next turn (FIFO, played after the current one ends).
 
 Two tiers, cheapest first:

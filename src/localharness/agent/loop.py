@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
-import hashlib
 import inspect
 import json
 import logging
@@ -33,6 +32,7 @@ from localharness.core.types import (
     Message,
     ToolOutcome,
     ToolProvenance,
+    compute_signature,
     harness_message,
     human_message,
     is_harness_message,
@@ -44,7 +44,7 @@ from localharness.core.fence import fence_project_text
 from localharness.agent.context import (
     APPROX_CHARS_PER_TOKEN, fixed_tokens, floor_schemas, harness_floor, response_reserve)
 from localharness.agent.context import (
-    BUDGET_NOTE_PREFIX, ActiveReferenceError, ActiveReferenceOverflow, _repeats,
+    BUDGET_NOTE_PREFIX, ActiveReferenceError, ActiveReferenceOverflow, repeats,
 )
 from localharness.plugins.api import ContextBudget
 from localharness.tools.capabilities import CoResidenceError
@@ -172,12 +172,6 @@ class Session:
     def budget_minutes(self) -> float:
         """Elapsed minutes less the seconds a caller excluded; read only by the time-budget comparison."""
         return (self.elapsed_seconds() - self.excluded_seconds) / 60.0
-
-
-def compute_signature(tool_name: str, args: Any) -> str:
-    """The call-only signature of a tool name and its arguments (16 hex characters)."""
-    canonical = f"{tool_name}:{json.dumps(args, sort_keys=True, separators=(',', ':'))}"
-    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
 def _tool_message(
@@ -976,8 +970,7 @@ _REPETITION_SAMPLE_CHARS = 200
 
 # #77: fed back (tool-role) when a completion is cut at the output-token ceiling
 # mid-tool-call. Names the cause AND the remedy so the model retries INFORMED instead of
-# re-emitting the identical truncated call (the live 2M-token turn: same write retried 4×,
-# stuck detector firing on the symptom).
+# re-emitting the identical truncated call (the live 2M-token turn: same write retried 4×).
 _TRUNCATED_TOOL_CALL_FEEDBACK = (
     "Your last response was cut off by the output-token limit mid-tool-call; nothing was "
     "executed. Produce the file in smaller pieces (multiple write/edit calls) or shorten "
@@ -1253,9 +1246,8 @@ class AgentLoop:
         from localharness.config.paths import resolve_config_dir
         self._config_dir = resolve_config_dir(config_dir)
         # Type-anytime input box: user-typed nudges routed to the CURRENT turn land here and
-        # are drained into durable session history at the next step boundary (same #82 seam as
-        # the stuck-recovery nudge). A one-loop, cooperative-async inbox — the REPL coroutine
-        # appends, the turn coroutine drains; no lock needed. Distinct from the stuck detector.
+        # are drained into durable session history at the next step boundary. A one-loop,
+        # cooperative-async inbox — the REPL coroutine appends, the turn coroutine drains; no lock needed.
         self._user_nudge_inbox: list[tuple[str, str]] = []
         # Prior-session context (compact.md) is FOLDED into the single leading system message,
         # never appended as a second system message — strict chat templates reject a non-leading
@@ -1635,7 +1627,6 @@ class AgentLoop:
     def push_user_nudge(self, text: str, subtype: str = "request") -> None:
         """Queue a nudge for the running turn's next step boundary (FIFO, no-op on blank).
 
-        A distinct source from the stuck detector: it never touches max_nudges_per_turn.
         `/approve` reuses it (owner ruling 2026-09-12), so an approval is a sentence the
         model reads at the next step boundary, not a second path into tool dispatch."""
         text = (text or "").strip()
@@ -2064,8 +2055,7 @@ class AgentLoop:
             )
 
             # 0. Type-anytime user nudges: drain the inbox at this step boundary into durable
-            # session history (#82 seam), so this iteration's build_messages replays them. A
-            # distinct source from the stuck detector — deliberately outside its accounting.
+            # session history (#82 seam), so this iteration's build_messages replays them.
             while self._user_nudge_inbox:
                 nudge, nudge_subtype = self._user_nudge_inbox.pop(0)
                 session.push(human_message(nudge, nudge_subtype, turn=self.turn))
@@ -2143,9 +2133,6 @@ class AgentLoop:
             ))
 
             # 5. LLM call with error handling
-            # (The stuck-recovery nudge is no longer injected here transiently — it is pushed
-            # straight into session.messages at RECOVERING time [#82], so it is durable history
-            # and every subsequent build_messages replays it, not just the next one.)
             tool_call_mode = getattr(
                 getattr(self._llm, "config", None), "tool_call_mode", "native"
             )
@@ -2658,9 +2645,8 @@ class AgentLoop:
                 # Baton gate (#84): a tool-less reply whose CLOSING move announces further work
                 # ("Now let me read X…") instead of doing it would otherwise be accepted verbatim
                 # as the final answer — the act-guard only arms at zero actions, so an
-                # announce-AFTER-work reply slips through. Nudge (persisted into history the same
-                # way the stuck-recovery nudges are, so the model sees it), then
-                # continue. Bounded by baton_gate.max_nudges per turn (default 1, i.e. the
+                # announce-AFTER-work reply slips through. Nudge (persisted into history, so the
+                # model sees it), then continue. Bounded by baton_gate.max_nudges per turn (default 1, i.e. the
                 # original #84 behavior): once every nudge is spent, a further announced
                 # intention is accepted (no loop). The nudge CONTENT escalates with the count
                 # (_baton_nudge_message) — the count itself does not.
@@ -2831,9 +2817,8 @@ class AgentLoop:
                 # not an action the agent took: it never ran, so it must not spend the task's
                 # action budget, must not appear in the "completed N tool calls" line, and must
                 # not push the turn toward max_actions — which is exactly what the dispatch-cap
-                # comment above already promises for a budget refusal. The stuck detector still
-                # sees every refusal, so a model that keeps retrying a disallowed call is still
-                # caught by the stuck ladder.
+                # comment above already promises for a budget refusal. The stuck rule still reads
+                # every refusal, so a model that keeps retrying a disallowed call is still stopped.
                 session.actions_taken += 1
                 self._mark_instruction_calls(tool_call)
 
@@ -2909,29 +2894,31 @@ class AgentLoop:
             # next request as a pointer (the notice); its next repeat stops the turn.
             view = [*request_messages, *session.messages[sent:]]
             called = {c.id: c for c in tool_calls}
-            repeats = [
-                (i, copies, called[view[i].get("tool_call_id")])
-                for i, (copies, _) in sorted(_repeats(view, self._gate_family).items())
+            found = [
+                (i, repeat, called[view[i].get("tool_call_id")])
+                for i, repeat in sorted(repeats(view, self._gate_family).items())
                 if i >= len(request_messages) and view[i].get("tool_call_id") in called
             ]
-            for i, copies, _ in repeats:
-                if copies == 1:
+            for i, repeat, _ in found:
+                if not repeat.told:
                     await self._bus.publish(StuckRecovered(
                         agent_id=session.agent_id,
                         session_id=session.session_id,
                         iteration=session.iteration,
                         stuck_signature=view[i]["_lh"]["outcome"]["call"],
                     ))
-            stuck = next(((i, call) for i, copies, call in repeats if copies >= 2), None)
+            stuck = next(((i, call) for i, repeat, call in found if repeat.told), None)
             if stuck is not None:
                 i, call = stuck
                 session.terminated_reason = "stuck"
-                tool = " ".join(call.name.split())[:64]
+                # A name the registry does not hold is the model's own text; it never reaches the person.
+                known = getattr(self._tools, "knows", None)
+                tool = f"`{' '.join(call.name.split())[:64]}`" if known is not None and known(call.name) else "a tool"
                 await self._bus.publish(Escalation(
                     agent_id=session.agent_id,
                     session_id=session.session_id,
                     reason="stuck_detected",
-                    detail=(f"`{tool}` repeated a result it had already returned this turn, "
+                    detail=(f"{tool} repeated a result it had already returned this turn, "
                             f"after being told so (iteration {session.iteration})"),
                     stuck_signature=view[i]["_lh"]["outcome"]["call"],
                     iteration_at_escalation=session.iteration,
@@ -3518,8 +3505,7 @@ class AgentLoop:
 
         The step is the turn in progress while it runs (IN-55): a child dispatched from it reads
         this loop's live remainder through `remaining_budget()`, as it would from `run_turn`, and
-        the previous value comes back afterwards. It keeps no stuck window: one iteration has
-        nothing to compare, so the stuck ladder and the call-only ceiling belong to `run_turn`."""
+        the previous value comes back afterwards. The stuck rule belongs to `run_turn`."""
         previous = self._live_turn
         try:
             return await self._step(session, on_token)
