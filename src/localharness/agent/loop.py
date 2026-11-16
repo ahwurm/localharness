@@ -27,7 +27,7 @@ from localharness.agent.gate import (
 )
 from localharness.agent.gate_types import GateOutcome, ToolMeta
 from localharness.agent.taint import DISPATCHING
-from localharness.agent.verdict import DELEGATE_TOOLS, call_paths
+from localharness.agent.verdict import DELEGATE_TOOLS, call_paths, candidate_basenames
 from localharness.core.types import (
     Message,
     ToolOutcome,
@@ -1324,7 +1324,7 @@ class AgentLoop:
             if recorded is not None:
                 known.add(str(Path(recorded).resolve()).casefold())
             return target in known
-        basenames = {p.name for p in candidates}
+        basenames = candidate_basenames(candidates)
         if name == "bash_exec":
             from localharness.agent.shell_classify import instruction_file_reads_only
 

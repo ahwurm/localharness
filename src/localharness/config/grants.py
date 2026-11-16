@@ -285,6 +285,14 @@ class GrantStore:
                 )
         return out
 
+    def _held(self, workspace_key: str, list_key: str) -> list[dict]:
+        from localharness.core.run_folder import shadow
+
+        return [r for (w, lk, _, _), r in shadow("grants").items() if (w, lk) == (workspace_key, list_key)]
+
+    def _with_held(self, data: dict, workspace_key: str, list_key: str, required: tuple[str, ...]) -> list[dict]:
+        return [*self._records(data, workspace_key, list_key, required), *self._held(workspace_key, list_key)]
+
     def lookup(self, workspace: Path, klass: str, key: str) -> Optional[Grant]:
         """The grant covering ``(klass, key)`` in ``workspace``, walking ancestors (PRD §3.3).
 
@@ -300,7 +308,7 @@ class GrantStore:
         """
         data = self._load()
         for workspace_key in _ancestors(workspace):
-            for record in self._records(data, workspace_key, GRANTS_KEY, GRANT_REQUIRED_FIELDS):
+            for record in self._with_held(data, workspace_key, GRANTS_KEY, GRANT_REQUIRED_FIELDS):
                 if record["key"] == key and record["class"] == klass:
                     return _record_type("Grant")(
                         key=record["key"],
@@ -325,17 +333,19 @@ class GrantStore:
         inside its own class's key space.
         """
         data = self._load()
-        for workspace_key in _ancestors(workspace):
-            for record in self._records(data, workspace_key, REFUSALS_KEY, REFUSAL_REQUIRED_FIELDS):
-                if record["key"] == key and record["class"] == klass:
-                    return _record_type("Refusal")(
-                        key=record["key"],
-                        klass=record["class"],
-                        refused_at=record["refused_at"],
-                        channel=record["channel"],
-                        session_id=record["session_id"],
-                        workspace=workspace_key,
-                    )
+        ancestors = _ancestors(workspace)
+        found = [(w, r) for w in ancestors for r in self._records(data, w, REFUSALS_KEY, REFUSAL_REQUIRED_FIELDS)]
+        found += [(w, r) for w in ancestors for r in self._held(w, REFUSALS_KEY)]
+        for workspace_key, record in found:
+            if record["key"] == key and record["class"] == klass:
+                return _record_type("Refusal")(
+                    key=record["key"],
+                    klass=record["class"],
+                    refused_at=record["refused_at"],
+                    channel=record["channel"],
+                    session_id=record["session_id"],
+                    workspace=workspace_key,
+                )
         return None
 
     # ----------------------------------------------------------------- writes
@@ -343,7 +353,7 @@ class GrantStore:
     def _write(self, data: dict) -> None:
         atomic_write_overlay(self.path, data)
 
-    def _record(self, workspace: Path | str, list_key: str, record: dict) -> None:
+    def _record(self, workspace: Path | str, list_key: str, record: dict) -> bool:
         """Load, replace-or-append one record, write — under the store's write lock.
 
         The lock is what makes "an answer is remembered" true when more than one session is
@@ -353,7 +363,13 @@ class GrantStore:
         Replaces any existing record with the same ``(key, class)`` in the same workspace, so
         re-answering refreshes provenance instead of growing the file.
         """
+        from localharness.core.run_folder import current, hold
+
         workspace_key = _key(workspace)
+        run = current()
+        if hold("grants", (workspace_key, list_key, record["class"], record["key"]), record,
+                scratch=run is not None and record["key"] == str(run.scratch)):
+            return False
         with _locked(self.path):
             data = self._load()
             entry = data.get(workspace_key)
@@ -371,10 +387,11 @@ class GrantStore:
             entry[list_key] = [*kept, record]
             data[workspace_key] = entry
             self._write(data)
+        return True
 
-    def add(self, grant: Grant) -> None:
-        """Record an "allow always" answer (PRD §3.3)."""
-        self._record(grant.workspace, GRANTS_KEY, {
+    def add(self, grant: Grant) -> bool:
+        """Record an "allow always" answer (PRD §3.3); False when it was held for the session instead."""
+        return self._record(grant.workspace, GRANTS_KEY, {
             "key": grant.key,
             "class": grant.klass,
             "granted_at": grant.granted_at or _now(),
@@ -382,7 +399,7 @@ class GrantStore:
             "session_id": grant.session_id,
         })
 
-    def add_refusal(self, refusal: Refusal) -> None:
+    def add_refusal(self, refusal: Refusal) -> bool:
         """Record a "never here" answer as a negative grant (PRD §3.3).
 
         Written into the same file, under the same workspace key, in the same key space as a
@@ -394,7 +411,7 @@ class GrantStore:
         grants and denies without prompting, which is the one answer a later "allow always"
         cannot undo from a prompt (editing ``grants.yaml`` is the escape hatch).
         """
-        self._record(refusal.workspace, REFUSALS_KEY, {
+        return self._record(refusal.workspace, REFUSALS_KEY, {
             "key": refusal.key,
             "class": refusal.klass,
             "refused_at": refusal.refused_at or _now(),

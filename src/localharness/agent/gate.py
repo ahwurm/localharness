@@ -41,11 +41,9 @@ from localharness.agent.gate_types import (
     Decision,
     GateOutcome,
     GateSettings,
-    Grant,
     Mode,
     PendingCall,
     PermissionRequest,
-    Refusal,
     ToolMeta,
     Verdict,
 )
@@ -441,8 +439,6 @@ class PermissionGate:
         self.state_dirs = tuple(Path(d).resolve() for d in state_dirs)
         self.run = run
         self.scratch = scratch
-        self.held: dict = run.held if run is not None else {}
-        """The session's scratch answers, kept on the run so a rebuilt gate still has them; never written to grants.yaml."""
 
         self._config_deny = deny
         self._warned_cannot_ask = False
@@ -592,8 +588,8 @@ class PermissionGate:
         return GateContext(
             boundary=self.boundary,
             workspace=self.workspace,
-            grants=self._held_or(Grant, self.grants.lookup),
-            refusals=self._held_or(Refusal, self.grants.refused),
+            grants=self.grants.lookup,
+            refusals=self.grants.refused,
             run=self.run.path if self.run is not None else None,
             scratch=self.scratch,
             mode=self.mode,
@@ -603,14 +599,9 @@ class PermissionGate:
             script_pending=partial(trust.tool_script_pending, global_dir=self.config_dir),
             config_dir=self.config_dir,
             state_dirs=self.state_dirs,
+            leaves_no_trace=self.run is not None and self.run.private,
             **marks,
         )
-
-    def _held_or(self, kind: type, lookup):
-        def look(workspace, klass, key):
-            held = self.held.get((klass, key))
-            return held if isinstance(held, kind) else lookup(workspace, klass, key)
-        return look
 
     # ---------------------------------------------------------------- check
 
@@ -1022,9 +1013,11 @@ class PermissionGate:
             if not request.grantable:
                 return False
             marked = self.taint.source(request.agent_id) is not None
+            wrote = False
             for klass, key in request.grant_keys or ((request.klass, request.key),):
                 if marked and klass in TAINTED_ASK_CLASSES:
                     self.taint.trust()
+                    wrote = True
                     continue
                 grant = new_grant(
                     key=key,
@@ -1033,16 +1026,14 @@ class PermissionGate:
                     channel=self.channel_name,
                     session_id=session_id,
                 )
-                if self.scratch is not None and key == str(self.scratch):
-                    self.held[(klass, key)] = grant
-                else:
-                    self.grants.add(grant)
-            return True
+                wrote |= self.grants.add(grant) is not False
+            return wrote
         refused = (
             request.grant_keys or ((request.klass, request.key),)
             if request.grantable
             else ((request.klass, request.key),)
         )
+        wrote = False
         for klass, key in refused:
             refusal = new_refusal(
                 key=key,
@@ -1051,8 +1042,5 @@ class PermissionGate:
                 channel=self.channel_name,
                 session_id=session_id,
             )
-            if self.scratch is not None and key == str(self.scratch):
-                self.held[(klass, key)] = refusal
-            else:
-                self.grants.add_refusal(refusal)
-        return True
+            wrote |= self.grants.add_refusal(refusal) is not False
+        return wrote

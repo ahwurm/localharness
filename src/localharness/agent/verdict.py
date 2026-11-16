@@ -33,6 +33,7 @@ import os
 import posixpath
 import re
 from dataclasses import dataclass, replace
+from itertools import chain
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable, Iterable, Literal, Optional
 from urllib.parse import urlparse
@@ -60,7 +61,7 @@ from localharness.agent.gate_types import (
 from localharness.agent.permissions import PermissionResult
 from localharness.agent.shell_classify import copy_operands, moved_into
 from localharness.agent.taint import DOWNLOADS, TAINTED_ASK_CLASSES, content_key, under_downloads
-from localharness.config.paths import WORKSPACE_DIR_NAME, global_config_dir
+from localharness.config.paths import CANDIDATE_NAMES, WORKSPACE_DIR_NAME, global_config_dir
 from localharness.tools.base import GateFamily
 
 GrantLookup = Callable[[Path, str, str], Optional[Grant]]
@@ -224,6 +225,10 @@ model can re-plan rather than retry — hence a sentence, not an error code."""
 PRIVATE_PLAN_REASON = "a task's plan is changed with /task plan, not edited"
 PRIVATE_DOC_REASON = "a task document is not editable by the agent; ask the person to edit it, then /task accept {doc}"
 PRIVATE_STATE_REASON = "harness state; not editable"
+NO_TRACE_FILE_REASON = "A private session does not write {name} (a later session would load it); write NOTES.md instead."
+NO_TRACE_COMMAND_REASON = "This command may change {name}, which a later session would load; use read to look at it."
+NO_TRACE_PATH_REASON = "A private session does not write {path} (a later session would load it); make it in a normal session."
+_NO_TRACE_DIRS = (".agents", WORKSPACE_DIR_NAME)
 DOWNLOADS_WRITE_REASON = (
     "the downloads folder holds pages saved from the web and only web_fetch and browser_fetch write it; "
     "re-fetch with save_to, or edit a copy in the workspace")
@@ -414,6 +419,8 @@ class GateContext:
     """This session's run folder, wherever it was made."""
     scratch: Optional[Path] = None
     """This session's scratch; None when it has none."""
+    leaves_no_trace: bool = False
+    """A private session: the agent may not write what a later session would load."""
 
 
 # ------------------------------------------------------------------- internals
@@ -1219,6 +1226,106 @@ def _run_text_deny(words: Iterable[str], ctx: GateContext) -> Optional[VerdictRe
     return None
 
 
+def candidate_basenames(candidates: Iterable[Path]) -> set[str]:
+    """The basenames of the instructions candidates, and of what a candidate that is a link resolves to."""
+    names: set[str] = set()
+    for candidate in candidates:
+        names.add(candidate.name)
+        if candidate.is_symlink():
+            try:
+                names.add(candidate.resolve().name)
+            except (OSError, RuntimeError):
+                pass
+    return names
+
+
+def instructions_name(word: str, root: Path, candidates: Iterable[Path] = ()) -> Optional[str]:
+    """The case-folded basename of ``word`` when it is an instructions file's, else None."""
+    paths = tuple(Path(c) for c in candidates) or tuple(Path(root) / n for n in CANDIDATE_NAMES)
+    base = posixpath.basename(word).casefold()
+    return base if base in {n.casefold() for n in candidate_basenames(paths)} else None
+
+
+def _shown_name(folded: str) -> str:
+    return next((n for n in CANDIDATE_NAMES if posixpath.basename(n).casefold() == folded), folded)
+
+
+def _hidden_dir(path: Path, root: Path) -> bool:
+    try:
+        shown = path.relative_to(root.resolve()).parts if _within(root.resolve(), path) else path.parts
+    except (OSError, RuntimeError, ValueError):
+        shown = path.parts
+    return any(part.casefold() in _NO_TRACE_DIRS for part in shown)
+
+
+def _same_file(path: Path, candidate: Path) -> bool:
+    try:
+        a, b = path.stat(), candidate.stat()
+    except OSError:
+        return False
+    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+
+def _no_trace_reason(path: Path, raw: str, ctx: GateContext, removal: bool) -> Optional[str]:
+    """Why a private session may not write ``path``: a later session would load it."""
+    if ctx.scratch is not None and _within(ctx.scratch, path):
+        return None
+    root = Path(ctx.boundary or ctx.workspace)
+    name = instructions_name(str(path), root)
+    if name is None and not removal:
+        name = next((posixpath.basename(n).casefold() for n in CANDIDATE_NAMES if _same_file(path, root / n)), None)
+    if name is not None:
+        return NO_TRACE_FILE_REASON.format(name=_shown_name(name))
+    if _hidden_dir(path, root) or any(_within(folder, path) for folder in _config_dirs(ctx)):
+        from localharness.channels.base import one_line
+        return NO_TRACE_PATH_REASON.format(path=repr(one_line(raw)))
+    return None
+
+
+def _copy_link_sources(segments: Iterable[ShellSegment]) -> Iterable[tuple[str, bool]]:
+    """The sources of a ``cp`` that links or preserves, and of an ``rsync`` with ``--link-dest``: a later write to the copy reaches the source."""
+    for segment in segments:
+        if not segment.argv:
+            continue
+        program, rest = posixpath.basename(segment.argv[0]).casefold(), segment.argv[1:]
+        if program == "cp":
+            linking = any(
+                (t.startswith("--") and len(t) > 3 and ("--link".startswith(t) or "--archive".startswith(t)))
+                or (t[:1] == "-" and t[1:2] != "-" and any(c in t for c in "la"))
+                for t in rest)
+        else:
+            linking = program == "rsync" and any(t.startswith("--link-dest") for t in rest)
+        if linking:
+            yield from ((source, False) for source in copy_operands(rest).sources)
+
+
+def _no_trace_text_deny(
+    segments: Iterable[ShellSegment], anchor: Optional[Path], ctx: GateContext
+) -> Optional[VerdictResult]:
+    """DENY a command that is not a read and names an instructions file, ``.agents`` or ``.localharness``, unless the name is only a copy source or sits in this session's scratch."""
+    root = Path(ctx.boundary or ctx.workspace)
+    for segment in segments:
+        if segment.read_only or not segment.argv:
+            continue
+        rest = segment.argv[1:]
+        copies = posixpath.basename(segment.argv[0]).casefold() in ("cp", "install", "rsync")
+        skipped = set(copy_operands(rest).sources) if copies else set()
+        for word in rest:
+            if word in skipped:
+                continue
+            placed = _resolve(word, anchor)
+            if placed is not None and ctx.scratch is not None and _within(ctx.scratch, placed):
+                continue
+            named = word.partition("=")[2] if word.startswith("-") else word
+            if (name := instructions_name(named, root)) is not None:
+                return VerdictResult(Verdict.DENY, NO_TRACE_COMMAND_REASON.format(name=_shown_name(name)))
+            if (placed is not None and any(_within(f, placed) for f in _config_dirs(ctx))) or any(
+                    part.casefold() in _NO_TRACE_DIRS for part in PurePosixPath(named).parts):
+                from localharness.channels.base import one_line
+                return VerdictResult(Verdict.DENY, NO_TRACE_PATH_REASON.format(path=repr(one_line(word))))
+    return None
+
+
 def _private_deny(
     targets: Iterable[tuple[str, bool]], anchor: Optional[Path], ctx: GateContext
 ) -> Optional[VerdictResult]:
@@ -1232,6 +1339,8 @@ def _private_deny(
                 return VerdictResult(Verdict.DENY, reason)
             if _in_run_folder(path, ctx):
                 return _run_denial(ctx)
+            if ctx.leaves_no_trace and (reason := _no_trace_reason(path, raw, ctx, removal)) is not None:
+                return VerdictResult(Verdict.DENY, reason)
     return None
 
 
@@ -1448,8 +1557,13 @@ def _evaluate_shell(
     non_read_only = tuple(s for s in classified.segments if not s.read_only)
 
     anchor = _shell_anchor(tool_name, params, ctx)
-    denied = _private_deny(_private_shell_targets(classified.segments, anchor), anchor, ctx) or _run_text_deny(
+    targets = _private_shell_targets(classified.segments, anchor)
+    if ctx.leaves_no_trace:
+        targets = chain(targets, _copy_link_sources(classified.segments))
+    denied = _private_deny(targets, anchor, ctx) or _run_text_deny(
         (*(w for s in classified.segments for w in s.write_targets), *(w for s in non_read_only for w in s.argv)), ctx)
+    if denied is None and ctx.leaves_no_trace:
+        denied = _no_trace_text_deny(classified.segments, anchor, ctx)
     if denied is not None:
         return denied
 

@@ -24,6 +24,9 @@ _DEFAULT_CONFIG_DIR = f"~/{WORKSPACE_DIR_NAME}"
 # or a submodule, so both shapes count as "there is a repo here".
 GIT_DIR_NAME = ".git"
 
+CANDIDATE_NAMES: tuple[str, ...] = ("CLAUDE.md", "AGENTS.md", ".localharness/INSTRUCTIONS.md")
+"""The three instructions files, in the order they are tried. Nothing else is ever a candidate."""
+
 # Accept str or Path so callers can pass a raw flag value or an already-resolved Path.
 PathLike = Union[str, Path]
 

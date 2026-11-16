@@ -52,6 +52,43 @@ def test_begin_makes_the_folder_and_end_removes_it(cfg):
     assert _ids(cfg) == []
 
 
+def test_begin_private_makes_state_and_current_and_a_normal_begin_does_not(cfg):
+    run = begin(cfg, private=True)
+    assert run.private and run.state.is_dir() and oct(run.state.stat().st_mode & 0o777) == "0o700"
+    assert run_folder.current() is run
+    normal = begin(cfg)
+    assert not normal.private and not normal.state.exists() and run_folder.current() is normal
+    end(run)
+    end(normal)
+
+
+def test_end_clears_current_only_while_it_is_that_run(cfg):
+    first, second = begin(cfg), begin(cfg)
+    end(first)
+    assert run_folder.current() is second
+    end(second)
+    assert run_folder.current() is None
+
+
+def test_a_private_fallback_run_has_state_too(cfg, temp, monkeypatch):
+    monkeypatch.setattr(run_folder, "_enforced", lambda name, parent: False)
+    run = begin(cfg, private=True)
+    assert run.parent is None and run.private and run.state.is_dir()
+    end(run)
+    assert not run.path.exists()
+
+
+@pytest.mark.parametrize("private,waits", [(True, True), (False, False)])
+def test_a_private_end_waits_longer_for_a_slow_removal(cfg, monkeypatch, private, waits):
+    run = begin(cfg, private=private)
+    monkeypatch.setattr(run_folder, "END_WAIT_S", 1.2)
+    monkeypatch.setattr(run_folder, "PRIVATE_END_WAIT_S", 2.4)
+    monkeypatch.setattr(run_folder, "_finish", lambda r: (time.sleep(1.8), ())[1])
+    t0 = time.monotonic()
+    end(run)
+    assert (time.monotonic() - t0 > 1.7) is waits
+
+
 def test_no_config_no_run_folder(tmp_path):
     assert begin(tmp_path) is None
     assert not (tmp_path / "run").exists()

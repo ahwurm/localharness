@@ -39,6 +39,7 @@ SCRATCH_SENTENCE = (
 )
 REMOVING_LINE = "Removing scratch… (Ctrl+C leaves it for the next start)"
 END_WAIT_S = 2.0
+PRIVATE_END_WAIT_S = 30.0
 _SLOW_AFTER_S = 1.0
 _TOLD_VISIT_CAP = 2000
 _ID = re.compile(r"[0-9a-f]{12}")
@@ -53,6 +54,7 @@ class RunFolder:
     parent: int | None = None
     held: dict = field(default_factory=dict)
     ident: os.stat_result | None = None
+    private: bool = False
     _mu: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _ender: "Future[tuple[str, ...]] | None" = field(default=None, repr=False)
 
@@ -60,10 +62,40 @@ class RunFolder:
     def scratch(self) -> Path:
         return self.path / "scratch"
 
+    @property
+    def state(self) -> Path:
+        return self.path / "state"
+
+    @property
+    def ending(self) -> bool:
+        return self._ender is not None
+
     def command_env(self, workspace_root: str | None = None) -> dict[str, str]:
         if scratch_of(self, workspace_root) is None:
             return {}
         return {"LOCALHARNESS_SCRATCH": str(self.scratch), "TMPDIR": str(self.path / "t")}
+
+
+_current: RunFolder | None = None
+
+
+def current() -> RunFolder | None:
+    return _current
+
+
+def shadow(store: str) -> dict:
+    """What the current run holds for `store`, by key."""
+    run = _current
+    return {k: v for (s, k), v in list(run.held.items()) if s == store} if run else {}
+
+
+def hold(store: str, key: object, value: object, scratch: bool = False) -> bool:
+    """Keep a store write in the current run's memory; False when the store must write to disk."""
+    run = _current
+    if run is None or not (run.private or scratch):
+        return False
+    run.held[(store, key)] = value
+    return True
 
 
 def scratch_of(run: RunFolder | None, workspace_root: str | None) -> Path | None:
@@ -99,36 +131,39 @@ def _lock(fd: int) -> None:
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
-def begin(config_dir: Path) -> RunFolder | None:
+def begin(config_dir: Path, private: bool = False) -> RunFolder | None:
     """Make this session's run folder, or None when there is no config yet or it cannot be made."""
+    global _current
     config_dir = Path(config_dir)
     if not (config_dir / "config.yaml").exists():
         return None
     try:
-        return _begin(config_dir) if _native() else _fallback()
+        run = _begin(config_dir, private) if _native() else _fallback(private)
     except OSError as e:
         where = config_dir / "run" if e.errno == errno.ENOSPC else "the run folder"
         log.warning("no scratch this session: %s: %s", where, e.strerror or e)
         return None
+    _current = run
+    return run
 
 
-def _begin(config_dir: Path) -> RunFolder:
+def _begin(config_dir: Path, private: bool) -> RunFolder:
     try:
         parent = open_private_dir(config_dir / "run")
     except OSError as e:
         if e.errno in (errno.ELOOP, errno.ENOTDIR):
-            return _fallback()
+            return _fallback(private)
         raise
     try:
         st = os.fstat(parent)
         if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid():
-            run = _fallback()
+            run = _fallback(private)
         else:
             if st.st_mode & OPEN_TO_OTHERS:
                 os.fchmod(parent, PRIVATE_DIR_MODE)
             _gitignore(parent)
             _sweep_briefly(parent)
-            run = _make(parent, config_dir.resolve() / "run")
+            run = _make(parent, config_dir.resolve() / "run", private)
         if run.parent is None:
             os.close(parent)
         return run
@@ -162,7 +197,7 @@ def _sweep_briefly(parent: int) -> None:
         log.debug("run folder sweep", exc_info=True)
 
 
-def _make(parent: int, run_dir: Path) -> RunFolder:
+def _make(parent: int, run_dir: Path, private: bool) -> RunFolder:
     for _ in range(8):
         name = secrets.token_hex(6)
         try:
@@ -183,12 +218,14 @@ def _make(parent: int, run_dir: Path) -> RunFolder:
             atomic_write_text(".marker", marker(), dir_fd=fd)
             os.mkdir("scratch", PRIVATE_DIR_MODE, dir_fd=fd)
             os.mkdir("t", PRIVATE_DIR_MODE, dir_fd=fd)
-            return RunFolder(run_dir / name, fd, parent)
+            if private:
+                os.mkdir("state", PRIVATE_DIR_MODE, dir_fd=fd)
+            return RunFolder(run_dir / name, fd, parent, private=private)
     except BaseException:
         _discard(name, parent, fd)
         raise
     _discard(name, parent, fd)
-    return _fallback()
+    return _fallback(private)
 
 
 def _enforced(name: str, parent: int) -> bool:
@@ -211,7 +248,7 @@ def _discard(name: str, parent: int, fd: int) -> None:
     os.close(fd)
 
 
-def _fallback() -> RunFolder:
+def _fallback(private: bool = False) -> RunFolder:
     path = Path(tempfile.mkdtemp(prefix="localharness-run-", dir="/tmp" if sys.platform == "darwin" else None))
     fd = None
     if hasattr(os, "O_NOFOLLOW") and os.open in os.supports_dir_fd:
@@ -222,16 +259,23 @@ def _fallback() -> RunFolder:
             raise PermissionError(errno.EACCES, "temp folder is not ours", str(path))
         os.mkdir("scratch", PRIVATE_DIR_MODE, dir_fd=fd)
         os.mkdir("t", PRIVATE_DIR_MODE, dir_fd=fd)
+        if private:
+            os.mkdir("state", PRIVATE_DIR_MODE, dir_fd=fd)
     else:
         (path / "scratch").mkdir()
         (path / "t").mkdir()
-    return RunFolder(path, fd, None, ident=os.lstat(path))
+        if private:
+            (path / "state").mkdir()
+    return RunFolder(path, fd, None, ident=os.lstat(path), private=private)
 
 
 def end(run: RunFolder | None, say: Callable[[str], None] = lambda line: None) -> None:
-    """Remove this session's run folder, waiting about two seconds; the next start finishes a slower one."""
+    """Remove this session's run folder, waiting about two seconds (thirty when private); the next start finishes a slower one."""
+    global _current
     if run is None:
         return
+    if _current is run:
+        _current = None
     with run._mu:
         if run._ender is None:
             run._ender = in_background(_finish, run)
@@ -241,7 +285,7 @@ def end(run: RunFolder | None, say: Callable[[str], None] = lambda line: None) -
             left = ender.result(timeout=_SLOW_AFTER_S)
         except TimeoutError:
             say(REMOVING_LINE)
-            left = ender.result(timeout=END_WAIT_S - _SLOW_AFTER_S)
+            left = ender.result(timeout=(PRIVATE_END_WAIT_S if run.private else END_WAIT_S) - _SLOW_AFTER_S)
     except TimeoutError:
         return
     except Exception:  # noqa: BLE001 - a folder that would not go is left for the next start

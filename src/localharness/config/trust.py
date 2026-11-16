@@ -72,9 +72,25 @@ def _load(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _project_load() -> dict:
+    from localharness.core.run_folder import shadow
+
+    return {**_load(trust_store_path()), **shadow("trust")}
+
+
+def _project_write(key: str, entry: dict) -> None:
+    from localharness.core.run_folder import hold
+
+    if hold("trust", key, entry):
+        return
+    data = _load(trust_store_path())
+    data[key] = entry
+    atomic_write_overlay(trust_store_path(), data)
+
+
 def is_trusted(workspace_dir: Path) -> Optional[bool]:
     """True / False / None (never asked). None is the fail-closed case for the caller."""
-    entry = _load(trust_store_path()).get(_key(workspace_dir))
+    entry = _project_load().get(_key(workspace_dir))
     if isinstance(entry, dict) and isinstance(entry.get("trusted"), bool):
         return entry["trusted"]
     return None
@@ -167,14 +183,13 @@ def record_trust(workspace_dir: Path, trusted: bool, *, unseen_executables: bool
     Only `trusted` changes: the servers a Yes approved stay. `unseen_executables`: this Yes was
     given without the server list (the in-session question), so an entry with no servers recorded
     gets "nothing approved yet" — the next start asks about them rather than adopting them."""
-    data = _load(trust_store_path())
+    data = _project_load()
     key = _key(workspace_dir)
     entry = dict(data[key]) if isinstance(data.get(key), dict) else {}
     entry["trusted"] = trusted
     if trusted and unseen_executables and EXECUTABLES_KEY not in entry:
         entry[EXECUTABLES_KEY] = {**NOTHING_APPROVED, "recorded": _now()}
-    data[key] = entry
-    atomic_write_overlay(trust_store_path(), data)
+    _project_write(key, entry)
 
 
 EXECUTABLES_KEY = "executables"
@@ -321,7 +336,7 @@ def recorded_executables(workspace_root: Path) -> Optional[dict]:
     """The executables record kept for this exact root, or None (never recorded — a trust record
     written before this release, or one written by hand). A malformed record reads as "nothing
     approved yet", the direction that asks."""
-    rec = _entry(_load(trust_store_path()), _key(workspace_root)).get(EXECUTABLES_KEY)
+    rec = _entry(_project_load(), _key(workspace_root)).get(EXECUTABLES_KEY)
     if not isinstance(rec, dict):
         return None
     servers = rec.get("servers")
@@ -333,13 +348,11 @@ def record_executables(workspace_root: Path, snapshot: list[dict]) -> None:
     """Store {fingerprint, servers, recorded (UTC ISO seconds)} under the root's own entry, keeping
     its "trusted" key. On the exact root's key, not a parent's: sibling projects under one trusted
     folder each keep their own record."""
-    data = _load(trust_store_path())
     key = _key(workspace_root)
-    entry = _entry(data, key)
+    entry = _entry(_project_load(), key)
     entry[EXECUTABLES_KEY] = {"fingerprint": fingerprint(snapshot), "servers": snapshot,
                               "recorded": _now()}
-    data[key] = entry
-    atomic_write_overlay(trust_store_path(), data)
+    _project_write(key, entry)
 
 
 def machine_key(global_dir: Path) -> str:
@@ -909,7 +922,10 @@ def offer_was_declined(target: Path | str) -> bool:
     without consent. Nothing else reads this file, so it can only ever cost a prompt. A remembered
     No can suppress a question; it never causes a launch.
     """
-    entry = _load(declined_offers_path()).get(target if isinstance(target, str) else _key(target))
+    from localharness.core.run_folder import shadow
+
+    key = target if isinstance(target, str) else _key(target)
+    entry = {**_load(declined_offers_path()), **({} if isinstance(target, str) else shadow("declined"))}.get(key)
     return isinstance(entry, dict) and entry.get("declined") is True
 
 
@@ -922,6 +938,10 @@ def record_offer_decline(target: Path | str) -> None:
     file); `init --workspace` and creating the directory by hand ignore this store entirely, so a
     recorded "no" can never stand between a user and a workspace they went and asked for.
     """
+    from localharness.core.run_folder import hold
+
+    if not isinstance(target, str) and hold("declined", _key(target), {"declined": True}):
+        return
     data = _load(declined_offers_path())
     data[target if isinstance(target, str) else _key(target)] = {"declined": True}
     atomic_write_overlay(declined_offers_path(), data)

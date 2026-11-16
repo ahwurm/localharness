@@ -37,7 +37,7 @@ import yaml
 
 from localharness.config import session_presence
 from localharness.config.overlay import atomic_write_overlay, atomic_write_text
-from localharness.config.paths import global_config_dir
+from localharness.config.paths import CANDIDATE_NAMES, global_config_dir
 from localharness.core.events import InstructionsCause, InstructionsNotice
 
 try:  # POSIX only; elsewhere the store falls back to an in-process lock (documented degradation)
@@ -65,9 +65,6 @@ LOCK_POLL_SECONDS = 0.02
 ACCEPT_MAX_BYTES = 2 * 1024 * 1024
 """The most ``accept_instructions`` reads: it runs before the window is known, so it takes the
 largest cap ``instructions.max_ratio`` allows on a 1M-token window."""
-
-CANDIDATE_NAMES: tuple[str, ...] = ("CLAUDE.md", "AGENTS.md", ".localharness/INSTRUCTIONS.md")
-"""The three instructions files, in the order they are tried. Nothing else is ever a candidate."""
 
 INSTRUCTION_BASENAMES: tuple[str, ...] = ("CLAUDE.md", "AGENTS.md", "INSTRUCTIONS.md")
 """The basenames a harness call may name (the naming set covers all three candidates)."""
@@ -252,6 +249,8 @@ def _store_transaction(config_dir: Any = None) -> Iterator[dict]:
     read leaves the file and its inode alone. Never nest it: a second flock from this process
     on a new descriptor would wait on the first. A store that cannot be read raises
     ``StoreUnavailable`` before the block runs, so it is never overwritten as if empty."""
+    from localharness.core.run_folder import hold, shadow
+
     with _store_lock(config_dir):
         loaded, damaged = _load_store(store_path(config_dir))
         roots = loaded.get("roots")
@@ -260,9 +259,17 @@ def _store_transaction(config_dir: Any = None) -> Iterator[dict]:
             "roots": roots if isinstance(roots, dict) else {},
             **{k: v for k, v in loaded.items() if k not in ("version", "roots")},
         }
+        for key, held in shadow("project_records").items():
+            if held is None:
+                data["roots"].pop(key, None)
+            else:
+                data["roots"][key] = copy.deepcopy(held)
         before = copy.deepcopy(data)
         yield data
         if data != before:
+            changed = [k for k in {*before["roots"], *data["roots"]} if before["roots"].get(k) != data["roots"].get(k)]
+            if changed and all([hold("project_records", k, copy.deepcopy(data["roots"].get(k))) for k in changed]):
+                return
             if damaged is not None:
                 _keep_damaged_copy(store_path(config_dir), damaged)
             atomic_write_overlay(store_path(config_dir), data)
