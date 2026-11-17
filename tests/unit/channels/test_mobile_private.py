@@ -182,10 +182,10 @@ def test_a_removal_that_hits_its_bound_is_named_by_end_and_by_a_new_chat(cfg, mo
         await _until(lambda: ch.session_id == "c1")
         old = runs[0]
         line = await cb["on_end"]()
-        assert line == f"Scratch not fully removed: {_gone(old)} stays until the next start"
+        assert line == f"Private session not fully removed: {_gone(old)} stays until localharness next starts"
         cb["on_first_message"](private=True)
         await _until(lambda: ch.session_id == "c2")
-        assert await cb["on_new_session"](private=False) == f"Scratch not fully removed: {_gone(runs[1])} stays until the next start"
+        assert await cb["on_new_session"](private=False) == f"Private session not fully removed: {_gone(runs[1])} stays until localharness next starts"
 
     _owner(monkeypatch, cfg, ["block", "block", "block"], script)
 
@@ -375,13 +375,13 @@ async def test_new_carries_the_privacy_and_returns_what_was_left(tmp_path):
 
     async def restart(*, private=False):
         calls.append(private)
-        return "Scratch not fully removed: /x stays until the next start" if private is False else ""
+        return "Private session not fully removed: /x stays until localharness next starts" if private is False else ""
 
     _, _, client = await _private_stack(tmp_path, on_new_session=restart)
     got = await client.post("/api/sessions/new", json={"private": True}, headers=JSON)
     assert got.status_code == 200 and got.json()["private"] is True and got.json()["left"] == ""
     got = await client.post("/api/sessions/new", json={}, headers=JSON)
-    assert got.json()["private"] is False and got.json()["left"].startswith("Scratch not fully removed")
+    assert got.json()["private"] is False and got.json()["left"].startswith("Private session not fully removed")
     got = await client.post("/api/sessions/new", json={"private": "yes"}, headers=JSON)
     assert calls == [True, False, False]
 
@@ -415,7 +415,7 @@ async def test_end_is_refused_in_replay_without_a_handle_with_no_private_chat_an
 
 
 async def test_end_ends_the_open_private_chat_and_returns_its_outcome(tmp_path):
-    outcomes = ["", "Scratch not fully removed: /x stays until the next start"]
+    outcomes = ["", "Private session not fully removed: /x stays until localharness next starts"]
 
     async def on_end():
         return outcomes.pop(0)
@@ -424,7 +424,7 @@ async def test_end_ends_the_open_private_chat_and_returns_its_outcome(tmp_path):
     first = await client.post("/api/sessions/end", json={}, headers=JSON)
     assert first.status_code == 200 and first.json() == {"status": "ended", "left": ""}
     second = await client.post("/api/sessions/end", json={}, headers=JSON)
-    assert second.json()["left"].startswith("Scratch not fully removed")
+    assert second.json()["left"].startswith("Private session not fully removed")
 
 
 async def test_health_and_hello_say_the_chat_is_private_and_which_one_sleeps(tmp_path):

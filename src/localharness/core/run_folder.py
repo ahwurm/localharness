@@ -39,6 +39,7 @@ SCRATCH_SENTENCE = (
     "name scratch files to the person by file name."
 )
 REMOVING_LINE = "Removing scratch… (Ctrl+C leaves it for the next start)"
+PRIVATE_REMOVING_LINE = "Removing this private session… (Ctrl+C leaves it for the next start)"
 END_WAIT_S = 2.0
 PRIVATE_END_WAIT_S = 30.0
 _SLOW_AFTER_S = 1.0
@@ -360,7 +361,7 @@ def end(run: RunFolder | None, say: Callable[[str], None] = lambda line: None) -
         try:
             left = ender.result(timeout=_SLOW_AFTER_S)
         except TimeoutError:
-            say(REMOVING_LINE)
+            say(PRIVATE_REMOVING_LINE if run.private else REMOVING_LINE)
             left = ender.result(timeout=(PRIVATE_END_WAIT_S if run.private else END_WAIT_S) - _SLOW_AFTER_S)
     except TimeoutError:
         gone = run.path.with_name(f".deleting-{run.path.name}") if run.parent is not None else run.path
@@ -370,7 +371,8 @@ def end(run: RunFolder | None, say: Callable[[str], None] = lambda line: None) -
         return ""
     if not left:
         return ""
-    line = one_line(f"Scratch not fully removed: {left[0]} stays until the next start")
+    line = one_line(f"Private session not fully removed: {left[0]} stays until localharness next starts" if run.private
+                    else f"Scratch not fully removed: {left[0]} stays until the next start")
     say(line)
     return line
 

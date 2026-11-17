@@ -1284,7 +1284,8 @@ is followed by one dim line giving its lifetime.
 - **The remover never follows a link.** It opens every folder without following links, unlinks a link rather than
   entering it, and leaves a folder on another device or owned by another account, reporting it.
 - **A slow removal does not hold the exit.** A session waits about two seconds for it, says `Removing
-  scratch…`, and leaves the rest as `run/.deleting-<id>` for the next start.
+  scratch…` (`Removing this private session…` in a private session), and leaves the rest as
+  `run/.deleting-<id>` for the next start.
 - **The fallback.** When `run/` is a link, another account's, or on a folder whose locks are not enforced, the
   run goes to a new folder under the system temp folder and is removed at the end; `localharness doctor` names
   the cause. Where the run cannot be made at all, the session starts without scratch.

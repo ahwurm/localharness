@@ -1823,7 +1823,7 @@ def test_private_what_was_left_becomes_one_row_and_a_refusal_one_error(page, tmp
     got = _private(page, tmp_path, r"""
 const out = {};
 hello({private: true});
-reply["/api/sessions/end"] = {status: "ended", left: "Scratch not fully removed: /run/x stays until the next start"};
+reply["/api/sessions/end"] = {status: "ended", left: "Private session not fully removed: /run/x stays until localharness next starts"};
 $("privMark").onclick(); await settle();
 out.left = rows().map((r) => [r.cls, r.text]);
 hello({private: true});
@@ -1832,7 +1832,7 @@ $("privMark").onclick(); await settle();
 out.refused = [rows().map((r) => r.text).pop(), S.private];
 console.log(JSON.stringify(out));
 """)
-    assert got["left"] == [["row sys", "Scratch not fully removed: /run/x stays until the next start"]]
+    assert got["left"] == [["row sys", "Private session not fully removed: /run/x stays until localharness next starts"]]
     assert got["refused"] == ["not ended: a turn is running — stop it first, then end the chat", True]
 
 

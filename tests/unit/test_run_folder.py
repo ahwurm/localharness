@@ -320,6 +320,8 @@ def test_end_returns_and_says_the_line_naming_what_is_left(cfg, monkeypatch):
     said = []
     line = end(run, said.append)
     assert line == "Scratch not fully removed: /x/y stays until the next start" and said == [line]
+    run = begin(cfg, private=True)
+    assert end(run, said.append) == "Private session not fully removed: /x/y stays until localharness next starts"
 
 
 def test_a_private_end_that_hits_its_bound_names_the_folder_left_behind(cfg, monkeypatch):
@@ -330,8 +332,8 @@ def test_a_private_end_that_hits_its_bound_names_the_folder_left_behind(cfg, mon
     said = []
     line = end(run, said.append)
     gone = run.path.with_name(f".deleting-{run.path.name}")
-    assert line == f"Scratch not fully removed: {gone} stays until the next start" and gone.is_dir()
-    assert said == [run_folder.REMOVING_LINE, line]
+    assert line == f"Private session not fully removed: {gone} stays until localharness next starts" and gone.is_dir()
+    assert said == ["Removing this private session… (Ctrl+C leaves it for the next start)", line]
     time.sleep(0.5)
 
 
