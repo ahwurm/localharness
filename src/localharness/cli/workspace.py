@@ -250,6 +250,8 @@ TRUST_ONLY_PROMPT_WITH_INSTRUCTIONS = (
 """`TRUST_ONLY_PROMPT` with the instructions noun, for a workspace that already exists. Its own
 string for the same reason as the original."""
 
+PRIVATE_TRUST_CLAUSE = "For this private session only: nothing is recorded or created."
+
 
 def settle_startup_trust(
     config_dir: Optional[Union[str, Path]] = None,
@@ -363,13 +365,15 @@ def settle_startup_trust(
     # The clause is chosen from the same candidate a yes records, so the sentence a person reads
     # and the file the store is told about can never differ (T-11-32).
     candidate = first_candidate(root)
-    if existing is not None:
+    run = current()
+    private = bool(run and run.private)
+    if existing is not None or private:
         question = TRUST_ONLY_PROMPT if candidate is None else (
             TRUST_ONLY_PROMPT_WITH_INSTRUCTIONS.format(name=display_name(candidate.name)))
     else:
         question = OFFER_PROMPT if candidate is None else (
             OFFER_PROMPT_WITH_INSTRUCTIONS.format(name=display_name(candidate.name)))
-    answer = _ask_create(question + _servers_suffix(snap))
+    answer = _ask_create(question + (" " + PRIVATE_TRUST_CLAUSE if private else "") + _servers_suffix(snap))
     if answer is None:
         return None  # EOF is not an answer; nothing recorded, nothing created
     trust.record_trust(root, answer)
@@ -385,8 +389,7 @@ def settle_startup_trust(
         except OSError:
             # A store that cannot be written costs the record, never the session or the answer.
             log.warning("could not record the instructions answer for %s", root, exc_info=True)
-    run = current()
-    if existing is not None or (run and run.private):
+    if existing is not None or private:
         return None
     try:
         _scaffold_workspace(endpoint=None, model=None, config_dir=None, next_steps=False)

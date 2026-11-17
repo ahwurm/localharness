@@ -172,6 +172,7 @@ PRIVATE_PLATFORM_LINE = ("{name} keeps the conversation on its servers; "
 PRIVATE_LINKED_RUN_LINE = "{path} is a link or another account's; remove it, or use --config-dir <local folder>."
 PRIVATE_UNLOCKED_LINE = "this folder does not enforce file locks; use --config-dir <local folder>."
 PRIVATE_NEEDS_POSIX_LINE = "private sessions need POSIX file locks; use WSL on Windows."
+PRIVATE_HINT = "Private: no saved memory; only files written into your project stay."
 PRIVATE_NO_RUN_LINE = "no run folder for a private session; use --config-dir <local folder>."
 
 
@@ -223,6 +224,17 @@ def _start_problems(plugin_resolution: Any) -> list[str]:
     list` and doctor still show it. An installed plugin's missing extra still warns: the user opted
     in. (46, ruling 5)"""
     return plugin_resolution.problems(include=lambda e: not (e.state == "needs-extra" and e.bundled))
+
+
+def _private_chip(llm: Any) -> str:
+    from localharness.provider.server import key_destination
+    return "private" if key_destination(llm.config.base_url)[0] else "private · remote"
+
+
+def _private_hint(llm: Any) -> str:
+    from localharness.provider.server import key_destination
+    here, shown = key_destination(llm.config.base_url)
+    return PRIVATE_HINT if here else f"{PRIVATE_HINT} This chat goes to {shown}."
 
 
 def _first_prompt_hint(is_returning: bool) -> str:
@@ -3400,9 +3412,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             from localharness.cli.ui import startup_banner
             console.print(startup_banner(
                 model=resolved_model, is_returning=is_returning, show_hint=not interactive,
+                chip=_private_chip(llm) if private else "",
             ))
             if interactive and isinstance(channel, TerminalChannel):
-                channel.first_prompt_hint = _first_prompt_hint(is_returning)
+                channel.first_prompt_hint = _private_hint(llm) if private else _first_prompt_hint(is_returning)
             from localharness.orchestrator.task_flow.verbs import wake_line
             if flow is not None and (folder := wake_line(flow.docs)):
                 console.print(Text(folder), soft_wrap=True)
@@ -3428,6 +3441,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 channel.instructions_hint = instructions_handle.start_line
                 channel.first_prompt_hint = _hint_with_instructions(
                     channel.first_prompt_hint, instructions_handle.start_line)
+        if private and isinstance(channel, TerminalChannel):
+            from localharness.agent.loop import arm_lines
+            channel.chip = lambda: _private_chip(llm)
+            channel.arm_lines = lambda: arm_lines(run, gate.boundary or gate.workspace)
         if hasattr(channel, "tps_source"):
             # The instrument cluster. Colored tok/s readout (status row / thinking label): poll
             # the client's live decode-speed snapshot. The client object survives /model rebinds,

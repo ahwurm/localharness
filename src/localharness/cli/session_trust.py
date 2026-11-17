@@ -31,7 +31,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from localharness.agent.gate_types import PermissionRequest
-from localharness.cli.workspace import NEXT_START_REVIEW_NOTICE
+from localharness.cli.workspace import NEXT_START_REVIEW_NOTICE, PRIVATE_TRUST_CLAUSE
+from localharness.core.run_folder import current
 from localharness.config import trust
 from localharness.config.paths import WORKSPACE_DIR_NAME, global_config_dir
 
@@ -75,6 +76,11 @@ TRUST_QUESTION_DETAIL = (
 """What the second line of the prompt says. A question about a permanent decision has to say
 that it is permanent, and what the other answer costs — the terminal renders it under the
 question and Zed renders it as the dialog body."""
+
+TRUST_QUESTION_DETAIL_PRIVATE = (
+    PRIVATE_TRUST_CLAUSE + " Answering no runs this session in guarded mode, where "
+    "boundary-crossing and destructive calls ask first."
+)
 
 TRUST_OPTIONS_LEGEND = "[y]es, trust it   [n]o, ask me (guarded)"
 """The terminal's key legend for this one question.
@@ -135,7 +141,8 @@ def _request(root: Path, question: str = TRUST_QUESTION) -> PermissionRequest:
     the legend through ``options_legend``; a channel that does not read that field falls back to
     its own two-option rendering, which is the same question with plainer buttons.
     """
-    detail = TRUST_QUESTION_DETAIL.format(root=root)
+    run = current()
+    detail = TRUST_QUESTION_DETAIL_PRIVATE if run and run.private else TRUST_QUESTION_DETAIL.format(root=root)
     return PermissionRequest(
         tool_name=TRUST_TOOL_NAME,
         tool_params={"workspace": str(root)},

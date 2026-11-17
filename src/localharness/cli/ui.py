@@ -16,7 +16,7 @@ _GREEN = SITE_ACCENT
 _WORDMARK = '██╗      ██████╗  ██████╗ █████╗ ██╗             \n██║     ██╔═══██╗██╔════╝██╔══██╗██║             \n██║     ██║   ██║██║     ███████║██║             \n██║     ██║   ██║██║     ██╔══██║██║             \n███████╗╚██████╔╝╚██████╗██║  ██║███████╗███████╗\n╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝\n                                                 \n██╗  ██╗ █████╗ ██████╗ ███╗   ██╗███████╗███████╗███████╗\n██║  ██║██╔══██╗██╔══██╗████╗  ██║██╔════╝██╔════╝██╔════╝\n███████║███████║██████╔╝██╔██╗ ██║█████╗  ███████╗███████╗\n██╔══██║██╔══██║██╔══██╗██║╚██╗██║██╔══╝  ╚════██║╚════██║\n██║  ██║██║  ██║██║  ██║██║ ╚████║███████╗███████║███████║\n╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚══════╝╚══════╝╚══════╝\n                                                          '
 
 
-def startup_banner(model: str, is_returning: bool, show_hint: bool = True) -> RenderableType:
+def startup_banner(model: str, is_returning: bool, show_hint: bool = True, chip: str = "") -> RenderableType:
     """The local_harness wordmark in green, with model and cwd.
 
     show_hint gates the first-run '/help' guidance line. Interactive TTY sessions pass
@@ -34,6 +34,8 @@ def startup_banner(model: str, is_returning: bool, show_hint: bool = True) -> Re
     info.append(f"v{version}", style="dim")
     info.append(f"    {model}")
     info.append(f"    {cwd}", style="dim")
+    if chip:
+        info.append(f"    {chip}", style="magenta")
     if show_hint and not is_returning:
         info.append("\n\nDescribe a task, or ", style="dim")
         info.append("/help", style=_GREEN)

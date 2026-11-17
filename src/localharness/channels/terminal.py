@@ -51,6 +51,7 @@ from localharness.config.chords import ChordName
 from localharness.config.models import TerminalKeysConfig
 from localharness.core.bus import EventBus
 from localharness.core.private_files import touch_private
+from localharness.core.run_folder import current
 from localharness.channels.input_router import FORCE_PREFIX
 from localharness.core.events import (
     DELEGATION_WORDS,
@@ -225,6 +226,7 @@ class _Burst:
 # (a PromptSession bottom_toolbar would pin it to the screen bottom instead).
 INPUT_STYLE = Style.from_dict({
     "frame": "ansibrightblack",
+    "frame-private": "ansimagenta",
     "caret": f"bold {SITE_INK}",           # ❯ in the box = ❯ of the echoed line in scrollback (one glyph, one ink)
     "input": "ansidefault",                # typed text: terminal default fg (else inherits the dim frame class)
     "auto-suggestion": "ansibrightblack",  # ghost history completion stays dim
@@ -588,6 +590,28 @@ once" was a lie in both directions: a yes is remembered forever, and a no does n
 only ever offers two (``cli/session_trust`` builds it ungrantable), and both spellings of each
 are listed so a channel that ever offers all four cannot fall through to the wrong sentence."""
 
+ARM_WINDOW_S = 1.0
+
+
+def press(armed: bool, armed_at: float, now: float, lines: Any, eof: bool) -> str:
+    """What an idle Ctrl+C (or Ctrl+D with `eof`) does: arm, ignore a repeat inside the window, or exit."""
+    if armed:
+        return "ignore" if lines and now - armed_at < ARM_WINDOW_S else "exit"
+    return "arm" if lines or not eof else "exit"
+
+
+PERMISSION_ANSWER_LINES_SESSION: dict[str, str] = {
+    **PERMISSION_ANSWER_LINES,
+    "allow_always": "✓ always (this session)",
+    "reject_always": "✗ never (this session)",
+}
+PERMISSION_ANSWER_LINES_PRIVATE_TRUST: dict[str, str] = {
+    "allow_once": "✓ trusted for this private session",
+    "allow_always": "✓ trusted for this private session",
+    "reject_once": "✗ not trusted — guarded for this private session",
+    "reject_always": "✗ not trusted — guarded for this private session",
+}
+
 ERASE_APPLICATIONS_WHEN_DONE = True
 """Whether a prompt_toolkit application clears its own drawing when it exits.
 
@@ -712,6 +736,7 @@ def _build_input_app(
     on_paste_image: Callable[[], Any] | None = None,
     keys: TerminalKeysConfig | None = None,
     on_newline_chord: Callable[[str], None] = lambda _name: None,
+    frame_fn: Callable[[], str] = lambda: "class:frame",
 ) -> Application:
     """Inline application: ╭─╮ │ > input │ ╰─ hint ──── meter ─╯. Exits with the entered line.
 
@@ -780,7 +805,7 @@ def _build_input_app(
         VSplit([_wall("╭"), Window(char="─", height=1), _wall("╮")]),
         VSplit([_wall("│"), Window(control, wrap_lines=True, dont_extend_height=True, height=Dimension(max=8), style="class:input"), _wall("│")]),
         VSplit(bottom),
-    ], style="class:frame")
+    ], style=frame_fn)
 
     return Application(
         layout=Layout(_menu_float(body), focused_element=control),
@@ -808,6 +833,7 @@ def _build_persistent_input_app(
     on_paste_image: Callable[[], Any] | None = None,
     keys: TerminalKeysConfig | None = None,
     on_newline_chord: Callable[[str], None] = lambda _name: None,
+    frame_fn: Callable[[], str] = lambda: "class:frame",
 ) -> Application:
     """Long-lived input box that stays usable while turn output streams above it.
 
@@ -926,7 +952,7 @@ def _build_persistent_input_app(
         VSplit([_wall("╭"), Window(char="─", height=1), _wall("╮")]),
         VSplit([_wall("│"), Window(control, wrap_lines=True, dont_extend_height=True, height=Dimension(max=8), style="class:input"), _wall("│")]),
         VSplit([_wall("╰"), Window(char="─", height=1), _wall("╯")]),
-    ], style="class:frame")
+    ], style=frame_fn)
     # Footer UNDER the closed box — where Claude Code / Codex / Gemini / Cline put the key hints
     # and the context readout. The border used to carry them, and a width-less hint Window
     # stretched to half the row and padded it with spaces: a hole in the frame. The right
@@ -1174,9 +1200,13 @@ class TerminalChannel(ChannelAdapter):
         self._live: Live | None = None
         self._state: str = "IDLE"
         self._sigint_armed: bool = False  # True after one Ctrl+C on an empty line; second exits
+        self._armed_at: float = 0.0
         # #49: hint drawn INSIDE the first input bubble (immune to the box repaint that drops
         # a banner hint in a real TTY). start_cmd sets it for interactive sessions; shown once.
         self.first_prompt_hint: str = ""
+        self.chip: Callable[[], str] = lambda: ""
+        self.arm_lines: Callable[[], tuple[str, str] | None] = lambda: None
+        self.armed_hint: str = ""
         # The project-instructions start line as `start` put it into the first hint. Showing a
         # hint that contains it IS the delivery, and the receipt runs there (see
         # `_maybe_deliver_instructions`). Empty means no line is owed on this surface.
@@ -1667,7 +1697,8 @@ class TerminalChannel(ChannelAdapter):
         hint = self._hint_with_status(hint)
         self._instructions_status = ""
         app = _build_input_app(
-            self._history, prompt, hint=hint, context_pct=self._context_pct,
+            self._history, prompt, hint=" · ".join(p for p in (self.chip(), hint) if p), context_pct=self._context_pct,
+            frame_fn=lambda: "class:frame-private" if self.chip() else "class:frame",
             model_names_fn=self._model_names_for_menu, on_paste_image=self.on_paste_image,
             keys=self.keys, on_newline_chord=self._note_newline_chord,
         )
@@ -1675,11 +1706,15 @@ class TerminalChannel(ChannelAdapter):
             line = await app.run_async()
             self._sigint_armed = False
             return (line or "").strip()
-        except KeyboardInterrupt:
-            if self._sigint_armed:
-                raise EOFError  # second consecutive Ctrl+C on an empty line → exit the REPL
-            self._sigint_armed = True
-            self._console.print("[system.info](Press Ctrl+C again to exit)[/system.info]")
+        except (KeyboardInterrupt, EOFError) as key:
+            lines = self.arm_lines()
+            now = time.monotonic()
+            match press(self._sigint_armed, self._armed_at, now, lines, isinstance(key, EOFError)):
+                case "exit":
+                    raise EOFError  # second consecutive press on an empty line → exit the REPL
+                case "arm":
+                    self._sigint_armed, self._armed_at = True, now
+                    self._console.print(f"[system.info]{escape(lines[0]) if lines else '(Press Ctrl+C again to exit)'}[/system.info]")
             return ""
         finally:
             self._state = "IDLE"
@@ -1743,6 +1778,7 @@ class TerminalChannel(ChannelAdapter):
             pending_fn=self._box_pending_frags, on_pending_answer=_on_pending_answer,
             on_keystroke=self._note_keystroke, on_paste_image=self.on_paste_image,
             keys=self.keys, on_newline_chord=self._note_newline_chord,
+            frame_fn=lambda: "class:frame-private" if self.chip() else "class:frame",
         )
         self._box_patch = patch_stdout(raw=True)
         self._box_patch.__enter__()
@@ -1803,6 +1839,7 @@ class TerminalChannel(ChannelAdapter):
     async def ask_permission(self, request: Any) -> Any:
         """Put one permission question to the person at the keyboard; every unclear key means no, once."""
         from localharness.agent.gate_types import Decision
+        from localharness.agent.verdict import SCRATCH_OPTIONS_LEGEND
 
         # The workspace-trust question carries its own legend: its answer is remembered.
         options = getattr(request, "options_legend", None) or (
@@ -1825,8 +1862,11 @@ class TerminalChannel(ChannelAdapter):
                     kind = PERMISSION_DEFAULT_DECISION
                 kind = kind or PERMISSION_DEFAULT_DECISION
                 lines = PERMISSION_ANSWER_LINES_BY_CLASS.get(
-                    getattr(request, "klass", ""), PERMISSION_ANSWER_LINES
+                    getattr(request, "klass", ""),
+                    PERMISSION_ANSWER_LINES_SESSION if options == SCRATCH_OPTIONS_LEGEND else PERMISSION_ANSWER_LINES,
                 )
+                if getattr(request, "klass", "") == "workspace-trust" and (run := current()) is not None and run.private:
+                    lines = PERMISSION_ANSWER_LINES_PRIVATE_TRUST
                 async with self._output_lock:
                     console.print(f"[system.info]{lines[kind]}[/system.info]")
         finally:
@@ -1938,6 +1978,8 @@ class TerminalChannel(ChannelAdapter):
         configured chords' labels, via `nudge_legend`) and ctrl+c to stop; idle: tab lists the
         commands, `/help`, and the backslash line break. (The first-run hint moved into the box
         as its placeholder — _box_placeholder.)"""
+        if self.armed_hint:
+            return [("class:caret", f"  {self.armed_hint}")]
         if self._decision_flash:
             return [("class:caret", f"  {self._decision_flash}")]
         parts: list[str] = []
@@ -2005,8 +2047,10 @@ class TerminalChannel(ChannelAdapter):
                 model = self.model_source()
             except Exception:
                 model = None
+        if chip := self.chip():
+            frags.append(("class:frame-private", chip))
         if model:
-            frags.append(("class:model", model))
+            frags += [sep] * bool(frags) + [("class:model", model)]
         rate = self._tps_text()
         if rate is not None and rate[2] and not self._box_working:
             frags += [sep] * bool(frags) + [(rate[0], rate[1])]
@@ -2149,6 +2193,11 @@ class TerminalChannel(ChannelAdapter):
         """Transient activity note for the status row (e.g. a /model swap's loading line).
         None/empty clears it. Safe to call in any mode — a no-op without the box."""
         self._box_activity = text or ""
+        self._invalidate_box()
+
+    def box_set_armed(self, text: str) -> None:
+        """The footer's left hint while Ctrl+C or Ctrl+D is armed; empty clears it."""
+        self.armed_hint = text
         self._invalidate_box()
 
     def box_set_queued(self, n: int) -> None:

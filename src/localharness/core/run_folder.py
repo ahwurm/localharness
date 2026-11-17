@@ -55,6 +55,10 @@ class RunFolder:
     held: dict = field(default_factory=dict)
     ident: os.stat_result | None = None
     private: bool = False
+    turn: int = 0
+    written: dict = field(default_factory=dict)
+    told: set = field(default_factory=set)
+    stated: bool = False
     _mu: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _ender: "Future[tuple[str, ...]] | None" = field(default=None, repr=False)
 
@@ -97,6 +101,12 @@ def hold(store: str, key: object, value: object, scratch: bool = False) -> bool:
         return False
     run.held[(store, key)] = value
     return True
+
+
+def note_written(run: RunFolder, paths, shown: bool) -> None:
+    """Record the paths a call wrote, each with the turn that first wrote it; the first write wins."""
+    for path in paths:
+        run.written.setdefault(str(path), [run.turn, False, shown])
 
 
 def scratch_of(run: RunFolder | None, workspace_root: str | None) -> Path | None:

@@ -308,10 +308,11 @@ _FORM = re.compile(r"\b(in (one|two|three|four|five|a few|[0-9]+) (sentences?|li
                    r"|one[- ]liner|one line|briefly|tl;?dr|in a sentence|in a word)\b", re.I)
 
 
-def compose_request(path: str, findings: Iterable[Finding], job: str = "", last: bool = False, request: str = "") -> str:
+def compose_request(path: str, findings: Iterable[Finding], job: str = "", last: bool = False, request: str = "", kept: str = "") -> str:
     """The harness message that asks the root to deliver its reviewed answer in its own words; an ask that names a length or form gets the answer alone."""
     if _FORM.search(request):
-        return (_COMPOSE_LAST if last else _COMPOSE_HEAD) + _COMPOSE_FORM + _COMPOSE
+        message = (_COMPOSE_LAST if last else _COMPOSE_HEAD) + _COMPOSE_FORM + _COMPOSE
+        return message + (f" {KEPT_ASK}\n\n{kept_block(kept)}" if kept else "")
     blocks = [(_COMPOSE_LAST if last else _COMPOSE_HEAD) + _COMPOSE_PATH + _COMPOSE]
     if job:
         blocks.append(_data("the job as the session understands it", job[:Caps.BLOCK]))
@@ -319,6 +320,8 @@ def compose_request(path: str, findings: Iterable[Finding], job: str = "", last:
         blocks.append(_data("what this turn did", path[:Caps.BLOCK]))
     if points := open_points(findings):
         blocks.append(_data("points that may still be open", "\n".join(f"- {p}" for p in points)[:Caps.BLOCK]))
+    if kept:
+        blocks.append(f"{KEPT_ASK}\n{kept_block(kept)}")
     return "\n\n".join(blocks)
 
 
@@ -452,6 +455,13 @@ def apply_jtbd(parsed: Parsed, tail: str, shown: set[int], docs: Docs | None) ->
     old = docs.read_session("jtbd.md").strip()
     docs.write_session("jtbd.md", new + "\n")
     return parsed, one_line(new.splitlines()[0])[:Caps.LINE] if old and old != new else ""
+
+
+KEPT_ASK = "Say in your reply which files the session wrote stay on disk when it ends."
+
+
+def kept_block(kept: str) -> str:
+    return _data("files this session wrote that stay", kept[:Caps.BLOCK])
 
 
 def _data(label: str, body: str) -> str:

@@ -1074,7 +1074,7 @@ def _decide(
             display=display,
             grant_keys=keys,
             auto_entry=next((a.auto_entry for a in ordered if a.auto_entry), None),
-            options_legend=SCRATCH_OPTIONS_LEGEND if scratch_only else None,
+            options_legend=SCRATCH_OPTIONS_LEGEND if scratch_only or (grantable and ctx.leaves_no_trace) else None,
         ),
     )
 

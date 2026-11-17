@@ -42,8 +42,10 @@ from localharness.core.events import (
     UserMessage,
 )
 from localharness.core.interrupt import sigint_cancels
+from localharness.core.run_folder import current
 from localharness.orchestrator.task_flow.verbs import cancel_row, mid_turn, pause, render, task_command, turn_end
 from localharness.provider.runtimes import RUNTIMES, row_of
+from localharness.provider.server import key_destination
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +94,8 @@ EFFORT_PICKER_PROMPT = "Reasoning effort for this session (/effort). This questi
 REVIEW_SET_TEMPLATE = "review: {level} — {phrase}"
 REVIEW_SAVED_LINE = "saved as this project's default"
 REVIEW_SESSION_ONLY_LINE = "this session only: there is no project to save it for"
+PRIVATE_SENT_NOTE = "this private session is sent there"
+REVIEW_PRIVATE_LINE = "this session only: a private session saves nothing"
 REVIEW_SAVE_FAILED_TEMPLATE = "Review set for this session, but saving it failed: {exc}"
 REVIEW_UNKNOWN_TEMPLATE = "Unknown review level '{arg}'. Levels: off, 1, 2, 3, max — /review show reports the current level."
 REVIEW_UNAVAILABLE_LINE = "review is unavailable: this session has no reply review."
@@ -429,6 +433,7 @@ class OrchestratorREPL:
         self._current_task: str = ""                          # its originating request (tier-2 context)
         self._fifo: deque[str] = deque()                      # queued messages → future turns (FIFO)
         self._sigint_armed: bool = False                      # idle double-Ctrl+C to exit
+        self._armed_at: float = 0.0
         self._cancelled_by_user: bool = False                 # this turn was cancelled by Ctrl+C
         self._queued_notices: set[asyncio.Task] = set()
         self._box_ctrl_q: Optional[asyncio.Queue] = None      # box → coordinator control events
@@ -832,6 +837,18 @@ class OrchestratorREPL:
             else:
                 await (send(line, meta) if meta and with_meta else send(line))
 
+    def _disarm(self) -> None:
+        self._sigint_armed = False
+        if hasattr(self._channel, "box_set_armed"):
+            self._channel.box_set_armed("")
+
+    def _private(self) -> bool:
+        run = current()
+        return bool(run and run.private)
+
+    def _sent_note(self, before: str, after: str) -> str:
+        return PRIVATE_SENT_NOTE if self._private() and after != before and not key_destination(after)[0] else ""
+
     async def _step(self, verb: str, name: str | None, *clauses: str, colorize: bool = False) -> None:
         """One `◆ model <verb> <name> · clause · …` line of a swap, the model named once and never cut; a URL in it shows no credentials."""
         from localharness.provider.server import strip_url_credentials
@@ -928,22 +945,27 @@ class OrchestratorREPL:
     async def _handle_box_event(self, kind: str, payload: Any) -> bool:
         """Apply one control event. Returns False to end the REPL."""
         try:
-            if kind == "eof":
-                return False
-            if kind == "interrupt":
-                if payload is not None and payload < self._ctrl_ready_at:
-                    # Pressed while the loop was blocked (a /model swap can block it for
-                    # minutes) → stale by the time it drains. It never reached the user as an
-                    # arming message, so counting it toward the ladder would end the session
-                    # the instant the wait they were sitting through finished.
-                    return True
-                # idle Ctrl+C: arm once, exit on the second (mirrors the classic prompt).
-                if self._sigint_armed:
-                    return False
-                self._sigint_armed = True
-                await self._channel.send_message(
-                    "(Press Ctrl+C again to exit)", metadata={"style": "system.info"}
-                )
+            if kind == "interrupt" and payload is not None and payload < self._ctrl_ready_at:
+                # Pressed while the loop was blocked (a /model swap can block it for
+                # minutes) → stale by the time it drains. It never reached the user as an
+                # arming message, so counting it toward the ladder would end the session
+                # the instant the wait they were sitting through finished.
+                return True
+            if kind in ("eof", "interrupt"):
+                # idle Ctrl+C or Ctrl+D: arm once, exit on the second (mirrors the classic prompt).
+                from localharness.channels.terminal import press
+                lines = getattr(self._channel, "arm_lines", lambda: None)()
+                now = time.monotonic()
+                match press(self._sigint_armed, self._armed_at, now, lines, kind == "eof"):
+                    case "exit":
+                        return False
+                    case "arm":
+                        self._sigint_armed, self._armed_at = True, now
+                        if lines:
+                            self._channel.box_set_armed(lines[1])
+                        await self._channel.send_message(
+                            lines[0] if lines else "(Press Ctrl+C again to exit)", metadata={"style": "system.info"}
+                        )
                 return True
             if kind == "turn_done":
                 await self._finish_turn(payload)
@@ -963,7 +985,7 @@ class OrchestratorREPL:
                 await self._apply_tier2_result(clean, decision)
                 return True
             if kind == "submit":
-                self._sigint_armed = False
+                self._disarm()
                 clean, forced = input_router.strip_force(payload)
                 if not clean:
                     return True
@@ -1507,7 +1529,7 @@ class OrchestratorREPL:
         revisions["reply"] = level
         gate = self._session_gate()
         boundary = getattr(gate, "boundary", None)
-        said = REVIEW_SAVED_LINE if boundary is not None else REVIEW_SESSION_ONLY_LINE
+        said = REVIEW_PRIVATE_LINE if self._private() else REVIEW_SAVED_LINE if boundary is not None else REVIEW_SESSION_ONLY_LINE
         if boundary is not None:
             try:
                 await asyncio.to_thread(write_review_level, boundary, level, config_dir=self._config_dir)
@@ -2205,6 +2227,7 @@ class OrchestratorREPL:
             # "leave unchanged" in rebind_endpoint, so an endpoint with the default {} headers would
             # otherwise silently INHERIT the previous endpoint's headers. An endpoint's identity is
             # exactly its own headers.
+            before = llm.config.base_url
             llm.rebind_endpoint(
                 ep.base_url, api_key=ep.api_key, extra_headers=ep.extra_headers,
                 provider_type=ep.provider_type,
@@ -2218,7 +2241,8 @@ class OrchestratorREPL:
             rate = self._measured_note(medians, ep.provider_type, target)
             await self._step(
                 "switched", target, f"on {ep.name}" if ep.name != target else "", ep.base_url,
-                f"tool calling {cap.tool_call_mode}", note, rate or "", SAVED_DEFAULT_NOTE if saved else "", colorize=True)
+                f"tool calling {cap.tool_call_mode}", note, rate or "", SAVED_DEFAULT_NOTE if saved else "",
+                self._sent_note(before, ep.base_url), colorize=True)
             return
 
         if entry is not None and entry.kind == "cold" and entry.record.peer is not None:
@@ -2328,6 +2352,7 @@ class OrchestratorREPL:
             await self._announce_ready(live_ep, ep.provider_type, served, self._measured_note(medians, ep.provider_type, served))
             # #3: pass ep.extra_headers directly (see the cross-endpoint branch above) — never None,
             # which would leave the previous endpoint's headers on the client.
+            before = llm.config.base_url
             llm.rebind_endpoint(ep.base_url, api_key=ep.api_key, extra_headers=ep.extra_headers,
                                 provider_type=ep.provider_type)
             llm.config.model = served
@@ -2337,7 +2362,8 @@ class OrchestratorREPL:
             )
             saved = await self._persist_landed(ep.base_url, served, endpoint=ep)
             await self._step(
-                "switched", None, ep.base_url, f"tool calling {cap.tool_call_mode}", note, SAVED_DEFAULT_NOTE if saved else "")
+                "switched", None, ep.base_url, f"tool calling {cap.tool_call_mode}", note, SAVED_DEFAULT_NOTE if saved else "",
+                self._sent_note(before, ep.base_url))
             await self._strata_offer(entries, arg)
             return
 

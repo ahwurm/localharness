@@ -391,7 +391,7 @@ class _NoteCtx:
 
 def _note_loop(note, ctx):
     loop = object.__new__(AgentLoop)
-    loop._request_note, loop._ctx, loop._llm, loop._tools = note, ctx, object(), None
+    loop._request_note, loop._ctx, loop._llm, loop._tools, loop._gate = note, ctx, object(), None, None
     return loop
 
 

@@ -200,10 +200,11 @@ def test_the_verification_ledger_lands_in_the_private_state(private_run, monkeyp
 
 def test_every_loop_on_a_private_gate_carries_the_private_line(private_run):
     from localharness.agent.loop import PRIVATE_PROMPT_LINE, AgentLoop
-    private = SimpleNamespace(_gate=SimpleNamespace(run=private_run))
-    normal = SimpleNamespace(_gate=SimpleNamespace(run=SimpleNamespace(private=False)))
-    assert AgentLoop._private_line(private) == "\n\n" + PRIVATE_PROMPT_LINE
-    assert AgentLoop._private_line(normal) == ""
+    private, normal = object.__new__(AgentLoop), object.__new__(AgentLoop)
+    private._gate = SimpleNamespace(run=private_run)
+    normal._gate = SimpleNamespace(run=SimpleNamespace(private=False))
+    assert private._private_line() == "\n\n" + PRIVATE_PROMPT_LINE
+    assert normal._private_line() == ""
 
 
 async def test_memory_says_it_is_this_sessions_and_promotes_nothing(private_run):
