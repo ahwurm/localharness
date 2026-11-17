@@ -1271,7 +1271,9 @@ is followed by one dim line giving its lifetime.
 
 - **Writes to scratch are judged as any write outside the project.** Silent in `auto`, asked in `guarded` with
   an "always" that holds for this session only and is never written to `grants.yaml` (it also survives a
-  `/plugins` restart), and a severe ask once the agent has read saved pages. Another session's folder and
+  `/plugins` restart), and a severe ask once the agent has read saved pages. This holds for a write spelled by
+  path or through `$LOCALHARNESS_SCRATCH` or `$TMPDIR`; a command that could set either (an assignment, `eval`,
+  `declare`, `read`, a quoted or escaped spelling) is judged as a write to a place the gate cannot name. Another session's folder and
   `run/` itself are refused outright (the deny class above), and a move into scratch asks.
 - **Only the bash tool's environment carries `LOCALHARNESS_SCRATCH` and `TMPDIR`.** MCP servers do not.
 - **The sweep acts on a lock and a marker.** A start removes folders in `run/` that no live session holds

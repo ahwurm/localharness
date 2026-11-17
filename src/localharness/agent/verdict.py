@@ -236,6 +236,11 @@ MOVE_INTO_RUN_REASON = "moves {source} into this session's scratch, which is del
 SCRATCH_ASK_REASON = "writes this session's scratch (deleted when it ends): {path}"
 SCRATCH_OPTIONS_LEGEND = "[y]es once   [a]lways (this session)   [n]o   [N]ever (this session)"
 _RUN_VARIABLE = re.compile(r"\$\{?(?:LOCALHARNESS_SCRATCH|TMPDIR)\b")
+_RUN_SPELLING = re.compile(r"\$(?:\{(LOCALHARNESS_SCRATCH|TMPDIR)\}|(LOCALHARNESS_SCRATCH|TMPDIR)\b)(?=/|$)")
+_RUN_NAME = re.compile(r"LOCALHARNESS_SCRATCH|TMPDIR")
+_RUN_READ = re.compile(r"(?<!\\)\$(?:\{(?:LOCALHARNESS_SCRATCH|TMPDIR)\}|(?:LOCALHARNESS_SCRATCH|TMPDIR)\b)")
+_RUN_REBINDERS = frozenset({"eval", "source", ".", "trap", "alias", "enable", "declare", "typeset", "local", "export",
+                            "readonly", "read", "printf", "mapfile", "readarray", "getopts", "let", "unset"})
 _CD_INTO_RUN_VARIABLE = re.compile(r"(?:^|[;&|(\s])(?:cd|pushd)\s+[\"']?\$\{?(?:LOCALHARNESS_SCRATCH|TMPDIR)\b")
 SAVED_PAGES_NOTE = " — the agent has read pages saved from the web ({source})."
 SAVED_PAGES_ALWAYS = ' "Always" trusts saved pages for the rest of this session.'
@@ -1154,7 +1159,8 @@ def _target_asks(
             continue
         if resolved is not None and _within(ctx.boundary, resolved):
             continue
-        if resolved is not None and ctx.scratch is not None and _within(ctx.scratch, resolved):
+        if resolved is not None and ctx.scratch is not None and (
+                _within(ctx.scratch, resolved) or (ctx.run is not None and _within(Path(ctx.run) / "t", resolved))):
             key = str(ctx.scratch)
             if not (_granted(ctx, "edit-outside", key) and _refused(ctx, "edit-outside", key) is None):
                 asks.append(_ask_record("edit-outside", key, SCRATCH_ASK_REASON.format(path=resolved)))
@@ -1171,6 +1177,23 @@ def _target_asks(
             "edit-outside", key, f"writes outside the workspace boundary ({where})",
         ))
     return asks
+
+
+def _run_variables_held(command: str, segments: Iterable[ShellSegment]) -> bool:
+    """Do ``$LOCALHARNESS_SCRATCH`` and ``$TMPDIR`` still hold what the bash tool set: every mention only reads them, unquoted, and no builtin that sets a variable by a computed name runs?"""
+    unquoted = re.sub(r"'[^']*'", "", command)
+    return ("((" not in command and len(_RUN_NAME.findall(command)) == len(_RUN_READ.findall(unquoted))
+            and not any(posixpath.basename(s.argv[0]) in _RUN_REBINDERS for s in segments if s.argv)
+            and all(len(_RUN_NAME.findall(w)) == len(_RUN_READ.findall(w)) for s in segments for w in s.argv))
+
+
+def _run_spelled(target: str, ctx: GateContext) -> Optional[Path]:
+    """Where a target spelled from ``$LOCALHARNESS_SCRATCH`` or ``$TMPDIR`` lands, as the bash tool sets them."""
+    match = _RUN_SPELLING.match(target)
+    if match is None or ctx.scratch is None or ctx.run is None:
+        return None
+    base = ctx.scratch if "LOCALHARNESS_SCRATCH" in (match[1], match[2]) else Path(ctx.run) / "t"
+    return _resolve(str(base) + target[match.end():], None)
 
 
 def _private_parts(path: Path, ctx: GateContext) -> Optional[tuple[str, ...]]:
@@ -1554,8 +1577,10 @@ def _evaluate_shell(
     # A segment whose directory the classifier could not read (`cd $HOME && echo x > .bashrc`) writes
     # a target it names only relative to somewhere unknown: it is judged unresolvable, outside the
     # boundary (PRD §3.2 step 8, WR-53), not as the workspace-relative name it is spelled as.
+    held = ctx.scratch is not None and _run_variables_held(command, classified.segments)
     asks += _target_asks(ctx, settings, tuple(
-        (target, None if segment.unresolvable_write else _resolve(target, anchor))
+        (target, (_run_spelled(target, ctx) if held else None)
+         or (None if segment.unresolvable_write else _resolve(target, anchor)))
         for segment in classified.segments
         for target in segment.write_targets
     ))

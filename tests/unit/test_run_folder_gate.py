@@ -181,6 +181,24 @@ def test_a_scratch_write_is_a_severe_ask_once_saved_pages_are_read(world, mode):
         assert "a.md" in result.request.reason
 
 
+@pytest.mark.parametrize("target", ["$LOCALHARNESS_SCRATCH/out", "${LOCALHARNESS_SCRATCH}/t3/out", '"$TMPDIR"/o', "$TMPDIR/o"])
+def test_a_scratch_write_spelled_by_its_variable_is_keyed_on_scratch(world, target):
+    request = world.shell(f"echo x > {target}").request
+    assert request.grant_keys == (("edit-outside", str(world.scratch)),)
+    assert request.options_legend == SCRATCH_OPTIONS_LEGEND
+
+
+@pytest.mark.parametrize("command", [
+    "LOCALHARNESS_SCRATCH=$HOME/.ssh; echo k >> $LOCALHARNESS_SCRATCH/out", "export TMPDIR=~; echo k >> $TMPDIR/o",
+    "n=TMP; declare ${n}DIR=~; echo k >> $TMPDIR/o", 'n=TMP; printf -v "${n}DIR" ~; echo k >> $TMPDIR/o',
+    "eval \"$X\"; echo k >> $TMPDIR/o", "echo k >> '$TMPDIR'/o", "echo k >> $TMPDIR/../../../../o",
+    "echo k >> ${TMPDIR:=~}/o",
+])
+def test_a_rebound_quoted_or_escaping_spelling_is_not_keyed_on_scratch(world, command):
+    request = world.shell(command).request
+    assert request is not None and ("edit-outside", str(world.scratch)) not in request.grant_keys
+
+
 def test_an_outside_write_elsewhere_carries_no_session_legend(world, tmp_path):
     result = world.write(tmp_path / "elsewhere" / "a")
     assert result.verdict is Verdict.ASK and result.request.options_legend is None
@@ -223,6 +241,20 @@ async def test_one_always_covers_scratch_and_every_task_folder_across_a_rebuilt_
     assert (await check(gate_for(world, asker, tmp_path), world.scratch / "t4" / "c")).allowed
     assert len(asker.calls) == 1
     assert (grants.read_bytes() if grants.exists() else None) == before
+
+
+async def test_an_always_for_a_variable_spelled_scratch_write_is_held_and_a_rebinding_asks_again(world, tmp_path):
+    asker = Asker("allow_always")
+    gate = gate_for(world, asker, tmp_path)
+
+    async def shell(command: str):
+        return await gate.check("bash_exec", {"command": command}, SHELL, agent_id="a", session_id="s")
+
+    assert (await shell("echo x > $LOCALHARNESS_SCRATCH/out")).allowed
+    assert (await shell("echo x > $TMPDIR/o")).allowed and (await check(gate, world.scratch / "a")).allowed
+    assert len(asker.calls) == 1 and not (tmp_path / "grants.yaml").exists()
+    assert (await shell("LOCALHARNESS_SCRATCH=$HOME/.ssh; echo k >> $LOCALHARNESS_SCRATCH/out")).allowed
+    assert len(asker.calls) == 2
 
 
 async def test_a_never_is_held_the_same_way_and_never_written(world, tmp_path):
