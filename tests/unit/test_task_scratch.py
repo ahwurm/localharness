@@ -165,3 +165,23 @@ def test_a_scratch_that_the_remover_cannot_open_is_no_error(tmp_path):
     flow, *_ = make_flow(tmp_path)
     flow.docs.scratch_root = tmp_path / "missing"
     assert flow.drop_scratch(1) == 0
+
+
+def test_a_task_that_reuses_a_dropped_id_keeps_its_own_scratch(tmp_path, monkeypatch):
+    import threading
+
+    from localharness.orchestrator.task_flow import filer
+
+    release, real = threading.Event(), filer.remove_dir
+    monkeypatch.setattr(filer, "remove_dir", lambda name, fd: release.wait(5) and real(name, fd))
+    flow, *_ = make_flow(tmp_path)
+    flow.open("x", 1)
+    put(flow, 1, 3)
+    assert flow.drop_scratch(1) == 3
+    flow.docs.make_scratch(1)
+    (flow.docs.scratch(1) / "new.txt").write_text("y")
+    release.set()
+    assert gone(tmp_path / "scratch" / "t1" / "f0.txt")
+    time.sleep(0.1)
+    assert [p.name for p in (tmp_path / "scratch").iterdir()] == ["t1"]
+    assert (flow.docs.scratch(1) / "new.txt").read_text() == "y"

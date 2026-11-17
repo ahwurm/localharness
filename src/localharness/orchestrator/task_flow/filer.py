@@ -5,6 +5,7 @@ import errno
 import hashlib
 import os
 import re
+import secrets
 import stat
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
@@ -512,11 +513,17 @@ class Docs:
         return min(n, _SCRATCH_COUNT_CAP + 1)
 
     def remove_scratch(self, task: int) -> None:
-        """Hands the task's scratch to the remover on a daemon thread without waiting."""
+        """Renames the task's scratch aside, so a task reusing the id gets a fresh one, and hands it to the remover on a daemon thread."""
         if self.scratch_root is None:
             return
         with suppress(OSError):
-            in_background(_remove_and_close, f"t{task}", open_private_dir(self.scratch_root, create=False))
+            fd = open_private_dir(self.scratch_root, create=False)
+            try:
+                os.rename(f"t{task}", gone := f".deleting-{secrets.token_hex(6)}", src_dir_fd=fd, dst_dir_fd=fd)
+            except OSError:
+                os.close(fd)
+                raise
+            in_background(_remove_and_close, gone, fd)
 
     def append_section(self, task: int, doc: str, section: str) -> str:
         if not _REVIEW_DOC.fullmatch(doc):
