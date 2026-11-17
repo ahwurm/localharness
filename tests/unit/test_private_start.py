@@ -92,11 +92,11 @@ def test_the_hidden_mobile_flag_prints_the_same_line():
 
 
 @pytest.mark.parametrize("cause, native, line", [
-    ("a link", True, start_cmd.PRIVATE_LINKED_RUN_LINE),
-    ("another account's", True, start_cmd.PRIVATE_LINKED_RUN_LINE),
-    ("on a folder without enforced locks", True, start_cmd.PRIVATE_UNLOCKED_LINE),
-    (None, True, start_cmd.PRIVATE_UNLOCKED_LINE),
-    (None, False, start_cmd.PRIVATE_NEEDS_POSIX_LINE),
+    (run_folder.LINKED, True, run_folder.PRIVATE_LINKED_RUN_LINE),
+    (run_folder.FOREIGN, True, run_folder.PRIVATE_LINKED_RUN_LINE),
+    (run_folder.UNLOCKED, True, run_folder.PRIVATE_UNLOCKED_LINE),
+    (None, True, run_folder.PRIVATE_UNLOCKED_LINE),
+    (None, False, run_folder.PRIVATE_NEEDS_POSIX_LINE),
 ])
 def test_the_temp_fallback_is_refused_with_its_cause_and_ended(cfg, monkeypatch, started, cause, native, line):
     run = RunFolder(cfg / "run" / "x", private=True)
@@ -108,7 +108,7 @@ def test_the_temp_fallback_is_refused_with_its_cause_and_ended(cfg, monkeypatch,
     result = invoke("--private", "--config-dir", str(cfg))
     assert result.exit_code == 2
     assert " ".join(result.output.split()) == " ".join(line.format(path=cfg / "run").split())
-    assert (str(cfg / "run") in " ".join(result.output.split())) is (line != start_cmd.PRIVATE_NEEDS_POSIX_LINE)
+    assert (str(cfg / "run") in " ".join(result.output.split())) is (line != run_folder.PRIVATE_NEEDS_POSIX_LINE)
     assert ended == [run] and not started
 
 
@@ -116,7 +116,7 @@ def test_a_private_start_that_got_no_run_folder_is_refused(cfg, monkeypatch, sta
     monkeypatch.setattr(run_folder, "begin", lambda c, private=False: None)
     result = invoke("--private", "--config-dir", str(cfg))
     assert result.exit_code == 2
-    assert start_cmd.PRIVATE_NO_RUN_LINE in " ".join(result.output.split())
+    assert run_folder.PRIVATE_NO_RUN_LINE in " ".join(result.output.split())
     assert not started
 
 

@@ -716,14 +716,14 @@ async def _bring_up(
     channel.set_bringup("starting the session", elapsed=0.0)
     try:
         if begin_run and channel.run is None:
-            from localharness.cli.start_cmd import private_run_problem
             from localharness.config.paths import resolve_config_dir
-            from localharness.core.run_folder import begin
+            from localharness.core.run_folder import begin, end, private_run_problem
 
             cfg = resolve_config_dir(config_dir)
             private = channel.bringup_private
             channel.run = await asyncio.to_thread(begin, cfg, private)
             if private and (problem := await asyncio.to_thread(private_run_problem, channel.run, cfg)):
+                await asyncio.to_thread(end, channel.run)
                 channel.run = None
                 channel.set_bringup("failed", detail=problem, failed=True, elapsed=time.monotonic() - started)
                 return

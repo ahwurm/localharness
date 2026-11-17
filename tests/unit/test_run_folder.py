@@ -358,13 +358,28 @@ def test_a_second_end_returns_the_first_ends_outcome(cfg, monkeypatch):
     assert got == ["Scratch not fully removed: /x/y stays until the next start"] * 2
 
 
+@pytest.mark.parametrize("cause, native, line", [
+    (run_folder.LINKED, True, run_folder.PRIVATE_LINKED_RUN_LINE), (run_folder.FOREIGN, True, run_folder.PRIVATE_LINKED_RUN_LINE),
+    (run_folder.UNLOCKED, True, run_folder.PRIVATE_UNLOCKED_LINE), (None, False, run_folder.PRIVATE_NEEDS_POSIX_LINE)])
+def test_private_run_problem_names_the_cause_and_leaves_ending_the_run_to_its_caller(cfg, monkeypatch, cause, native, line):
+    ended = []
+    monkeypatch.setattr(run_folder, "end", lambda run, say=None: ended.append(run))
+    monkeypatch.setattr(run_folder, "fallback_cause", lambda c: cause)
+    monkeypatch.setattr(run_folder, "native", lambda: native)
+    fallback = run_folder.RunFolder(cfg / "x", private=True)
+    assert run_folder.private_run_problem(fallback, cfg) == line.format(path=cfg / "run")
+    assert run_folder.private_run_problem(None, cfg) == run_folder.PRIVATE_NO_RUN_LINE
+    assert run_folder.private_run_problem(run_folder.RunFolder(cfg / "y", parent=3, private=True), cfg) is None
+    assert ended == []
+
+
 def test_doctor_names_a_fallback_and_foreign_folders(cfg, tmp_path, capsys):
     from localharness.cli import doctor_cmd
 
     other = tmp_path / "elsewhere"
     other.mkdir()
     (cfg / "run").symlink_to(other)
-    assert fallback_cause(cfg) == "a link"
+    assert fallback_cause(cfg) == run_folder.LINKED == "a link"
     doctor_cmd._print_run_folder(cfg)
     out = capsys.readouterr().out
     assert "run/ is a link: sessions use" in out and "use --config-dir <local folder>" in out

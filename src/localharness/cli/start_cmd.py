@@ -169,11 +169,7 @@ PRIVATE_ACP_LINE = ("acp has no private mode (Zed keeps its own thread history);
                     "start a terminal session with localharness start --private.")
 PRIVATE_PLATFORM_LINE = ("{name} keeps the conversation on its servers; "
                          "start a terminal session with localharness start --private.")
-PRIVATE_LINKED_RUN_LINE = "{path} is a link or another account's; remove it, or use --config-dir <local folder>."
-PRIVATE_UNLOCKED_LINE = "{path} does not enforce file locks; use --config-dir <local folder>."
-PRIVATE_NEEDS_POSIX_LINE = "private sessions need POSIX file locks; use WSL on Windows."
 PRIVATE_HINT = "Private: no saved memory; only files written into your project stay."
-PRIVATE_NO_RUN_LINE = "no run folder for a private session; use --config-dir <local folder>."
 
 
 def _refuse_private(line: str) -> None:
@@ -188,24 +184,6 @@ def _refuse_private_channel(channel_mode: str) -> None:
         _refuse_unbuildable_channel(channel_mode)
     _refuse_private({"mobile": PRIVATE_MOBILE_LINE, "acp": PRIVATE_ACP_LINE}.get(
         channel_mode, PRIVATE_PLATFORM_LINE.format(name=channel_mode)))
-
-
-def private_run_problem(run: Any, cfg: Path) -> str | None:
-    """Why a private session cannot run in this run folder, or None; a fallback run is ended here."""
-    from localharness.core.run_folder import end, fallback_cause, native
-    if run is None:
-        return PRIVATE_NO_RUN_LINE
-    if run.parent is not None:
-        return None
-    end(run)
-    cause = fallback_cause(cfg)
-    return (PRIVATE_LINKED_RUN_LINE if cause in ("a link", "another account's")
-            else PRIVATE_UNLOCKED_LINE if native() else PRIVATE_NEEDS_POSIX_LINE).format(path=cfg / "run")
-
-
-def _refuse_private_run(run: Any, cfg: Path) -> None:
-    if problem := private_run_problem(run, cfg):
-        _refuse_private(problem)
 
 
 MOBILE_NEEDS_ITS_OWN_COMMAND = OWN_COMMAND_ERROR.format(name="mobile", why=_own_command(None, None)["mobile"][0])
@@ -3882,12 +3860,13 @@ def start_app(
             gc.collect()
     elif not list_models and channel == "terminal":
         _models_that_arrived(config_dir, wanted, no_input)
-    from localharness.core.run_folder import begin, end
+    from localharness.core.run_folder import begin, end, private_run_problem
 
     cfg = resolve_config_dir(config_dir)
     run = None if list_models else begin(cfg, private=private)
-    if private and not list_models and (cfg / "config.yaml").exists():
-        _refuse_private_run(run, cfg)
+    if private and not list_models and (cfg / "config.yaml").exists() and (problem := private_run_problem(run, cfg)):
+        end(run)
+        _refuse_private(problem)
     resume: Resume | None = None
 
     def say(line: str) -> None:

@@ -41,6 +41,11 @@ SCRATCH_SENTENCE = (
 REMOVING_LINE = "Removing scratch… (Ctrl+C leaves it for the next start)"
 PRIVATE_REMOVING_LINE = "Removing this private session… (Ctrl+C leaves it for the next start)"
 END_WAIT_S = 2.0
+LINKED, FOREIGN, UNLOCKED = "a link", "another account's", "on a folder without enforced locks"
+PRIVATE_LINKED_RUN_LINE = "{path} is a link or another account's; remove it, or use --config-dir <local folder>."
+PRIVATE_UNLOCKED_LINE = "{path} does not enforce file locks; use --config-dir <local folder>."
+PRIVATE_NEEDS_POSIX_LINE = "private sessions need POSIX file locks; use WSL on Windows."
+PRIVATE_NO_RUN_LINE = "no run folder for a private session; use --config-dir <local folder>."
 PRIVATE_END_WAIT_S = 30.0
 _SLOW_AFTER_S = 1.0
 _TOLD_VISIT_CAP = 2000
@@ -475,9 +480,9 @@ def fallback_cause(config_dir: Path) -> str | None:
     except OSError:
         return None
     if stat.S_ISLNK(st.st_mode):
-        return "a link"
+        return LINKED
     if st.st_uid != os.geteuid():
-        return "another account's"
+        return FOREIGN
     try:
         first, second = os.open(run, _DIR_FLAGS), os.open(run, _DIR_FLAGS)
     except OSError:
@@ -488,12 +493,22 @@ def fallback_cause(config_dir: Path) -> str | None:
             _lock(second)
         except BlockingIOError:
             return None
-        return "on a folder without enforced locks"
+        return UNLOCKED
     except OSError:
         return None
     finally:
         os.close(first)
         os.close(second)
+
+
+def private_run_problem(run: RunFolder | None, cfg: Path) -> str | None:
+    """Why a private session cannot run in this run folder, or None; the caller ends a refused run."""
+    if run is None:
+        return PRIVATE_NO_RUN_LINE
+    if run.parent is not None:
+        return None
+    return (PRIVATE_LINKED_RUN_LINE if fallback_cause(cfg) in (LINKED, FOREIGN)
+            else PRIVATE_UNLOCKED_LINE if native() else PRIVATE_NEEDS_POSIX_LINE).format(path=cfg / "run")
 
 
 def foreign_count(config_dir: Path) -> int:
