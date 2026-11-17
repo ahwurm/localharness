@@ -226,7 +226,7 @@ PRIVATE_DOC_REASON = "a task document is not editable by the agent; ask the pers
 PRIVATE_STATE_REASON = "harness state; not editable"
 NO_TRACE_FILE_REASON = "A private session does not write {name} (a later session would load it); write NOTES.md instead."
 NO_TRACE_COMMAND_REASON = "This command may change {name}, which a later session would load; use read to look at it."
-NO_TRACE_PATH_REASON = "A private session does not write {path} (a later session would load it); make it in a normal session."
+NO_TRACE_PATH_REASON = "A private session does not write {path} (a later session would load it); ask for it again in a normal session."
 _NO_TRACE_DIRS = (".agents", WORKSPACE_DIR_NAME)
 DOWNLOADS_WRITE_REASON = (
     "the downloads folder holds pages saved from the web and only web_fetch and browser_fetch write it; "

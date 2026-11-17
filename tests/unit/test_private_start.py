@@ -211,6 +211,15 @@ def test_every_loop_on_a_private_gate_carries_the_private_line(private_run):
     assert normal._private_line() == ""
 
 
+def test_the_private_line_says_nothing_reaches_a_later_session_and_remember_is_this_sessions():
+    from localharness.agent.loop import PRIVATE_PROMPT_LINE
+    assert "a later session will not know anything said here" in PRIVATE_PROMPT_LINE
+    assert "never offer to save or restore it there" in PRIVATE_PROMPT_LINE
+    assert "`remember` keeps a fact for this session only" in PRIVATE_PROMPT_LINE
+    assert "unless the person asks for a file in a message" in PRIVATE_PROMPT_LINE
+    assert "files or memory" not in PRIVATE_PROMPT_LINE
+
+
 async def test_memory_says_it_is_this_sessions_and_promotes_nothing(private_run):
     from localharness.cli import memory_cmd
     from localharness.tools.builtin.memory_tools import MemoryRememberTool

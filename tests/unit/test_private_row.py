@@ -120,6 +120,7 @@ def test_a_skill_or_a_projects_localharness_folder_is_refused(world, mode, path)
     result = world.write(world.ws / path, mode=mode)
     assert result.verdict is Verdict.DENY
     assert result.reason == NO_TRACE_PATH_REASON.format(path=repr(str(world.ws / path)))
+    assert result.reason.endswith("; ask for it again in a normal session.")
     assert world.shell(f"mkdir -p {path}", mode=mode).verdict is Verdict.DENY
     assert world.shell(f"touch {path}", mode=mode).verdict is Verdict.DENY
 
