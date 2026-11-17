@@ -588,7 +588,10 @@ read and argue with. Each step below says what it does in `auto`.
      The same class refuses a write, delete, move or link whose target, or a link's source, lands under `run/`
      of either config directory (the session's and the default one, compared without regard to case), except
      inside this session's own `scratch/`. Each session's run folder holds its scratch (see
-     [Scratch](#scratch)), so another session's folder and `run/` itself are refused. A relative `ln -s`
+     [Scratch](#scratch)), so another session's folder and `run/` itself are refused. Each target is judged on
+     its own, so a second one held in a variable (`2>$TMPDIR/err`) does not hide the first. The sources of `cp
+     -l`, `cp -s`, `cp -a` and `rsync --link-dest`, and that option's folder, count as a link's source does,
+     because a later write to the copy reaches the source. A relative `ln -s`
      source is read against the folder the link sits in, and a word that holds a variable and names
      `.localharness/run` (`$HOME/.localharness/run/…`) is refused by its text. A move into scratch is a
      separate ask, never granted by an "always" and put to you in `auto` too: `mv`, `rsync
@@ -1330,9 +1333,10 @@ the project that is neither the agent's nor one of these:
 removal, move or link aimed at what a later session would load: an instructions file (`CLAUDE.md`, `AGENTS.md`,
 `.localharness/INSTRUCTIONS.md`, matched without regard to case and including the resolved name of a candidate
 that is a link), anything under a `.agents/` or `.localharness/` folder, and the config folder, apart from the
-session's own scratch. The row reads every target the shell parser yields and the sources of `ln`, `cp -l`,
-`cp -a` and `rsync --link-dest`, because a later write to the copy reaches the source. A command that is not a
-read and names one of these is refused unless the name is only a copy source, so `git mv`, `git rm`, `git
+session's own scratch. The row reads every target the shell parser yields, each on its own, and the sources of
+`ln`, `cp -l`, `cp -s`, `cp -a` and `rsync --link-dest`, because a later write to the copy reaches the source. A
+redirect, and any word of a command that is not a read, naming one of these is refused by its text even when a
+variable spells the folder (`echo x >> $PWD/CLAUDE.md`), unless the name is only a copy source, so `git mv`, `git rm`, `git
 checkout -- CLAUDE.md`, `git restore` and `patch` naming one are refused and `cp CLAUDE.md NOTES.md` is not.
 A target is also compared by device and inode with the instructions files that exist, so `ln CLAUDE.md
 NOTES.md` followed by a write to `NOTES.md` is refused. The reasons name the path and say what to do instead.

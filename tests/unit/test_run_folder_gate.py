@@ -100,6 +100,27 @@ def test_a_link_to_a_file_in_the_project_is_not_denied(world):
 
 
 @pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("command", [
+    "echo x > {o}/s.sh 2>$TMPDIR/err", "cp a {o}/s.sh 2>$ERR", "tee {o}/s.sh $LOG", "echo x >> {o}/s.sh 2> $LOG",
+])
+def test_a_second_variable_spelled_target_does_not_lift_the_deny(world, mode, command):
+    assert world.shell(command.format(o=world.other), mode=mode).verdict is Verdict.DENY
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("command", [
+    "cp -l {o}/secret {s}/h", "cp -s {o}/secret {s}/h", "cp -a {o}/secret {s}/h", "cp --link {o}/secret {s}/h",
+    "rsync --link-dest={o} a/ {s}/b", "rsync -a --link-dest {o} a/ {s}/b",
+])
+def test_a_linking_copy_from_another_sessions_folder_is_denied(world, mode, command):
+    assert world.shell(command.format(o=world.other, s=world.scratch), mode=mode).verdict is Verdict.DENY
+
+
+def test_a_plain_copy_out_of_another_sessions_folder_is_not_denied(world):
+    assert world.shell(f"cp {world.other}/secret {world.scratch}/h").verdict is not Verdict.DENY
+
+
+@pytest.mark.parametrize("mode", MODES)
 def test_a_home_spelling_of_the_run_folder_is_refused_by_text(world, mode):
     for command in (f'echo x > "$HOME/.localharness/run/{OTHER}/scratch/y"',
                     f'rm -rf "$HOME/.LocalHarness/run/{OTHER}"',
@@ -240,6 +261,8 @@ MOVES = [
     ("tar --remove-files -cf {s}/a.tar ~/x", "~/x"),
     ("tar --remove-files --file={s}/a.tar ~/x", "~/x"),
     ("zip -m {s}/a.zip ~/x", "~/x"),
+    ("mv ~/Documents {s}/d 2>$TMPDIR/err", "~/Documents"),
+    ("mv ~/x {s}/y 2>$ERR", "~/x"),
 ]
 
 

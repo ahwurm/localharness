@@ -33,7 +33,6 @@ import os
 import posixpath
 import re
 from dataclasses import dataclass, replace
-from itertools import chain
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable, Iterable, Literal, Optional
 from urllib.parse import urlparse
@@ -864,11 +863,10 @@ def _move_asks(segments, anchor: Optional[Path], ctx: GateContext, command: str)
         destination = moved[1]
         if _RUN_VARIABLE.search(destination):
             into = True
-        elif segment.unresolvable_write:
-            into = cd_names_run
         else:
             into = any((place := _resolve(raw, anchor)) is not None and _within(ctx.run, place)
-                       for raw in (destination, *segment.write_targets))
+                       for raw in (destination, *segment.write_targets)) or (
+                segment.unresolvable_write and cd_names_run)
         if not into:
             continue
         for source in segment.removal_targets:
@@ -1266,63 +1264,23 @@ def _same_file(path: Path, candidate: Path) -> bool:
     return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
 
 
-def _no_trace_reason(path: Path, raw: str, ctx: GateContext, removal: bool) -> Optional[str]:
-    """Why a private session may not write ``path``: a later session would load it."""
-    if ctx.scratch is not None and _within(ctx.scratch, path):
+def _no_trace_reason(word: str, place: Optional[Path], ctx: GateContext, removal: bool = False,
+                     named: bool = False) -> Optional[str]:
+    """Why a private session may not write ``word``, a target placed at ``place`` or, when ``named``, a word a command names: a later session would load it."""
+    if place is not None and ctx.scratch is not None and _within(ctx.scratch, place):
         return None
     root = Path(ctx.boundary or ctx.workspace)
-    name = instructions_name(str(path), root)
-    if name is None and not removal:
-        name = next((posixpath.basename(n).casefold() for n in CANDIDATE_NAMES if _same_file(path, root / n)), None)
+    text = (word.partition("=")[2] if word.startswith("-") else word) if named else str(place)
+    name = instructions_name(text, root)
+    if name is None and place is not None and not (removal or named):
+        name = next((posixpath.basename(n).casefold() for n in CANDIDATE_NAMES if _same_file(place, root / n)), None)
     if name is not None:
-        return NO_TRACE_FILE_REASON.format(name=_shown_name(name))
-    if _hidden_dir(path, root) or any(_within(folder, path) for folder in _config_dirs(ctx)):
+        return (NO_TRACE_COMMAND_REASON if named else NO_TRACE_FILE_REASON).format(name=_shown_name(name))
+    hidden = (any(part.casefold() in _NO_TRACE_DIRS for part in PurePosixPath(text).parts) if named
+              else place is not None and _hidden_dir(place, root))
+    if hidden or (place is not None and any(_within(folder, place) for folder in _config_dirs(ctx))):
         from localharness.channels.base import one_line
-        return NO_TRACE_PATH_REASON.format(path=repr(one_line(raw)))
-    return None
-
-
-def _copy_link_sources(segments: Iterable[ShellSegment]) -> Iterable[tuple[str, bool]]:
-    """The sources of a ``cp`` that links or preserves, and of an ``rsync`` with ``--link-dest``: a later write to the copy reaches the source."""
-    for segment in segments:
-        if not segment.argv:
-            continue
-        program, rest = posixpath.basename(segment.argv[0]).casefold(), segment.argv[1:]
-        if program == "cp":
-            linking = any(
-                (t.startswith("--") and len(t) > 3 and ("--link".startswith(t) or "--archive".startswith(t)))
-                or (t[:1] == "-" and t[1:2] != "-" and any(c in t for c in "la"))
-                for t in rest)
-        else:
-            linking = program == "rsync" and any(t.startswith("--link-dest") for t in rest)
-        if linking:
-            yield from ((source, False) for source in copy_operands(rest).sources)
-
-
-def _no_trace_text_deny(
-    segments: Iterable[ShellSegment], anchor: Optional[Path], ctx: GateContext
-) -> Optional[VerdictResult]:
-    """DENY a command that is not a read and names an instructions file, ``.agents`` or ``.localharness``, unless the name is only a copy source or sits in this session's scratch."""
-    root = Path(ctx.boundary or ctx.workspace)
-    for segment in segments:
-        if segment.read_only or not segment.argv:
-            continue
-        rest = segment.argv[1:]
-        copies = posixpath.basename(segment.argv[0]).casefold() in ("cp", "install", "rsync")
-        skipped = set(copy_operands(rest).sources) if copies else set()
-        for word in rest:
-            if word in skipped:
-                continue
-            placed = _resolve(word, anchor)
-            if placed is not None and ctx.scratch is not None and _within(ctx.scratch, placed):
-                continue
-            named = word.partition("=")[2] if word.startswith("-") else word
-            if (name := instructions_name(named, root)) is not None:
-                return VerdictResult(Verdict.DENY, NO_TRACE_COMMAND_REASON.format(name=_shown_name(name)))
-            if (placed is not None and any(_within(f, placed) for f in _config_dirs(ctx))) or any(
-                    part.casefold() in _NO_TRACE_DIRS for part in PurePosixPath(named).parts):
-                from localharness.channels.base import one_line
-                return VerdictResult(Verdict.DENY, NO_TRACE_PATH_REASON.format(path=repr(one_line(word))))
+        return NO_TRACE_PATH_REASON.format(path=repr(one_line(word)))
     return None
 
 
@@ -1339,45 +1297,54 @@ def _private_deny(
                 return VerdictResult(Verdict.DENY, reason)
             if _in_run_folder(path, ctx):
                 return _run_denial(ctx)
-            if ctx.leaves_no_trace and (reason := _no_trace_reason(path, raw, ctx, removal)) is not None:
+            if ctx.leaves_no_trace and (reason := _no_trace_reason(raw, path, ctx, removal)) is not None:
                 return VerdictResult(Verdict.DENY, reason)
     return None
 
 
 def _link_sources(segment: ShellSegment, anchor: Optional[Path]) -> Iterable[str]:
-    """The sources of an ``ln``; a symbolic link's relative source is read from the folder the link sits in."""
-    rest = segment.argv[1:]
-    ops = copy_operands(rest)
-    symbolic = any(t == "--symbolic" or (t[:1] == "-" and t[1:2] != "-" and "s" in t) for t in rest)
-    if not symbolic or segment.unresolvable_write or not segment.write_targets:
-        yield from ops.sources
+    """What a later write to the copy reaches: the sources of an ``ln``, a ``cp`` that links or preserves, and an ``rsync --link-dest`` with its folder."""
+    if not segment.argv:
         return
-    for index, source in enumerate(ops.sources):
-        if source.startswith(("/", "~")):
-            yield source
-            continue
-        link = segment.write_targets[index if ops.into and index < len(segment.write_targets) else 0]
-        if ops.destination is None:
-            folder = ""
-        elif ops.into or not ((place := _resolve(link, anchor)) is not None and place.is_dir()):
-            folder = posixpath.dirname(link)
-        else:
-            folder = link
-        yield posixpath.join(folder, source)
+    program, rest = posixpath.basename(segment.argv[0]).casefold(), segment.argv[1:]
+    ops = copy_operands(rest)
+    if program == "cp" and any(
+            (t.startswith("--") and len(t) > 3 and any(f.startswith(t) for f in ("--link", "--archive", "--symbolic-link")))
+            or (t[:1] == "-" and t[1:2] != "-" and any(c in t for c in "las")) for t in rest):
+        yield from ops.sources
+    elif program == "rsync" and any(t.startswith("--link-dest") for t in rest):
+        yield from (*ops.sources, *(t.partition("=")[2] for t in rest if t.startswith("--link-dest=")))
+    elif program == "ln":
+        symbolic = any(t == "--symbolic" or (t[:1] == "-" and t[1:2] != "-" and "s" in t) for t in rest)
+        if not symbolic or segment.unresolvable_write or not segment.write_targets:
+            yield from ops.sources
+            return
+        for index, source in enumerate(ops.sources):
+            if source.startswith(("/", "~")):
+                yield source
+                continue
+            link = segment.write_targets[index if ops.into and index < len(segment.write_targets) else 0]
+            if ops.destination is None:
+                folder = ""
+            elif ops.into or not ((place := _resolve(link, anchor)) is not None and place.is_dir()):
+                folder = posixpath.dirname(link)
+            else:
+                folder = link
+            yield posixpath.join(folder, source)
 
 
-def _private_shell_targets(
-    segments: Iterable[ShellSegment], anchor: Optional[Path]
-) -> Iterable[tuple[str, bool]]:
-    """Every static target the segments write, delete or link, in segment order; a link's source is one too."""
+def _shell_words(segments: Iterable[ShellSegment], anchor: Optional[Path]) -> Iterable[tuple[str, str]]:
+    """Every word the segments write or link from ("write"), remove ("removal"), only read ("source": a program or a copy's source) or name ("named"), placed or not."""
     for segment in segments:
-        if not segment.unresolvable_write:
-            yield from ((target, False) for target in segment.write_targets)
-        yield from ((target, False) for target in segment.destructive_targets)
-        if not segment.unresolvable_removal:
-            yield from ((target, True) for target in segment.removal_targets)
-        if segment.argv and Path(segment.argv[0]).name.casefold() == "ln":
-            yield from ((source, False) for source in _link_sources(segment, anchor))
+        yield from ((word, "write") for word in (
+            *segment.write_targets, *segment.destructive_targets, *_link_sources(segment, anchor)))
+        yield from ((word, "removal") for word in segment.removal_targets)
+        if segment.argv and not segment.read_only:
+            rest = segment.argv[1:]
+            copies = posixpath.basename(segment.argv[0]).casefold() in ("cp", "install", "rsync")
+            sources = set(copy_operands(rest).sources) if copies else set()
+            yield segment.argv[0], "source"
+            yield from ((word, "source" if word in sources else "named") for word in rest)
 
 
 def _evaluate_write(
@@ -1557,13 +1524,13 @@ def _evaluate_shell(
     non_read_only = tuple(s for s in classified.segments if not s.read_only)
 
     anchor = _shell_anchor(tool_name, params, ctx)
-    targets = _private_shell_targets(classified.segments, anchor)
-    if ctx.leaves_no_trace:
-        targets = chain(targets, _copy_link_sources(classified.segments))
-    denied = _private_deny(targets, anchor, ctx) or _run_text_deny(
-        (*(w for s in classified.segments for w in s.write_targets), *(w for s in non_read_only for w in s.argv)), ctx)
+    words = tuple(_shell_words(classified.segments, anchor))
+    denied = _private_deny(((w, kind == "removal") for w, kind in words if kind in ("write", "removal")), anchor, ctx
+                           ) or _run_text_deny((w for w, _ in words), ctx)
     if denied is None and ctx.leaves_no_trace:
-        denied = _no_trace_text_deny(classified.segments, anchor, ctx)
+        reason = next((r for w, kind in words if kind != "source"
+                       and (r := _no_trace_reason(w, _resolve(w, anchor), ctx, named=True))), None)
+        denied = reason and VerdictResult(Verdict.DENY, reason)
     if denied is not None:
         return denied
 

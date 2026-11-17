@@ -94,7 +94,10 @@ COMMANDS = [
     "git mv NOTES.md CLAUDE.md", "git checkout x -- CLAUDE.md", "git restore CLAUDE.md", "patch CLAUDE.md",
     "echo x >> HARD.md", "echo x > HARD.md", "echo x > CLAUDE.md", "sed -i s/a/b/ CLAUDE.md", "tee VIA.md",
     "cp a.txt CLAUDE.md", "cd sub && echo x >> CLAUDE.md", "rsync --link-dest=. CLAUDE.md x2",
-    "install a.txt AGENTS.md",
+    "install a.txt AGENTS.md", "echo x >> CLAUDE.md 2>$ERR", "cat x > CLAUDE.md 2> $LOCALHARNESS_SCRATCH/err",
+    "echo x > HARD.md 2>$TMPDIR/err", "cp -s CLAUDE.md x2",
+    "echo x >> $PWD/CLAUDE.md", 'cat >> "$PWD/AGENTS.md" <<EOF\nx\nEOF', "echo x > $HOME/.localharness/agents/a.yaml",
+    "echo x > $PWD/.agents/skills/s/SKILL.md",
 ]
 
 
