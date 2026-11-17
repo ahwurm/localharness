@@ -49,11 +49,13 @@ def _owner(monkeypatch, cfg, outcomes, script):
             seen["cb"].update(kw, channel=channel)
 
         def session_over(self):
-            pass
+            seen["cb"]["over"] = seen["cb"].get("over", 0) + 1
 
     async def fake_start(*args, run=None, mobile_channel=None, **kw):
         seen["runs"].append(run)
         outcome = outcomes.pop(0)
+        if outcome == "raise":
+            raise RuntimeError("the model server is down")
         private_dir = run.state / "sessions" if run is not None and run.private else None
         mobile_channel.bind_runtime(session_id=f"c{len(seen['runs'])}", agent_id="a",
                                     session_dir=cfg / "agents" / "a" / "sessions", private_dir=private_dir)
@@ -117,6 +119,31 @@ def test_a_private_chat_sleeps_in_its_run_folder_and_wakes_in_it(cfg, monkeypatc
         assert runs[1] is runs[0] and ch.private is True
 
     _owner(monkeypatch, cfg, ["asleep", "block"], script)
+
+
+@pytest.mark.parametrize("private", [True, False])
+def test_a_failed_wake_keeps_a_private_chat_until_end_and_ends_a_normal_one(cfg, monkeypatch, private):
+    async def script(cb, runs, runner):
+        ch = cb["channel"]
+        cb["on_first_message"](private=private)
+        await _until(lambda: ch.asleep)
+        run = runs[0]
+        thread = run.state / "sessions" / "thread.jsonl"
+        if private:
+            thread.parent.mkdir(parents=True, exist_ok=True)
+            thread.write_text("{}")
+        for over in (2, 3):
+            cb["on_first_message"]()
+            await _until(lambda: cb["over"] == over)
+            assert ch.bringup.failed and ch.session_id is None
+            assert (ch.run is run, ch.private) == ((True, True) if private else (False, None))
+        if private:
+            assert runs[1] is runs[2] is run and thread.exists()
+        await cb["on_end"]()
+        await _until(lambda: not run.path.exists())
+        assert ch.run is None and ch.private is None
+
+    _owner(monkeypatch, cfg, ["asleep", "raise", "raise"], script)
 
 
 @pytest.mark.parametrize("state", ["asleep", "block"])

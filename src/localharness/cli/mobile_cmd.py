@@ -530,20 +530,21 @@ async def _serve(
             if session_task is not None and not session_task.done():
                 return
             channel.private = private if private is not None else bool(channel.private)
+            woke = channel.private and channel.run is not None  # a sleeping private chat, or one whose wake failed
             session_task = asyncio.ensure_future(_bring_up(
                 channel, config_dir=config_dir, verbose=verbose, agent=agent, fresh_thread=fresh_thread,
                 private=channel.private, chat=chat))
-            session_task.add_done_callback(_after_session)
+            session_task.add_done_callback(lambda task: _after_session(task, woke))
             channel.set_bringup_abort(session_task.cancel)
 
-        def _after_session(task: asyncio.Task) -> None:
+        def _after_session(task: asyncio.Task, woke: bool) -> None:
             """The session task is over with no session live — asleep, failed, or a build abandoned
             — so the next message brings one up again (the server's latch; a failed wake has put
             its file back and tries again that way). A sleep also lets the model the session
             held go (the plugin, registry and scheduler leave a cycle the GC has to reach), and a
             line that arrived while the session was falling asleep wakes it right now rather
             than waiting for the one after."""
-            if not channel.asleep:
+            if not channel.asleep and not (woke and channel.bringup is not None and channel.bringup.failed):
                 _end_run()
             if channel.session_id is not None:
                 return  # ended with its handles still bound (/quit): not this callback's to undo
