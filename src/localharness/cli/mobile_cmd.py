@@ -35,6 +35,7 @@ from rich.console import Console
 from rich.markup import escape
 
 from localharness.cli.mobile_plugin import MOBILE_DEFAULT_PORT as DEFAULT_PORT  # the one literal lives there
+from localharness.cli.workspace import run_home
 from localharness.core import run_folder
 
 log = logging.getLogger(__name__)
@@ -499,7 +500,9 @@ async def _serve(
 
         channel = MobileChannel(bus=EventBus(), config={})
         ending: list[asyncio.Future] = []
-        await asyncio.to_thread(run_folder.sweep, resolve_config_dir(config_dir))
+        for place in (await asyncio.to_thread(run_home, config_dir), resolve_config_dir(config_dir).resolve()):
+            if place is not None:
+                await asyncio.to_thread(run_folder.sweep, place)
 
         def _end_run() -> None:
             run = channel.run
@@ -720,7 +723,8 @@ async def _bring_up(
 
             cfg = resolve_config_dir(config_dir)
             private = channel.bringup_private
-            channel.run = await asyncio.to_thread(run_folder.begin, cfg, private)
+            home = await asyncio.to_thread(run_home, config_dir)
+            channel.run = await asyncio.to_thread(run_folder.begin, cfg, private, home)
             if private and (problem := await asyncio.to_thread(run_folder.private_run_problem, channel.run, cfg)):
                 await asyncio.to_thread(run_folder.end, channel.run)
                 channel.run = None

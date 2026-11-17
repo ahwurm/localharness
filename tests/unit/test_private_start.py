@@ -101,7 +101,7 @@ def test_the_hidden_mobile_flag_prints_the_same_line():
 def test_the_temp_fallback_is_refused_with_its_cause_and_ended(cfg, monkeypatch, started, cause, native, line):
     run = RunFolder(cfg / "run" / "x", private=True)
     ended = []
-    monkeypatch.setattr(run_folder, "begin", lambda c, private=False: run)
+    monkeypatch.setattr(run_folder, "begin", lambda c, private=False, home=None: run)
     monkeypatch.setattr(run_folder, "end", lambda r, say=None: ended.append(r))
     monkeypatch.setattr(run_folder, "fallback_cause", lambda c: cause)
     monkeypatch.setattr(run_folder, "native", lambda: native)
@@ -113,7 +113,7 @@ def test_the_temp_fallback_is_refused_with_its_cause_and_ended(cfg, monkeypatch,
 
 
 def test_a_private_start_that_got_no_run_folder_is_refused(cfg, monkeypatch, started):
-    monkeypatch.setattr(run_folder, "begin", lambda c, private=False: None)
+    monkeypatch.setattr(run_folder, "begin", lambda c, private=False, home=None: None)
     result = invoke("--private", "--config-dir", str(cfg))
     assert result.exit_code == 2
     assert run_folder.PRIVATE_NO_RUN_LINE in " ".join(result.output.split())
@@ -121,7 +121,7 @@ def test_a_private_start_that_got_no_run_folder_is_refused(cfg, monkeypatch, sta
 
 
 def test_list_models_and_a_missing_config_ignore_private(tmp_path, cfg, monkeypatch, started):
-    monkeypatch.setattr(run_folder, "begin", lambda c, private=False: None)
+    monkeypatch.setattr(run_folder, "begin", lambda c, private=False, home=None: None)
     assert invoke("--private", "--list-models", "--config-dir", str(cfg)).exit_code == 0
     assert invoke("--private", "--no-input", "--config-dir", str(tmp_path / "none")).exit_code == 0
     assert len(started) == 2
@@ -237,3 +237,25 @@ async def test_memory_says_it_is_this_sessions_and_promotes_nothing(private_run)
     assert "this private session's memory" in MemoryRememberTool(None).info().description
     end(private_run)
     assert "private" not in MemoryRememberTool(None).info().description
+
+
+def test_a_private_start_in_a_project_keeps_its_state_in_the_projects_run(tmp_path, fake_home, monkeypatch, started):
+    config = fake_home() / ".localharness"
+    config.mkdir()
+    (config / "config.yaml").write_text("{}")
+    project = tmp_path / "work"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    seen = []
+    real_end = run_folder.end
+
+    def end_noting(r, say=None):
+        seen.append((r.path.parent, r.state.is_dir()))
+        return real_end(r, say)
+
+    monkeypatch.setattr(run_folder, "end", end_noting)
+    assert invoke("--private").exit_code == 0
+    run = started[0][1]["run"]
+    assert run.private and run.state == run.path / "state"
+    assert seen == [(project.resolve() / ".localharness" / "run", True)]
+    assert not (config / "run").exists()

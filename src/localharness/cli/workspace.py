@@ -96,6 +96,42 @@ NO_INPUT_HELP = (
 _notice_console = Console(stderr=True, soft_wrap=True)
 
 
+def _in_project(found: Path, here: Path) -> bool:
+    """Is that workspace your own directory, or in the repository you are working in?"""
+    from localharness.config.paths import workspace_is_within_repo
+
+    return found.resolve().parent == here or workspace_is_within_repo(found, here)
+
+
+def run_home(config_dir: Optional[Union[str, Path]]) -> Optional[Path]:
+    """The project's `.localharness/` that holds this session's run folder, or None when it has no project."""
+    from localharness.agent.gate import derive_session_boundary
+    from localharness.cli.init_cmd import _is_the_global_config_dir
+    from localharness.config import trust
+    from localharness.config.paths import (
+        WORKSPACE_DIR_NAME,
+        config_dir_env_override,
+        discover_workspace_dir,
+        resolve_config_dir,
+    )
+
+    if config_dir is not None or config_dir_env_override() is not None:
+        return None
+    try:
+        here = Path.cwd().resolve()
+    except OSError:
+        return None
+    found = discover_workspace_dir()
+    layer = found if found is not None and (_in_project(found, here) or trust.is_trusted_tree(found) is True) else None
+    root = derive_session_boundary(cwd=here, local_dir=layer)
+    if root is None:
+        return None
+    cfg = resolve_config_dir().resolve()
+    if _is_the_global_config_dir(root / WORKSPACE_DIR_NAME) or cfg in (root, *root.parents):
+        return None
+    return root / WORKSPACE_DIR_NAME
+
+
 def resolve_workspace_layer(
     config_dir: Optional[Union[str, Path]] = None,
     *,
@@ -122,7 +158,6 @@ def resolve_workspace_layer(
     from localharness.config.paths import (
         config_dir_env_override,
         discover_workspace_dir,
-        workspace_is_within_repo,
     )
 
     if config_dir is not None or config_dir_env_override() is not None:
@@ -139,7 +174,7 @@ def resolve_workspace_layer(
     # two halves of the gate agree on what a workspace IS. `real` is identical to `found` for
     # every ordinary directory — the walk builds it from an already-resolved ancestor.
     real = found.resolve()
-    if real.parent == here or workspace_is_within_repo(found, here):
+    if _in_project(found, here):
         # In project: your own directory, or the same repository you are working in. Nested
         # inherits — no prompt, and nothing is written to the trust store.
         log.info("workspace layer: %s (in project)", found)

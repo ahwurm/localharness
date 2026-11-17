@@ -888,7 +888,12 @@ class AcpChannel(ChannelAdapter):
         from localharness.cli.start_cmd import _start_async
         from localharness.config.paths import resolve_config_dir
 
-        run = await asyncio.to_thread(begin, resolve_config_dir(self._config_dir))
+        from localharness.cli.workspace import run_home
+
+        def _begin():
+            return begin(resolve_config_dir(self._config_dir), home=run_home(self._config_dir))
+
+        run = await asyncio.to_thread(_begin)
         loop = asyncio.get_running_loop()
         try:
             await _start_async(

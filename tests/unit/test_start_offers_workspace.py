@@ -107,6 +107,22 @@ def test_yes_creates_the_workspace_and_returns_it_as_the_layer(project, monkeypa
     assert "run `localharness start`" not in capsys.readouterr().out
 
 
+def test_the_offer_and_its_yes_work_beside_a_live_project_run(project, monkeypatch):
+    from localharness.core.run_folder import begin, end
+
+    (project.parent / ".localharness" / "config.yaml").write_text("{}")
+    run = begin(project.parent / ".localharness", home=project / ".localharness")
+    try:
+        _tty(monkeypatch)
+        asked = _answer(monkeypatch, True)
+        assert settle_startup_trust(None) == project / ".localharness"
+        assert asked == [OFFER_PROMPT]
+        assert (project / ".localharness" / "config.yaml").is_file() and (project / ".localharness" / "agents").is_dir()
+        assert run.path.is_dir()
+    finally:
+        end(run)
+
+
 def test_no_creates_nothing_and_returns_none(project, monkeypatch):
     """A refusal costs nothing — the session carries on globally (and, now, guarded)."""
     _tty(monkeypatch)

@@ -24,6 +24,7 @@ import yaml
 from localharness.agent.gate_types import Decision
 from localharness.agent.loop import PRIVATE_PROMPT_LINE
 from localharness.core.events import Observation
+from localharness.cli.workspace import run_home
 from localharness.core.run_folder import begin, end
 from tests.conftest import FakeLLMResponse
 from tests.integration.test_guardrails_from_global_dir_e2e import _let_the_stub_tokenizer_run_a_turn
@@ -50,6 +51,8 @@ KEPT = (
     ("/model, /effort, /plugins and /mcp, with their audit rows",
      ("audit.jsonl", "plugins/*", "mcp/*")),
 )
+
+PROJECT_RUN = (".localharness/", ".localharness/run/", ".localharness/run/.gitignore")
 
 WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC
 SKIP = re.compile(r"^/(proc|dev|sys)/")
@@ -275,7 +278,7 @@ async def session(w: World, monkeypatch, *, private: bool, record: bool = True) 
     from localharness.cli.start_cmd import _start_async
 
     screen = Screen()
-    cfg_before, proj_before, rows_before = snapshot(w.cfg, skip=("run",)), snapshot(w.project), project_rows(w.cfg)
+    cfg_before, proj_before, rows_before = snapshot(w.cfg), snapshot(w.project), project_rows(w.cfg)
     RECORD.events.clear()
     try:
         with monkeypatch.context() as mp:
@@ -283,7 +286,7 @@ async def session(w: World, monkeypatch, *, private: bool, record: bool = True) 
             mp.setattr(sys, "stdout", screen.out)
             mp.setattr(sys, "stderr", screen.out)
             RECORD.on = record
-            run = begin(w.cfg, private=private)
+            run = begin(w.cfg, private, run_home(None))
             assert run is not None and run.private is private
             await _start_async(None, False, False, str(w.cfg), run=run)
             end(run)
@@ -292,8 +295,8 @@ async def session(w: World, monkeypatch, *, private: bool, record: bool = True) 
         screen.close()
     return {
         "run": run,
-        "cfg": changed(cfg_before, snapshot(w.cfg, skip=("run",))),
-        "project": changed(proj_before, snapshot(w.project)),
+        "cfg": changed(cfg_before, snapshot(w.cfg)),
+        "project": changed(proj_before, snapshot(w.project)) - set(PROJECT_RUN),
         "events": list(RECORD.events),
         "rows": (rows_before, project_rows(w.cfg)),
         "screen": screen.text(),
@@ -311,10 +314,10 @@ async def warm_up(w: World, monkeypatch) -> None:
 def leaks(w: World, out: dict) -> list:
     """Every recorded write that is not in the run folder, in a file the agent wrote, or in KEPT."""
     written = {str(w.project / rel.rstrip("/")) for rel in out["project"]}
-    run_root, cfg = str(w.cfg / "run"), str(w.cfg)
+    run_root, dot, cfg = str(out["run"].path.parent), str(out["run"].path.parent.parent), str(w.cfg)
     bad = []
     for event, path, certain in out["events"]:
-        if path == run_root or path.startswith(run_root + os.sep):
+        if path in (run_root, dot) or path.startswith(run_root + os.sep):
             continue
         if any(path == x or path.startswith(x + os.sep) for x in written):
             continue
@@ -331,11 +334,12 @@ def landed_in_state(out: dict, tail: str) -> bool:
 
 
 def assert_nothing_stays(w: World, out: dict) -> None:
-    assert not out["run"].path.exists() and not list((w.cfg / "run").glob(".deleting-*"))
-    stray = sorted(rel for rel in out["cfg"] if not in_kept(rel) and rel != "run/")
+    assert not out["run"].path.exists() and not list(out["run"].path.parent.glob(".deleting-*"))
+    stray = sorted(rel for rel in out["cfg"] if not in_kept(rel))
     assert stray == []
     assert out["rows"][0] == out["rows"][1]
-    assert not (w.project / ".localharness").exists()
+    assert {rel for rel in snapshot(w.project) if rel.startswith(".localharness")} == set(PROJECT_RUN)
+    assert (w.project / PROJECT_RUN[2]).read_text() == "*\n"
     assert not (w.project / "reports").exists()
     assert leaks(w, out) == []
 

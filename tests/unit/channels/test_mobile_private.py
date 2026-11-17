@@ -205,7 +205,7 @@ def test_a_new_chat_from_a_normal_chat_says_nothing_was_left(cfg, monkeypatch):
 def test_a_private_bring_up_on_the_temp_fallback_is_refused_before_any_session(cfg, monkeypatch):
     fallback = []
 
-    def fake_begin(config_dir, private=False):
+    def fake_begin(config_dir, private=False, home=None):
         fallback.append(run_folder._fallback(private))
         return fallback[0]
 

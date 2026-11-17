@@ -18,11 +18,11 @@ from rich.markup import escape
 from rich.rule import Rule
 
 from localharness.channels.base import sanitize_for_display
-from localharness.cli.workspace import NO_INPUT_HELP
+from localharness.cli.workspace import NO_INPUT_HELP, run_home
 from localharness.config.loader import ConfigLoader
 from localharness.config.migrate import BACKUP_PREFIX, BACKUP_STAMP_FORMAT
 from localharness.config.models import HarnessConfig
-from localharness.config.paths import resolve_config_dir
+from localharness.config.paths import RUN_DIR_NAME, resolve_config_dir
 from localharness.core.run_folder import fallback_cause, foreign_count
 from localharness.provider.runtimes import RUNTIMES, has_engine_config
 
@@ -308,17 +308,25 @@ def _read_only(path: Path) -> bool:
         return False
 
 
-def _print_run_folder(cfg_path: Path) -> None:
-    """Info rows: why sessions keep scratch in the temp folder, and run folders another machine left."""
+def _print_run_folder(cfg_path: Path, home: Path | None = None) -> None:
+    """Info rows: why sessions keep their run folder in the config or temp folder, and run folders another machine left."""
     import tempfile
 
-    if cause := fallback_cause(cfg_path):
+    cfg = cfg_path.resolve()
+    project_cause = home is not None and fallback_cause(home)
+    if project_cause:
         console.print(_INFO + " " + escape(
-            f"run/ is {cause}: sessions use {tempfile.gettempdir()} and remove it at exit; "
+            f"{home / RUN_DIR_NAME} is {project_cause}: sessions here keep their run folder in {cfg / RUN_DIR_NAME}"),
+            soft_wrap=True)
+    if (home is None or project_cause) and (cause := fallback_cause(cfg)):
+        console.print(_INFO + " " + escape(
+            f"{cfg / RUN_DIR_NAME} is {cause}: sessions use {tempfile.gettempdir()} and remove it at exit; "
             "use --config-dir <local folder>"), soft_wrap=True)
-    if n := foreign_count(cfg_path):
-        console.print(_INFO + " " + escape(
-            f"{n} run folders of another machine: left alone; exclude run/ from the sync"), soft_wrap=True)
+    for place in dict.fromkeys(p for p in (home, cfg) if p is not None):
+        if n := foreign_count(place):
+            console.print(_INFO + " " + escape(
+                f"{n} run folders of another machine in {place / RUN_DIR_NAME}: left alone; "
+                "exclude it from the sync"), soft_wrap=True)
 
 
 def _print_private_files(cfg_path: Path) -> None:
@@ -815,7 +823,7 @@ def doctor(
         _print_migration_state(cfg_path, harness)
         _print_exposure(harness)
         _print_private_files(cfg_path)
-        _print_run_folder(cfg_path)
+        _print_run_folder(cfg_path, run_home(config_dir))
     # D-59: computed independently of `harness`; boundary None or no repository prints nothing.
     _print_git_read(workspace, getattr(getattr(root_agent, "permissions", None), "workspace_root", None))
 

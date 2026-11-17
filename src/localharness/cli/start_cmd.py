@@ -31,6 +31,7 @@ from localharness.cli.workspace import (
     MachineTrust,
     primary_server_port,
     raw_settings,
+    run_home,
     uncovered,
     visible_text,
     write_overlay_validated,
@@ -3862,7 +3863,7 @@ def start_app(
         _models_that_arrived(config_dir, wanted, no_input)
 
     cfg = resolve_config_dir(config_dir)
-    run = None if list_models else run_folder.begin(cfg, private=private)
+    run = None if list_models else run_folder.begin(cfg, private=private, home=run_home(config_dir))
     if private and not list_models and (cfg / "config.yaml").exists() and (problem := run_folder.private_run_problem(run, cfg)):
         run_folder.end(run)
         _refuse_private(problem)

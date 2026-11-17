@@ -333,3 +333,98 @@ def test_home_stop_survives_a_symlinked_home(tmp_path, monkeypatch, fake_home):
     fake_home(link_home, clear_overrides=False)
 
     assert discover_workspace_dir(start) is None
+
+
+# --------------------------------------------------------------------------- run_home
+
+
+@pytest.fixture
+def lived_in(tmp_path, fake_home, monkeypatch):
+    """A fake home with its config folder and a project folder to stand in; returns `(home, project)`."""
+    home = fake_home()
+    (home / ".localharness").mkdir()
+    project = tmp_path / "proj"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    return home, project
+
+
+def test_run_home_is_none_when_the_config_folder_is_chosen(lived_in, monkeypatch):
+    from localharness.cli.workspace import run_home
+
+    _, project = lived_in
+    assert run_home(project / "cfg") is None
+    monkeypatch.setenv("LOCALHARNESS_DIR", str(project / "cfg"))
+    assert run_home(None) is None
+    monkeypatch.delenv("LOCALHARNESS_DIR")
+    monkeypatch.setenv("LOCALHARNESS_HOME", str(project / "cfg"))
+    assert run_home(None) is None
+
+
+def test_run_home_is_none_standing_in_home_or_inside_the_config_folder(lived_in, monkeypatch):
+    from localharness.cli.workspace import run_home
+
+    home, _ = lived_in
+    monkeypatch.chdir(home)
+    assert run_home(None) is None
+    (home / ".localharness" / "sub").mkdir()
+    monkeypatch.chdir(home / ".localharness" / "sub")
+    assert run_home(None) is None
+
+
+def test_run_home_is_the_project_folders_own_dot_folder(lived_in):
+    from localharness.cli.workspace import run_home
+
+    _, project = lived_in
+    assert run_home(None) == project.resolve() / ".localharness"
+
+
+def test_run_home_from_a_subfolder_is_the_checkout_roots_even_without_a_dot_folder(lived_in, monkeypatch):
+    from localharness.cli.workspace import run_home
+
+    _, project = lived_in
+    (project / ".git").mkdir()
+    (project / "src").mkdir()
+    monkeypatch.chdir(project / "src")
+    assert run_home(None) == project.resolve() / ".localharness"
+
+
+def test_run_home_from_a_subfolder_is_the_in_project_dot_folder_above(lived_in, monkeypatch):
+    from localharness.cli.workspace import run_home
+
+    _, project = lived_in
+    (project / ".git").mkdir()
+    (project / ".localharness").mkdir()
+    (project / ".localharness" / "config.yaml").write_text("{}")
+    (project / "a" / "b").mkdir(parents=True)
+    monkeypatch.chdir(project / "a" / "b")
+    assert run_home(None) == project.resolve() / ".localharness"
+
+
+def test_run_home_from_a_subfolder_is_a_run_only_dot_folder_at_the_checkout_root(lived_in, monkeypatch):
+    from localharness.cli.workspace import run_home
+
+    _, project = lived_in
+    (project / ".git").mkdir()
+    (project / ".localharness" / "run").mkdir(parents=True)
+    (project / "src").mkdir()
+    monkeypatch.chdir(project / "src")
+    assert run_home(None) == project.resolve() / ".localharness"
+
+
+@pytest.mark.parametrize("trusted", [False, True])
+def test_run_home_takes_an_outside_dot_folder_only_when_it_is_trusted(lived_in, tmp_path, monkeypatch, trusted):
+    from localharness.cli.workspace import run_home
+    from localharness.config import trust
+
+    _, project = lived_in
+    outer = tmp_path / "outer"
+    (outer / ".localharness").mkdir(parents=True)
+    (outer / ".localharness" / "config.yaml").write_text("{}")
+    inner = outer / "plain"
+    inner.mkdir()
+    monkeypatch.chdir(inner)
+    if trusted:
+        trust.record_trust(outer / ".localharness", True)
+    expected = outer if trusted else inner
+    assert run_home(None) == expected.resolve() / ".localharness"

@@ -399,14 +399,35 @@ def test_doctor_names_a_fallback_and_foreign_folders(cfg, tmp_path, capsys):
     assert fallback_cause(cfg) == run_folder.LINKED == "a link"
     doctor_cmd._print_run_folder(cfg)
     out = capsys.readouterr().out
-    assert "run/ is a link: sessions use" in out and "use --config-dir <local folder>" in out
+    assert f"{cfg.resolve()}/run is a link: sessions use" in out and "use --config-dir <local folder>" in out
     (cfg / "run").unlink()
     _make(cfg, "0123456789ab", mark=OTHER, scratch=True)
     _make(cfg, "ba9876543210", scratch=True)
     _make(cfg, "aaaaaaaaaaaa")
     assert foreign_count(cfg) == 2 and fallback_cause(cfg) is None
     doctor_cmd._print_run_folder(cfg)
-    assert "2 run folders of another machine: left alone; exclude run/ from the sync" in capsys.readouterr().out
+    assert f"2 run folders of another machine in {cfg.resolve()}/run: left alone; exclude it from the sync" in " ".join(
+        capsys.readouterr().out.split())
+
+
+def test_doctor_names_a_projects_run_problem_and_where_sessions_go(cfg, proj, tmp_path, capsys):
+    from localharness.cli import doctor_cmd
+
+    home = proj / ".localharness"
+    home.mkdir()
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    (home / "run").symlink_to(other)
+    _make(cfg, "0123456789ab", mark=OTHER, scratch=True)
+    doctor_cmd._print_run_folder(cfg, home)
+    out = " ".join(capsys.readouterr().out.split())
+    assert f"{home}/run is a link: sessions here keep their run folder in {cfg.resolve()}/run" in out
+    assert "sessions use" not in out
+    assert f"1 run folders of another machine in {cfg.resolve()}/run: left alone" in out
+    (home / "run").unlink()
+    doctor_cmd._print_run_folder(cfg, home)
+    out = " ".join(capsys.readouterr().out.split())
+    assert "is a link" not in out and "1 run folders of another machine" in out
 
 
 def test_start_app_makes_a_run_the_bash_tool_sees_and_removes_it(cfg, monkeypatch):
@@ -460,7 +481,7 @@ def test_acp_session_begins_and_ends_its_own_run(cfg, monkeypatch):
     assert seen["there"] and not seen["run"].path.exists()
 
 
-def _mobile(monkeypatch, cfg, outcomes, script):
+def _mobile(monkeypatch, cfg, outcomes, script, explicit=True):
     """Drive `_serve` with a fake server: `script(callbacks, runs)` stands for the phone."""
     import uvicorn
 
@@ -500,8 +521,8 @@ def _mobile(monkeypatch, cfg, outcomes, script):
     monkeypatch.setattr(start_cmd, "_start_async", fake_start)
     monkeypatch.setattr(run_folder, "begin", traced)
     asyncio.run(mobile_cmd._serve(
-        config_dir=str(cfg), host="127.0.0.1", port=1, token="t" * 8, ui_dir=None, replay=None,
-        fixtures=None, speed=1.0, verbose=False, agent=None, sleep_after=0))
+        config_dir=str(cfg) if explicit else None, host="127.0.0.1", port=1, token="t" * 8, ui_dir=None,
+        replay=None, fixtures=None, speed=1.0, verbose=False, agent=None, sleep_after=0))
     assert all(t is not threading.main_thread() for t in threads)
     return runs
 
@@ -720,3 +741,97 @@ def test_the_end_line_names_a_project_leftover_from_where_you_stand(cfg, proj, m
     assert run_folder._shown(proj / ".localharness" / "run" / "x") == ".localharness/run/x"
     monkeypatch.chdir(cfg)
     assert run_folder._shown(proj / ".localharness" / "run" / "x") == str(proj / ".localharness" / "run" / "x")
+
+
+@pytest.fixture
+def lived_in(tmp_path, fake_home, monkeypatch):
+    """No config folder chosen: a fake home holding the config, and a project to stand in."""
+    home = fake_home()
+    config = home / ".localharness"
+    config.mkdir()
+    (config / "config.yaml").write_text("{}")
+    project = tmp_path / "work"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    return SimpleNamespace(cfg=config, proj=project, dot=project.resolve() / ".localharness")
+
+
+def test_start_app_keeps_a_projects_run_in_its_dot_folder(lived_in, monkeypatch):
+    from localharness.cli import start_cmd
+    from localharness.tools.builtin.bash_tool import BashExecTool
+
+    seen = {}
+
+    async def fake(*args, run=None, **kw):
+        seen["run"] = run
+        res = await BashExecTool(run=run)._execute(command='echo "$LOCALHARNESS_SCRATCH $TMPDIR"')
+        seen["env"] = res.output.strip()
+
+    monkeypatch.setattr(start_cmd, "_start_async", fake)
+    monkeypatch.setattr(start_cmd, "_models_that_arrived", lambda *a: None)
+    start_cmd.start_app(config_dir=None)
+    run = seen["run"]
+    assert run.path.parent == lived_in.dot / "run" and seen["env"] == f"{run.path}/scratch {run.path}/t"
+    assert not run.path.exists() and _listing(lived_in.dot) == ["run", "run/.gitignore"]
+    assert not (lived_in.cfg / "run").exists()
+
+
+def test_a_session_with_no_project_keeps_its_run_in_the_config_folder(lived_in, tmp_path, monkeypatch):
+    from localharness.cli import start_cmd
+
+    chosen = tmp_path / "chosen"
+    chosen.mkdir()
+    (chosen / "config.yaml").write_text("{}")
+    runs = []
+
+    async def fake(*args, run=None, **kw):
+        runs.append(run.path.parent)
+
+    monkeypatch.setattr(start_cmd, "_start_async", fake)
+    monkeypatch.setattr(start_cmd, "_models_that_arrived", lambda *a: None)
+    start_cmd.start_app(config_dir=str(chosen))
+    monkeypatch.setenv("LOCALHARNESS_DIR", str(chosen))
+    start_cmd.start_app(config_dir=None)
+    monkeypatch.delenv("LOCALHARNESS_DIR")
+    monkeypatch.chdir(lived_in.cfg.parent)
+    start_cmd.start_app(config_dir=None)
+    assert runs == [chosen.resolve() / "run", chosen.resolve() / "run", lived_in.cfg.resolve() / "run"]
+    assert not lived_in.dot.exists()
+
+
+def test_acp_session_keeps_its_run_in_the_project(lived_in, monkeypatch):
+    from localharness.channels.acp import AcpChannel
+    from localharness.cli import start_cmd
+
+    seen = {}
+
+    async def fake(**kw):
+        seen["run"] = kw["run"]
+        seen["there"] = kw["run"].path.exists()
+
+    monkeypatch.setattr(start_cmd, "_start_async", fake)
+    asyncio.run(AcpChannel(config_dir=None)._run_session())
+    assert seen["there"] and seen["run"].path.parent == lived_in.dot / "run" and not seen["run"].path.exists()
+    assert not (lived_in.cfg / "run").exists()
+
+
+def test_mobile_keeps_each_chats_run_in_the_project_and_sweeps_both_places(lived_in, monkeypatch):
+    dead = [_make(lived_in.dot, "0123456789ab", mark=marker(), scratch=True),
+            _make(lived_in.cfg, "ba9876543210", mark=marker(), scratch=True)]
+    seen = {}
+
+    async def script(cb, runs):
+        seen["swept"] = [not d.exists() for d in dead]
+        cb["on_first_message"]()
+        await _until(lambda: runs)
+        seen["parent"] = runs[0].path.parent
+        seen["there"] = runs[0].path.exists()
+        await cb["on_new_session"](private=True)
+        await _until(lambda: len(runs) == 2)
+        seen["private"] = (runs[1].path.parent, runs[1].private, runs[1].state.is_dir())
+
+    runs = _mobile(monkeypatch, lived_in.cfg, ["block", "block"], script, explicit=False)
+    assert seen["swept"] == [True, True]
+    assert seen["parent"] == lived_in.dot / "run" and seen["there"]
+    assert seen["private"] == (lived_in.dot / "run", True, True)
+    assert not any(r.path.exists() for r in runs) and _listing(lived_in.dot) == ["run", "run/.gitignore"]
