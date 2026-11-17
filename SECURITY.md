@@ -594,7 +594,8 @@ read and argue with. Each step below says what it does in `auto`.
      -l`, `cp -s`, `cp -a` and `rsync --link-dest`, and that option's folder, count as a link's source does,
      because a later write to the copy reaches the source. A relative `ln -s`
      source is read against the folder the link sits in, and a word that holds a variable and names
-     `.localharness/run` (`$HOME/.localharness/run/…`, `$PWD/.localharness/run/…`) is refused by its text. A move into scratch is a
+     `.localharness/run` (`$HOME/.localharness/run/…`, `$PWD/.localharness/run/…`) is refused by its text, and so is a word
+     that starts with `$LOCALHARNESS_SCRATCH` or `$TMPDIR` and has a `..` part. A move into scratch is a
      separate ask, never granted by an "always" and put to you in `auto` too: `mv`, `rsync
      --remove-source-files` or `--remove-sent-files`, `tar --remove-files` and `zip -m` whose destination is in
      this run, spelled by path, through `$LOCALHARNESS_SCRATCH` or `$TMPDIR`, after a `cd` to either,
@@ -1281,8 +1282,8 @@ is followed by one dim line giving its lifetime.
   `auto`, asked in `guarded` with an "always" that holds for this session only and is never written to
   `grants.yaml` (it also survives a `/plugins` restart), and a severe ask once the agent has read saved pages. This
   holds for a write spelled by path or through `$LOCALHARNESS_SCRATCH` or `$TMPDIR`; a command that could set either
-  (an assignment, `eval`, `declare`, `read`, a quoted or escaped spelling) is judged as a write to a place the gate
-  cannot name. Another session's folder and `run/` itself are refused outright (the deny class above), and a move
+  (an assignment, `eval`, `declare`, `read`, a quoted or escaped spelling), or a spelling that leaves the folder through
+  a link, is judged as a write to a place the gate cannot name, and one with a `..` part is refused. Another session's folder and `run/` itself are refused outright (the deny class above), and a move
   into scratch asks.
 - **Only the bash tool's environment carries `LOCALHARNESS_SCRATCH` and `TMPDIR`.** MCP servers do not.
 - **The sweep acts on a lock and a marker.** A start removes folders in its project's `.localharness/run/` and in

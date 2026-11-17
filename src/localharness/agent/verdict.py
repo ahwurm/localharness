@@ -1199,7 +1199,8 @@ def _run_spelled(target: str, ctx: GateContext) -> Optional[Path]:
     if match is None or ctx.scratch is None or ctx.run is None:
         return None
     base = ctx.scratch if SCRATCH_VAR in (match[1], match[2]) else Path(ctx.run) / TMP_DIR
-    return _resolve(str(base) + target[match.end():], None)
+    spelled = _resolve(str(base) + target[match.end():], None)
+    return spelled if spelled is not None and _within(_resolve(str(base), None), spelled) else None
 
 
 def _private_parts(path: Path, ctx: GateContext) -> Optional[tuple[str, ...]]:
@@ -1248,8 +1249,9 @@ def _run_denial(ctx: GateContext) -> VerdictResult:
 
 
 def _run_text_deny(words: Iterable[str], ctx: GateContext) -> Optional[VerdictResult]:
-    """DENY a word that spells the run folder through a variable (``$HOME/.localharness/run/x``), which resolution cannot place."""
-    if any("$" in word and ".localharness/run" in word.casefold() for word in words):
+    """DENY a word that spells the run folder through a variable (``$HOME/.localharness/run/x``, ``$TMPDIR/../x``), which resolution cannot place."""
+    if any("$" in word and (".localharness/run" in word.casefold() or (
+            _RUN_SPELLING.match(word) and ".." in word.split("/"))) for word in words):
         return _run_denial(ctx)
     return None
 

@@ -25,7 +25,7 @@ def no_grants(workspace: Path, klass: str, key: str) -> Grant | None:
 
 
 class World:
-    def __init__(self, home: Path, placement: str = "config"):
+    def __init__(self, home: Path, placement: str = "config", private: bool = False):
         self.home = home
         self.cfg = home / ".localharness"
         self.ws = home / "proj"
@@ -33,7 +33,7 @@ class World:
         (self.cfg / "agents").mkdir(parents=True)
         (self.cfg / "config.yaml").write_text("{}\n")
         kept_in = self.ws / ".localharness" if placement == "project" else self.cfg
-        self.run = begin(self.cfg, home=kept_in if placement == "project" else None)
+        self.run = begin(self.cfg, private, home=kept_in if placement == "project" else None)
         runs = kept_in.resolve() / "run"
         assert self.run is not None and self.run.path.parent == runs
         self.scratch = self.run.scratch
@@ -46,6 +46,9 @@ class World:
         kw.setdefault("config_dir", self.cfg)
         kw.setdefault("run", self.run.path)
         kw.setdefault("scratch", self.scratch)
+        if self.run.private:
+            kw.setdefault("leaves_no_trace", True)
+            kw.setdefault("state_dirs", (self.run.state,))
         return GateContext(boundary=self.ws, workspace=self.ws, grants=no_grants, has_review_surface=True, **kw)
 
     def write(self, path: Path | str, **kw):
@@ -56,12 +59,12 @@ class World:
         return evaluate("bash_exec", params, SHELL, self.ctx(**kw), SETTINGS)
 
 
-def _world(tmp_path, monkeypatch, placement):
+def _world(tmp_path, monkeypatch, placement, private=False):
     home = (tmp_path / "home").resolve()
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("LOCALHARNESS_DIR", str(home / ".localharness"))
-    w = World(home, placement)
+    w = World(home, placement, private)
     yield w
     end(w.run)
 
@@ -74,6 +77,12 @@ def world(tmp_path, monkeypatch):
 @pytest.fixture(params=("config", "project"))
 def any_world(request, tmp_path, monkeypatch):
     yield from _world(tmp_path, monkeypatch, request.param)
+
+
+@pytest.fixture(params=[(p, v) for p in ("config", "project") for v in (False, True)],
+                ids=lambda p: f"{p[0]}-{'private' if p[1] else 'normal'}")
+def every_world(request, tmp_path, monkeypatch):
+    yield from _world(tmp_path, monkeypatch, *request.param)
 
 
 # ------------------------------------------------------------------------------- the deny row
@@ -148,6 +157,27 @@ def test_another_projects_run_folder_is_denied_in_every_mode(any_world, tmp_path
         assert any_world.write(path, mode=mode).verdict is Verdict.DENY
         assert any_world.shell(f"echo x > {path}", mode=mode).verdict is Verdict.DENY
         assert any_world.shell(f"rm -rf {path.parent}", mode=mode).verdict is Verdict.DENY
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("command", [
+    "echo x > $LOCALHARNESS_SCRATCH/../../{o}/scratch/x", "echo x > $LOCALHARNESS_SCRATCH/../state/x",
+    "echo x > $TMPDIR/../state/x", "echo x > ${{TMPDIR}}/../../{o}/scratch/x",
+    "echo x > $LOCALHARNESS_SCRATCH/../../../agents/evil.yaml",
+    "echo x > $LOCALHARNESS_SCRATCH/../../../agents/root/tasks/t1/plan.md",
+    'echo x > "$LOCALHARNESS_SCRATCH/a/../../../x"', "rm -rf $LOCALHARNESS_SCRATCH/../../{o}",
+    "echo k >> $TMPDIR/../../../../o", "mv $TMPDIR/../../../../x $TMPDIR/y",
+])
+def test_a_run_variable_spelling_with_a_dotdot_part_is_denied(every_world, mode, command):
+    assert every_world.shell(command.format(o=OTHER), mode=mode).verdict is Verdict.DENY
+
+
+@pytest.mark.parametrize("var", ["$LOCALHARNESS_SCRATCH", "$TMPDIR"])
+def test_a_run_variable_spelling_through_a_link_out_of_its_folder_is_not_placed(any_world, var):
+    for base in (any_world.scratch, any_world.run.path / "t"):
+        (base / "lnk").symlink_to(any_world.other)
+    result = any_world.shell(f"echo x > {var}/lnk/x")
+    assert result.verdict is Verdict.ASK and result.request.grant_keys == (("edit-outside", f"{var}/lnk/x"),)
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -232,7 +262,7 @@ def test_a_scratch_write_spelled_by_its_variable_is_keyed_on_scratch(world, targ
 @pytest.mark.parametrize("command", [
     "LOCALHARNESS_SCRATCH=$HOME/.ssh; echo k >> $LOCALHARNESS_SCRATCH/out", "export TMPDIR=~; echo k >> $TMPDIR/o",
     "n=TMP; declare ${n}DIR=~; echo k >> $TMPDIR/o", 'n=TMP; printf -v "${n}DIR" ~; echo k >> $TMPDIR/o',
-    "eval \"$X\"; echo k >> $TMPDIR/o", "echo k >> '$TMPDIR'/o", "echo k >> $TMPDIR/../../../../o",
+    "eval \"$X\"; echo k >> $TMPDIR/o", "echo k >> '$TMPDIR'/o",
     "echo k >> ${TMPDIR:=~}/o",
 ])
 def test_a_rebound_quoted_or_escaping_spelling_is_not_keyed_on_scratch(world, command):
@@ -337,7 +367,6 @@ MOVES = [
     ("mv ~/Documents {s}/d 2>$TMPDIR/err", "~/Documents"),
     ("mv ~/x {s}/y 2>$ERR", "~/x"),
     ("mv $HOME/x $TMPDIR/y", "$HOME/x"),
-    ("mv $TMPDIR/../../../../x $TMPDIR/y", "$TMPDIR/../../../../x"),
     ("TMPDIR=~; mv $TMPDIR/a $LOCALHARNESS_SCRATCH/b", "$TMPDIR/a"),
 ]
 
