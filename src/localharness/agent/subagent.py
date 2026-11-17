@@ -1306,15 +1306,14 @@ def _verification_ledger_path() -> Any:
     import datetime
     from pathlib import Path
 
-    from localharness.core.run_folder import current
+    from localharness.core.run_folder import current, is_private
 
     base = os.environ.get("LOCALHARNESS_VERIFICATION_LEDGER_DIR")
-    run = current()
     if base:
         d = Path(base)
     else:
         day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-        d = (run.state / "reports" if run and run.private else Path("reports")) / day
+        d = (current().state / "reports" if is_private() else Path("reports")) / day
     d.mkdir(parents=True, exist_ok=True)
     return d / "verification-ledger.jsonl"
 

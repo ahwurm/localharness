@@ -94,6 +94,10 @@ def current() -> RunFolder | None:
     return _current
 
 
+def is_private() -> bool:
+    return bool(_current and _current.private)
+
+
 def shadow(store: str) -> dict:
     """What the current run holds for `store`, by key."""
     run = _current

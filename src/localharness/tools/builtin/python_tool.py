@@ -17,7 +17,7 @@ import threading
 import traceback
 from typing import Any
 
-from localharness.core.run_folder import current
+from localharness.core.run_folder import is_private
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 
 AGENT_COMMAND_MARKER = "LOCALHARNESS_COMMIT"
@@ -41,8 +41,7 @@ def _agent_command_marker():
     with _marker_lock:
         if _marker_depth == 0:
             _marker_set_by_us = AGENT_COMMAND_MARKER not in os.environ
-            run = current()
-            os.environ[AGENT_COMMAND_MARKER] = os.environ.get(AGENT_COMMAND_MARKER, "private" if run and run.private else "1")
+            os.environ[AGENT_COMMAND_MARKER] = os.environ.get(AGENT_COMMAND_MARKER, "private" if is_private() else "1")
         _marker_depth += 1
     try:
         yield

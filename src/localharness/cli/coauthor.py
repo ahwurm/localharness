@@ -27,6 +27,7 @@ from typing import Any, Optional
 
 from localharness.agent.gate_types import PermissionRequest
 from localharness.config import coauthor
+from localharness.core.run_folder import is_private
 
 log = logging.getLogger(__name__)
 
@@ -191,12 +192,6 @@ def git_repo_root(start_dir: str | Path) -> Optional[str]:
     return root or None
 
 
-def _private() -> bool:
-    from localharness.core.run_folder import current
-    run = current()
-    return bool(run and run.private)
-
-
 async def settle_coauthor_startup(gate: Any, workspace: Optional[str | Path], notice: Any = None) -> None:
     """Install the co-author hook for this session's project.
 
@@ -205,7 +200,7 @@ async def settle_coauthor_startup(gate: Any, workspace: Optional[str | Path], no
     prepare-commit-msg hook. Does NOT ask the consent question — that happens on
     the first harness commit (the hook writes a pending marker, and the REPL asks
     after the turn). Best-effort: a failure here costs a log line, never the session."""
-    if workspace is None or _private():
+    if workspace is None or is_private():
         return
     repo_root = git_repo_root(workspace)
     if repo_root is None:
@@ -225,7 +220,7 @@ async def settle_pending_coauthor(gate: Any, notice: Any = None) -> None:
     marker (first harness commit for an undecided project), this asks the consent
     question via the gate and records the answer. If no marker, returns immediately.
     Best-effort: a failure here costs a log line, never the session."""
-    if _private():
+    if is_private():
         return
     pending_root = coauthor.read_pending_marker()
     if pending_root is None:

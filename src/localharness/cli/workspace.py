@@ -335,7 +335,7 @@ def settle_startup_trust(
     # at (paths). Re-deriving either here is how two guards that must agree start disagreeing.
     from localharness.cli.init_cmd import _is_the_global_config_dir, _scaffold_workspace
     from localharness.config.paths import _home_stop
-    from localharness.core.run_folder import current
+    from localharness.core.run_folder import is_private
 
     home = _home_stop()
     if _is_the_global_config_dir(target) or (home is not None and target.parent == home):
@@ -365,8 +365,7 @@ def settle_startup_trust(
     # The clause is chosen from the same candidate a yes records, so the sentence a person reads
     # and the file the store is told about can never differ (T-11-32).
     candidate = first_candidate(root)
-    run = current()
-    private = bool(run and run.private)
+    private = is_private()
     if existing is not None or private:
         question = TRUST_ONLY_PROMPT if candidate is None else (
             TRUST_ONLY_PROMPT_WITH_INSTRUCTIONS.format(name=display_name(candidate.name)))

@@ -1767,9 +1767,8 @@ def run_instructions_command(handle: ProjectInstructions | None, arg: str) -> st
     if word == "off":
         if failure is not None:  # the answer could not be kept: say so rather than claim it
             return f"instructions not changed ({failure})"
-        from localharness.core.run_folder import current
-        run = current()
-        return f"instructions off for {'this private session' if run and run.private else 'this workspace'}; /instructions on to use {name}"
+        from localharness.core.run_folder import is_private
+        return f"instructions off for {'this private session' if is_private() else 'this workspace'}; /instructions on to use {name}"
     if failure is not None:
         return f"{name} not used this turn ({failure})"
     return f"using {name} ({format_kb(st.size)})"

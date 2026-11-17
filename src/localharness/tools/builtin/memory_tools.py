@@ -16,6 +16,7 @@ import logging
 from datetime import datetime, time as _dtime, timedelta
 from typing import Any
 
+from localharness.core.run_folder import is_private
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 
 log = logging.getLogger(__name__)
@@ -186,12 +187,6 @@ PRIVATE_REMEMBER = (
 )
 
 
-def _private() -> bool:
-    from localharness.core.run_folder import current
-    run = current()
-    return bool(run and run.private)
-
-
 class MemoryRememberTool(Tool):
     """Persist one durable fact as a bet (memory spec, write side). Writes route through
     MemoryStore.store_fact — supersede-not-overwrite + read-back-verified; birth truth is
@@ -210,7 +205,7 @@ class MemoryRememberTool(Tool):
             name="remember",
             group="memory",
             gate_family="allow", ingest="none", host="safe", result_origin="trusted",
-            description=PRIVATE_REMEMBER if _private() else (
+            description=PRIVATE_REMEMBER if is_private() else (
                 "Save one durable fact to your persistent memory so future sessions can use it. "
                 "Use a short stable name (e.g. 'deploy-requires-vpn') and a self-contained "
                 "content sentence. Writing an existing name with new content supersedes the old "
@@ -316,7 +311,7 @@ class MemoryRememberTool(Tool):
         except Exception as exc:
             return self.err(f"Remember failed: {exc}")
         return self.ok(
-            f"Remembered '{fact.key}' for this private session (read-back verified)." if _private()
+            f"Remembered '{fact.key}' for this private session (read-back verified)." if is_private()
             else f"Remembered '{fact.key}' (read-back verified).",
             fact_key=fact.key,
         )

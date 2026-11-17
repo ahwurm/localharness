@@ -53,7 +53,7 @@ from localharness.config.models import TerminalKeysConfig
 from localharness.core.bus import EventBus
 from localharness.core.private_files import touch_private
 from localharness.core.caps import Caps, capped
-from localharness.core.run_folder import current, goes, kept_names
+from localharness.core.run_folder import goes, is_private, kept_names
 from localharness.channels.input_router import FORCE_PREFIX
 from localharness.core.events import (
     DELEGATION_WORDS,
@@ -1883,7 +1883,7 @@ class TerminalChannel(ChannelAdapter):
                     getattr(request, "klass", ""),
                     PERMISSION_ANSWER_LINES_SESSION if options == SCRATCH_OPTIONS_LEGEND else PERMISSION_ANSWER_LINES,
                 )
-                if getattr(request, "klass", "") == "workspace-trust" and (run := current()) is not None and run.private:
+                if getattr(request, "klass", "") == "workspace-trust" and is_private():
                     lines = PERMISSION_ANSWER_LINES_PRIVATE_TRUST
                 async with self._output_lock:
                     console.print(f"[system.info]{lines[kind]}[/system.info]")

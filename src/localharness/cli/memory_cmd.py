@@ -36,6 +36,7 @@ from rich.console import Group
 from rich.text import Text
 from rich.tree import Tree
 
+from localharness.core.run_folder import is_private
 from localharness.memory.router import ORIGIN_GLOBAL, parse_origin_token
 from localharness.memory.sqlite import (
     USER_FORGET_PROVENANCE_PREFIX,
@@ -99,12 +100,6 @@ PRIVATE_EMPTY = "Memory starts empty in a private session; your project's memory
 PRIVATE_PROMOTE = "A private session keeps nothing; have the agent write it into a file."
 
 
-def _private() -> bool:
-    from localharness.core.run_folder import current
-    run = current()
-    return bool(run and run.private)
-
-
 async def dispatch(store: Any, arg: str, *, promote_target: Any = None,
                    workspace_identity: str = "") -> str:
     """Route a `/memory` argument string to a subcommand renderer. `store` is an opened MemoryStore
@@ -129,7 +124,7 @@ async def dispatch(store: Any, arg: str, *, promote_target: Any = None,
     if sub == "search":
         return await render_search(store, rest)
     if sub == "promote":
-        if _private():
+        if is_private():
             return PRIVATE_PROMOTE
         return await render_promote(store, rest, promote_target=promote_target,
                                     workspace_identity=workspace_identity)
@@ -144,7 +139,7 @@ async def render_overview(store: Any) -> str:
     groups = await store.list_groups(named_only=True, limit=12)
     facts = await store.recent_facts(limit=_PAGE)
     if not groups and not facts:
-        return PRIVATE_EMPTY if _private() else "Memory is empty — nothing has been remembered yet."
+        return PRIVATE_EMPTY if is_private() else "Memory is empty — nothing has been remembered yet."
     lines: list[str] = []
     if groups:
         lines.append("Groups (bound while dreaming):")

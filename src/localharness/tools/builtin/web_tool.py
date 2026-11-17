@@ -291,9 +291,8 @@ def save_page(store: Any, save_root: Path, text: str, stored: str, url: str, htm
     except OSError as exc:
         return refuse(f"the downloads folder cannot be written safely ({exc.strerror or exc})")
     fid = store.put_web(stored)
-    from localharness.core.run_folder import current
-    run = current()
-    shown = str(Path(save_root).joinpath(*DOWNLOADS, name)) if run and run.private else "/".join((*DOWNLOADS, name))
+    from localharness.core.run_folder import is_private
+    shown = str(Path(save_root).joinpath(*DOWNLOADS, name)) if is_private() else "/".join((*DOWNLOADS, name))
     lines = [f"saved {len(text)} chars to {shown} (fetch_id={fid})",
              f"first: {' '.join(text[:1000].split())[:200]}",
              f"last: {' '.join(text[-1000:].split())[-200:]}"]

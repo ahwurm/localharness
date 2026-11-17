@@ -42,7 +42,7 @@ from localharness.core.events import (
     UserMessage,
 )
 from localharness.core.interrupt import sigint_cancels
-from localharness.core.run_folder import current
+from localharness.core.run_folder import is_private
 from localharness.orchestrator.task_flow.verbs import cancel_row, mid_turn, pause, render, task_command, turn_end
 from localharness.provider.runtimes import RUNTIMES, row_of
 from localharness.provider.server import key_destination
@@ -842,12 +842,8 @@ class OrchestratorREPL:
         if hasattr(self._channel, "box_set_armed"):
             self._channel.box_set_armed("")
 
-    def _private(self) -> bool:
-        run = current()
-        return bool(run and run.private)
-
     def _sent_note(self, before: str, after: str) -> str:
-        return PRIVATE_SENT_NOTE if self._private() and after != before and not key_destination(after)[0] else ""
+        return PRIVATE_SENT_NOTE if is_private() and after != before and not key_destination(after)[0] else ""
 
     async def _step(self, verb: str, name: str | None, *clauses: str, colorize: bool = False) -> None:
         """One `◆ model <verb> <name> · clause · …` line of a swap, the model named once and never cut; a URL in it shows no credentials."""
@@ -1529,7 +1525,7 @@ class OrchestratorREPL:
         revisions["reply"] = level
         gate = self._session_gate()
         boundary = getattr(gate, "boundary", None)
-        said = REVIEW_PRIVATE_LINE if self._private() else REVIEW_SAVED_LINE if boundary is not None else REVIEW_SESSION_ONLY_LINE
+        said = REVIEW_PRIVATE_LINE if is_private() else REVIEW_SAVED_LINE if boundary is not None else REVIEW_SESSION_ONLY_LINE
         if boundary is not None:
             try:
                 await asyncio.to_thread(write_review_level, boundary, level, config_dir=self._config_dir)

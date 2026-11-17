@@ -55,11 +55,13 @@ def test_begin_makes_the_folder_and_end_removes_it(cfg):
 def test_begin_private_makes_state_and_current_and_a_normal_begin_does_not(cfg):
     run = begin(cfg, private=True)
     assert run.private and run.state.is_dir() and oct(run.state.stat().st_mode & 0o777) == "0o700"
-    assert run_folder.current() is run
+    assert run_folder.current() is run and run_folder.is_private()
     normal = begin(cfg)
     assert not normal.private and not normal.state.exists() and run_folder.current() is normal
+    assert not run_folder.is_private()
     end(run)
     end(normal)
+    assert not run_folder.is_private()
 
 
 def test_end_clears_current_only_while_it_is_that_run(cfg):
