@@ -3829,8 +3829,8 @@ def start_app(
     )] = False,
     private: Annotated[bool, typer.Option(
         "--private",
-        help="A session that keeps nothing: no saved memory, no records naming the project, no state "
-             "on disk afterwards. Files the agent writes into your project stay.",
+        help="A session that keeps no conversation, memory or logs of its own once it ends. Files "
+             "written into your project and settings you change stay.",
     )] = False,
 ) -> None:
     """Launch the agent REPL. Zero to chatting in one command."""
