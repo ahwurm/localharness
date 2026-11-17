@@ -10,6 +10,7 @@ All notable changes to LocalHarness are documented here. The format follows
 - **a run folder per session** — `<config dir>/run/<id>/` holds the agent's scratch and the bash tool's `TMPDIR`, and is deleted when the session ends. A start removes folders a dead session left; a mobile chat and an ACP session each keep their own. The agent is told the scratch path and that it is deleted.
 - **a line after a reply that names a scratch file** — says where the file is and when it goes, and asks for a copy in the project to keep it.
 - **`localharness doctor` rows** — name why sessions fall back to the system temp folder when `run/` is a link, another account's or on a folder without enforced locks, and count run folders of other machines.
+- **`localharness start --private`** — a session that works like any other and keeps nothing of itself when it ends: its state, memory, logs, task documents, pictures and saved pages live in its run folder, answers to its questions are held in memory, and the project's memory is not read. Files the agent writes into the project stay. TERM and HUP end it cleanly, Ctrl-C and Ctrl-D ask again when something would go, and the screen marks it with a `private` chip and a tinted input frame (`private · remote` when the model is not on this machine). Mobile, ACP and chat platforms refuse the flag with a sentence naming the fix.
 
 ### Changed
 - **task scratch moves** from `<state_dir>/scratchpad/` into the run folder. Folders already under `scratchpad/` are left alone and nothing new is written there.
@@ -20,6 +21,7 @@ All notable changes to LocalHarness are documented here. The format follows
 - **`run/` is refused** — writes, removals and link sources under another session's run folder or `run/` itself are denied in every mode, `$HOME` spellings included.
 - **a move into scratch always asks** — `mv`, `rsync --remove-source-files`, `tar --remove-files` and `zip -m` into the run ask in every mode, since the folder is deleted at the end. Interpreters and scripts are not seen.
 - **scratch writes** are asked in `guarded`, with an "always" that holds for the session and is never written to `grants.yaml`.
+- **a private session cannot write what a later session would load** — instructions files, `.agents/`, a project's `.localharness/` and the config folder are refused in every mode, with hard links, `git mv`, `git rm`, `git restore` and `patch` covered. The gate cannot name what a script, `tar -x`, `unzip`, `rsync DIR/ .`, `cp -r DIR/. .` or `make` writes, and SECURITY.md lists what a private session does not hide.
 
 ## [0.28.0] — 2026-11-16
 

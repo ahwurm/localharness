@@ -199,6 +199,44 @@ def test_machine_only_list_bites():
     assert check_machine_only_list("## Something else\n", code)
 
 
+# ---------------------------------------------------------------- check: what a private session keeps
+
+PRIVATE_HEADING = "## Private sessions"
+
+
+def _plain(text: str) -> str:
+    return " ".join(text.replace("`", "").split()).rstrip(".;,")
+
+
+def check_private_kept(security_text: str, kept: Iterable[str]) -> list[str]:
+    """SECURITY.md's `## Private sessions` bullets are exactly the labels of the invariant test's `KEPT`, both ways."""
+    body = section(security_text, PRIVATE_HEADING)
+    if body is None:
+        return [f"SECURITY.md has no '{PRIVATE_HEADING}' section"]
+    doc = {_plain(b[2:]) for _h, b in bullets(body)}
+    code = {_plain(label) for label in kept}
+    return ([f"kept in code, not listed in SECURITY.md: {x}" for x in sorted(code - doc)]
+            + [f"listed in SECURITY.md, not kept in code: {x}" for x in sorted(doc - code)])
+
+
+def test_private_kept_live():
+    from tests.integration.test_private_session_e2e import KEPT
+    assert check_private_kept(_read("SECURITY.md"), [label for label, _globs in KEPT]) == []
+
+
+def test_private_kept_bites():
+    labels = ["the model server with its state and logs", "phone pairing"]
+    good = f"{PRIVATE_HEADING}\n\nWhat stays:\n\n" + "".join(f"- {x}\n" for x in labels)
+    assert check_private_kept(good, labels) == []
+    assert check_private_kept(good, [*labels, "the speed ledger"]) == [
+        "kept in code, not listed in SECURITY.md: the speed ledger"]
+    assert check_private_kept(good + "- the project's memory\n", labels) == [
+        "listed in SECURITY.md, not kept in code: the project's memory"]
+    assert check_private_kept(good.replace("- phone pairing\n", ""), labels) == [
+        "kept in code, not listed in SECURITY.md: phone pairing"]
+    assert check_private_kept("## Something else\n", labels)
+
+
 # ---------------------------------------------------------------- check: the launch keys the record holds
 
 LLAMA_CONFIG_INI = "/etc/llama.cpp/config.ini"

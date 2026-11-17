@@ -1242,7 +1242,8 @@ named, never resumed.
 
 **What this does NOT cover.** Pictures the image plugin generates are written at your umask. In a
 session with no project they sit in the owner-only config folder, which keeps other accounts out,
-but in a project they sit in its `.localharness/`, and a copy taken anywhere keeps that mode. The
+but in a project they sit in its `.localharness/`, and a copy taken anywhere keeps that mode. In a private
+session they sit in the run's `state/` and go with it. The
 files `init --workspace` writes inside a project (`.localharness/config.yaml`, its
 `plugins/README.md` and `.gitignore`) are meant for the repository and are not made private, and
 neither is a project's `.localharness/` folder itself. Files written outside the config folder — a
@@ -1289,6 +1290,78 @@ writes. A config folder synced between machines should exclude `run/` from the s
 folders are left alone, never removed. An interpreter or script can still move a file into scratch, and the
 session's end deletes it.
 
+## Private sessions
+
+`localharness start --private` runs a session that works like any other while it is open and keeps nothing of
+itself when it ends: no conversation, memory, logs, tool output, task documents, scratch, pictures or pages it
+saved for itself, no answer given to one of its questions, and no record naming the project. Files you had the
+agent write into the project are yours and stay, the way a private browser window keeps your downloads; to keep
+anything else, have the agent write it there. The harness refuses the agent's writes to what a later session
+would load, as far as the gate can name them (below). It does not hide everything; the last paragraph of this
+section lists what it does not.
+
+**Where things go.** The session's state (event logs, the memory store, history, `MEMORY.md`, `compact.md`,
+`memory.log`, `context.log`, task documents, the input history, pictures, pages saved with `save_to`, and the
+search verifier's ledger) is written under `<run>/state/` and deleted with the run folder. Saved pages sit in
+`<run>/state/.localharness/downloads/`, so the saved-pages rules above apply to them unchanged. A private
+session reads no learned memory, neither the project's nor the machine's, and it reads config, agent files,
+skills and the project's instructions file as any session does. Records that name the project or the session
+(permission answers, workspace trust, declined offers for a path, the project's server list, the instructions
+record, shown notices and the `/review` level) are read as usual, and a new answer is held in this process only:
+an "always" lasts for the session and is not written to `grants.yaml`, a trust answer is not written to the
+trust record, and `project_records.yaml` is read but never written. No `.localharness/` folder, downloads
+folder, `reports/` ledger, audit row or git hook is made in the project, no co-author consent is asked and no
+live session is registered, so a private session is neither warned about nor warns. The `LOCALHARNESS_COMMIT`
+marker reads `private`, so a commit the agent makes carries no co-author trailer.
+
+**What stays.** These are written in a private session as in any, because they belong to the machine and not to
+the session; a test runs a private session through its main paths and fails on a write to the config folder or
+the project that is neither the agent's nor one of these:
+
+- config migration and backups, the config folder's mode, and the seeded script
+- the model server with its state and logs, and the model library
+- the window floor, the speed ledger, the skill-cue calibration and the inference lock
+- the machine trust record, and declined offers keyed by binary, digest, posture or host
+- the `grants.yaml.lock` and `project_records.yaml.lock` sidecars
+- the embedding model and tiktoken caches, and phone pairing
+- `/model`, `/effort`, `/plugins` and `/mcp`, with their audit rows
+
+**The gate's row.** A private session adds one deny, in every mode and before any ask, for a write, edit,
+removal, move or link aimed at what a later session would load: an instructions file (`CLAUDE.md`, `AGENTS.md`,
+`.localharness/INSTRUCTIONS.md`, matched without regard to case and including the resolved name of a candidate
+that is a link), anything under a `.agents/` or `.localharness/` folder, and the config folder, apart from the
+session's own scratch. The row reads every target the shell parser yields and the sources of `ln`, `cp -l`,
+`cp -a` and `rsync --link-dest`, because a later write to the copy reaches the source. A command that is not a
+read and names one of these is refused unless the name is only a copy source, so `git mv`, `git rm`, `git
+checkout -- CLAUDE.md`, `git restore` and `patch` naming one are refused and `cp CLAUDE.md NOTES.md` is not.
+A target is also compared by device and inode with the instructions files that exist, so `ln CLAUDE.md
+NOTES.md` followed by a write to `NOTES.md` is refused. The reasons name the path and say what to do instead.
+
+**The writes the gate cannot name.** The gate reads the paths a tool names and the commands it can parse. It
+cannot see where a script, a path held in a variable, `tar -x`, `unzip`, `rsync DIR/ .`, `cp -r DIR/. .` or
+`make` lands a file, so any of them can leave an instructions file, a skill or a `.localharness/` file that a
+later session loads. The row stops the agent's direct writes and the mistakes a model makes, not an agent that
+is set on it.
+
+**Ending.** The run folder is removed when the session ends, and a private session waits up to thirty seconds
+for the removal. TERM and HUP end the session the same way, and a session that has not finished within about ten
+seconds of the signal removes what it can and exits with the signal's status. When a scratch file a reply named,
+a picture, a saved page or a task document would go, the first Ctrl-C or Ctrl-D asks again and names what goes.
+Nothing is printed at the end; the model is asked to say which files it wrote stay.
+
+**What a private session does not hide.** A crash, a kill or a power cut leaves the run folder until the next
+start on this machine removes it, and a plugin that outlives its stop timeout can re-create its folder in the
+run after the end and leave it there until then. That a session ran is visible in the model server's log and
+cache, in the speed ledger and in file access times. Settings you change stay, and so do their audit rows. What
+reaches past the harness is outside it: a command's own leftovers, an MCP server's and a plugin's own storage,
+the sites a fetch contacted, ComfyUI's copy of a picture, the browser plugin's temporary profile and the
+terminal's scrollback. Writes the gate cannot name are above. Readers running as you, another process or an
+agent in another session, can read the run folder while it exists. What the agent writes into the project stays
+and is yours to remove. A commit made in a private session carries no co-author trailer. No record of what the
+session ran is kept, so there is nothing to audit afterwards but the settings rows. Deleted is not wiped: the
+run folder is unlinked, not overwritten, and a snapshot, a backup, a journal or the storage's own remapping can
+still hold it.
+
 ## What ends up in logs
 
 No setting LocalHarness treats as a secret is written to `.repl_history`, `bus-events.jsonl`,
@@ -1320,7 +1393,8 @@ holds no host-mutating tools. One path is the exception, described next.
 
 **Saved pages: the one raw path, behind a severity gate.** One path now carries raw untrusted bytes
 into the agent that holds host tools. A researcher's `web_fetch` with `save_to` writes a page's full
-text into `.localharness/downloads/` in the project (folder 0700, files 0600, written through no
+text into `.localharness/downloads/` in the project (in a private session,
+`<run>/state/.localharness/downloads/`, which goes with the run; folder 0700, files 0600, written through no
 symlink, at most 256 MB and 1,000 files with the oldest removed), the agent reads it with its
 ordinary tools, and those bytes sit behind a severity gate instead of the floor. From the moment the
 agent (or a subagent it dispatches while in that state) reads a saved page, destructive shell
@@ -1524,7 +1598,8 @@ in `auto`, and so does a plain `rm`, `unlink`, `rmdir` or `mv`-away of either, o
 itself, like the `-f` / `-rf` / `shred` spellings; so do `find <folder> … -exec rm|mv`, an `xargs rm`
 on a line that names the folder, and `rsync --remove-source-files` / `--delete` on it, and a glob under
 the folder that could match an entry such as `project_rec*` or `*`) and the harness creates both owner-only (0600). A project cannot write them, which
-is what stops a model from setting `yes` under its own hash. A record that this session already saw
+is what stops a model from setting `yes` under its own hash. A private session reads the record and holds
+its own changes in memory, so it writes neither file. A record that this session already saw
 and that then vanishes (deleted, damaged) is not a fresh root: nothing is adopted until `/instructions
 on`, and the session says so once. The fail-closed handle is per process: a record that vanishes
 between sittings is a fresh root at the next start (the file is used under the ordinary first-contact
@@ -2303,7 +2378,8 @@ Added with the mobile plugin:
 **Two live sessions on one agent are warned about, not prevented.** `history.jsonl` and
 `compact.md` take unlocked appends, so a terminal session and a web session on the same
 agent can interleave their writes. Starting the second one names the first; neither is
-refused. Closing one is still your call to make.
+refused. Closing one is still your call to make. A private session registers no live session, so it is
+neither warned about nor warns.
 
 ### A paired phone or Discord account
 
@@ -2324,7 +2400,9 @@ locked like the phone. "Launched by the agent" is read from the `LOCALHARNESS_CO
 agent's commands carry, which every process they start inherits: a Zed (or a terminal emulator)
 that the agent itself cold-started, say from "open this in Zed", passes it on, so a session you
 later start from that Zed is capped and locked like the phone too. That errs on the safe side;
-start the editor yourself to be treated as at the machine. It is `true` by default. A cold launch or
+start the editor yourself to be treated as at the machine. In a private session the marker reads `private`
+instead of `1`; it is still present, so "launched by the agent" is read as before, and a commit the harness
+makes there gets no co-author trailer. It is `true` by default. A cold launch or
 managed restart needs a question the person can answer, so a session that cannot put one — Discord,
 a `--no-input`, piped or agent-launched terminal, and a Zed session the agent launched — is refused
 it whatever the setting, at the default with one line pointing at the terminal (and at the phone app
@@ -2361,7 +2439,8 @@ confirmation. One phone message can now spend the root's action cap in `task` ca
 bounded by its own budget and the flow cap. ACP's `/task run` and `/task accept` are the local
 operator's, ungated like the terminal's.
 
-**The `LOCALHARNESS_COMMIT` marker is cooperative.** It is an environment variable, and a
+**The `LOCALHARNESS_COMMIT` marker is cooperative.** (In a private session its value is `private`; it is
+present, and nothing below changes.) It is an environment variable, and a
 command the model runs can drop it: `env -u LOCALHARNESS_COMMIT localharness start …` starts a
 session without it. A Zed (ACP) session started that way needs no tty and reads as a person at the
 machine. A terminal session needs a tty as well, which `bash_exec` never gives (its stdin is
