@@ -212,6 +212,31 @@ def test_start_app_installs_the_guard_only_for_a_private_run(installs):
     assert calls == [("guard", None)]
 
 
+def test_a_plugins_restart_keeps_one_private_run_and_idles_the_guard_after_every_pass(installs, monkeypatch):
+    from types import SimpleNamespace
+
+    from localharness.cli import start_cmd
+    from localharness.cli.session_resume import RELOAD_ACTION
+    from localharness.core import run_folder
+
+    calls, cfg = installs
+    begun, ended = [], []
+    real_begin, real_end = run_folder.begin, run_folder.end
+    monkeypatch.setattr(run_folder, "begin", lambda *a, **k: begun.append(real_begin(*a, **k)) or begun[-1])
+    monkeypatch.setattr(run_folder, "end", lambda run, **k: ended.append(run) or real_end(run, **k))
+    restart = SimpleNamespace(action=RELOAD_ACTION, resume=SimpleNamespace(agent_name=None))
+    passes = iter([restart, restart, None])
+
+    async def fake(*args, run=None, **kw):
+        calls.append(("pass", run))
+        return next(passes)
+
+    monkeypatch.setattr(start_cmd, "_start_async", fake)
+    assert _invoke("--private", "--config-dir", str(cfg)).exit_code == 0
+    assert len(begun) == 1 and ended == begun and not begun[0].path.exists()
+    assert calls == [("SIGTERM", "SIGHUP"), *[("pass", begun[0]), "idle"] * 3, "restore"]
+
+
 def test_a_second_end_of_a_private_run_waits_for_the_first(installs, monkeypatch):
     import threading
     from types import SimpleNamespace
