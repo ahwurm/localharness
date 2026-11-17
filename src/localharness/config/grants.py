@@ -390,7 +390,7 @@ class GrantStore:
         return True
 
     def add(self, grant: Grant) -> bool:
-        """Record an "allow always" answer (PRD §3.3); False when it was held for the session instead."""
+        """Record an "allow always" answer; False when it was held for the session instead."""
         return self._record(grant.workspace, GRANTS_KEY, {
             "key": grant.key,
             "class": grant.klass,

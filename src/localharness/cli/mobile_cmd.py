@@ -516,16 +516,7 @@ async def _serve(
                     end, run, lambda line: console.print(escape(line), style="dim", soft_wrap=True))))
 
         def _begin_session(*, fresh_thread: bool = False, private: Optional[bool] = None) -> None:
-            """Start session bring-up once, in the background, and never twice.
-
-            Held in a closure rather than on the channel because the channel must not be able to
-            start a session — it is the surface, and one process serves one LIVE session at a
-            time (LOCKED for the whole milestone; §6.6's unlocked `history.jsonl` appends are
-            what that rule keeps closed, not merely scheduling convenience).
-
-            A thread asleep in the agent's folder wakes in this bring-up; `fresh_thread` (the
-            new-chat verb) discards it instead. `private` None keeps the open chat's privacy.
-            """
+            """Start one session bring-up at a time in the background; `fresh_thread` discards a sleeping thread, `private` None keeps the chat's privacy."""
             nonlocal session_task
             if session_task is not None and not session_task.done():
                 return
@@ -568,13 +559,7 @@ async def _serve(
             return await asyncio.to_thread(end, old) if old is not None and old.private else ""
 
         async def _new_session(*, private: bool = False) -> str:
-            """The + button's other half: end the live session, then begin a fresh one. Returns what a private chat's removal left.
-
-            Cancellation is the mechanism — the session lives inside `session_task` — and
-            `_bring_up` tells the two cancellations apart: a live session ending on purpose
-            publishes "ended", only a genuinely abandoned BUILD publishes the red "cancelled".
-            The old session's log stays on disk, which is what keeps it in the drawer.
-            """
+            """End the live session and begin a fresh one (the + button); returns what a private chat's removal left."""
             if channel.asleep and channel.private is not True and channel.session_dir is not None:
                 from localharness.cli.session_resume import asleep_path
 

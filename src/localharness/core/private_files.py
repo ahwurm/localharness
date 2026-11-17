@@ -340,8 +340,7 @@ def in_background(fn: Callable[..., Any], *args: Any) -> "Future[Any]":
 
 
 def _open_dir(name: str, dir_fd: int) -> int:
-    """Open the directory `name` inside `dir_fd` without following a link; one that its mode keeps
-    us out of is made 0700 through an O_PATH descriptor first (Linux)."""
+    """Open the directory `name` inside `dir_fd` without following a link, first making one its mode keeps us out of 0700 (Linux)."""
     try:
         return os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
     except PermissionError:

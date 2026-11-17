@@ -2023,7 +2023,7 @@ async function syncPermissions() {
 }
 
 // A push carries where to land; opening from one, or tapping one while the app is open, has to
-// actually go there (WEBCH-44). A private push names no session.
+// actually go there. A private push names no session.
 async function followDeepLink(params) {
   const pending = params.get("pending");
   const ask = params.get("ask");
