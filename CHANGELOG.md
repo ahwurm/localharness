@@ -3060,8 +3060,8 @@ that do not have one yet.
 - **An empty completion no longer ends the turn as a success.** Observed live
   (qwen3.8-27b): two replies ~3 minutes apart with no text and no tool call — the
   whole output budget spent on hidden reasoning — and the turn completed
-  `success=True` with a STALE narration line ("Now let me pull the voice anchor
-  exemplars…") as its summary, because the #91 fallback resolves the last in-turn
+  `success=True` with a STALE narration line ("Now let me pull the reference
+  examples…") as its summary, because the #91 fallback resolves the last in-turn
   assistant text. The loop now re-prompts once with a message that names the cause
   (not the "only a confirmation" nudge), and a second empty reply ends the turn as
   a failure whose summary says so. The `llm_response` Action now carries

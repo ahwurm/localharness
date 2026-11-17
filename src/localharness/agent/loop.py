@@ -2539,7 +2539,7 @@ class AgentLoop:
                 # the output budget spent on hidden reasoning — and the turn completed
                 # success=True with a STALE narration line as its summary (the #91 fallback
                 # resolves the last in-turn assistant text, which was "Now let me pull the
-                # voice anchor exemplars…"). The #91 re-prompt is also the wrong message for
+                # reference examples…"). The #91 re-prompt is also the wrong message for
                 # this shape ("only a confirmation"). Name the cause to the model once; a
                 # second empty reply ends the turn through the same honest-failure pathway
                 # the parse-retry exhaustion and the #152 guard use.
