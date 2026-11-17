@@ -287,6 +287,7 @@ async def session(w: World, monkeypatch, *, private: bool, record: bool = True) 
             mp.setattr(sys, "stdin", screen.stdin)
             mp.setattr(sys, "stdout", screen.out)
             mp.setattr(sys, "stderr", screen.out)
+            mp.setenv("NO_COLOR", "1")
             RECORD.on = record
             run = begin(w.cfg, private, run_home(None))
             assert run is not None and run.private is private
