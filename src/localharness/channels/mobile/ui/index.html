@@ -110,6 +110,11 @@
   #queueBtn { flex:none; color:var(--warn);
               border-color:color-mix(in srgb,var(--warn) 45%,transparent); }
   .offline { color:var(--bad); }
+  #privMark { flex:none; color:var(--warn);
+              border-color:color-mix(in srgb,var(--warn) 45%,transparent); }
+  #undobar, #kept { max-width:var(--col); margin:4px auto 0; text-align:center; overflow-wrap:anywhere; }
+  #greet button { pointer-events:auto; }
+  #greetnote { max-width:30rem; padding:0 var(--gut); }
 
   main { max-width:var(--col); margin:0 auto; padding-top:18px;
          padding-left:max(14px,env(safe-area-inset-left));
@@ -305,15 +310,20 @@
         <span id="ctx" class="meta"></span>
       </div>
     </div>
+    <button class="small" id="privMark" hidden>Private</button>
     <button class="small" id="queueBtn" hidden>needs you <span class="badge" id="pcount">0</span></button>
     <button class="icon" id="newBtn" aria-label="new chat">+</button>
   </div>
+  <div id="undobar" class="meta" hidden></div>
+  <div id="kept" class="meta" hidden></div>
 </header>
 
 <div id="greet" hidden>
   <img src="/icon.svg" alt="" width="64" height="64">
   <div id="hello">Good day</div>
   <div id="agentline" class="meta"></div>
+  <div id="greetnote" class="meta"></div>
+  <button class="small" id="privGreet">Private chat</button>
 </div>
 
 <main id="log"></main>
@@ -335,8 +345,11 @@
 </div>
 
 <dialog id="drawer">
+  <button class="small" id="privAct">Private chat</button>
+  <button class="small" id="normAct" hidden>New normal chat</button>
   <h3>history</h3>
   <input id="sessq" type="search" placeholder="search chats" autocomplete="off">
+  <div class="meta" id="privCaption" hidden></div>
   <div id="sessions"><div class="meta">open the drawer to read the list…</div></div>
   <h3>housekeeping</h3>
   <button class="small" id="memBtn" hidden>memory</button>
@@ -353,6 +366,7 @@
 
 <dialog id="mem">
   <h3>memory</h3>
+  <div class="meta" id="memnote"></div>
   <input id="memq" type="search" placeholder="search memory" autocomplete="off">
   <div id="memlist"><div class="meta">reading memory…</div></div>
   <div id="memdetail" hidden>
@@ -403,6 +417,14 @@ const FAILED_HINT = " \u00b7 stuck? + starts a fresh chat";  // the failure row 
 const escalationText = (d) => d.reason === "stuck_detected"
   ? "stopped — " + (d.detail || "")
   : "escalated — " + d.reason + ": " + (d.detail || "");
+const FAILED_HINT_PRIVATE = " \u00b7 stuck? + ends this private chat and starts a fresh one";
+const PRIVATE_GREETING = "Private: no saved memory; nothing is kept when you end it; files written into your project stay.";
+const PRIVATE_RESTART = "Your private chat ended when the server stopped. Your next message starts a new private chat; tap + for a normal one.";
+const PRIVATE_CAPTION = "This private chat is not listed. It stays on this machine until you tap End or the server stops.";
+const PRIVATE_HISTORY_END = "an ended chat is read-only. This private chat has no saved memory, so ask about it in a normal chat.";
+const PRIVATE_MEMORY = "Private chat: it starts with no saved memory, and what it remembers goes when you end it.";
+const CHAT_CHANGED = "the chat changed";
+const LINE_DROPPED = "not sent: the chat changed";
 // PAIRING (A2). The enrolment QR encodes `https://host/#t=<token>`, and the FRAGMENT is the
 // reason that is allowed: a fragment is never sent to a server, so it lands in no access log,
 // no proxy log and no Referer — which is what the "never put the token in a URL" rule is
@@ -442,7 +464,9 @@ const PICKER_TITLE = "Choose";
 const CONFIRM_TITLE = "Confirm";
 
 // ---------------------------------------------------------------- state
+const flagged = () => { try { return LS.getItem("lh.private") === "1"; } catch (e) { return false; } };
 const S = {
+  private: flagged(), chat: false, kept: [], lines: new Map(),
   session: null, seq: null, turn: false, mode: null, collapsible: ["fs.read", "web", "memory"],
   tools: {}, calls: new Map(), prov: null, lastSent: "", parked: new Map(), asks: new Map(),
   reasoning: false, offline: false, modes: [], verbose: false, burst: null, lastRow: null,
@@ -459,8 +483,28 @@ function remember(seq) {
   // case this exists for is precisely the one where the page is reclaimed without warning.
   if (seq == null) return;
   S.seq = seq;
+  if (S.private) return;   // a private chat leaves no trace in this browser
   try { LS.setItem(cursorKey(), String(seq)); } catch (e) { /* private mode: degrade, don't die */ }
 }
+
+// The one flag in this browser: seeds a page that has no chat; a chat on screen overrides it.
+function setPrivate(on) {
+  S.private = on;
+  try { if (on) LS.setItem("lh.private", "1"); else LS.removeItem("lh.private"); } catch (e) { /* degrade */ }
+  paintPrivate();
+}
+const adoptChat = (chat, priv) => { S.chat = chat; setPrivate(chat ? priv : flagged()); };
+function paintPrivate() {
+  const live = S.private && S.chat;
+  $("privMark").hidden = $("normAct").hidden = $("privCaption").hidden = !live;
+  $("privAct").textContent = live ? "End private chat" : "Private chat";
+  $("privCaption").textContent = PRIVATE_CAPTION;
+  $("privGreet").hidden = S.private;
+  $("greetnote").textContent = !S.private ? "" : S.chat ? PRIVATE_GREETING : PRIVATE_RESTART;
+  $("kept").textContent = live && S.kept.length ? "stays: " + S.kept.join(", ") : "";
+  $("kept").hidden = !$("kept").textContent;
+}
+const failedHint = () => S.private ? FAILED_HINT_PRIVATE : FAILED_HINT;
 
 // ---------------------------------------------------------------- rendering helpers
 function el(tag, cls, text) {
@@ -472,7 +516,7 @@ function el(tag, cls, text) {
 function atBottom() { return window.innerHeight + window.scrollY >= document.body.offsetHeight - 120; }
 function add(node) {
   const stick = atBottom();
-  $("greet").hidden = true;   // the first real transcript row retires the greeting
+  if (/\b(user|answer)\b/.test(node.className)) $("greet").hidden = true;   // only a real exchange retires the greeting
   log.appendChild(node);
   S.lastRow = node;           // burst recency: a row landing after a counter ends its run
   if (stick) window.scrollTo(0, document.body.scrollHeight);
@@ -595,7 +639,7 @@ function onEvent(name, data) {
       const head = S.echoes[0];
       const e = head && (head.text === data.content ||
         (head.images && String(data.content || "").includes(head.text))) ? S.echoes.shift() : null;
-      if (e) { e.meta.textContent = "you · via " + data.channel; break; }
+      if (e) { S.lines.delete(e.line); e.meta.textContent = "you · via " + data.channel; break; }
       const r = add(el("div", "row user"));
       r.appendChild(el("div", null, data.content));
       r.appendChild(el("div", "meta", "you · via " + data.channel));
@@ -628,7 +672,7 @@ function onEvent(name, data) {
       }
       add(el("div", "row " + (child ? "sys child" : "err"),
         (child ? "subagent failed — " : "turn failed — ") + data.reason + ": " + (data.detail || "") +
-        (child ? "" : FAILED_HINT)));
+        (child ? "" : failedHint())));
       break;
     case "Action": renderAction(data, child); break;
     case "Observation": renderObservation(data, child); break;
@@ -644,6 +688,8 @@ function onEvent(name, data) {
         withCode(r, data.summary || "");
         r.appendChild(el("div", "meta",
           `${data.success ? "ok" : "unsuccessful"} · ${(data.duration_seconds || 0).toFixed(1)}s`));
+        S.kept = data.kept || [];
+        paintPrivate();
       }
       break;
     }
@@ -919,14 +965,21 @@ function clearProvisional(bySeq) {
 
 // ---------------------------------------------------------------- SSE-only frames
 function onFrame(name, d) {
+  if (name === "BringUpStage" && !d.failed && d.stage !== "ended") adoptChat(true, d.private === true);
   switch (name) {
     case "Hello":
       // A different session id than this page knows = a NEW CHAT happened while this context
       // was away: seq lines restart per chat, so every cursor and view held here is poison on
       // the new line. Reboot onto the fresh session's spine rather than half-adopt it.
-      if (!d.synthetic && S.session && d.session_id && d.session_id !== S.session
-          && location.reload) { location.reload(); return; }
+      // A line still waiting for its echo would be lost to a reload, so that view resets in place.
+      if (!d.synthetic && S.session && d.session_id && d.session_id !== S.session) {
+        if (S.echoes.length) resetView();
+        else if (location.reload) { location.reload(); return; }
+      }
       S.session = d.session_id; S.mode = d.mode; S.turn = d.turn_in_progress; S.activity = "";
+      S.kept = d.kept || [];
+      adoptChat(!!(d.session_live || d.model_state === "building" || d.asleep_session_id), d.private === true);
+      if (d.asleep_session_id && !d.synthetic) loadSpine(d.asleep_session_id);
       S.checking = null;
       if (S.launchName && d.model && d.model !== $("model").textContent) S.sawSwitch = true;
       if (d.model) $("model").textContent = d.model;
@@ -935,9 +988,20 @@ function onFrame(name, d) {
       if (d.synthetic) add(el("div", "row sys",
         "REPLAY: the streaming and instrument frames on this connection are SYNTHESIZED from a " +
         "persisted log — plausible, not measured. A blocking ask has no persisted analog at all."));
-      if (d.protocol_version !== 13) add(el("div", "row err",
-        "protocol_version " + d.protocol_version + " — this page was written against 13. Something " +
-        "will render as a blank cell; go read /api/protocol."));
+      if (d.protocol_version !== 13) {
+        // A newer server serves a newer page: one reload per version picks it up, and a page that
+        // still mismatches after that says so instead of looping.
+        let tried = true;
+        try {
+          const seen = window.sessionStorage;
+          tried = seen.getItem("lh.reloaded") === String(d.protocol_version);
+          seen.setItem("lh.reloaded", String(d.protocol_version));
+        } catch (e) { /* no sessionStorage: say it, don't reload */ }
+        if (!tried && location.reload) { location.reload(); return; }
+        add(el("div", "row err",
+          "protocol_version " + d.protocol_version + " — this page was written against 13. Something " +
+          "will render as a blank cell; go read /api/protocol."));
+      }
       // REPLAY keeps its label: paint() maps a healthy state to the quiet wordmark otherwise.
       paint(d.synthetic ? null : d.model_state);
       break;
@@ -1041,7 +1105,7 @@ function onFrame(name, d) {
       add(el("div", "row gap", "this client fell behind and its buffer was dropped — resyncing."));
       connect(d.from_seq);
       break;
-    case "LineDropped": break;
+    case "LineDropped": restoreLine(d.line_id); break;
     default: break;
   }
 }
@@ -1055,10 +1119,12 @@ function connect(from) {
   // backfills and nothing repeats. A COLD open deliberately ignores the stored cursor — the
   // fresh view starts clean and Hello points at the drawer for the past.
   const cursor = from != null ? from : (S.seq != null ? S.seq + 1 : null);
-  es = new EventSource("/api/stream" + (cursor != null ? "?from=" + cursor : ""));
+  const query = [cursor != null && "from=" + cursor, S.private && "private=1"].filter(Boolean).join("&");
+  es = new EventSource("/api/stream" + (query ? "?" + query : ""));
   const known = new Set([
     "Hello", "TokenDelta", "StreamClosed", "ReasoningDelta", "StatusTick", "BlockingAsk",
     "AskExpired", "TurnCancelled", "BringUpStage", "Notice", "GapDetected", "Lagged", "Activity",
+    "LineDropped",
   ]);
   es.onopen = () => { S.offline = false; paint(); };
   const src = es;
@@ -1266,6 +1332,18 @@ $("composer").ondrop = e => {
 $("attach").onclick = () => $("filePick").click();
 $("filePick").onchange = () => { stage($("filePick").files); $("filePick").value = ""; };
 
+function restoreLine(id) {
+  const text = S.lines.get(id);
+  if (text == null) return;
+  S.lines.delete(id);
+  const i = S.echoes.findIndex(e => e.line === id);
+  if (i >= 0) { S.echoes[i].meta.textContent = "you · NOT delivered"; S.echoes.splice(i, 1); }
+  const box = $("text");
+  if (text) box.value = box.value ? box.value + "\n\n" + text : text;
+  if (!S.echoes.length) { S.sent = false; paint(); }   // nothing will run for it: the pulse stops
+  add(el("div", "row sys", LINE_DROPPED));
+}
+
 async function send(intent) {
   const text = $("text").value.trim();
   if (!text && !staged.length) return;
@@ -1286,14 +1364,25 @@ async function send(intent) {
   if (images.length) row.appendChild(el("div", "meta", `📎 ${images.length} image${images.length > 1 ? "s" : ""}`));
   const meta = el("div", "meta", "you · sending…");
   row.appendChild(meta);
-  S.echoes.push({ text, meta, images: images.length });
-  const body = { text, ...(intent ? { intent } : {}), ...(images.length ? { images } : {}) };
+  // The server drops a line whose chat changed under it and names it by this id; the page's own
+  // copy of the text is what goes back to the composer.
+  const line = "l" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  S.lines.set(line, text);
+  S.echoes.push({ text, meta, images: images.length, line });
+  const body = { text, private: S.private, line_id: line,
+                 ...(intent ? { intent } : {}), ...(images.length ? { images } : {}) };
   const r = await post(`/api/sessions/${S.session || "current"}/message`, body);
+  if (r.error === CHAT_CHANGED) {
+    if (typeof r.private === "boolean") adoptChat(true, r.private);
+    restoreLine(line);
+    return;
+  }
   if (r.error) {
     // Refused (not an image, too many, a nudge with pictures): nothing was queued, so the text
     // and the chips stay for a second try.
     meta.textContent = "you · NOT delivered"; add(el("div", "row err", r.error));
     S.echoes.splice(S.echoes.findIndex(e => e.meta === meta), 1);
+    S.lines.delete(line);
     if (!$("text").value) $("text").value = text;
     return;
   }
@@ -1319,22 +1408,32 @@ $("retry").onclick = () => {
   send(null);
 };
 
-let undo = null;
+// ONE pending action at a time, in the fixed header so it shows while the log is scrolled up.
+// A tap that ends the chat while another is pending takes over its action and keeps its deadline:
+// a repeat tap changes nothing, and Stop armed then End tapped becomes the stop-then-end chain.
+let undo = null, pending = null;
+function disarm() { clearTimeout(undo); undo = null; pending = null; $("undobar").hidden = true; }
+function arm(label, run) {
+  if (pending) { pending.run = run; pending.label.textContent = label + " "; return; }
+  const text = el("span", null, label + " ");
+  const b = el("button", "small", "undo");
+  b.onclick = disarm;
+  $("undobar").replaceChildren(text, b);
+  $("undobar").hidden = false;
+  pending = { run, label: text };
+  undo = setTimeout(async () => { const go = pending.run; disarm(); await go(); }, 3000);
+}
+const cancelTurn = () => post(`/api/sessions/${S.session || "current"}/cancel`);
+const command = (text) => post(`/api/sessions/${S.session || "current"}/command`, { text, private: S.private });
 $("cancel").onclick = () => {
   // A brief undo window before the POST fires. Cancel sits next to the composer where a
   // distracted thumb lands, and on this box the GPU is the scarce resource — a mis-tap discards
   // real generation.
-  if (undo) return;
-  const row = add(el("div", "row sys"));
-  row.appendChild(el("span", null, "cancelling in 3s… "));
-  const b = el("button", "small", "undo");
-  b.onclick = () => { clearTimeout(undo); undo = null; row.remove(); };
-  row.appendChild(b);
-  undo = setTimeout(async () => {
-    undo = null; row.remove();
-    const r = await post(`/api/sessions/${S.session || "current"}/cancel`);
+  if (pending) return;
+  arm("cancelling in 3s…", async () => {
+    const r = await cancelTurn();
     if (r.status === "nothing_to_cancel") add(el("div", "row sys", "nothing was running."));
-  }, 3000);
+  });
 };
 
 $("reasonBtn").onclick = async () => {
@@ -1343,8 +1442,7 @@ $("reasonBtn").onclick = async () => {
   if (S.prov) S.prov.reason.style.display = S.reasoning ? "" : "none";
   // The server-side toggle too, through the REPL's own dispatcher — so the two surfaces cannot
   // drift and `/reasoning` means the same thing wherever it is typed.
-  await post(`/api/sessions/${S.session || "current"}/command`,
-             { text: "/reasoning " + (S.reasoning ? "on" : "off") });
+  await command("/reasoning " + (S.reasoning ? "on" : "off"));
 };
 $("queueBtn").onclick = showQueue;
 $("grantsBtn").onclick = async () => {
@@ -1476,7 +1574,7 @@ function renderSpine(lines, container) {
         // The escalation row above is the notice; this is the reply summary, shown as itself.
         if (d.detail) r = el("div", "row sys", d.detail);
       } else {
-        r = el("div", "row err", "turn failed — " + d.reason + ": " + (d.detail || "") + FAILED_HINT);
+        r = el("div", "row err", "turn failed — " + d.reason + ": " + (d.detail || "") + failedHint());
       }
     }
     if (r) {
@@ -1485,6 +1583,20 @@ function renderSpine(lines, container) {
     }
   }
   return maxSeq;
+}
+
+// A sleeping chat has no session id of its own on the wire, so a tap on its push loads it by the
+// id the Hello names; only the live chat's cursor is remembered.
+async function loadSpine(id) {
+  if (!id || log.children.length) return;
+  try {
+    const res = await fetch(`/api/sessions/${encodeURIComponent(id)}/events`,
+                            { headers: { "Authorization": "Bearer " + token } });
+    const text = await res.text();
+    if (log.children.length) return;
+    const upto = renderSpine(text.split("\n"), log);
+    if (upto != null && id === S.session) remember(upto);   // the stream below resumes right after the spine
+  } catch (e) { /* the clean open stays clean */ }
 }
 
 async function openHistory(id) {
@@ -1501,7 +1613,7 @@ async function openHistory(id) {
                           { headers: { "Authorization": "Bearer " + token } });
     renderSpine((await r.text()).split("\n"), hist);
   } catch (e) { hist.appendChild(el("div", "row err", "could not read that session: " + e)); }
-  hist.appendChild(el("div", "row sys",
+  hist.appendChild(el("div", "row sys", S.private ? PRIVATE_HISTORY_END :
     "an ended chat is read-only, but nothing is lost: the agent's memory carries it, so a new " +
     "chat can be asked about anything here. Tap-to-continue is the next build."));
   log.hidden = true; $("composer").hidden = true; $("greet").hidden = true;
@@ -1593,7 +1705,11 @@ $("memforget").onclick = async () => {
 };
 
 $("memback").onclick = () => loadMemory($("memq").value.trim());
-$("memBtn").onclick = () => { $("drawer").close(); $("mem").showModal(); loadMemory($("memq").value.trim()); };
+$("memBtn").onclick = () => {
+  $("drawer").close(); $("mem").showModal();
+  $("memnote").textContent = S.private ? PRIVATE_MEMORY : "";
+  loadMemory($("memq").value.trim());
+};
 $("memclose").onclick = () => $("mem").close();
 
 // ---------------------------------------------------------------- screens + the picture gallery
@@ -1660,27 +1776,65 @@ $("memq").oninput = () => {
 };
 
 // ---------------------------------------------------------------- new chat
-$("newBtn").onclick = async () => {
-  // POST /api/sessions/new ends the live session and builds a fresh one; the old chat stays in
-  // the drawer. Cold box: the composer already IS the new chat — go there. Mid-turn the server
-  // refuses (409) and the refusal is shown: stop the turn first, that verb exists.
-  closeHistory();
-  if (S.session == null && !S.turn) { $("text").focus(); return; }
-  const r = await post("/api/sessions/new");
+// The fresh view is the point. Local per-session state dies with the old chat; the stream
+// stays attached and the fresh session's events land below. S.seq is dropped because the new
+// session's seqs restart — resuming from the old cursor would skip everything.
+function resetView() {
+  log.replaceChildren();
+  S.calls.clear(); S.echoes = []; S.burst = null; S.prov = null; S.lastSent = "";
+  S.session = null; S.seq = null; S.kept = []; S.turn = false; S.sent = false;
+  paint();
+  $("greet").hidden = false;
+}
+const hasTurns = () => S.turn || S.echoes.length > 0 ||
+  [...log.children].some(r => /\b(user|answer)\b/.test(r.className));
+
+// POST /api/sessions/new ends the live session and builds a fresh one; the old chat stays in
+// the drawer. Mid-turn the server refuses (409) and the refusal is shown: stop the turn first.
+async function startChat(priv) {
+  const emptyPrivate = S.private && S.chat && !hasTurns();
+  const r = await post("/api/sessions/new", { private: priv });
   if (r.status !== "starting") {
     add(el("div", "row err", "no new chat: " + (r.error || JSON.stringify(r))));
     return;
   }
-  // The fresh view is the point. Local per-session state dies with the old chat; the stream
-  // stays attached and the fresh session's events land below. S.seq is dropped because the new
-  // session's seqs restart — resuming from the old cursor would skip everything.
-  log.replaceChildren();
-  S.calls.clear(); S.echoes = []; S.burst = null; S.prov = null; S.lastSent = "";
-  S.session = null; S.seq = null;
-  paint();
-  $("greet").hidden = false;
+  resetView();
+  adoptChat(true, priv);
+  if (emptyPrivate && !priv) add(el("div", "row sys", "the empty private chat ended"));
+  if (r.left) add(el("div", "row sys", r.left));
   $("text").focus();
+}
+// Ending a private chat that has turns takes the undo; mid-turn the countdown stops the turn first.
+const endingChain = (then) => {
+  arm((S.turn ? "stopping, then " : "") + "ending this private chat in 3s…",
+      async () => { if (S.turn) await cancelTurn(); await then(); });
 };
+function newChat(priv) {
+  closeHistory();
+  if (!S.chat && !S.turn && S.session == null) {   // cold box: the composer already IS the new chat
+    if (priv) startChat(true); else { setPrivate(false); $("text").focus(); }
+    return;
+  }
+  if (S.private && S.chat && hasTurns()) endingChain(() => startChat(priv));
+  else startChat(priv);
+}
+async function endChat() {
+  const r = await post("/api/sessions/end");
+  if (r.status !== "ended") {
+    add(el("div", "row err", "not ended: " + (r.error || JSON.stringify(r))));
+    return;
+  }
+  resetView();
+  S.chat = false;
+  setPrivate(false);
+  if (r.left) add(el("div", "row sys", r.left));
+}
+function endTap() { if (hasTurns()) endingChain(endChat); else endChat(); }
+$("newBtn").onclick = () => newChat(false);
+$("normAct").onclick = () => { $("drawer").close(); newChat(false); };
+$("privGreet").onclick = () => newChat(true);
+$("privAct").onclick = () => { $("drawer").close(); if (S.private && S.chat) endTap(); else newChat(true); };
+$("privMark").onclick = endTap;
 
 // ---------------------------------------------------------------- the settings pill
 // The model/config home the owner asked for: IN the prompt box. The pill's label is the model
@@ -1707,7 +1861,7 @@ function tapModel(r) {
   if (S.turn) add(el("div", "row sys", r.kind === "cold" ? MODEL_QUEUED_ASK : MODEL_QUEUED));
   $("cfg").close();
   const unchecked = () => { S.checking = null; paint(); };
-  post(`/api/sessions/${S.session || "current"}/command`, { text: "/model " + r.name })
+  command("/model " + r.name)
     .then(res => { if (res.error || typeof res.status === "number") unchecked(); }, unchecked);
 }
 function modelRow(r, off) {
@@ -1752,7 +1906,7 @@ async function loadModels() {
       const w = el("button", "small", MODEL_WAKE);
       w.onclick = () => {
         S.wakeRefetch = true;
-        post(`/api/sessions/${S.session || "current"}/command`, { text: "/model list" });
+        command("/model list");
       };
       nodes.push(w);
     }
@@ -1854,11 +2008,26 @@ function paintPush() {
   b.title = blocked || "buzz this phone when a turn finishes or the gate needs you";
 }
 
+// The stream is closed while backgrounded, so this page's counts may be stale: read what is open
+// at boot, on a return to visible and on a push.
+async function syncPermissions() {
+  try {
+    const state = await get("/api/permissions");
+    // Number keys, matching `S.parked.set(data.pending.id, ...)` on the event path —
+    // a string key here would shadow rather than replace, and `PermissionResolved`
+    // (which deletes by the event's numeric id) would then never clear the row.
+    S.parked = new Map((state.parked || []).map(p => [p.id, p]));
+    S.asks = new Map((state.blocking || []).map(a => [a.request_id, a]));
+    paint();
+  } catch (e) { /* offline: the badge stays as it was */ }
+}
+
 // A push carries where to land; opening from one, or tapping one while the app is open, has to
-// actually go there (WEBCH-44).
+// actually go there (WEBCH-44). A private push names no session.
 async function followDeepLink(params) {
   const pending = params.get("pending");
   const ask = params.get("ask");
+  if (ask && !S.asks.has(ask)) await syncPermissions();
   if (ask && S.asks.has(ask)) { showAsk(S.asks.get(ask)); return; }
   if (pending || ask) await showQueue();
 }
@@ -1873,15 +2042,7 @@ if ("serviceWorker" in navigator) {
       // navigating: the stream is closed while backgrounded, so this page's counts may be
       // stale — but yanking the view out from under a thumb that is mid-sentence would be a
       // worse bug than a stale badge. The notification is still there to tap.
-      try {
-        const state = await get("/api/permissions");
-        // Number keys, matching `S.parked.set(data.pending.id, ...)` on the event path —
-        // a string key here would shadow rather than replace, and `PermissionResolved`
-        // (which deletes by the event's numeric id) would then never clear the row.
-        S.parked = new Map((state.parked || []).map(p => [p.id, p]));
-        S.asks = new Map((state.blocking || []).map(a => [a.request_id, a]));
-        paint();
-      } catch (e) { /* offline: the badge stays as it was */ }
+      await syncPermissions();
     }
   });
 }
@@ -1914,6 +2075,8 @@ $("recheck").onclick = async () => {
     S.modes = proto.modes || [];        // the settings pill's mode buttons, from the gate's own list
     for (const t of tools.tools) S.tools[t.name] = t;
     S.session = health.session_id || S.session;
+    adoptChat(!!(health.session_live || health.asleep_session_id || health.model_state === "building"),
+              health.private === true);
     if (health.mode) S.mode = health.mode;
     if (health.agent_id) $("agentline").textContent = "agent · " + health.agent_id;
     if (health.model) $("model").textContent = health.model;
@@ -1932,14 +2095,7 @@ $("recheck").onclick = async () => {
     // only for a session with no exchanges yet; an answer that landed while no phone was
     // watching is therefore simply THERE at the next open.
     // (not in replay: there the playback itself is the render, and a spine would double it)
-    if (S.session && !log.children.length && !health.replay) {
-      try {
-        const res = await fetch(`/api/sessions/${encodeURIComponent(S.session)}/events`,
-                                { headers: { "Authorization": "Bearer " + token } });
-        const upto = renderSpine((await res.text()).split("\n"), log);
-        if (upto != null) remember(upto);   // the stream below resumes right after the spine
-      } catch (e) { /* the clean open stays clean */ }
-    }
+    if (!health.replay) await loadSpine(S.session || health.asleep_session_id);
     if (health.turn_in_progress)
       add(el("div", "row sys", "a turn is running — its answer lands right here when it finishes."));
   } catch (e) {
@@ -1971,10 +2127,12 @@ $("recheck").onclick = async () => {
   $("hello").textContent = hr < 5 ? "Up late" : hr < 12 ? "Good morning"
     : hr < 18 ? "Good afternoon" : "Good evening";
   if (!log.children.length) $("greet").hidden = false;
+  paintPrivate();
 
   connect();
   await registerWorker();
   paintPush();
+  await syncPermissions();
   // Arrived from a notification: `/?session=…&pending=…`. Done after the first paint so the
   // parked queue it opens is populated.
   await followDeepLink(new URLSearchParams(location.search));
@@ -1990,6 +2148,7 @@ $("recheck").onclick = async () => {
     if (document.hidden) { if (es) { es.close(); es = null; } return; }
     if (S.offline || !es || es.readyState === 2) connect();
     paintPush();
+    syncPermissions();
   });
 })();
 </script>

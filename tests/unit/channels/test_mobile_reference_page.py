@@ -85,7 +85,8 @@ def test_the_cursor_is_persisted_on_every_event(page):
     silently to the tail and misses the answer — the one thing WIN-A exists to deliver."""
     assert "localStorage" in page
     assert "remember(data.seq)" in page
-    assert 'es = new EventSource("/api/stream" + (cursor != null ? "?from=" + cursor : ""))' in page
+    assert 'cursor != null && "from=" + cursor' in page
+    assert 'es = new EventSource("/api/stream" + (query ? "?" + query : ""))' in page
 
 
 def test_copy_reads_the_stored_string_not_the_rendered_dom(page):
@@ -235,7 +236,7 @@ const mk = (tag) => ({
     this.parent = null;
   },
   classList: { add() {}, remove() {}, contains: () => false },
-  close() { this.open = false; }, showModal() { this.open = true; },
+  close() { this.open = false; }, showModal() { this.open = true; }, focus() {},
 });
 const byId = new Map();
 globalThis.document = {
@@ -244,13 +245,14 @@ globalThis.document = {
   body: { offsetHeight: 0, scrollHeight: 0 },
   addEventListener() {},
 };
-const store = new Map();
+const store = new Map(), tab = new Map();
 globalThis.window = {
   localStorage: {
     getItem: (k) => (store.has(k) ? store.get(k) : null),
     setItem: (k, v) => store.set(k, String(v)),
     removeItem: (k) => store.delete(k),
   },
+  sessionStorage: { getItem: (k) => (tab.has(k) ? tab.get(k) : null), setItem: (k, v) => tab.set(k, String(v)) },
   innerHeight: 0, scrollY: 0, scrollTo() {}, isSecureContext: true, addEventListener() {},
 };
 globalThis.location = { hash: "", search: "", pathname: "/" };
@@ -1064,7 +1066,7 @@ waiting[0].res(ok(LIST)); await tick();
 $("cfgModel").children[1].onclick(); await tick();
 console.log(JSON.stringify({posts, open: $("cfg").open, rows: rows()}));
 """)
-    assert got["posts"] == [["/api/sessions/s/command", {"text": "/model llama3.1:8b"}]]
+    assert got["posts"] == [["/api/sessions/s/command", {"text": "/model llama3.1:8b", "private": False}]]
     assert got["open"] is False and got["rows"] == []
 
 
@@ -1117,7 +1119,7 @@ onFrame("Notice", {text: "listing"}); await tick();
 console.log(JSON.stringify({shown, posts, afterFirst, afterSecond: waiting.length}));
 """)
     assert got["shown"] == [["div", "chat asleep — /model list wakes it"], ["button", "wake chat and list"]]
-    assert got["posts"] == [["/api/sessions/s/command", {"text": "/model list"}]]
+    assert got["posts"] == [["/api/sessions/s/command", {"text": "/model list", "private": False}]]
     assert got["afterFirst"] == 2 and got["afterSecond"] == 2
 
 
@@ -1158,8 +1160,9 @@ for (const t of ["/model list", "/model qwen3:32b"]) { $("text").value = t; awai
 console.log(JSON.stringify({opened, posts}));
 """)
     assert got["opened"] == [True, 1, 0, ""]
-    assert got["posts"] == [["/api/sessions/s/message", {"text": "/model list"}],
-                            ["/api/sessions/s/message", {"text": "/model qwen3:32b"}]]
+    assert [[path, {k: v for k, v in body.items() if k != "line_id"}] for path, body in got["posts"]] == [
+        ["/api/sessions/s/message", {"text": "/model list", "private": False}],
+        ["/api/sessions/s/message", {"text": "/model qwen3:32b", "private": False}]]
 
 
 @NODE_ONLY
@@ -1588,3 +1591,409 @@ def test_a_second_tap_is_skipped_for_the_picker_class_alone_and_kept_for_every_o
     assert 'const picker = d.klass === "picker";' in body
     assert '(o.confirm_required && !picker ? " (2 taps)" : "")' in body
     assert "if (!picker && !confirm(r.detail)) { dlg.close(); return; }" in body
+
+
+# --------------------------------------------------------------------------------------------
+# A private chat on the page. Fake timers: the 3 s undo is fired by hand, never waited for.
+PRIVATE_PRELUDE = r"""
+const posts = [], gets = [], reply = {}, timers = [];
+const settle = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
+globalThis.fetch = async (path, opts) => {
+  if (opts && opts.method === "POST") {
+    const body = JSON.parse(opts.body); posts.push([path, body]);
+    const r = typeof reply[path] === "function" ? reply[path](body) : reply[path] || {};
+    return {status: 200, json: async () => r};
+  }
+  gets.push(path);
+  const text = path === "/api/sessions/asleep-1/events"
+    ? '{"event_type":"UserMessage","content":"q","seq":1}\n{"event_type":"TaskComplete","summary":"the answer","seq":2}'
+    : "";
+  const body = path === "/api/permissions"
+    ? {blocking: [{request_id: "r1", klass: "shell-new", options: [], display: "run ls"}], parked: []} : {};
+  return {ok: true, status: 200, text: async () => text, json: async () => body};
+};
+globalThis.setTimeout = (fn, ms) => { timers.push({fn, ms, live: true}); return timers.length; };
+globalThis.clearTimeout = (id) => { if (timers[id - 1]) timers[id - 1].live = false; };
+const live = () => timers.filter((t) => t.live);
+const fire = async () => { const t = live().pop(); t.live = false; await t.fn(); await settle(); };
+reply["/api/sessions/new"] = {status: "starting", left: ""};
+reply["/api/sessions/end"] = {status: "ended", left: ""};
+const hello = (o) => onFrame("Hello", {session_id: "s", mode: "repl", turn_in_progress: false,
+  protocol_version: PROTOCOL_VERSION, synthetic: false, model_state: "ready", session_live: true,
+  private: false, ...o});
+const noChat = {session_live: false, session_id: null, model_state: "cold"};
+const user = (text) => onEvent("UserMessage", {seq: 1, content: text, channel: "mobile"});
+const bar = () => [$("undobar").hidden, $("undobar").children.map((c) => c.textContent).join("")];
+const sent = (path) => posts.filter((p) => p[0] === "/api/sessions/" + path).map((p) => p[1]);
+const order = () => posts.map((p) => p[0].replace("/api/sessions/", "").replace("s/", ""));
+const flag = () => window.localStorage.getItem("lh.private");
+token = "tok";
+"""
+
+PRIVATE_GREETING = ("Private: no saved memory; nothing is kept when you end it; "
+                    "files written into your project stay.")
+PRIVATE_RESTART = ("Your private chat ended when the server stopped. Your next message starts a new "
+                   "private chat; tap + for a normal one.")
+
+
+def _private(page, tmp_path, script):
+    return _drive(page, PRIVATE_PRELUDE + script, tmp_path)
+
+
+@NODE_ONLY
+def test_private_a_hello_naming_a_chat_sets_the_flag_and_the_flag_only_seeds_a_page_with_none(page, tmp_path):
+    got = _private(page, tmp_path, r"""
+const out = {};
+window.localStorage.setItem("lh.private", "1");
+hello(noChat);
+out.seeded = [S.private, S.chat, $("greetnote").textContent, $("privGreet").hidden, $("privMark").hidden];
+hello({private: false});
+out.stale = [S.private, S.chat, flag(), $("greetnote").textContent, $("privGreet").hidden];
+$("text").value = "hi"; await send(null);
+out.normalSend = [sent("s/message")[0].private, /^[A-Za-z0-9_-]{1,64}$/.test(sent("s/message")[0].line_id)];
+hello({private: true});
+out.named = [S.private, flag(), $("greetnote").textContent, $("privMark").hidden, $("privAct").textContent];
+hello({session_live: false, session_id: null, model_state: "building", private: true});
+out.building = [S.private, S.chat];
+hello({...noChat, model_state: "asleep", asleep_session_id: "asleep-1", private: true});
+out.asleep = [S.private, S.chat];
+onFrame("BringUpStage", {stage: "ready", private: false});
+out.ready = [S.private, flag()];
+console.log(JSON.stringify(out));
+""")
+    assert got["seeded"] == [True, False, PRIVATE_RESTART, True, True]
+    assert got["stale"] == [False, True, None, "", False]
+    assert got["normalSend"] == [False, True]
+    assert got["named"] == [True, "1", PRIVATE_GREETING, False, "End private chat"]
+    assert got["building"] == [True, True] and got["asleep"] == [True, True]
+    assert got["ready"] == [False, None]
+
+
+@NODE_ONLY
+def test_private_message_and_command_carry_the_privacy_of_the_chat_on_screen(page, tmp_path):
+    got = _private(page, tmp_path, r"""
+hello({private: true});
+$("text").value = "secret"; await send("queue");
+await command("/reasoning on");
+console.log(JSON.stringify([posts[0][1], posts[1]]));
+""")
+    message, command = got
+    assert {k: v for k, v in message.items() if k != "line_id"} == {"text": "secret", "private": True, "intent": "queue"}
+    assert command == ["/api/sessions/s/command", {"text": "/reasoning on", "private": True}]
+
+
+@NODE_ONLY
+def test_private_a_dropped_line_goes_back_to_the_composer_and_says_so(page, tmp_path):
+    got = _private(page, tmp_path, r"""
+hello({private: false});
+const out = {};
+const lineOf = (n) => sent("s/message")[n].line_id;
+$("text").value = "first"; await send(null);
+out.echoPending = S.echoes.length;
+onFrame("LineDropped", {line_id: lineOf(0)});
+out.empty = [$("text").value, S.echoes.length, S.lines.size, rows().map((r) => r.text.replace(/^[\s\S]*you · /, "you · "))];
+$("text").value = "second"; await send(null);
+$("text").value = "typing";
+onFrame("LineDropped", {line_id: lineOf(1)});
+out.blank = $("text").value;
+const before = rows().length;
+onFrame("LineDropped", {line_id: "never-sent"});
+out.unknown = rows().length === before;
+reply["/api/sessions/s/message"] = {error: "the chat changed", private: true};
+$("text").value = "third"; await send(null);
+out.refused = [$("text").value, S.private, S.chat, S.echoes.length];
+console.log(JSON.stringify(out));
+""")
+    assert got["echoPending"] == 1
+    assert got["empty"][:3] == ["first", 0, 0]
+    assert got["empty"][3] == ["you · NOT delivered", "not sent: the chat changed"]
+    assert got["blank"] == "typing\n\nsecond"
+    assert got["unknown"] is True
+    assert got["refused"] == ["third", True, True, 0]
+
+
+@NODE_ONLY
+def test_private_chat_starts_from_a_tap_on_a_cold_box_and_on_a_chat_with_turns(page, tmp_path):
+    got = _private(page, tmp_path, r"""
+const out = {};
+hello(noChat);
+await $("privGreet").onclick(); await settle();
+out.cold = [sent("new"), S.private, S.chat, flag(), $("greetnote").textContent, $("privGreet").hidden];
+hello({private: false}); user("hi"); posts.length = 0;
+await $("privAct").onclick(); await settle();
+out.fromNormal = [sent("new"), S.private, rows().length, live().length];
+console.log(JSON.stringify(out));
+""")
+    assert got["cold"] == [[{"private": True}], True, True, "1", PRIVATE_GREETING, True]
+    assert got["fromNormal"] == [[{"private": True}], True, 0, 0]
+
+
+@NODE_ONLY
+def test_private_chat_tapped_on_a_private_chat_with_turns_waits_for_the_countdown_and_stops_first(page, tmp_path):
+    got = _private(page, tmp_path, r"""
+const out = {};
+hello({private: true}); user("secret"); posts.length = 0;
+$("privGreet").onclick();
+out.armed = [bar(), posts.length, live().map((t) => t.ms)];
+await fire();
+out.after = [order(), sent("new"), S.private];
+hello({private: true, turn_in_progress: true}); user("again"); posts.length = 0;
+$("privGreet").onclick();
+out.mid = bar();
+await fire();
+out.chain = [order(), sent("new"), rows().map((r) => r.text)];
+console.log(JSON.stringify(out));
+""")
+    assert got["armed"] == [[False, "ending this private chat in 3s… undo"], 0, [3000]]
+    assert got["after"] == [["new"], [{"private": True}], True]
+    assert got["mid"] == [False, "stopping, then ending this private chat in 3s… undo"]
+    assert got["chain"][:2] == [["s/cancel".replace("s/", ""), "new"], [{"private": True}]]
+    assert got["chain"][2] == []
+
+
+@NODE_ONLY
+def test_private_end_is_at_once_when_empty_and_takes_the_undo_with_turns(page, tmp_path):
+    got = _private(page, tmp_path, r"""
+const out = {};
+hello({private: true});
+$("privMark").onclick(); await settle();
+out.empty = [order(), S.private, S.chat, flag(), rows().length, $("greetnote").textContent];
+hello({private: true}); user("secret"); posts.length = 0;
+$("privAct").onclick();
+$("privMark").onclick(); $("privAct").onclick();
+out.repeat = [bar(), live().length, timers.length, posts.length, rows().length];
+await fire();
+out.ended = [order(), S.private, S.chat, flag(), rows().length];
+console.log(JSON.stringify(out));
+""")
+    assert got["empty"] == [["end"], False, False, None, 0, ""]
+    assert got["repeat"] == [[False, "ending this private chat in 3s… undo"], 1, 1, 0, 1]
+    assert got["ended"] == [["end"], False, False, None, 0]
+
+
+@NODE_ONLY
+def test_private_one_undo_cancels_the_whole_chain_and_a_stop_turns_into_it_with_the_stop_deadline(page, tmp_path):
+    got = _private(page, tmp_path, r"""
+const out = {};
+hello({private: true, turn_in_progress: true}); user("secret"); posts.length = 0;
+$("privMark").onclick();
+const undoBtn = $("undobar").children[1];
+undoBtn.onclick();
+out.undone = [bar()[0], live().length, posts.length];
+$("cancel").onclick();
+out.stop = [bar(), live().map((t) => t.ms)];
+$("cancel").onclick();
+$("privMark").onclick();
+out.upgraded = [bar(), live().length, timers.length];
+await fire();
+out.sent = [order(), S.private, S.chat];
+console.log(JSON.stringify(out));
+""")
+    assert got["undone"] == [True, 0, 0]
+    assert got["stop"] == [[False, "cancelling in 3s… undo"], [3000]]
+    assert got["upgraded"] == [[False, "stopping, then ending this private chat in 3s… undo"], 1, 2]
+    assert got["sent"] == [["cancel", "end"], False, False]
+
+
+@NODE_ONLY
+def test_private_plus_and_new_normal_chat_take_the_same_path_and_clear_the_flag(page, tmp_path):
+    got = _private(page, tmp_path, r"""
+const out = {};
+hello({private: true}); posts.length = 0;
+await $("newBtn").onclick(); await settle();
+out.empty = [sent("new"), S.private, flag(), rows().map((r) => r.text)];
+hello({private: true}); user("secret"); posts.length = 0;
+$("normAct").onclick();
+out.armed = [bar(), posts.length];
+await fire();
+out.normal = [sent("new"), S.private, S.chat, flag()];
+window.localStorage.setItem("lh.private", "1"); hello(noChat); posts.length = 0;
+$("newBtn").onclick();
+out.restart = [posts.length, S.private, flag(), $("greetnote").textContent];
+console.log(JSON.stringify(out));
+""")
+    assert got["empty"] == [[{"private": False}], False, None, ["the empty private chat ended"]]
+    assert got["armed"] == [[False, "ending this private chat in 3s… undo"], 0]
+    assert got["normal"] == [[{"private": False}], False, True, None]
+    assert got["restart"] == [0, False, None, ""]
+
+
+@NODE_ONLY
+def test_private_what_was_left_becomes_one_row_and_a_refusal_one_error(page, tmp_path):
+    got = _private(page, tmp_path, r"""
+const out = {};
+hello({private: true});
+reply["/api/sessions/end"] = {status: "ended", left: "Scratch not fully removed: /run/x stays until the next start"};
+$("privMark").onclick(); await settle();
+out.left = rows().map((r) => [r.cls, r.text]);
+hello({private: true});
+reply["/api/sessions/end"] = {error: "a turn is running — stop it first, then end the chat"};
+$("privMark").onclick(); await settle();
+out.refused = [rows().map((r) => r.text).pop(), S.private];
+console.log(JSON.stringify(out));
+""")
+    assert got["left"] == [["row sys", "Scratch not fully removed: /run/x stays until the next start"]]
+    assert got["refused"] == ["not ended: a turn is running — stop it first, then end the chat", True]
+
+
+@NODE_ONLY
+def test_private_the_countdown_and_what_stays_render_in_the_header_not_the_log(page, tmp_path):
+    got = _private(page, tmp_path, r"""
+const out = {};
+hello({private: true, kept: ["notes.md"]});
+out.hello = [$("kept").textContent, $("kept").hidden];
+user("secret");
+onEvent("TaskComplete", {seq: 2, summary: "done", success: true, duration_seconds: 1, kept: ["a.txt", "and 2 more"]});
+out.reply = $("kept").textContent;
+const logged = rows().length;
+$("privMark").onclick();
+out.header = [bar(), rows().length === logged];
+hello({private: false});
+out.normal = [$("kept").textContent, $("kept").hidden];
+console.log(JSON.stringify(out));
+""")
+    assert got["hello"] == ["stays: notes.md", False]
+    assert got["reply"] == "stays: a.txt, and 2 more"
+    assert got["header"] == [[False, "ending this private chat in 3s… undo"], True]
+    assert got["normal"] == ["", True]
+    header = page.split("<header>")[1].split("</header>")[0]
+    assert 'id="undobar"' in header and 'id="kept"' in header and 'id="privMark"' in header
+    assert 'id="privMark"' not in header.split('<b id="state">')[1].split("</b>")[0]
+
+
+@NODE_ONLY
+def test_private_chat_keeps_no_event_cursor_and_the_flag_is_the_only_new_key(page, tmp_path):
+    got = _private(page, tmp_path, r"""
+const out = {};
+hello({private: true});
+onEvent("TurnStarted", {seq: 5, task_summary: "q"});
+out.private = [...store.keys()];
+hello({private: false});
+onEvent("TurnStarted", {seq: 6, task_summary: "q"});
+out.normal = [...store.keys()];
+console.log(JSON.stringify(out));
+""")
+    assert got["private"] == ["lh.private"]
+    assert got["normal"] == ["lh.seq.s"]
+
+
+@NODE_ONLY
+def test_private_the_stream_asks_for_privacy_and_listens_for_a_dropped_line(page, tmp_path):
+    got = _private(page, tmp_path, r"""
+const urls = [], names = [];
+globalThis.EventSource = class { constructor(url) { urls.push(url); } addEventListener(n) { names.push(n); } close() {} };
+S.private = true; connect();
+S.seq = 4; connect();
+S.private = false; connect();
+S.seq = null; connect();
+console.log(JSON.stringify({urls, dropped: names.includes("LineDropped")}));
+""")
+    assert got["urls"] == ["/api/stream?private=1", "/api/stream?from=5&private=1",
+                           "/api/stream?from=5", "/api/stream"]
+    assert got["dropped"] is True
+
+
+@NODE_ONLY
+def test_private_greeting_retires_on_a_user_or_answer_row_and_not_on_a_system_row(page, tmp_path):
+    got = _private(page, tmp_path, r"""
+const out = {};
+hello(noChat);
+$("greet").hidden = false;
+onFrame("Notice", {text: "hello"});
+onFrame("BringUpStage", {stage: "weights", private: false});
+onEvent("TurnStarted", {seq: 1, task_summary: "q"});
+out.system = $("greet").hidden;
+user("hi");
+out.user = $("greet").hidden;
+$("greet").hidden = false;
+onEvent("TaskComplete", {seq: 2, summary: "done", success: true});
+out.answer = $("greet").hidden;
+console.log(JSON.stringify(out));
+""")
+    assert got == {"system": False, "user": True, "answer": True}
+
+
+@NODE_ONLY
+def test_private_a_sleeping_chat_loads_its_events_for_a_push_tap(page, tmp_path):
+    got = _private(page, tmp_path, r"""
+hello({...noChat, model_state: "asleep", asleep_session_id: "asleep-1", private: true});
+await settle();
+hello({...noChat, model_state: "asleep", asleep_session_id: "asleep-1", private: true});
+await settle();
+console.log(JSON.stringify([gets.filter((g) => g.includes("asleep-1")), rows().map((r) => r.text.slice(0, 10)), store.size]));
+""")
+    assert got[0] == ["/api/sessions/asleep-1/events"]
+    assert [t[:1] for t in got[1]] == ["q", "t"] and got[2] == 1
+
+
+@NODE_ONLY
+def test_private_a_new_session_while_an_echo_waits_resets_in_place_and_otherwise_reloads(page, tmp_path):
+    got = _private(page, tmp_path, r"""
+let reloads = 0;
+location.reload = () => { reloads++; };
+const out = {};
+hello({});
+$("text").value = "pending"; await send(null);
+hello({session_id: "t"});
+out.pending = [reloads, S.session, S.echoes.length, rows().length];
+hello({session_id: "u"});
+out.idle = [reloads, rows().length];
+console.log(JSON.stringify(out));
+""")
+    assert got["pending"] == [0, "t", 0, 0]
+    assert got["idle"][0] == 1
+
+
+@NODE_ONLY
+def test_private_a_protocol_other_than_the_pinned_one_reloads_once_then_stays_loud(page, tmp_path):
+    got = _private(page, tmp_path, r"""
+let reloads = 0;
+location.reload = () => { reloads++; };
+hello({protocol_version: 99});
+const first = [reloads, rows().length];
+hello({protocol_version: 99});
+console.log(JSON.stringify([first, reloads, rows().map((r) => r.cls)]));
+""")
+    assert got == [[1, 0], 1, ["row err"]]
+
+
+@NODE_ONLY
+def test_private_chat_reads_its_own_texts_in_the_drawer_failure_history_and_memory(page, tmp_path):
+    got = _private(page, tmp_path, r"""
+const out = {};
+hello({private: true});
+out.caption = [$("privCaption").hidden, $("privCaption").textContent];
+onEvent("TurnFailed", {seq: 3, reason: "provider_error", detail: "x"});
+out.failed = rows().pop().text;
+await openHistory("old");
+out.history = $("hist").children.pop().textContent;
+$("memq").value = ""; $("memBtn").onclick(); await settle();
+out.memory = $("memnote").textContent;
+hello({private: false});
+out.normal = [$("privCaption").hidden, $("privAct").textContent, $("normAct").hidden];
+$("memBtn").onclick();
+out.memoryNormal = $("memnote").textContent;
+console.log(JSON.stringify(out));
+""")
+    assert got["caption"] == [False, "This private chat is not listed. It stays on this machine until you tap End or the server stops."]
+    assert got["failed"].endswith(" · stuck? + ends this private chat and starts a fresh one")
+    assert got["history"] == ("an ended chat is read-only. This private chat has no saved memory, "
+                              "so ask about it in a normal chat.")
+    assert got["memory"] == ("Private chat: it starts with no saved memory, and what it remembers "
+                             "goes when you end it.")
+    assert got["normal"] == [True, "Private chat", True] and got["memoryNormal"] == ""
+
+
+@NODE_ONLY
+def test_private_a_push_with_no_session_lands_on_its_question_by_reading_the_permissions(page, tmp_path):
+    got = _private(page, tmp_path, r"""
+await followDeepLink(new URLSearchParams("ask=r1"));
+console.log(JSON.stringify([gets, $("ask").open, $("ask").dataset.rid]));
+""")
+    assert got == [["/api/permissions"], True, "r1"]
+
+
+def test_private_boot_and_a_return_to_visible_both_read_the_permissions(page):
+    boot = page.split(BOOT)[1]
+    assert "await syncPermissions();" in boot
+    assert "syncPermissions();" in boot.split('"visibilitychange"')[1]
