@@ -84,8 +84,8 @@ def test_the_footer_shows_the_chip_live_and_the_armed_hint_replaces_the_left_hin
     assert text(ch._box_instrument_frags()) == "private"
     url[0] = REMOTE
     assert text(ch._box_instrument_frags()) == "private · remote"
-    ch.box_set_armed("Ctrl+C or Ctrl+D again ends this private session (3 files go)")
-    assert text(ch._box_hint_frags()).strip() == "Ctrl+C or Ctrl+D again ends this private session (3 files go)"
+    ch.box_set_armed("Ctrl+C or Ctrl+D again ends the session")
+    assert text(ch._box_hint_frags()).strip() == "Ctrl+C or Ctrl+D again ends the session"
     ch.box_set_armed("")
     assert "tab commands" in text(ch._box_hint_frags())
 

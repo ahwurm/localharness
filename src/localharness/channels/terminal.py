@@ -613,10 +613,9 @@ def arm_lines(run, root) -> tuple[str, str] | None:
     kinds = ", ".join(f"{c} {kind}{'s' * (c != 1)}" for kind in ("saved page", "task doc")
                       if (c := sum(k == kind for k, _ in items)))
     stays = ", ".join(kept_names(run, root))
-    count = len(items)
     return (f"Press Ctrl+C or Ctrl+D again to end this private session. Goes: {'; '.join(p for p in (files, kinds) if p)}."
             + f" Stays (at least): {stays}." * bool(stays),
-            f"Ctrl+C or Ctrl+D again ends this private session ({count} file{'s' * (count != 1)} go{'es' * (count == 1)})")
+            "Ctrl+C or Ctrl+D again ends the session")
 
 
 PERMISSION_ANSWER_LINES_SESSION: dict[str, str] = {

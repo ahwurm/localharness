@@ -182,7 +182,8 @@ def test_the_arm_line_names_what_goes_and_what_stays(world):
     line, footer = arm_lines(run, world.ws)
     assert line == ("Press Ctrl+C or Ctrl+D again to end this private session. Goes: out.csv, chart.png; 1 saved page. "
                     "Stays (at least): a.txt, b.txt.")
-    assert footer == "Ctrl+C or Ctrl+D again ends this private session (3 files go)"
+    assert footer == "Ctrl+C or Ctrl+D again ends the session"
+    assert len(f"  {footer}") <= 120 - len("private · qwen-27b-swift-1.5 · 117.0 tok/s · █░░░░░░░░░ 16%") - 1
 
 
 def test_one_file_going_and_nothing_staying_has_no_stays_clause_and_the_names_are_capped(world):
