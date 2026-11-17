@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from localharness.agent.loop import base_system_prompt, render_index
+from localharness.agent.loop import AgentLoop, base_system_prompt, render_index
 from localharness.channels.base import ChannelAdapter, told_line
 from localharness.config.models import AgentConfig
 from localharness.core.events import TaskComplete
@@ -134,10 +134,17 @@ async def test_the_phone_pushes_the_phone_line_after_the_reply_and_the_tail_only
 def test_the_index_ends_with_the_scratch_line_and_the_old_sentence_goes_with_it(tmp_path):
     index = render_index(None, tmp_path, set(), False, False, scratch=tmp_path / "run" / "a" / "scratch")
     assert index.splitlines()[-1] == f"Scratch: {str(tmp_path / 'run' / 'a' / 'scratch')!r}. {SCRATCH_SENTENCE}"
-    with_scratch = base_system_prompt(CFG, tool_call_mode="native", guardrails="", index=index)
+    with_scratch = base_system_prompt(CFG, tool_call_mode="native", guardrails="", index=index, scratch=True)
     assert "create any files or folders you make" not in with_scratch and SCRATCH_SENTENCE in with_scratch
     plain = base_system_prompt(CFG, tool_call_mode="native", guardrails="", index=render_index(None, tmp_path, set(), False, False))
     assert "create any files or folders you make" in plain and SCRATCH_SENTENCE not in plain
+
+
+@pytest.mark.parametrize("index, scratch, named", [("idx", Path("/s"), True), ("", Path("/s"), False), ("idx", None, False)])
+def test_a_loop_says_scratch_is_named_only_when_its_index_and_gate_both_carry_it(index, scratch, named):
+    loop = object.__new__(AgentLoop)
+    loop._index, loop._gate = index, SimpleNamespace(scratch=scratch)
+    assert loop._scratch_named() is named
 
 
 async def test_the_launch_floor_index_carries_a_scratch_line(tmp_path, monkeypatch):

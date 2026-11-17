@@ -20,7 +20,7 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from localharness.core.caps import Caps
+from localharness.core.caps import Caps, capped
 from localharness.core.private_files import (
     _DIR_FLAGS, OPEN_TO_OTHERS, PRIVATE_DIR_MODE, PRIVATE_FILE_MODE, atomic_write_text,
     empty_dir, in_background, open_private_dir, read_private_text, remove_dir,
@@ -127,10 +127,9 @@ def _inside(path: str, root) -> str | None:
     return None
 
 
-def _listed(names: list[str]) -> str:
+def _named(names: list[str]) -> list[str]:
     from localharness.channels.base import one_line
-    shown = ", ".join(one_line(n)[:Caps.FINDING] for n in names[:KEPT_NAMES])
-    return shown + (f" and {len(names) - KEPT_NAMES} more" if len(names) > KEPT_NAMES else "")
+    return [one_line(n)[:Caps.FINDING] for n in capped(names, KEPT_NAMES)]
 
 
 def kept_line(run: RunFolder, root) -> str:
@@ -145,16 +144,13 @@ def kept_line(run: RunFolder, root) -> str:
             made.append(rel)
     if not (made or outside):
         return ""
-    rows = [_listed(made)] * bool(made) + [f"also wrote outside the project: {_listed(outside)}"] * bool(outside)
+    rows = [", ".join(_named(made))] * bool(made) + [f"also wrote outside the project: {', '.join(_named(outside))}"] * bool(outside)
     return "\n".join(rows + ["at least these; commands may leave more"] * (not run.stated))
 
 
 def kept_names(run: RunFolder, root) -> tuple[str, ...]:
     """Every written file still on disk outside the run folder, project-relative where it can be, capped."""
-    from localharness.channels.base import one_line
-    names = [_inside(p, root) or p for p, _ in _stays(run)]
-    more = [f"and {len(names) - KEPT_NAMES} more"] * (len(names) > KEPT_NAMES)
-    return tuple([one_line(n)[:Caps.FINDING] for n in names[:KEPT_NAMES]] + more)
+    return tuple(_named([_inside(p, root) or p for p, _ in _stays(run)]))
 
 
 def end_kept_turn(run: RunFolder, root) -> None:

@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator, Callable, Sequence
 
 from localharness.core.bus import EventBus
-from localharness.core.caps import Caps
+from localharness.core.caps import Caps, capped
 from localharness.core.events import (
     Action,
     CompactionTriggered,
@@ -199,15 +199,14 @@ def told_line(names: Sequence[str], *, phone: bool = False, tail: bool = True) -
         return None
     end = "the chat ends or the server stops" if phone else "the session ends"
     groups: dict[str, list[str]] = {}
-    for name in names[:_TOLD_NAMES]:
+    shown = capped(names, _TOLD_NAMES)
+    for name in shown[:_TOLD_NAMES]:
         head = name.split("/")[0]
         folder = head if "/" in name and _TASK_FOLDER.fullmatch(head) else ""
         groups.setdefault(folder, []).append('"' + one_line(name.rsplit("/", 1)[-1])[:Caps.LINE] + '"')
     parts = [f"scratch, gone when {f'{folder} is cleared or replaced, ' + ('' if phone else 'or ') if folder else ''}{end}: " + ", ".join(quoted)
              for folder, quoted in groups.items()]
-    if len(names) > _TOLD_NAMES:
-        parts[-1] += f" and {len(names) - _TOLD_NAMES} more"
-    return f"{NOTICE_MARK} " + "; ".join(parts) + (" · ask for a copy in your project to keep it" if tail else "")
+    return f"{NOTICE_MARK} " + " ".join(["; ".join(parts), *shown[_TOLD_NAMES:]]) + (" · ask for a copy in your project to keep it" if tail else "")
 
 
 def permission_denied_reason(error: str | None) -> str | None:
