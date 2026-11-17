@@ -1957,6 +1957,11 @@ console.log(JSON.stringify([first, reloads, rows().map((r) => r.cls)]));
     assert got == [[1, 0], 1, ["row err"]]
 
 
+def test_the_private_marker_says_it_ends_the_chat(page):
+    assert '<button class="small" id="privMark" hidden>Private · End</button>' in page
+    assert '$("privMark").onclick = endTap;' in page
+
+
 @NODE_ONLY
 def test_private_chat_reads_its_own_texts_in_the_drawer_failure_history_and_memory(page, tmp_path):
     got = _private(page, tmp_path, r"""
