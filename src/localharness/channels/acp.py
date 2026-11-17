@@ -88,6 +88,7 @@ from localharness.core.events import (
     TaskComplete,
     TurnFailed,
 )
+from localharness.core.run_folder import begin, end
 from localharness.orchestrator.task_flow.verbs import render, running_now, task_command, turn_end
 
 log = logging.getLogger(__name__)
@@ -886,7 +887,6 @@ class AcpChannel(ChannelAdapter):
         """
         from localharness.cli.start_cmd import _start_async
         from localharness.config.paths import resolve_config_dir
-        from localharness.core.run_folder import begin, end
 
         run = await asyncio.to_thread(begin, resolve_config_dir(self._config_dir))
         loop = asyncio.get_running_loop()

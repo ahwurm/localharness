@@ -66,6 +66,8 @@ from typing import Any, Callable, Mapping, Optional, Sequence, Union
 
 from rich.console import Console
 
+from localharness.core.run_folder import is_private
+
 log = logging.getLogger(__name__)
 
 TrustAsker = Callable[[str], bool]
@@ -335,7 +337,6 @@ def settle_startup_trust(
     # at (paths). Re-deriving either here is how two guards that must agree start disagreeing.
     from localharness.cli.init_cmd import _is_the_global_config_dir, _scaffold_workspace
     from localharness.config.paths import _home_stop
-    from localharness.core.run_folder import is_private
 
     home = _home_stop()
     if _is_the_global_config_dir(target) or (home is not None and target.parent == home):

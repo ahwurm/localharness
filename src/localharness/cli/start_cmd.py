@@ -36,6 +36,7 @@ from localharness.cli.workspace import (
     write_overlay_validated,
 )
 from localharness.config.effort import EFFORT_UNENFORCED_LINE
+from localharness.core import run_folder
 from localharness.core.private_files import touch_private
 from localharness.core.which import which_outside_cwd
 from localharness.plugins.channels import (OWN_COMMAND, accepted_channels, channel_names,
@@ -2788,9 +2789,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     _boundary, _boundary_warning = narrow_boundary(
         _derived, getattr(agent_config.permissions, "workspace_root", None)
     )
-    from localharness.core.run_folder import scratch_of
 
-    scratch = scratch_of(run, agent_config.permissions.workspace_root)
+    scratch = run_folder.scratch_of(run, agent_config.permissions.workspace_root)
     # workspace_root (issue #15): opt-in; None (default) leaves write/edit/bash unconfined.
     await register_builtin_tools(
         tool_registry,
@@ -3860,12 +3860,11 @@ def start_app(
             gc.collect()
     elif not list_models and channel == "terminal":
         _models_that_arrived(config_dir, wanted, no_input)
-    from localharness.core.run_folder import begin, end, private_run_problem
 
     cfg = resolve_config_dir(config_dir)
-    run = None if list_models else begin(cfg, private=private)
-    if private and not list_models and (cfg / "config.yaml").exists() and (problem := private_run_problem(run, cfg)):
-        end(run)
+    run = None if list_models else run_folder.begin(cfg, private=private)
+    if private and not list_models and (cfg / "config.yaml").exists() and (problem := run_folder.private_run_problem(run, cfg)):
+        run_folder.end(run)
         _refuse_private(problem)
     resume: Resume | None = None
 
@@ -3875,7 +3874,7 @@ def start_app(
     guard = None
     if private and run is not None:
         from localharness.core.interrupt import install
-        guard = install(("SIGTERM", "SIGHUP"), lambda: end(run, say=say))
+        guard = install(("SIGTERM", "SIGHUP"), lambda: run_folder.end(run, say=say))
     try:
         while True:
             try:
@@ -3913,6 +3912,6 @@ def start_app(
         pass
     finally:
         with contextlib.suppress(KeyboardInterrupt):
-            end(run, say=say)
+            run_folder.end(run, say=say)
         if guard is not None:
             guard.restore()

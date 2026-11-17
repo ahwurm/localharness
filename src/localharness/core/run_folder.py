@@ -25,6 +25,7 @@ from localharness.core.private_files import (
     _DIR_FLAGS, OPEN_TO_OTHERS, PRIVATE_DIR_MODE, PRIVATE_FILE_MODE, atomic_write_text,
     empty_dir, in_background, open_private_dir, read_private_text, remove_dir,
 )
+from localharness.core.sanitize import one_line
 
 try:
     import fcntl
@@ -138,7 +139,6 @@ def _inside(path: str, root) -> str | None:
 
 
 def _named(names: list[str]) -> list[str]:
-    from localharness.channels.base import one_line
     return [one_line(n)[:Caps.FINDING] for n in capped(names, KEPT_NAMES)]
 
 
@@ -365,7 +365,6 @@ def end(run: RunFolder | None, say: Callable[[str], None] = lambda line: None) -
         if run._ender is None:
             run._ender = in_background(_finish, run)
         ender = run._ender
-    from localharness.channels.base import one_line
     try:
         try:
             left = ender.result(timeout=_SLOW_AFTER_S)

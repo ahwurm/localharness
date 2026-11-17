@@ -39,6 +39,7 @@ from localharness.config import session_presence
 from localharness.config.overlay import atomic_write_overlay, atomic_write_text
 from localharness.config.paths import CANDIDATE_NAMES, global_config_dir
 from localharness.core.events import InstructionsCause, InstructionsNotice
+from localharness.core.run_folder import hold, is_private, shadow
 
 try:  # POSIX only; elsewhere the store falls back to an in-process lock (documented degradation)
     import fcntl
@@ -249,8 +250,6 @@ def _store_transaction(config_dir: Any = None) -> Iterator[dict]:
     read leaves the file and its inode alone. Never nest it: a second flock from this process
     on a new descriptor would wait on the first. A store that cannot be read raises
     ``StoreUnavailable`` before the block runs, so it is never overwritten as if empty."""
-    from localharness.core.run_folder import hold, shadow
-
     with _store_lock(config_dir):
         loaded, damaged = _load_store(store_path(config_dir))
         roots = loaded.get("roots")
@@ -1767,7 +1766,6 @@ def run_instructions_command(handle: ProjectInstructions | None, arg: str) -> st
     if word == "off":
         if failure is not None:  # the answer could not be kept: say so rather than claim it
             return f"instructions not changed ({failure})"
-        from localharness.core.run_folder import is_private
         return f"instructions off for {'this private session' if is_private() else 'this workspace'}; /instructions on to use {name}"
     if failure is not None:
         return f"{name} not used this turn ({failure})"

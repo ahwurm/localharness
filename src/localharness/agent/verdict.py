@@ -61,6 +61,7 @@ from localharness.agent.permissions import PermissionResult
 from localharness.agent.shell_classify import copy_operands, moved_into
 from localharness.agent.taint import DOWNLOADS, TAINTED_ASK_CLASSES, content_key, under_downloads
 from localharness.config.paths import CANDIDATE_NAMES, WORKSPACE_DIR_NAME, global_config_dir
+from localharness.core.sanitize import one_line
 from localharness.tools.base import GateFamily
 
 GrantLookup = Callable[[Path, str, str], Optional[Grant]]
@@ -1305,7 +1306,6 @@ def _no_trace_reason(word: str, place: Optional[Path], ctx: GateContext, removal
     hidden = (any(part.casefold() in _NO_TRACE_DIRS for part in PurePosixPath(text).parts) if named
               else place is not None and _hidden_dir(place, root))
     if hidden or (place is not None and any(_within(folder, place) for folder in _config_dirs(ctx))):
-        from localharness.channels.base import one_line
         return NO_TRACE_PATH_REASON.format(path=repr(one_line(word)))
     return None
 

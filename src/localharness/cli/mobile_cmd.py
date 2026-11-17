@@ -35,6 +35,7 @@ from rich.console import Console
 from rich.markup import escape
 
 from localharness.cli.mobile_plugin import MOBILE_DEFAULT_PORT as DEFAULT_PORT  # the one literal lives there
+from localharness.core import run_folder
 
 log = logging.getLogger(__name__)
 console = Console()
@@ -495,18 +496,17 @@ async def _serve(
         )), soft_wrap=True)
     else:
         from localharness.config.paths import resolve_config_dir
-        from localharness.core.run_folder import end, sweep
 
         channel = MobileChannel(bus=EventBus(), config={})
         ending: list[asyncio.Future] = []
-        await asyncio.to_thread(sweep, resolve_config_dir(config_dir))
+        await asyncio.to_thread(run_folder.sweep, resolve_config_dir(config_dir))
 
         def _end_run() -> None:
             run = channel.run
             channel.forget_chat()
             if run is not None:
                 task = asyncio.ensure_future(asyncio.to_thread(
-                    end, run, lambda line: console.print(escape(line), style="dim", soft_wrap=True)))
+                    run_folder.end, run, lambda line: console.print(escape(line), style="dim", soft_wrap=True)))
                 ending.append(task)
                 task.add_done_callback(ending.remove)
 
@@ -551,7 +551,7 @@ async def _serve(
             return old
 
         async def _left_by(old: Any) -> str:
-            return await asyncio.to_thread(end, old) if old is not None and old.private else ""
+            return await asyncio.to_thread(run_folder.end, old) if old is not None and old.private else ""
 
         async def _new_session(*, private: bool = False) -> str:
             """End the live session and begin a fresh one (the + button); returns what a private chat's removal left."""
@@ -717,13 +717,12 @@ async def _bring_up(
     try:
         if begin_run and channel.run is None:
             from localharness.config.paths import resolve_config_dir
-            from localharness.core.run_folder import begin, end, private_run_problem
 
             cfg = resolve_config_dir(config_dir)
             private = channel.bringup_private
-            channel.run = await asyncio.to_thread(begin, cfg, private)
-            if private and (problem := await asyncio.to_thread(private_run_problem, channel.run, cfg)):
-                await asyncio.to_thread(end, channel.run)
+            channel.run = await asyncio.to_thread(run_folder.begin, cfg, private)
+            if private and (problem := await asyncio.to_thread(run_folder.private_run_problem, channel.run, cfg)):
+                await asyncio.to_thread(run_folder.end, channel.run)
                 channel.run = None
                 channel.set_bringup("failed", detail=problem, failed=True, elapsed=time.monotonic() - started)
                 return

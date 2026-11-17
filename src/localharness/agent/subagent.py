@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 from localharness.config.models import (
     AgentConfig, BudgetConfig, ChildBudget, ChildrenBudgetConfig, PermissionConfig, ToolConfig,
 )
+from localharness.core.run_folder import current, is_private
 from localharness.tools.builtin.agent_tool import BUILTIN_AGENT_NAMES, INVALID_AGENT_NAME, DelegationArgError
 
 if TYPE_CHECKING:
@@ -1305,8 +1306,6 @@ def _verification_ledger_path() -> Any:
     """`LOCALHARNESS_VERIFICATION_LEDGER_DIR`, else `reports/<UTC-date>/` relative to cwd (in `<run>/state/` when private)."""
     import datetime
     from pathlib import Path
-
-    from localharness.core.run_folder import current, is_private
 
     base = os.environ.get("LOCALHARNESS_VERIFICATION_LEDGER_DIR")
     if base:

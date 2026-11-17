@@ -37,6 +37,7 @@ import yaml
 
 from localharness.config.overlay import atomic_write_overlay
 from localharness.config.paths import global_config_dir
+from localharness.core.run_folder import hold, shadow
 
 WORKSPACE_TRUST_FILE = "trusted_workspaces.yaml"
 
@@ -73,14 +74,10 @@ def _load(path: Path) -> dict:
 
 
 def _project_load() -> dict:
-    from localharness.core.run_folder import shadow
-
     return {**_load(trust_store_path()), **shadow("trust")}
 
 
 def _project_write(key: str, entry: dict) -> None:
-    from localharness.core.run_folder import hold
-
     if hold("trust", key, entry):
         return
     data = _load(trust_store_path())
@@ -922,8 +919,6 @@ def offer_was_declined(target: Path | str) -> bool:
     without consent. Nothing else reads this file, so it can only ever cost a prompt. A remembered
     No can suppress a question; it never causes a launch.
     """
-    from localharness.core.run_folder import shadow
-
     key = target if isinstance(target, str) else _key(target)
     entry = {**_load(declined_offers_path()), **({} if isinstance(target, str) else shadow("declined"))}.get(key)
     return isinstance(entry, dict) and entry.get("declined") is True
@@ -938,8 +933,6 @@ def record_offer_decline(target: Path | str) -> None:
     file); `init --workspace` and creating the directory by hand ignore this store entirely, so a
     recorded "no" can never stand between a user and a workspace they went and asked for.
     """
-    from localharness.core.run_folder import hold
-
     if not isinstance(target, str) and hold("declined", _key(target), {"declined": True}):
         return
     data = _load(declined_offers_path())

@@ -23,6 +23,7 @@ from localharness.config.loader import ConfigLoader
 from localharness.config.migrate import BACKUP_PREFIX, BACKUP_STAMP_FORMAT
 from localharness.config.models import HarnessConfig
 from localharness.config.paths import resolve_config_dir
+from localharness.core.run_folder import fallback_cause, foreign_count
 from localharness.provider.runtimes import RUNTIMES, has_engine_config
 
 console = Console()
@@ -310,8 +311,6 @@ def _read_only(path: Path) -> bool:
 def _print_run_folder(cfg_path: Path) -> None:
     """Info rows: why sessions keep scratch in the temp folder, and run folders another machine left."""
     import tempfile
-
-    from localharness.core.run_folder import fallback_cause, foreign_count
 
     if cause := fallback_cause(cfg_path):
         console.print(_INFO + " " + escape(

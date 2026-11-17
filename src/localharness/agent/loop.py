@@ -42,6 +42,7 @@ from localharness.core.types import (
 from localharness.core.content import redact_images, text_of, text_part
 from localharness.core.fence import fence_project_text
 from localharness.core.run_folder import SCRATCH_SENTENCE, end_kept_turn, kept_line, kept_names, note_written, told
+from localharness.core.sanitize import one_line
 from localharness.agent.context import (
     APPROX_CHARS_PER_TOKEN, fixed_tokens, floor_schemas, harness_floor, response_reserve)
 from localharness.agent.context import (
@@ -1079,7 +1080,6 @@ def render_index(root: Path | None, machine_dir: Path, held: set[str], config_di
                  scratch: Path | None = None) -> str:
     """The root's map of the project and where its skills and agents live and enter a task."""
     from shlex import quote
-    from localharness.channels.base import one_line
     from localharness.config.skills import ORIGINS
 
     def shown(x) -> str:
