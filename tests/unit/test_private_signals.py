@@ -28,8 +28,7 @@ CHILD = textwrap.dedent('''
 
     interrupt.DEADLINE_S, interrupt.JOIN_S, start_cmd.STAGE_S = 1.5, 0.5, 0.3
     cfg, mode = Path(sys.argv[1]), sys.argv[2]
-    if mode == "hup-ignored":
-        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN if mode == "hup-ignored" else signal.SIG_DFL)
     run = begin(cfg, private=True)
     guard = interrupt.install(("SIGTERM", "SIGHUP"), lambda: end(run))
     ready = lambda: print("ready", flush=True)
