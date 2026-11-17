@@ -159,7 +159,8 @@ packages = ["src/localharness"]
 [tool.hatch.build.targets.sdist]
 # Keep the sdist to what a build/install needs — without this, hatchling ships the whole
 # repo (bench corpus, docs, assets, tests) in every source tarball.
-include = ["src/localharness", "README.md", "LICENSE", "CHANGELOG.md"]
+# Patterns are gitignore-style: without the leading "/" an entry matches at any depth (README.md would ship every nested one).
+include = ["/src/localharness", "/README.md", "/LICENSE", "/CHANGELOG.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
