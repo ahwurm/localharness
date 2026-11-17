@@ -256,7 +256,7 @@ def _discard(name: str, parent: int, fd: int) -> None:
 
 
 def _fallback(private: bool = False) -> RunFolder:
-    path = Path(tempfile.mkdtemp(prefix="localharness-run-", dir="/tmp" if sys.platform == "darwin" else None))
+    path = Path(tempfile.mkdtemp(prefix="localharness-run-", dir="/tmp" if sys.platform == "darwin" else None)).resolve()
     fd = None
     if hasattr(os, "O_NOFOLLOW") and os.open in os.supports_dir_fd:
         fd = os.open(path, _DIR_FLAGS)

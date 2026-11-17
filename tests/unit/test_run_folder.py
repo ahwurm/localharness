@@ -78,6 +78,16 @@ def test_a_private_fallback_run_has_state_too(cfg, temp, monkeypatch):
     assert not run.path.exists()
 
 
+def test_a_fallback_under_a_linked_temp_folder_names_its_real_path(tmp_path, monkeypatch):
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "link"))
+    run = run_folder._fallback()
+    assert run.path.parent == (tmp_path / "real").resolve() and run.scratch.is_dir()
+    end(run)
+    assert not run.path.exists()
+
+
 @pytest.mark.parametrize("private,waits", [(True, True), (False, False)])
 def test_a_private_end_waits_longer_for_a_slow_removal(cfg, monkeypatch, private, waits):
     run = begin(cfg, private=private)
