@@ -51,7 +51,7 @@ def _write(path: Path, text: str) -> None:
 
 
 def _let_the_stub_tokenizer_run_a_turn(monkeypatch) -> None:
-    """Extend the harness's offline token counter with the one method a TURN needs.
+    """Extend the harness's offline token counter with what a TURN needs; `mode` is read once a request carries a note.
 
     `_stub_start_boundaries` installs a counter with `count`/`count_messages` only, which is enough
     for start-up. A turn's `build_messages` also calls `estimate_messages` — measured: without it
@@ -64,6 +64,8 @@ def _let_the_stub_tokenizer_run_a_turn(monkeypatch) -> None:
     stub = _context.TokenCounter  # the harness's _StubTokenCounter, installed just above
 
     class _TurnCapableCounter(stub):
+        mode = "off"
+
         def estimate_messages(self, messages):
             return sum(4 + self.count(m.get("content") or "") for m in messages)
 

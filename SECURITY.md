@@ -1355,8 +1355,9 @@ is set on it.
 **Ending.** The run folder is removed when the session ends, and a private session waits up to thirty seconds
 for the removal. TERM and HUP end the session the same way, and a session that has not finished within about ten
 seconds of the signal removes what it can and exits with the signal's status. When a scratch file a reply named,
-a picture, a saved page or a task document would go, the first Ctrl-C or Ctrl-D asks again and names what goes.
-Nothing is printed at the end; the model is asked to say which files it wrote stay.
+a picture, a saved page or a task document would go, the first Ctrl-C or Ctrl-D asks again and names what goes
+and the files the session wrote that are still there. Nothing is printed at the end; the model is asked to say
+which files it wrote stay, naming every one the first time and after that the ones no tool row has shown.
 
 **What a private session does not hide.** A crash, a kill or a power cut leaves the run folder until the next
 start on this machine removes it, and a plugin that outlives its stop timeout can re-create its folder in the

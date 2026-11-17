@@ -133,14 +133,14 @@ def _named(names: list[str]) -> list[str]:
 
 
 def kept_line(run: RunFolder, root) -> str:
-    """What this turn's new files say about what stays: shell-made project files and files outside the project, none already shown by a tool row."""
+    """What this turn's new files say about what stays: files outside the project, and project files a tool row has not shown, every one until the first statement."""
     made, outside = [], []
     for path, w in _stays(run):
         if w.turn != run.turn or w.announced:
             continue
         if (rel := _inside(path, root)) is None:
             outside.append(path)
-        elif not w.shown:
+        elif not w.shown or not run.stated:
             made.append(rel)
     if not (made or outside):
         return ""

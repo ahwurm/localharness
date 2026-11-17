@@ -66,15 +66,21 @@ def test_the_first_write_of_a_path_fixes_its_turn(world):
     assert world.run.written[str(world.ws / "a")] == Written(1, False, True)
 
 
-async def test_a_tool_row_file_is_counted_but_not_named_and_a_shell_file_is_named(world):
+async def test_a_tool_row_file_is_named_until_the_first_statement_and_a_shell_file_always(world):
     loop = loop_for(gate_for(world))
     make(world.ws / "wrote.txt")
     make(world.ws / "made.txt")
     await call(loop, "write", path=str(world.ws / "wrote.txt"), content="x")
     await call(loop, "bash_exec", command="echo x > made.txt", working_dir=str(world.ws))
-    line = kept_line(world.run, world.ws)
-    assert "made.txt" in line and "wrote.txt" not in line
+    assert kept_line(world.run, world.ws).splitlines()[0] == "wrote.txt, made.txt"
     assert len(world.run.written) == 2
+    end_kept_turn(world.run, world.ws)
+    world.run.turn = 2
+    make(world.ws / "later.txt")
+    make(world.ws / "shell.txt")
+    await call(loop, "edit", path=str(world.ws / "later.txt"), old_string="x", new_string="y")
+    await call(loop, "bash_exec", command="echo x > shell.txt", working_dir=str(world.ws))
+    assert kept_line(world.run, world.ws) == "shell.txt"
 
 
 async def test_a_file_a_childs_loop_wrote_on_the_same_gate_is_counted(world):
@@ -163,7 +169,7 @@ def test_goes_lists_scratch_files_named_in_a_reply_pictures_pages_and_task_docs_
     assert goes(run) == (("file", "out.csv"), ("file", "chart.png"), ("saved page", "p.html"), ("task doc", "notes.md"))
 
 
-def test_the_arm_line_names_what_goes_and_counts_what_stays(world):
+def test_the_arm_line_names_what_goes_and_what_stays(world):
     run = world.run
     assert arm_lines(run, world.ws) is None
     make(run.scratch / "out.csv")
@@ -174,6 +180,23 @@ def test_the_arm_line_names_what_goes_and_counts_what_stays(world):
     make(run.state / ".localharness/downloads/p.html")
     note_written(run, [make(world.ws / "a.txt"), make(world.ws / "b.txt")], shown=True)
     line, footer = arm_lines(run, world.ws)
-    assert line == ("Press Ctrl+C or Ctrl+D again to end this private session: out.csv, chart.png and 1 saved page go; "
-                    "at least 2 project files stay.")
+    assert line == ("Press Ctrl+C or Ctrl+D again to end this private session. Goes: out.csv, chart.png; 1 saved page. "
+                    "Stays (at least): a.txt, b.txt.")
     assert footer == "Ctrl+C or Ctrl+D again ends this private session (3 files go)"
+
+
+def test_one_file_going_and_nothing_staying_has_no_stays_clause_and_the_names_are_capped(world):
+    run = world.run
+    make(run.scratch / "name-idea.md")
+    run.told.add("name-idea.md")
+    assert arm_lines(run, world.ws)[0] == "Press Ctrl+C or Ctrl+D again to end this private session. Goes: name-idea.md."
+    for i in range(4):
+        make(run.scratch / f"f{i}.txt")
+        run.told.add(f"f{i}.txt")
+    (run.state / "agents/root/tasks/t1").mkdir(parents=True)
+    make(run.state / "agents/root/tasks/t1/plan.md")
+    make(run.state / "agents/root/tasks/t1/notes.md")
+    note_written(run, [make(world.outside / "o.txt")], shown=True)
+    assert arm_lines(run, world.ws)[0] == (
+        "Press Ctrl+C or Ctrl+D again to end this private session. "
+        f"Goes: f0.txt, f1.txt, f2.txt, and 2 more; 2 task docs. Stays (at least): {world.outside / 'o.txt'}.")
