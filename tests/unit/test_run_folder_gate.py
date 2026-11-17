@@ -295,7 +295,16 @@ MOVES = [
     ("zip -m {s}/a.zip ~/x", "~/x"),
     ("mv ~/Documents {s}/d 2>$TMPDIR/err", "~/Documents"),
     ("mv ~/x {s}/y 2>$ERR", "~/x"),
+    ("mv $HOME/x $TMPDIR/y", "$HOME/x"),
+    ("mv $TMPDIR/../../../../x $TMPDIR/y", "$TMPDIR/../../../../x"),
+    ("TMPDIR=~; mv $TMPDIR/a $LOCALHARNESS_SCRATCH/b", "$TMPDIR/a"),
 ]
+
+
+@pytest.mark.parametrize("command", ['mv "$TMPDIR/a" "$TMPDIR/b"', "mv $LOCALHARNESS_SCRATCH/a $TMPDIR/b",
+                                     "mv ${{TMPDIR}}/a {s}/b"])
+def test_a_move_within_the_run_spelled_by_its_variables_does_not_ask(world, command):
+    assert world.shell(command.format(s=world.scratch), mode="auto").verdict is Verdict.ALLOW
 
 
 @pytest.mark.parametrize("mode", ["auto", "guarded"])

@@ -855,7 +855,7 @@ def _removal_asks(
     return asks
 
 
-def _move_asks(segments, anchor: Optional[Path], ctx: GateContext, command: str) -> list[_Ask]:
+def _move_asks(segments, anchor: Optional[Path], ctx: GateContext, command: str, held: bool) -> list[_Ask]:
     """The ungrantable ask for a move into the run folder: what is moved in is removed with the folder."""
     if ctx.run is None:
         return []
@@ -875,7 +875,8 @@ def _move_asks(segments, anchor: Optional[Path], ctx: GateContext, command: str)
         if not into:
             continue
         for source in segment.removal_targets:
-            place = None if segment.unresolvable_removal or source == "{}" else _resolve(source, anchor)
+            place = None if source == "{}" else (_run_spelled(source, ctx) if held else None) or (
+                None if segment.unresolvable_removal else _resolve(source, anchor))
             if place is None or not _within(ctx.run, place):
                 asks.append(_ask_record(
                     "shell-destructive", source, MOVE_INTO_RUN_REASON.format(source=source),
@@ -1586,7 +1587,7 @@ def _evaluate_shell(
     ))
 
     asks += _removal_asks(non_read_only, anchor, ctx, settings, classified.segments)
-    asks += _move_asks(non_read_only, anchor, ctx, command)
+    asks += _move_asks(non_read_only, anchor, ctx, command, held)
 
     for segment in classified.segments:
         for path in _run_paths(segment, anchor, settings):
