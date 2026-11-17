@@ -34,6 +34,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 import structlog
 
+from localharness.agent.taint import TAINTED_ASK_CLASSES
 from localharness.channels.base import ChannelAdapter, _call_receipt, reply_line, sanitize_for_display, told_line
 from localharness.channels.errors import NotInteractiveError
 from localharness.core.bus import EventBus
@@ -66,6 +67,7 @@ from .protocol import (
     GapDetected,
     Hello,
     Lagged,
+    LineDropped,
     Notice,
     ReasoningDelta,
     StatusTick,
@@ -175,6 +177,15 @@ Drawing it with the generic ungrantable pair would label a permanent decision "A
 opposite of what it does. Mirrors what the ACP adapter had to do for the same question.
 """
 
+PRIVATE_TRUST_OPTION_NAMES: dict[str, str] = {
+    "allow_always": "Trust for this run",
+    "reject_once": "Not now",
+}
+
+PRIVATE_TAINTED_CONFIRM = (
+    "this trusts saved pages for the rest of this private chat; repeat the request with confirm_token to record it"
+)
+
 GRANTABLE_OPTION_NAMES: dict[str, str] = {
     "allow_once": "Allow once",
     "allow_always": "Always allow here",
@@ -225,9 +236,10 @@ class _OpenAsk:
     flaky phone connection must not be able to allow something twice.
     """
 
-    __slots__ = ("request_id", "request", "future", "frame", "asked_at", "outcome", "confirm")
+    __slots__ = ("request_id", "request", "future", "frame", "asked_at", "outcome", "confirm", "private")
 
-    def __init__(self, request_id: str, request: Any, frame: BlockingAsk) -> None:
+    def __init__(self, request_id: str, request: Any, frame: BlockingAsk, private: bool = False) -> None:
+        self.private = private
         self.request_id = request_id
         self.request = request
         self.frame = frame
@@ -292,7 +304,7 @@ class MobileChannel(ChannelAdapter):
     def __init__(self, bus: EventBus, config: dict[str, Any]) -> None:
         super().__init__(bus, config)
         self._clients: dict[str, _Client] = {}
-        self._inbound: asyncio.Queue[tuple[str, list[dict]]] = asyncio.Queue()
+        self._inbound: asyncio.Queue[tuple[str, list[dict], Optional[str], bool]] = asyncio.Queue()
         self._images: list[dict] = []   # parts that rode with the line read_input last returned
         # Set by the runner's idle watch (and at shutdown): the REPL's next `read_input` ends the
         # session instead of waiting, and the session builder writes the thread to disk.
@@ -350,6 +362,7 @@ class MobileChannel(ChannelAdapter):
         self._private_dir: Optional[Path] = None
         self.run: Any = None
         self.private: Optional[bool] = None
+        self.kept: tuple[str, ...] = ()
         self._turns = 0
         self._memory_slot = MemorySlot()
         self._artifact_roots: dict[str, Path] = {}
@@ -447,11 +460,16 @@ class MobileChannel(ChannelAdapter):
     def forget_chat(self) -> None:
         """The chat is over: its run, privacy and turn count go, so the next one starts clean."""
         self.run = self.private = self._private_dir = None
+        self.kept = ()
         self._turns = 0
 
     def has_turns(self) -> bool:
         """A root turn has run, a chat is asleep, or a line waits: replacing the chat would lose something."""
-        return self._turns > 0 or self.asleep or not self._inbound.empty()
+        return self._turns > 0 or self.asleep or self._waiting() > 0
+
+    def _waiting(self) -> int:
+        """Lines queued by the open chat; a line typed into another chat is never counted."""
+        return sum(item[3] == (self.private is True) for item in self._inbound._queue)
 
     def reset_session(self) -> None:
         """Forget the bound session so the next bring-up binds fresh — the new-chat verb's half.
@@ -745,6 +763,8 @@ class MobileChannel(ChannelAdapter):
         """
         root = getattr(event, "parent_id", None) is None
         policy = self._push_policy()
+        sid = getattr(event, "session_id", None)
+        private = self.run is None or self.run.private or sid != self.session_id
         if isinstance(event, TurnStarted):
             if root:
                 self._turn_running = True
@@ -753,7 +773,7 @@ class MobileChannel(ChannelAdapter):
                 self._reply_verdict = None
                 await self._start_status_ticker()
                 if policy is not None:
-                    policy.turn_started(self.session_id)
+                    policy.turn_started(sid)
         elif isinstance(event, (TurnCompleted, TurnFailed)):
             if root:
                 verdict, finding, ending = (self._reply_verdict or (None, "", None)) if isinstance(event, TurnCompleted) else (None, "", None)
@@ -765,17 +785,19 @@ class MobileChannel(ChannelAdapter):
                     # over this channel's wall-clock bookkeeping, which cannot see a turn that
                     # began before the page connected.
                     self._push_fire(policy.turn_finished(
-                        self.session_id,
+                        sid,
                         clients_attached=self.client_count,
                         duration=getattr(event, "duration_seconds", None),
                         summary=(getattr(event, "summary", "") or "")[:PUSH_SUMMARY_CHARS],
                         verdict=verdict,
                         finding=finding[:PUSH_SUMMARY_CHARS],
                         ending=ending,
+                        private=private,
                     ))
         elif isinstance(event, TaskComplete):
             if root:
                 self._reply_verdict = (event.verdict, event.finding, event.ending)
+                self.kept = tuple(event.kept)
                 if line := reply_line(event):
                     self.push(Notice(session_id=self.session_id, text=line, style="system.info"))
                 if line := told_line(event.scratch_files, phone=True, tail=not self._told):
@@ -787,19 +809,21 @@ class MobileChannel(ChannelAdapter):
             if policy is not None:
                 pending = getattr(event, "pending", None)
                 self._push_fire(policy.needs_you(
-                    self.session_id, kind="parked",
+                    sid, kind="parked",
                     pending_id=getattr(pending, "id", None),
                     detail=(getattr(pending, "rendering", "") or "")[:PUSH_SUMMARY_CHARS],
+                    private=private,
                 ))
         elif isinstance(event, PermissionResolved):
             # From ANY surface — answering in Discord has to bring this phone's badge down too.
             if policy is not None:
-                policy.resolved(self.session_id, pending_id=getattr(event, "pending_id", None))
+                policy.resolved(sid, pending_id=getattr(event, "pending_id", None))
         elif isinstance(event, Escalation):
             if root and policy is not None and event.reason != "stuck_detected":
                 self._push_fire(policy.needs_you(
-                    self.session_id, kind="escalation",
+                    sid, kind="escalation",
                     detail=(getattr(event, "detail", "") or "")[:PUSH_SUMMARY_CHARS],
+                    private=private,
                 ))
         elif isinstance(event, Heartbeat):
             self._context_pct = event.context_utilization_pct
@@ -976,17 +1000,24 @@ class MobileChannel(ChannelAdapter):
         if self._sleep_now:
             self._sleeping = True
             raise EOFError()
-        getter = asyncio.ensure_future(self._inbound.get())
-        sleeper = asyncio.ensure_future(self._sleep_event.wait())
-        try:
-            done, _ = await asyncio.wait({getter, sleeper}, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            sleeper.cancel()
-            if not getter.done():
-                getter.cancel()  # Queue.get leaves the item in place when cancelled before it got one
-        if getter in done and not self._sleep_now:
+        while True:
+            getter = asyncio.ensure_future(self._inbound.get())
+            sleeper = asyncio.ensure_future(self._sleep_event.wait())
+            try:
+                done, _ = await asyncio.wait({getter, sleeper}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                sleeper.cancel()
+                if not getter.done():
+                    getter.cancel()  # Queue.get leaves the item in place when cancelled before it got one
+            if getter not in done or self._sleep_now:
+                break
+            text, images, line_id, private = getter.result()
+            if private != (self.private is True):
+                if line_id:
+                    self.push(LineDropped(line_id=line_id))
+                continue
             self._sleep_event.clear()
-            text, self._images = getter.result()
+            self._images = images
             # An image-only message still has to read as a line: the REPL drops blank input, so
             # the picture's label stands in for the text it did not come with.
             return text or " ".join(image_label(p) for p in self._images)
@@ -999,7 +1030,8 @@ class MobileChannel(ChannelAdapter):
         images, self._images = self._images, []
         return images
 
-    def submit(self, text: str, parts: Optional[list[dict]] = None) -> None:
+    def submit(self, text: str, parts: Optional[list[dict]] = None, *, line_id: Optional[str] = None,
+               private: Optional[bool] = None) -> None:
         """Queue a user message for the REPL's next `read_input()`.
 
         This IS `intent=queue`: the classic REPL loop does not read input while a turn runs, so a
@@ -1007,7 +1039,7 @@ class MobileChannel(ChannelAdapter):
         Nothing is dropped and nothing interleaves.
         """
         self._sleep_event.clear()  # a person spoke: whatever idle watch was about to sleep, this comes first
-        self._inbound.put_nowait((text, list(parts or [])))
+        self._inbound.put_nowait((text, list(parts or []), line_id, self.private is True if private is None else private))
         if self._turn_running and self._queued_resolver is not None:
             self._queued_resolver(text)
 
@@ -1060,7 +1092,7 @@ class MobileChannel(ChannelAdapter):
     @property
     def queued_input(self) -> int:
         """Lines POSTed and not yet read by a REPL — what a session that just slept left waiting."""
-        return self._inbound.qsize()
+        return self._waiting()
 
     def idle(self) -> bool:
         """Nothing is happening and nobody is here: a live session, no turn running, no phone
@@ -1071,7 +1103,7 @@ class MobileChannel(ChannelAdapter):
         it lives only in this session's gate. Sleeping would drop it — the same reason a
         `/plugins` restart refuses while something is parked."""
         return (self.session_id is not None and not self._turn_running and not self._clients
-                and self._inbound.empty() and not self._open_asks
+                and not self._waiting() and not self._open_asks
                 and not getattr(self._gate, "pending", None) and not self._activity)
 
     def box_activity(self, text: str | None) -> None:
@@ -1139,7 +1171,7 @@ class MobileChannel(ChannelAdapter):
         from localharness.agent.gate_types import Decision
 
         request_id = uuid.uuid4().hex
-        ask = _OpenAsk(request_id, request, self._ask_frame(request_id, request))
+        ask = _OpenAsk(request_id, request, self._ask_frame(request_id, request), private=self._private_chat())
         self._open_asks[request_id] = ask
         self.push(ask.frame)
         policy = self._push_policy()
@@ -1151,6 +1183,7 @@ class MobileChannel(ChannelAdapter):
                 self.session_id, kind="blocking", request_id=request_id,
                 detail=(getattr(ask.frame, "text", "") or getattr(request, "display", "")
                         or "")[:PUSH_SUMMARY_CHARS],
+                private=self.run is None or self.run.private,
             ))
         try:
             kind = await ask.future
@@ -1245,8 +1278,12 @@ class MobileChannel(ChannelAdapter):
         finally:
             self._open_asks.pop(request_id, None)
 
+    def _private_chat(self) -> bool:
+        """Strict: a one-tap "always" on a chat that is not known private would write a lasting grant."""
+        return self.run is not None and self.run.private
+
     @staticmethod
-    def ask_options(klass: str, grantable: bool) -> list[AskOption]:
+    def ask_options(klass: str, grantable: bool, private: bool = False, marked: bool = False) -> list[AskOption]:
         """The buttons a question of this class and grantability gets.
 
         One derivation, used by the live ask AND by `--fixtures`, so a scripted dialog cannot
@@ -1255,7 +1292,7 @@ class MobileChannel(ChannelAdapter):
         """
         if klass == TRUST_KLASS:
             kinds: tuple[str, ...] = ("allow_always", "reject_once")
-            names = TRUST_OPTION_NAMES
+            names = PRIVATE_TRUST_OPTION_NAMES if private else TRUST_OPTION_NAMES
         elif grantable:
             kinds = ("allow_once", "allow_always", "reject_once", "reject_always")
             names = GRANTABLE_OPTION_NAMES
@@ -1270,7 +1307,8 @@ class MobileChannel(ChannelAdapter):
                 # second tap: the question ITSELF already says it is permanent, and a confirm on
                 # a two-button dialog that has already explained itself is friction with no
                 # guardrail attached.
-                confirm_required=(k in ALWAYS_KINDS and klass != TRUST_KLASS),
+                confirm_required=(k in ALWAYS_KINDS and klass != TRUST_KLASS
+                                  and (not private or (marked and klass in TAINTED_ASK_CLASSES))),
             )
             for k in kinds
         ]
@@ -1283,6 +1321,8 @@ class MobileChannel(ChannelAdapter):
         grantable = bool(getattr(request, "grantable", False))
         tool_name = getattr(request, "tool_name", "") or ""
         schema = self._tool_registry.schema_of(tool_name) if self._tool_registry is not None else None
+        taint = getattr(self._gate, "taint", None)
+        marked = taint is not None and taint.source(getattr(request, "agent_id", None)) is not None
         return BlockingAsk(
             session_id=self.session_id,
             request_id=request_id,
@@ -1296,7 +1336,7 @@ class MobileChannel(ChannelAdapter):
             agent_id=getattr(request, "agent_id", None),
             call_id=getattr(request, "call_id", None),
             options_legend=getattr(request, "options_legend", None),
-            options=self.ask_options(klass, grantable),
+            options=self.ask_options(klass, grantable, self._private_chat(), marked),
             untrusted_ingest=ingests_untrusted(schema) if schema is not None else tool_name in WEB_INGEST_TOOLS,
         )
 
@@ -1330,7 +1370,7 @@ class MobileChannel(ChannelAdapter):
             return {"status": "invalid", "detail": f"{kind!r} is not offered for this question"}
 
         option = next(o for o in ask.frame.options if o.kind == kind)
-        if kind in ALWAYS_KINDS and ask.frame.klass != TRUST_KLASS or option.confirm_required:
+        if (kind in ALWAYS_KINDS and ask.frame.klass != TRUST_KLASS and not ask.private) or option.confirm_required:
             now = time.monotonic()
             held = ask.confirm
             live = held if (held and held[1] == kind and held[2] > now) else None
@@ -1353,6 +1393,7 @@ class MobileChannel(ChannelAdapter):
                     "confirm_token": live[0],
                     "expires_in": round(live[2] - now, 3),
                     "detail": (
+                        PRIVATE_TAINTED_CONFIRM if ask.private and kind in ALWAYS_KINDS else
                         "this answer is permanent, global and has no revoke command; "
                         "repeat the request with confirm_token to record it"
                         if kind in ALWAYS_KINDS else ask.frame.reason
@@ -1563,6 +1604,7 @@ class MobileChannel(ChannelAdapter):
             model=self.model_label(),
             private=self.private is True,
             asleep_session_id=self.asleep_session_id,
+            kept=self.kept,
         )
 
     def model_state(self) -> str:

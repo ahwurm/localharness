@@ -1078,6 +1078,14 @@ def kept_line(run, root) -> str:
     return "\n".join(rows + ["at least these; commands may leave more"] * (not run.stated))
 
 
+def kept_names(run, root) -> tuple[str, ...]:
+    """Every written file still on disk outside the run folder, project-relative where it can be, capped."""
+    from localharness.channels.base import one_line
+    names = [_inside(p, root) or p for p, _ in _stays(run)]
+    more = [f"and {len(names) - KEPT_NAMES} more"] * (len(names) > KEPT_NAMES)
+    return tuple([one_line(n)[:Caps.FINDING] for n in names[:KEPT_NAMES]] + more)
+
+
 def end_kept_turn(run, root) -> None:
     run.stated = run.stated or bool(kept_line(run, root))
     for entry in run.written.values():
@@ -1474,6 +1482,10 @@ class AgentLoop:
 
     def _project_root(self):
         return getattr(self._gate, "boundary", None) or getattr(self._gate, "workspace", None)
+
+    def _kept(self) -> tuple[str, ...]:
+        run = self._private_run()
+        return kept_names(run, self._project_root()) if run is not None and self._owns_run() else ()
 
     def _told(self, session: Session, summary: str) -> tuple[str, ...]:
         if not (scratch := getattr(self._gate, "scratch", None)):
@@ -2848,6 +2860,7 @@ class AgentLoop:
                     notes=notes,
                     ending=ending,
                     scratch_files=self._told(session, summary),
+                    kept=self._kept(),
                 ))
                 if panel is not None and panel.on_delivered and verdict is not None and not off:
                     try:

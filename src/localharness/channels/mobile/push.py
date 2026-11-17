@@ -61,6 +61,8 @@ nobody, which is the failure §5.5 exists to prevent.
 REPLY_TITLES = {"pass": "reply ready", "unreviewed": "reply ready (unchecked)", "blocked": "reply ready (caveats)",
                 "fixed": "reply ready (revised)", "asked": "reply needs your answer"}
 
+PRIVATE_PUSH_BODY = "Open the app to see it."
+
 NEEDS_YOU_COOLDOWN_S = MEASURED_LONG_TURN_S
 """One alerting "needs you" per session per window.
 
@@ -320,7 +322,7 @@ def deep_link(session_id: Optional[str], **item: Any) -> str:
     By the time push exists there is a chat list to get lost in, so a notification that drops you
     on a generic screen reintroduces the friction it was sent to remove.
     """
-    params = {"session": session_id or ""}
+    params = {} if session_id is None else {"session": session_id}
     params.update({k: str(v) for k, v in item.items() if v is not None})
     return "/?" + urlencode(params)
 
@@ -367,6 +369,7 @@ class PushPolicy:
         self, session_id: Optional[str], *, clients_attached: int, now: Optional[float] = None,
         summary: str = "", duration: Optional[float] = None,
         verdict: Optional[str] = None, finding: str = "", ending: Optional[str] = None,
+        private: bool = False,
     ) -> Optional[Push]:
         """A push, or None — and None is the common answer.
 
@@ -390,15 +393,16 @@ class PushPolicy:
             None if started is None else moment - started)
         if elapsed is None or elapsed < TURN_PUSH_MIN_S:
             return None
+        shown = None if private else session_id
         return Push(
             title=REPLY_TITLES.get(ending or verdict, "turn finished"),
-            body=(finding if verdict == "blocked" and not ending and finding else summary) or f"{int(elapsed)}s of work is waiting for you.",
-            tag=f"{CLASS_TURN_FINISHED}:{session_id or ''}",
+            body=PRIVATE_PUSH_BODY if private else (finding if verdict == "blocked" and not ending and finding else summary) or f"{int(elapsed)}s of work is waiting for you.",
+            tag=f"{CLASS_TURN_FINISHED}:{'private' if private else session_id or ''}",
             badge=len(state.outstanding),
             data={
                 "class": CLASS_TURN_FINISHED,
-                "session_id": session_id,
-                "url": deep_link(session_id),
+                "session_id": shown,
+                "url": deep_link(None if private else session_id or ""),
             },
             alert=True,
         )
@@ -408,6 +412,7 @@ class PushPolicy:
     def needs_you(
         self, session_id: Optional[str], *, kind: str, now: Optional[float] = None,
         pending_id: Any = None, request_id: Optional[str] = None, detail: str = "",
+        private: bool = False,
     ) -> Push:
         """Always returns a push; `alert` says whether it makes a sound.
 
@@ -429,18 +434,19 @@ class PushPolicy:
             state.last_alert_at = moment
 
         count = len(state.outstanding)
+        shown = None if private else session_id
         return Push(
             title=_NEEDS_YOU_TITLES.get(kind, "needs you"),
-            body=detail or _NEEDS_YOU_BODIES.get(kind, "the harness is waiting on you."),
-            tag=f"{CLASS_NEEDS_YOU}:{session_id or ''}",
+            body=PRIVATE_PUSH_BODY if private else detail or _NEEDS_YOU_BODIES.get(kind, "the harness is waiting on you."),
+            tag=f"{CLASS_NEEDS_YOU}:{'private' if private else session_id or ''}",
             badge=count,
             data={
                 "class": CLASS_NEEDS_YOU,
                 "kind": kind,
-                "session_id": session_id,
+                "session_id": shown,
                 "pending_id": pending_id,
                 "request_id": request_id,
-                "url": deep_link(session_id, pending=pending_id, ask=request_id),
+                "url": deep_link(None if private else session_id or "", pending=pending_id, ask=request_id),
             },
             alert=alert,
         )

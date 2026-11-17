@@ -1041,6 +1041,7 @@ function onFrame(name, d) {
       add(el("div", "row gap", "this client fell behind and its buffer was dropped — resyncing."));
       connect(d.from_seq);
       break;
+    case "LineDropped": break;
     default: break;
   }
 }

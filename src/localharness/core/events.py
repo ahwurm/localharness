@@ -213,6 +213,9 @@ class TaskComplete(BaseEvent):
     scratch_files: tuple[str, ...] = Field(
         default=(), description="Scratch files this reply names that the turn made, relative to the scratch folder; empty with no scratch."
     )
+    kept: tuple[str, ...] = Field(
+        default=(), description="Files a private session wrote that stay on disk after it ends, project-relative where possible; empty otherwise."
+    )
 
 
 class Action(BaseEvent):

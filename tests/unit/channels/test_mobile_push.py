@@ -13,6 +13,7 @@ import base64
 import contextlib
 import json
 import signal
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -362,6 +363,7 @@ async def _pushable(tmp_path):
     channel = MobileChannel(bus=bus, config={})
     await channel.start()
     channel.bind_runtime(session_id="s1", agent_id="orchestrator", session_dir=tmp_path / "s")
+    channel.run = SimpleNamespace(private=False)
     store = push.SubscriptionStore(tmp_path)
     store.add(_subscription())
     recorder = _Recorder()

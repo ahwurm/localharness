@@ -30,6 +30,7 @@ import asyncio
 import base64
 import binascii
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional
@@ -247,12 +248,18 @@ the one route that answers without a credential.
 
 
 class _SecurityHeaders(BaseHTTPMiddleware):
-    """Add :data:`SECURITY_HEADERS` to every response, including the streaming one."""
+    """Add :data:`SECURITY_HEADERS` to every response, including the streaming one; `/api` is no-store while a chat is private."""
+
+    def __init__(self, app: Any, private: Any = lambda: False) -> None:
+        super().__init__(app)
+        self._private = private
 
     async def dispatch(self, request: Request, call_next: Any) -> Response:
         response = await call_next(request)
         for name, value in SECURITY_HEADERS.items():
             response.headers.setdefault(name, value)
+        if request.url.path.startswith("/api") and self._private():
+            response.headers["Cache-Control"] = ARTIFACT_NO_STORE
         return response
 
 
@@ -270,6 +277,7 @@ _SUFFIX_MIMES: dict[str, str] = {s: m for m, s in ARTIFACT_MIMES.items()} | {".j
 ARTIFACT_CACHE_CONTROL = "private, max-age=31536000, immutable"
 ARTIFACT_NO_STORE = "no-store"
 ARTIFACT_PAGE = 60
+LINE_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
 def _stem_candidates(root: Path) -> dict[str, list[Path]]:
@@ -431,7 +439,7 @@ class MobileServer:
             Route("/api/sessions/{session_id}/command", self.command, methods=["POST"]),
             Route("/{path:path}", self.static, methods=["GET"]),
         ]
-        return Starlette(routes=routes, middleware=[Middleware(_SecurityHeaders)])
+        return Starlette(routes=routes, middleware=[Middleware(_SecurityHeaders, private=lambda: self.channel.private is True)])
 
     # ------------------------------------------------------------------ static
 
@@ -907,20 +915,15 @@ class MobileServer:
         return _json({"eviction_id": eviction_id, "body": body})
 
     def _artifact_policy(self) -> tuple[dict[str, Path], str, bool]:
-        """THE one decision point for privacy-relevant artifact serving (45/46; the private-mode hook):
-        the roots served (only those bound this session), the Cache-Control the artifact route sends,
-        and whether the gallery listing (and screens.pictures) exists. `--incognito` flips the last two;
-        inline pictures still load, fetched fresh each time."""
-        roots, private = self.channel.artifact_roots(), self.incognito
+        """The roots served (only those bound this session), the artifact route's Cache-Control, and whether the gallery listing exists; incognito or a private chat turns the last two off."""
+        roots, private = self.channel.artifact_roots(), self.incognito or self.channel.private is True
         return (roots, ARTIFACT_NO_STORE if private else ARTIFACT_CACHE_CONTROL,
                 bool(roots) and not private)
 
     def _screens(self) -> dict[str, Any]:
-        """The drawer's screens. `incognito` is the session-wide switch, always a bool (read off
-        the policy's Cache-Control, so the flag keeps its one reader)."""
-        _, cache_control, pictures = self._artifact_policy()
-        return {"memory": self._browse() is not None, "pictures": pictures,
-                "incognito": cache_control == ARTIFACT_NO_STORE}
+        """The drawer's screens; `incognito` is the switch itself, off in a private chat unless turned on."""
+        _, _, pictures = self._artifact_policy()
+        return {"memory": self._browse() is not None, "pictures": pictures, "incognito": self.incognito}
 
     async def set_incognito(self, request: Request) -> Response:
         """The drawer's Incognito switch, for this server process (a WRITER of the flag;
@@ -1330,12 +1333,14 @@ class MobileServer:
                          status=400)
 
         private = body.get("private") is True
+        line_id = body.get("line_id")
+        line_id = line_id if isinstance(line_id, str) and LINE_ID_RE.fullmatch(line_id) else None
         if (changed := await self._chat_for(private)) is not None:
             return changed
         started = self._ensure_session(private)
         if not self.channel._turn_running:
             # Between turns there is nothing to nudge: every intent is the same "run it next".
-            self.channel.submit(text, parts)
+            self.channel.submit(text, parts, line_id=line_id, private=private)
             return _json({"status": "queued", "intent": "queue", "bringing_up": started})
 
         effective = intent or DEFAULT_MID_TURN_INTENT
@@ -1350,9 +1355,9 @@ class MobileServer:
         if effective == "auto":
             # The terminal's behaviour, kept available for a caller that wants the classifier.
             # Not the default here, and §4.4.1 says why at length.
-            self.channel.submit(text, parts)
+            self.channel.submit(text, parts, line_id=line_id, private=private)
             return _json({"status": "queued", "intent": "auto"})
-        self.channel.submit(text, parts)
+        self.channel.submit(text, parts, line_id=line_id, private=private)
         return _json({"status": "queued", "intent": "queue"})
 
     async def cancel(self, request: Request) -> Response:
@@ -1505,7 +1510,7 @@ class MobileServer:
         if (changed := await self._chat_for(private)) is not None:
             return changed
         self._ensure_session(private)
-        self.channel.submit(text)
+        self.channel.submit(text, private=private)
         return _json({"status": "queued", "command": text.split()[0]})
 
     async def abort_bringup(self, request: Request) -> Response:

@@ -52,7 +52,7 @@ v9: ModelSwitched (event), Activity (frame), Hello.model, /api/health model, GET
 v10: AffordanceCued: a new event; additive, older pages ignore it at `default: break`.
 v11: TaskComplete gained verdict, stage, step and finding, and StatusTick gained text; additive, older pages ignore them.
 v12: TaskComplete gained blockers and notes; additive, older pages ignore them.
-v13: TaskComplete gained scratch_files; Hello gained private and asleep_session_id; BringUpStage gained private; additive, older pages ignore them.
+v13: TaskComplete gained scratch_files and kept; Hello gained private, asleep_session_id and kept; BringUpStage gained private; LineDropped is a new frame; additive, older pages ignore them.
 
 One recorded exception to "a moved schema bumps the version": additive OPTIONAL fields on an
 existing event that the page does not read re-record the snapshot without a bump (the page renders
@@ -211,6 +211,10 @@ class Hello(WireFrame):
     asleep_session_id: Optional[str] = Field(
         default=None,
         description="The id of the chat that is asleep, while one is; session_live stays false.",
+    )
+    kept: tuple[str, ...] = Field(
+        default=(),
+        description="Files the open private chat wrote that stay on disk when it ends, from its last reply.",
     )
 
 
@@ -493,6 +497,13 @@ class Lagged(WireFrame):
     dropped: int = 0
 
 
+class LineDropped(WireFrame):
+    """A queued line was not sent because the chat it was typed into is gone; it carries no text."""
+
+    frame_type: Literal["LineDropped"] = "LineDropped"
+    line_id: str = Field(description="The page-made id of the line, so the page can put its own copy back.")
+
+
 FRAME_TYPES: tuple[type[WireFrame], ...] = (
     Hello,
     TokenDelta,
@@ -507,6 +518,7 @@ FRAME_TYPES: tuple[type[WireFrame], ...] = (
     GapDetected,
     Lagged,
     Activity,
+    LineDropped,
 )
 """Every SSE-only frame, in the order `/api/protocol` lists them.
 

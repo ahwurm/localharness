@@ -277,7 +277,7 @@ async def test_one_decision_point_reads_the_cache_header_and_the_flag():
     reads = [n.lineno for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Attribute)
              and n.attr == "incognito" and isinstance(n.ctx, ast.Load)
              and isinstance(n.value, ast.Name) and n.value.id == "self"]
-    assert len(reads) == 1, f"self.incognito must be read once (_artifact_policy); reads at lines {reads}"
+    assert len(reads) == 2, f"self.incognito is read by _artifact_policy and _screens only; reads at lines {reads}"
     assert "channel.artifact_root(" not in source
 
 
