@@ -333,10 +333,8 @@ class GrantStore:
         inside its own class's key space.
         """
         data = self._load()
-        ancestors = _ancestors(workspace)
-        found = [(w, r) for w in ancestors for r in self._records(data, w, REFUSALS_KEY, REFUSAL_REQUIRED_FIELDS)]
-        found += [(w, r) for w in ancestors for r in self._held(w, REFUSALS_KEY)]
-        for workspace_key, record in found:
+        for workspace_key, record in ((w, r) for w in _ancestors(workspace)
+                                      for r in self._with_held(data, w, REFUSALS_KEY, REFUSAL_REQUIRED_FIELDS)):
             if record["key"] == key and record["class"] == klass:
                 return _record_type("Refusal")(
                     key=record["key"],
