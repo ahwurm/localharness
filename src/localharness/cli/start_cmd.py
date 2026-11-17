@@ -170,7 +170,7 @@ PRIVATE_ACP_LINE = ("acp has no private mode (Zed keeps its own thread history);
 PRIVATE_PLATFORM_LINE = ("{name} keeps the conversation on its servers; "
                          "start a terminal session with localharness start --private.")
 PRIVATE_LINKED_RUN_LINE = "{path} is a link or another account's; remove it, or use --config-dir <local folder>."
-PRIVATE_UNLOCKED_LINE = "this folder does not enforce file locks; use --config-dir <local folder>."
+PRIVATE_UNLOCKED_LINE = "{path} does not enforce file locks; use --config-dir <local folder>."
 PRIVATE_NEEDS_POSIX_LINE = "private sessions need POSIX file locks; use WSL on Windows."
 PRIVATE_HINT = "Private: no saved memory; only files written into your project stay."
 PRIVATE_NO_RUN_LINE = "no run folder for a private session; use --config-dir <local folder>."
@@ -199,8 +199,8 @@ def private_run_problem(run: Any, cfg: Path) -> str | None:
         return None
     end(run)
     cause = fallback_cause(cfg)
-    return (PRIVATE_LINKED_RUN_LINE.format(path=cfg / "run") if cause in ("a link", "another account's")
-            else PRIVATE_UNLOCKED_LINE if native() else PRIVATE_NEEDS_POSIX_LINE)
+    return (PRIVATE_LINKED_RUN_LINE if cause in ("a link", "another account's")
+            else PRIVATE_UNLOCKED_LINE if native() else PRIVATE_NEEDS_POSIX_LINE).format(path=cfg / "run")
 
 
 def _refuse_private_run(run: Any, cfg: Path) -> None:

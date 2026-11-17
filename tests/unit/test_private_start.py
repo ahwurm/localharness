@@ -108,6 +108,7 @@ def test_the_temp_fallback_is_refused_with_its_cause_and_ended(cfg, monkeypatch,
     result = invoke("--private", "--config-dir", str(cfg))
     assert result.exit_code == 2
     assert " ".join(result.output.split()) == " ".join(line.format(path=cfg / "run").split())
+    assert (str(cfg / "run") in " ".join(result.output.split())) is (line != start_cmd.PRIVATE_NEEDS_POSIX_LINE)
     assert ended == [run] and not started
 
 
