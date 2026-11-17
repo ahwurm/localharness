@@ -311,14 +311,14 @@ def _finish(run: RunFolder) -> tuple[str, ...]:
     try:
         if run.fd is None:
             if run.ident is not None and os.path.samestat(os.lstat(run.path), run.ident):
-                return remove_dir(run.path.name, run.path.parent).left
+                return remove_dir(run.path.name, run.path.parent)
             return ()
         name = run.path.name
         if run.parent is not None:
             gone = f".deleting-{name}"
             os.rename(name, gone, src_dir_fd=run.parent, dst_dir_fd=run.parent)
             name = gone
-        left = remove_dir("state", run.fd).left + empty_dir(run.fd, name).left
+        left = remove_dir("state", run.fd) + empty_dir(run.fd, name)
         if not left:
             if run.parent is not None:
                 os.rmdir(name, dir_fd=run.parent)

@@ -20,8 +20,9 @@ import tempfile
 import threading
 from collections.abc import Callable
 from concurrent.futures import Future
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NamedTuple, Optional
+from typing import Any, Optional
 
 log = logging.getLogger(__name__)
 
@@ -319,11 +320,6 @@ def readable_by_others(root: Path, limit: int = 10_000) -> list[Path]:
     return found
 
 
-class Removed(NamedTuple):
-    files: int
-    left: tuple[str, ...]
-
-
 _DIR_FLAGS = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
               | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
 _MAX_HELD = 64  # one descriptor per depth level
@@ -372,135 +368,136 @@ def _own(fd: int, dev: int) -> bool:
     return True
 
 
-def empty_dir(fd: int, label: str = ".") -> Removed:
-    """Empty the open directory `fd` without following a link or leaving its device; `files` counts
-    what was unlinked and `left` names what could not be removed. `fd` stays open and stays."""
+@dataclass
+class _Frame:
+    fd: int
+    path: str
+    names: list[str]
+    relisted: bool = False
+    kept: bool = False
+
+
+def empty_dir(fd: int, label: str = ".") -> tuple[str, ...]:
+    """Empty the open directory `fd` without following a link or leaving its device; returns what could not be removed."""
     dev = os.fstat(fd).st_dev
     if not _own(fd, dev):
-        return Removed(0, (label,))
-    files, left = 0, []
-    stack: list[list[Any]] = [[fd, label, os.listdir(fd), False, False]]  # fd, path, names, relisted, kept
+        return (label,)
+    left: list[str] = []
+    stack = [_Frame(fd, label, os.listdir(fd))]
+
+    def skip(frame: _Frame, here: str) -> None:
+        left.append(here)
+        frame.kept = True
+
     while stack:
         frame = stack[-1]
-        dfd, path, names = frame[0], frame[1], frame[2]
-        if names:
-            name = names.pop()
-            here = f"{path}/{name}"
+        if frame.names:
+            name = frame.names.pop()
+            here = f"{frame.path}/{name}"
             try:
-                is_dir = stat.S_ISDIR(os.lstat(name, dir_fd=dfd).st_mode)
+                is_dir = stat.S_ISDIR(os.lstat(name, dir_fd=frame.fd).st_mode)
             except FileNotFoundError:
                 continue
             except OSError:
-                left.append(here)
-                frame[4] = True
+                skip(frame, here)
                 continue
             if not is_dir:
                 try:
-                    os.unlink(name, dir_fd=dfd)
-                    files += 1
+                    os.unlink(name, dir_fd=frame.fd)
                 except FileNotFoundError:
                     pass
                 except OSError:
-                    left.append(here)
-                    frame[4] = True
+                    skip(frame, here)
                 continue
             if len(stack) >= _MAX_HELD:
-                left.append(here)
-                frame[4] = True
+                skip(frame, here)
                 continue
             try:
-                child = _open_dir(name, dfd)
+                child = _open_dir(name, frame.fd)
             except FileNotFoundError:
                 continue
             except OSError as e:
-                if e.errno in (errno.ELOOP, errno.ENOTDIR):  # swapped for a link since the lstat
-                    try:
-                        os.unlink(name, dir_fd=dfd)
-                        files += 1
+                try:
+                    if e.errno in (errno.ELOOP, errno.ENOTDIR):  # swapped for a link since the lstat
+                        os.unlink(name, dir_fd=frame.fd)
                         continue
-                    except OSError:
-                        pass
-                left.append(here)
-                frame[4] = True
+                except OSError:
+                    pass
+                skip(frame, here)
                 continue
             try:
-                if not _own(child, dev):
-                    os.close(child)
-                    left.append(here)
-                    frame[4] = True
+                if _own(child, dev):
+                    stack.append(_Frame(child, here, os.listdir(child)))
                     continue
-                stack.append([child, here, os.listdir(child), False, False])
             except OSError:
-                os.close(child)
-                left.append(here)
-                frame[4] = True
+                pass
+            os.close(child)
+            skip(frame, here)
             continue
         if len(stack) == 1:
             break
         stack.pop()
-        os.close(dfd)
+        os.close(frame.fd)
         parent = stack[-1]
-        name = path.rsplit("/", 1)[1]
-        if frame[4]:
-            parent[4] = True
+        name = frame.path.rsplit("/", 1)[1]
+        if frame.kept:
+            parent.kept = True
             continue
         try:
-            os.rmdir(name, dir_fd=parent[0])
+            os.rmdir(name, dir_fd=parent.fd)
         except FileNotFoundError:
             pass
         except OSError as e:
-            if e.errno in (errno.ENOTEMPTY, errno.EEXIST) and not frame[3]:
+            if e.errno in (errno.ENOTEMPTY, errno.EEXIST) and not frame.relisted:
                 try:  # something landed since the listing: one more pass over the same folder
-                    again = _open_dir(name, parent[0])
-                    stack.append([again, path, os.listdir(again), True, False])
+                    again = _open_dir(name, parent.fd)
+                    stack.append(_Frame(again, frame.path, os.listdir(again), relisted=True))
                     continue
                 except OSError:
                     pass
-            left.append(path)
-            parent[4] = True
-    return Removed(files, tuple(left))
+            skip(parent, frame.path)
+    return tuple(left)
 
 
-def remove_dir(name: str, dir_fd: "int | Path") -> Removed:
+def remove_dir(name: str, dir_fd: "int | Path") -> tuple[str, ...]:
     """Remove the directory `name` inside `dir_fd` (a descriptor; a checked Path on Windows) and all it holds; a link or file at `name` is just unlinked."""
     if isinstance(dir_fd, Path):
         target = dir_fd / name
         try:
             st = os.lstat(target)
         except FileNotFoundError:
-            return Removed(0, ())
+            return ()
         if not stat.S_ISDIR(st.st_mode) or getattr(st, "st_file_attributes", 0) & 0x400:
             target.unlink()
-            return Removed(1, ())
-        count = sum(len(files) for _, _, files in os.walk(target))
-        shutil.rmtree(target)
-        return Removed(count, ())
+        else:
+            shutil.rmtree(target)
+        return ()
     try:
         kind = os.lstat(name, dir_fd=dir_fd).st_mode
     except FileNotFoundError:
-        return Removed(0, ())
+        return ()
     if not stat.S_ISDIR(kind):
         os.unlink(name, dir_fd=dir_fd)
-        return Removed(1, ())
+        return ()
     try:
         fd = _open_dir(name, dir_fd)
     except FileNotFoundError:
-        return Removed(0, ())
+        return ()
     except OSError as e:
         if e.errno in (errno.ELOOP, errno.ENOTDIR):
             os.unlink(name, dir_fd=dir_fd)
-            return Removed(1, ())
-        return Removed(0, (name,))
+            return ()
+        return (name,)
     try:
-        removed = empty_dir(fd, name)
+        left = empty_dir(fd, name)
     finally:
         os.close(fd)
-    if removed.left:
-        return removed
+    if left:
+        return left
     try:
         os.rmdir(name, dir_fd=dir_fd)
     except FileNotFoundError:
         pass
     except OSError:
-        return Removed(removed.files, (name,))
-    return removed
+        return (name,)
+    return ()
