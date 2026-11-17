@@ -96,6 +96,24 @@ def test_context_logs_routed_to_a_file_and_still_propagate(tmp_path):
         logging.getLogger().removeHandler(root_h)
 
 
+def test_routing_for_another_folder_closes_the_first_folders_handler(tmp_path):
+    import logging
+
+    from localharness.cli.start_cmd import _route_context_logs, _route_memory_logs_to_file
+
+    for route, name, file in ((_route_context_logs, "localharness.agent.context", "context.log"),
+                              (_route_memory_logs_to_file, "localharness.memory", "memory.log")):
+        lg = logging.getLogger(name)  # conftest restores the shared loggers afterwards
+        mine = lambda: [h for h in lg.handlers if isinstance(h, logging.FileHandler)]  # noqa: E731
+        for folder in ("a", "b"):
+            (tmp_path / folder).mkdir(exist_ok=True)
+        first = route(tmp_path / "a")
+        assert route(tmp_path / "a") is first and mine() == [first]
+        second = route(tmp_path / "b")
+        assert mine() == [second] and second.baseFilename == str(tmp_path / "b" / file)
+        assert first.stream is None, "the first folder's file is closed"
+
+
 def test_memory_logs_routed_to_file_not_repl_console(tmp_path):
     """The real emitter behind #20: consolidation/mining use stdlib logging, and the
     interactive start path configures no handler, so their log.warning/exception records

@@ -78,6 +78,10 @@ def test_an_unknown_channel_still_gets_the_unknown_channel_refusal(cfg, monkeypa
     assert not started
 
 
+def test_the_mobile_line_sends_a_person_to_the_phone():
+    assert start_cmd.PRIVATE_MOBILE_LINE == "run localharness mobile and tap Private chat"
+
+
 def test_the_hidden_mobile_flag_prints_the_same_line():
     from localharness.cli.mobile_cmd import mobile_cmd
     app = typer.Typer()

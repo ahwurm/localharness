@@ -284,6 +284,63 @@ def test_end_gives_up_after_two_seconds_and_the_next_start_finishes(cfg, monkeyp
         end(nxt)
 
 
+def _slow_finish(monkeypatch, seconds, left=()):
+    real = run_folder._finish
+
+    def slow(run):
+        time.sleep(seconds)
+        real(run)
+        return left
+
+    monkeypatch.setattr(run_folder, "_finish", slow)
+    monkeypatch.setattr(run_folder, "_SLOW_AFTER_S", 0.05)
+    monkeypatch.setattr(run_folder, "END_WAIT_S", 0.15)
+    monkeypatch.setattr(run_folder, "PRIVATE_END_WAIT_S", 0.15)
+
+
+def test_end_returns_an_empty_line_for_a_clean_removal(cfg):
+    said = []
+    assert end(begin(cfg, private=True), said.append) == "" and said == []
+    assert end(None) == ""
+
+
+def test_end_returns_and_says_the_line_naming_what_is_left(cfg, monkeypatch):
+    run = begin(cfg)
+    _slow_finish(monkeypatch, 0, left=("/x/y",))
+    said = []
+    line = end(run, said.append)
+    assert line == "Scratch not fully removed: /x/y stays until the next start" and said == [line]
+
+
+def test_a_private_end_that_hits_its_bound_names_the_run_folder(cfg, monkeypatch):
+    run = begin(cfg, private=True)
+    _slow_finish(monkeypatch, 0.4)
+    said = []
+    line = end(run, said.append)
+    assert line == f"Scratch not fully removed: {run.path} stays until the next start"
+    assert said == [run_folder.REMOVING_LINE, line]
+    time.sleep(0.5)
+
+
+def test_a_normal_end_that_hits_its_bound_stays_silent(cfg, monkeypatch):
+    run = begin(cfg)
+    _slow_finish(monkeypatch, 0.4)
+    said = []
+    assert end(run, said.append) == "" and said == [run_folder.REMOVING_LINE]
+    time.sleep(0.5)
+
+
+def test_a_second_end_returns_the_first_ends_outcome(cfg, monkeypatch):
+    run = begin(cfg)
+    _slow_finish(monkeypatch, 0.1, left=("/x/y",))
+    got = []
+    first = threading.Thread(target=lambda: got.append(end(run)))
+    first.start()
+    got.append(end(run))
+    first.join(5)
+    assert got == ["Scratch not fully removed: /x/y stays until the next start"] * 2
+
+
 def test_doctor_names_a_fallback_and_foreign_folders(cfg, tmp_path, capsys):
     from localharness.cli import doctor_cmd
 

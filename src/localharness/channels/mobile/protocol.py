@@ -52,7 +52,7 @@ v9: ModelSwitched (event), Activity (frame), Hello.model, /api/health model, GET
 v10: AffordanceCued: a new event; additive, older pages ignore it at `default: break`.
 v11: TaskComplete gained verdict, stage, step and finding, and StatusTick gained text; additive, older pages ignore them.
 v12: TaskComplete gained blockers and notes; additive, older pages ignore them.
-v13: TaskComplete gained scratch_files; additive, older pages ignore it.
+v13: TaskComplete gained scratch_files; Hello gained private and asleep_session_id; BringUpStage gained private; additive, older pages ignore them.
 
 One recorded exception to "a moved schema bumps the version": additive OPTIONAL fields on an
 existing event that the page does not read re-record the snapshot without a bump (the page renders
@@ -203,6 +203,14 @@ class Hello(WireFrame):
         description="True in --replay. Says that TokenDelta and StatusTick frames on this "
                     "connection were SYNTHESIZED from a persisted log, not measured — so nobody "
                     "mistakes a replayed tok/s for a real one (§8).",
+    )
+    private: bool = Field(
+        default=False,
+        description="True when the open chat is a private chat, which keeps nothing once it ends.",
+    )
+    asleep_session_id: Optional[str] = Field(
+        default=None,
+        description="The id of the chat that is asleep, while one is; session_live stays false.",
     )
 
 
@@ -410,6 +418,7 @@ class BringUpStage(WireFrame):
     elapsed: float = 0.0
     abortable: bool = Field(default=True, description="Whether POST /api/bringup/abort applies.")
     failed: bool = False
+    private: bool = Field(default=False, description="True when the chat being brought up is a private chat.")
 
 
 class Notice(WireFrame):

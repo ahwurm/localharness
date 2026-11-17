@@ -164,7 +164,7 @@ def _channel_refusal(channel_mode: str, resolution: Any) -> str | None:
     return CHANNEL_PLUGIN_NOT_ON.format(name=channel_mode, plugin=entry.name, state=state, fix=fix)
 
 
-PRIVATE_MOBILE_LINE = "private chats on the phone are not available yet"
+PRIVATE_MOBILE_LINE = "run localharness mobile and tap Private chat"
 PRIVATE_ACP_LINE = ("acp has no private mode (Zed keeps its own thread history); "
                     "start a terminal session with localharness start --private.")
 PRIVATE_PLATFORM_LINE = ("{name} keeps the conversation on its servers; "
@@ -190,17 +190,22 @@ def _refuse_private_channel(channel_mode: str) -> None:
         channel_mode, PRIVATE_PLATFORM_LINE.format(name=channel_mode)))
 
 
-def _refuse_private_run(run: Any, cfg: Path) -> None:
-    """Refuse a private start whose run folder is missing or only the temp fallback."""
+def private_run_problem(run: Any, cfg: Path) -> str | None:
+    """Why a private session cannot run in this run folder, or None; a fallback run is ended here."""
     from localharness.core.run_folder import end, fallback_cause, native
     if run is None:
-        _refuse_private(PRIVATE_NO_RUN_LINE)
+        return PRIVATE_NO_RUN_LINE
     if run.parent is not None:
-        return
+        return None
     end(run)
     cause = fallback_cause(cfg)
-    _refuse_private(PRIVATE_LINKED_RUN_LINE.format(path=cfg / "run") if cause in ("a link", "another account's")
-                    else PRIVATE_UNLOCKED_LINE if native() else PRIVATE_NEEDS_POSIX_LINE)
+    return (PRIVATE_LINKED_RUN_LINE.format(path=cfg / "run") if cause in ("a link", "another account's")
+            else PRIVATE_UNLOCKED_LINE if native() else PRIVATE_NEEDS_POSIX_LINE)
+
+
+def _refuse_private_run(run: Any, cfg: Path) -> None:
+    if problem := private_run_problem(run, cfg):
+        _refuse_private(problem)
 
 
 MOBILE_NEEDS_ITS_OWN_COMMAND = OWN_COMMAND_ERROR.format(name="mobile", why=_own_command(None, None)["mobile"][0])
@@ -1291,6 +1296,13 @@ def _attach_window_report(harness: Any, provider_type: str, served: int | None, 
     return report, undo
 
 
+def _drop_other_file_handlers(logger: logging.Logger, keep: Path) -> None:
+    """One `mobile` process runs many chats: a previous chat's file must not receive the next one's records."""
+    for h in [h for h in logger.handlers if isinstance(h, logging.FileHandler) and h.baseFilename != str(keep)]:
+        logger.removeHandler(h)
+        h.close()
+
+
 def _route_memory_logs_to_file(agent_dir: Path) -> logging.FileHandler:
     """Interactive REPL only: send the memory subsystem's stdlib logs to a file instead of
     the terminal (#20). consolidation.py + mining.py log via `logging.getLogger(__name__)`
@@ -1302,6 +1314,7 @@ def _route_memory_logs_to_file(agent_dir: Path) -> logging.FileHandler:
     `logging.basicConfig` and never call this — non-interactive channels are untouched."""
     log_path = agent_dir / "memory.log"
     mem_log = logging.getLogger("localharness.memory")
+    _drop_other_file_handlers(mem_log, log_path)
     handler = next((h for h in mem_log.handlers if isinstance(h, logging.FileHandler)
                     and getattr(h, "baseFilename", None) == str(log_path)), None)
     if handler is None:
@@ -1319,6 +1332,7 @@ def _route_context_logs(agent_dir: Path) -> logging.FileHandler:
     """Interactive REPL only: the context manager's floor and compaction records go to `<agent_dir>/context.log`, not the terminal."""
     log_path = agent_dir / "context.log"
     ctx_log = logging.getLogger("localharness.agent.context")
+    _drop_other_file_handlers(ctx_log, log_path)
     handler = next((h for h in ctx_log.handlers if isinstance(h, logging.FileHandler)
                     and getattr(h, "baseFilename", None) == str(log_path)), None)
     if handler is None:
@@ -2771,6 +2785,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # and compact.md (~line 1060). All per-agent WORK, so all follow the workspace. Anyone tempted to
     # "tidy" this back to cfg_path would silently move all five back to the global dir.
     agent_dir = state_dir / "agents" / agent_name_str
+    normal_agent_dir = (workspace if workspace is not None else cfg_path) / "agents" / agent_name_str
     events_path = agent_dir / "bus-events.jsonl"
     bus = EventBus(persist_path=events_path)
     # #20: keep background consolidation/mining logs off the interactive terminal (file only)
@@ -3608,7 +3623,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 tool_registry=tool_registry,
                 llm=llm,
                 agent_loop=agent_loop,
-                session_dir=events_path.parent / "sessions",
+                session_dir=(normal_agent_dir if private else agent_dir) / "sessions",
+                private_dir=events_path.parent / "sessions" if private else None,
                 # THE bus this session publishes on. The channel was constructed on a
                 # placeholder bus before any session existed; without this hand-over its
                 # event subscriptions point at a bus nothing writes to, and live events

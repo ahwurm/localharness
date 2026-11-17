@@ -54,7 +54,7 @@ def test_the_protocol_moved_once_per_phase_on_top_of_v3():
     assert isinstance(doc, str)
     for bit in ("v3:", "tool_names", "v4:", "artifact", "v5:", "screens", "v6:", "ProviderLost",
                 "v7:", "InstructionsChanged", "NarrowingNotice", "v8:", "ConversationCleared", "v9:", "ModelSwitched",
-                "v10:", "AffordanceCued", "v11:", "verdict", "StatusTick", "v12:", "blockers", "v13:", "scratch_files"):
+                "v10:", "AffordanceCued", "v11:", "verdict", "StatusTick", "v12:", "blockers", "v13:", "scratch_files", "private", "asleep_session_id"):
         assert bit in doc, f"the PROTOCOL_VERSION docstring does not mention {bit!r}"
     assert "artifact" in Observation.model_fields
 

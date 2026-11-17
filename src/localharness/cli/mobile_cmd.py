@@ -428,8 +428,7 @@ def print_enrolment(token: str, *, public_url: Optional[str], host: str, port: i
 
 @dataclass
 class _Chat:
-    """The one chat's run folder, and the tasks removing the ones it has finished with."""
-    run: Any = None
+    """The tasks removing the run folders the chat has finished with."""
     ending: list = field(default_factory=list)
 
 
@@ -510,13 +509,13 @@ async def _serve(
         await asyncio.to_thread(sweep, resolve_config_dir(config_dir))
 
         def _end_run() -> None:
-            if (run := chat.run) is None:
-                return
-            chat.run = None
-            chat.ending.append(asyncio.ensure_future(asyncio.to_thread(
-                end, run, lambda line: console.print(escape(line), style="dim", soft_wrap=True))))
+            run = channel.run
+            channel.forget_chat()
+            if run is not None:
+                chat.ending.append(asyncio.ensure_future(asyncio.to_thread(
+                    end, run, lambda line: console.print(escape(line), style="dim", soft_wrap=True))))
 
-        def _begin_session(*, fresh_thread: bool = False) -> None:
+        def _begin_session(*, fresh_thread: bool = False, private: Optional[bool] = None) -> None:
             """Start session bring-up once, in the background, and never twice.
 
             Held in a closure rather than on the channel because the channel must not be able to
@@ -525,14 +524,15 @@ async def _serve(
             what that rule keeps closed, not merely scheduling convenience).
 
             A thread asleep in the agent's folder wakes in this bring-up; `fresh_thread` (the
-            new-chat verb) discards it instead.
+            new-chat verb) discards it instead. `private` None keeps the open chat's privacy.
             """
             nonlocal session_task
             if session_task is not None and not session_task.done():
                 return
+            channel.private = private if private is not None else bool(channel.private)
             session_task = asyncio.ensure_future(_bring_up(
                 channel, config_dir=config_dir, verbose=verbose, agent=agent, fresh_thread=fresh_thread,
-                chat=chat))
+                private=channel.private, chat=chat))
             session_task.add_done_callback(_after_session)
             channel.set_bringup_abort(session_task.cancel)
 
@@ -554,26 +554,48 @@ async def _serve(
             if channel.queued_input:
                 _begin_session()
 
-        async def _new_session() -> None:
-            """The + button's other half: end the live session, then begin a fresh one.
+        async def _stop_session() -> Any:
+            """Cancel the session task and let it finish; returns the run the chat held."""
+            old = channel.run
+            if session_task is not None and not session_task.done():
+                session_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await session_task
+            return old
+
+        async def _left_by(old: Any) -> str:
+            return await asyncio.to_thread(end, old) if old is not None and old.private else ""
+
+        async def _new_session(*, private: bool = False) -> str:
+            """The + button's other half: end the live session, then begin a fresh one. Returns what a private chat's removal left.
 
             Cancellation is the mechanism — the session lives inside `session_task` — and
             `_bring_up` tells the two cancellations apart: a live session ending on purpose
             publishes "ended", only a genuinely abandoned BUILD publishes the red "cancelled".
             The old session's log stays on disk, which is what keeps it in the drawer.
             """
-            nonlocal session_task
-            if session_task is not None and not session_task.done():
-                session_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await session_task
+            if channel.asleep and channel.private is not True and channel.session_dir is not None:
+                from localharness.cli.session_resume import asleep_path
+
+                asleep_path(channel.session_dir).unlink(missing_ok=True)
+            old = await _stop_session()
             _end_run()
             channel.reset_session()
-            _begin_session(fresh_thread=True)  # a thread asleep on disk is not the chat they asked for
+            _begin_session(fresh_thread=True, private=private)  # a thread asleep on disk is not the chat they asked for
+            return await _left_by(old)
+
+        async def _end_chat() -> str:
+            """End the open chat for good, building none after it. Returns what its removal left."""
+            old = await _stop_session()
+            _end_run()
+            channel.reset_session()
+            channel.clear_bringup()
+            server.session_over()
+            return await _left_by(old)
 
         server = MobileServer(
             channel, token=token, ui_dir=resolved_ui, on_first_message=_begin_session,
-            on_new_session=_new_session, config_dir=config_dir, incognito=incognito,
+            on_new_session=_new_session, on_end=_end_chat, config_dir=config_dir, incognito=incognito,
         )
         # Web Push, on the live path only. A `--replay` run must never buzz a phone about a
         # session that finished last week.
@@ -630,6 +652,11 @@ async def _serve(
             previous[sig] = signal.signal(sig, _stop_signal)
         except (ValueError, OSError):  # not the main thread, or a platform without the signal
             continue
+    if (hup := getattr(signal, "SIGHUP", None)) is not None and signal.getsignal(hup) is not signal.SIG_IGN:
+        try:
+            previous[hup] = signal.signal(hup, lambda signum, frame: setattr(runner, "should_exit", True))
+        except (ValueError, OSError):
+            pass
     try:
         await runner.serve()
     finally:
@@ -685,7 +712,7 @@ async def _sleep_or_cancel(channel: Any, session_task: asyncio.Task) -> None:
 
 async def _bring_up(
     channel: Any, *, config_dir: Optional[str], verbose: bool, agent: Optional[str],
-    fresh_thread: bool = False, chat: Optional[_Chat] = None,
+    fresh_thread: bool = False, private: bool = False, chat: Optional[_Chat] = None,
 ) -> None:
     """Build the session and hand the channel to the REPL, reporting the build to the client.
 
@@ -707,15 +734,21 @@ async def _bring_up(
     started = time.monotonic()
     channel.set_bringup("starting the session", elapsed=0.0)
     try:
-        if chat is not None and chat.run is None:
+        if chat is not None and channel.run is None:
+            from localharness.cli.start_cmd import private_run_problem
             from localharness.config.paths import resolve_config_dir
             from localharness.core.run_folder import begin
 
-            chat.run = await asyncio.to_thread(begin, resolve_config_dir(config_dir))
+            cfg = resolve_config_dir(config_dir)
+            channel.run = await asyncio.to_thread(begin, cfg, private)
+            if private and (problem := await asyncio.to_thread(private_run_problem, channel.run, cfg)):
+                channel.run = None
+                channel.set_bringup("failed", detail=problem, failed=True, elapsed=time.monotonic() - started)
+                return
         restart = await _start_async(
             agent, verbose, False, config_dir,
             channel_mode="mobile", mobile_channel=channel, fresh_thread=fresh_thread,
-            run=chat.run if chat is not None else None,
+            run=channel.run if chat is not None else None,
         )
     except asyncio.CancelledError:
         # Two very different cancels share this except: a bound session means the NEW-CHAT verb

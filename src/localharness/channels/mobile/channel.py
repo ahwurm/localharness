@@ -347,6 +347,10 @@ class MobileChannel(ChannelAdapter):
         # session log can serve, so a swallowed persist failure surfaces as a gap (§4.2.3).
         self._forwarded_max: dict[str, int] = {}
         self._session_dir: Optional[Path] = None
+        self._private_dir: Optional[Path] = None
+        self.run: Any = None
+        self.private: Optional[bool] = None
+        self._turns = 0
         self._memory_slot = MemorySlot()
         self._artifact_roots: dict[str, Path] = {}
 
@@ -403,6 +407,7 @@ class MobileChannel(ChannelAdapter):
         llm: Any = None,
         agent_loop: Any = None,
         session_dir: Optional[Path] = None,
+        private_dir: Optional[Path] = None,
         bus: Any = None,
         memory_slot: MemorySlot | None = None,
         artifact_roots: Optional[Mapping[str, Path]] = None,
@@ -425,6 +430,7 @@ class MobileChannel(ChannelAdapter):
         self._llm = llm
         self._agent_loop = agent_loop
         self._session_dir = session_dir
+        self._private_dir = private_dir
         self._memory_slot = memory_slot if memory_slot is not None else MemorySlot()
         self._artifact_roots = dict(artifact_roots or {})
         # The session exists from this line on, with two client-visible consequences. First,
@@ -437,6 +443,15 @@ class MobileChannel(ChannelAdapter):
         self._sleep_event.clear()  # a session starts awake, whatever ended the last one
         self._sleep_now = self._sleeping = False
         self.set_bringup("ready", elapsed=self._bringup.elapsed if self._bringup else 0.0)
+
+    def forget_chat(self) -> None:
+        """The chat is over: its run, privacy and turn count go, so the next one starts clean."""
+        self.run = self.private = self._private_dir = None
+        self._turns = 0
+
+    def has_turns(self) -> bool:
+        """A root turn has run, a chat is asleep, or a line waits: replacing the chat would lose something."""
+        return self._turns > 0 or self.asleep or not self._inbound.empty()
 
     def reset_session(self) -> None:
         """Forget the bound session so the next bring-up binds fresh — the new-chat verb's half.
@@ -733,6 +748,7 @@ class MobileChannel(ChannelAdapter):
         if isinstance(event, TurnStarted):
             if root:
                 self._turn_running = True
+                self._turns += 1
                 self._stream_id = None
                 self._reply_verdict = None
                 await self._start_status_ticker()
@@ -920,7 +936,7 @@ class MobileChannel(ChannelAdapter):
         """Name the bring-up stage now running, and remember it for a client that connects late."""
         self._bringup = BringUpStage(
             session_id=self.session_id, stage=stage, detail=detail, failed=failed,
-            elapsed=elapsed, abortable=self._bringup_abort is not None,
+            elapsed=elapsed, abortable=self._bringup_abort is not None, private=self.private is True,
         )
         self.push(self._bringup)
 
@@ -1026,12 +1042,20 @@ class MobileChannel(ChannelAdapter):
         if self.asleep:
             self._bringup = None
 
+    def clear_bringup(self) -> None:
+        """The chat is over and none follows: the ribbon goes back to cold."""
+        self._bringup = None
+
     @property
     def asleep(self) -> bool:
         """No session is bound and the last thing that happened to one was a sleep: the thread is
         on disk and the next message wakes it."""
         return (self.session_id is None and self._bringup is not None
                 and self._bringup.stage == ASLEEP_STAGE)
+
+    @property
+    def asleep_session_id(self) -> Optional[str]:
+        return self._bringup.session_id if self.asleep else None
 
     @property
     def queued_input(self) -> int:
@@ -1537,6 +1561,8 @@ class MobileChannel(ChannelAdapter):
             model_state=self.model_state(),
             session_live=self.session_id is not None,
             model=self.model_label(),
+            private=self.private is True,
+            asleep_session_id=self.asleep_session_id,
         )
 
     def model_state(self) -> str:

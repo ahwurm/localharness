@@ -189,7 +189,7 @@ async def test_after_sleep_the_next_message_wakes_the_session_and_a_connect_does
     channel = await _channel(tmp_path)
     started: list = []
     server = server_mod.MobileServer(channel, token=TOKEN,
-                                     on_first_message=lambda: started.append("up"))
+                                     on_first_message=lambda **kw: started.append("up"))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app),
                                  base_url="http://web.test") as client:
         first = await client.post("/api/sessions/current/message", json={"text": "hi"}, headers=JSON)

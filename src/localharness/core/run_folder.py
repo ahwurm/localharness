@@ -280,17 +280,18 @@ def _fallback(private: bool = False) -> RunFolder:
     return RunFolder(path, fd, None, ident=os.lstat(path), private=private)
 
 
-def end(run: RunFolder | None, say: Callable[[str], None] = lambda line: None) -> None:
-    """Remove this session's run folder, waiting about two seconds (thirty when private); the next start finishes a slower one."""
+def end(run: RunFolder | None, say: Callable[[str], None] = lambda line: None) -> str:
+    """Remove this session's run folder, waiting about two seconds (thirty when private); the next start finishes a slower one. Returns the line naming what is left, or ''."""
     global _current
     if run is None:
-        return
+        return ""
     if _current is run:
         _current = None
     with run._mu:
         if run._ender is None:
             run._ender = in_background(_finish, run)
         ender = run._ender
+    from localharness.channels.base import one_line
     try:
         try:
             left = ender.result(timeout=_SLOW_AFTER_S)
@@ -298,13 +299,15 @@ def end(run: RunFolder | None, say: Callable[[str], None] = lambda line: None) -
             say(REMOVING_LINE)
             left = ender.result(timeout=(PRIVATE_END_WAIT_S if run.private else END_WAIT_S) - _SLOW_AFTER_S)
     except TimeoutError:
-        return
+        left = (str(run.path),) if run.private else ()
     except Exception:  # noqa: BLE001 - a folder that would not go is left for the next start
         log.warning("run folder not removed", exc_info=True)
-        return
-    if left:
-        from localharness.channels.base import one_line
-        say(one_line(f"Scratch not fully removed: {left[0]} stays until the next start"))
+        return ""
+    if not left:
+        return ""
+    line = one_line(f"Scratch not fully removed: {left[0]} stays until the next start")
+    say(line)
+    return line
 
 
 def _finish(run: RunFolder) -> tuple[str, ...]:

@@ -168,6 +168,11 @@ MODEL_LIST_NO_SESSION = "chat asleep — /model list wakes it"
 
 MODEL_LIST_NOT_READY = "chat not ready — {state}"
 
+NO_RESTART_HANDLE = (
+    "this server cannot restart the session — a replay serves a finished log, and only the live "
+    "runner installs the restart handle"
+)
+
 TRASH_DIRNAME = "sessions-trash"
 """Where a deleted chat's log MOVES (never unlinks) — beside `sessions/` in the agent dir.
 
@@ -309,6 +314,7 @@ class MobileServer:
         ui_dir: Optional[Path] = None,
         on_first_message: Optional[Any] = None,
         on_new_session: Optional[Any] = None,
+        on_end: Optional[Any] = None,
         replay: Any = None,
         config_dir: Optional[str | Path] = None,
         incognito: bool = False,
@@ -319,6 +325,7 @@ class MobileServer:
         self.ui_dir = (ui_dir or PACKAGED_UI_DIR).resolve()
         self.on_first_message = on_first_message
         self.on_new_session = on_new_session
+        self.on_end = on_end
         self.replay = replay
         self.config_dir = config_dir
         self.incognito = incognito
@@ -409,6 +416,7 @@ class MobileServer:
             Route("/api/incognito", self.set_incognito, methods=["POST"]),
             Route("/api/sessions", self.sessions, methods=["GET"]),
             Route("/api/sessions/new", self.new_session, methods=["POST"]),
+            Route("/api/sessions/end", self.end_session, methods=["POST"]),
             Route("/api/sessions/{session_id}/events", self.events, methods=["GET"]),
             Route("/api/sessions/{session_id}/delete", self.delete_session, methods=["POST"]),
             # Memory is query/body-addressed, never path-addressed: fact names carry '/'
@@ -498,7 +506,7 @@ class MobileServer:
         if refusal is not None:
             return refusal
         cursor = self._cursor(request)
-        await self._maybe_prewarm()
+        await self._maybe_prewarm(request.query_params.get("private") == "1")
         client = self.channel.attach_client()
         return StreamingResponse(
             self._sse(client, cursor),
@@ -638,9 +646,13 @@ class MobileServer:
                 continue
             yield data.get("event_type") or "Event", seq, line
 
-    def _session_log(self, session_id: str) -> Optional[Path]:
+    def _session_log(self, session_id: str, *, private: bool = True) -> Optional[Path]:
         if self.replay is not None:
             return self.replay.path
+        if private and self.channel._private_dir is not None:
+            held = auth.confine(self.channel._private_dir, f"{session_id}.jsonl")
+            if held is not None and held.exists():
+                return held
         base = self.channel._session_dir
         if base is None:
             return None
@@ -666,7 +678,7 @@ class MobileServer:
                 best = seq
         return best
 
-    async def _maybe_prewarm(self) -> None:
+    async def _maybe_prewarm(self, private: bool = False) -> None:
         """Opening the app IS the signal — for a live session, and for a replay (LOCKED, §6.1).
 
         ACP cannot know a user is coming until they submit a prompt; this channel can, because it
@@ -694,6 +706,8 @@ class MobileServer:
             return
         if self.channel.session_id is not None:
             return
+        if self.channel.private is not None and self.channel.private != private:
+            return
         if self.channel.asleep:
             # A sleeping thread wakes on a message, never on a connect: a backgrounded page
             # reconnects on its own, and the point of sleeping was that nobody's pocket keeps
@@ -703,7 +717,7 @@ class MobileServer:
             log.info("mobile_prewarm_skipped", reason="provider not answering; waiting for a message")
             return
         self._bringup_started = True
-        self.on_first_message()
+        self.on_first_message(private=private)
 
     # ------------------------------------------------------------------ read verbs
 
@@ -719,6 +733,8 @@ class MobileServer:
             "session_id": self.channel.session_id,
             "agent_id": self.channel.agent_id,
             "session_live": self.channel.session_id is not None,
+            "private": self.channel.private is True,
+            "asleep_session_id": self.channel.asleep_session_id,
             "turn_in_progress": self.channel._turn_running,
             "mode": getattr(self.channel._gate, "mode", None),
             "clients": self.channel.client_count,
@@ -1116,7 +1132,7 @@ class MobileServer:
         if session_id == self.channel.session_id:
             return _json({"error": "this chat is live — end it with the + button first, "
                                    "then delete it"}, status=409)
-        path = self._session_log(session_id)
+        path = self._session_log(session_id, private=False)
         if path is None or not path.exists():
             return _json({"error": "no log with that id"}, status=404)
         # The sleeping chat is this log's thread, on disk beside it: deleting the chat discards
@@ -1313,7 +1329,10 @@ class MobileServer:
             return _json({"error": "images cannot ride a nudge; send them as a new message"},
                          status=400)
 
-        started = self._ensure_session()
+        private = body.get("private") is True
+        if (changed := await self._chat_for(private)) is not None:
+            return changed
+        started = self._ensure_session(private)
         if not self.channel._turn_running:
             # Between turns there is nothing to nudge: every intent is the same "run it next".
             self.channel.submit(text, parts)
@@ -1356,18 +1375,46 @@ class MobileServer:
         refusal = self._authed(request, post=True)
         if refusal is not None:
             return refusal
-        if self.on_new_session is None:
-            return _json({"error": "this server cannot restart the session — a replay serves "
-                                   "a finished log, and only the live runner installs the "
-                                   "restart handle"}, status=409)
+        if self.on_new_session is None or self.replay is not None:
+            return _json({"error": NO_RESTART_HANDLE}, status=409)
+        try:
+            body = await self._body(request)
+        except (ValueError, json.JSONDecodeError) as exc:
+            return _json({"error": str(exc)}, status=400)
         if self.channel._turn_running:
             return _json({"error": "a turn is running — stop it first, then start the new "
                                    "chat"}, status=409)
-        await self.on_new_session()
+        private = body.get("private") is True
+        left = await self.on_new_session(private=private)
         return _json({
             "status": "starting",
             "note": "the fresh session is building; the old chat stays in the history list",
+            "private": private,
+            "left": left or "",
         })
+
+    async def end_session(self, request: Request) -> Response:
+        """End the open private chat, remove its run folder and say what the removal left."""
+        refusal = self._authed(request, post=True)
+        if refusal is not None:
+            return refusal
+        if self.on_end is None or self.replay is not None:
+            return _json({"error": NO_RESTART_HANDLE}, status=409)
+        if self.channel.private is not True:
+            return _json({"error": "no private chat is open"}, status=409)
+        if self.channel._turn_running:
+            return _json({"error": "a turn is running — stop it first, then end the chat"}, status=409)
+        return _json({"status": "ended", "left": await self.on_end() or ""})
+
+    async def _chat_for(self, private: bool) -> Optional[JSONResponse]:
+        """None when the request may go to the chat on screen, else the 409. An empty normal chat is replaced toward private; nothing else is."""
+        current = self.channel.private
+        if current is None or current == private:
+            return None
+        if private and not self.channel.has_turns() and self.on_new_session is not None:
+            await self.on_new_session(private=True)
+            return None
+        return _json({"error": "the chat changed", "private": current}, status=409)
 
     async def answer(self, request: Request) -> Response:
         """Answer a blocking ask. Idempotent; the `_always` kinds and a picker's confirm option take a second, server-checked tap."""
@@ -1454,7 +1501,10 @@ class MobileServer:
             return _json({"error": "text is required"}, status=400)
         if not text.startswith("/"):
             text = "/" + text
-        self._ensure_session()
+        private = body.get("private") is True
+        if (changed := await self._chat_for(private)) is not None:
+            return changed
+        self._ensure_session(private)
         self.channel.submit(text)
         return _json({"status": "queued", "command": text.split()[0]})
 
@@ -1540,19 +1590,22 @@ class MobileServer:
         wake a sleeping one (`_maybe_prewarm`)."""
         self._bringup_started = False
 
-    def _ensure_session(self) -> bool:
+    def _ensure_session(self, private: bool = False) -> bool:
         """Start session bring-up if it has not begun. Returns True if this call started it."""
         if self._bringup_started or self.on_first_message is None or self.replay is not None:
             return False
         if self.channel.session_id is not None:
             return False
         self._bringup_started = True
-        self.on_first_message()
+        self.on_first_message(private=private)
         return True
 
 
 _VERBS: tuple[tuple[str, str, str], ...] = (
-    ("POST", "/api/sessions/new", "end the current session, build a fresh one; the old log stays"),
+    ("POST", "/api/sessions/new",
+     "end the current session, build a fresh one; the old log stays; body {private?}; reply {status, private, left}"),
+    ("POST", "/api/sessions/end",
+     "end the open private chat and remove its run folder; reply {status, left}, left naming what the removal left"),
     ("POST", "/api/sessions/{id}/message",
      "a user turn; body {text, intent?, images?: [{data: base64, mime, name}]}; at most 4 images, "
      "20 MiB each, 24 MiB body; type read from the bytes (PNG/JPEG/GIF/WebP), else 400; "

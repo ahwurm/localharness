@@ -500,7 +500,7 @@ async def test_new_chat_ends_the_session_and_begins_a_fresh_one(tmp_path):
     the response says the old chat survives on disk."""
     restarts = []
 
-    async def _restart():
+    async def _restart(*, private=False):
         restarts.append(1)
 
     _, channel, _, client = await _stack(tmp_path, on_new_session=_restart)
@@ -514,7 +514,7 @@ async def test_new_chat_ends_the_session_and_begins_a_fresh_one(tmp_path):
 async def test_new_chat_is_refused_mid_turn_and_without_a_restart_handle(tmp_path):
     """Mid-turn, a new chat would discard real GPU work — the stop verb exists, use it. And a
     server with no restart handle (replay) must say so instead of pretending."""
-    async def _restart():
+    async def _restart(*, private=False):
         raise AssertionError("the mid-turn refusal must come before the handle is called")
 
     _, channel, _, client = await _stack(tmp_path, on_new_session=_restart)
@@ -1128,7 +1128,7 @@ async def test_model_list_never_starts_a_session_or_probes_the_endpoint(tmp_path
     channel = MobileChannel(bus=EventBus(), config={})
     await channel.start()
     channel.probe_model = lambda *a, **k: probed.append(1)
-    server = MobileServer(channel, token=TOKEN, on_first_message=lambda: started.append(1))
+    server = MobileServer(channel, token=TOKEN, on_first_message=lambda **kw: started.append(1))
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url="http://web.test")
     assert (await client.get("/api/model", headers=BEARER)).status_code == 503
     assert not started and not probed
@@ -1321,7 +1321,7 @@ async def test_connecting_does_not_start_a_cold_model_server(tmp_path):
     _, channel, server, _ = await _stack(tmp_path)
     channel.session_id = None
     started: list[str] = []
-    server.on_first_message = lambda: started.append("bring-up")
+    server.on_first_message = lambda **kw: started.append("bring-up")
 
     channel._model_reachable = False
     server.channel.probe_model = _fixed(False)        # type: ignore[method-assign]
@@ -1337,7 +1337,7 @@ async def test_connecting_does_prewarm_a_warm_box(tmp_path):
     _, channel, server, _ = await _stack(tmp_path)
     channel.session_id = None
     started: list[str] = []
-    server.on_first_message = lambda: started.append("bring-up")
+    server.on_first_message = lambda **kw: started.append("bring-up")
     server.channel.probe_model = _fixed(True)         # type: ignore[method-assign]
     await server._maybe_prewarm()
     assert started == ["bring-up"]
