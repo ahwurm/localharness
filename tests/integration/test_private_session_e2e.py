@@ -445,3 +445,21 @@ async def test_a_private_session_recalls_none_of_the_projects_facts(world, monke
     assert db.read_bytes() == before
     assert_nothing_stays(world, out)
     assert normal["cfg"]
+
+
+async def test_a_redirect_spelled_through_a_variable_or_beside_one_is_refused_and_leaves_nothing(world, monkeypatch):
+    await warm_up(world, monkeypatch)
+    other = world.cfg / "run" / "aaaaaaaaaaaa" / "scratch" / "s.sh"
+    commands = ["echo x >> CLAUDE.md 2>$ERR", "cat README.md > CLAUDE.md 2> $LOCALHARNESS_SCRATCH/err",
+                "echo x >> $PWD/CLAUDE.md", 'cat >> "$PWD/AGENTS.md" <<EOF\nx\nEOF',
+                "echo x > $HOME/.localharness/agents/a.yaml", "echo x > $PWD/.agents/skills/s/SKILL.md",
+                f"echo x > {other} 2>$TMPDIR/err", f"tee {other} $LOG"]
+    world.lines = ["write the files"]
+    world.model = [call(f"b{i}", "bash_exec", command=c) for i, c in enumerate(commands)] + [
+        FakeLLMResponse(content="Done.")]
+    out = await session(world, monkeypatch, private=True)
+    assert [r.klass for r in world.asked] == ["workspace-trust"]
+    refused = [o.output or "" for o in world.observed if o.tool_name == "bash_exec"]
+    assert refused == ["[DENIED]"] * len(commands)
+    assert out["project"] == set() and not other.exists()
+    assert_nothing_stays(world, out)
