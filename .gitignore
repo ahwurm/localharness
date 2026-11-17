@@ -31,6 +31,7 @@ reports/
 /CLAUDE.md
 /INDEX.md
 /ARCHITECT-REVIEW.md
+/examples/workflows/
 # REPL dogfood outputs (subject-model-written files from live run-throughs)
 lh_test_artifacts/
 .coverage

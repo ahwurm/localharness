@@ -53,19 +53,3 @@ The agent can tell you where the swatch was saved: the tool's result names the f
 
 See [plugin-template/README.md](plugin-template/README.md) for what each part does and a checklist
 for copying it.
-
-## `workflows/sample/`
-
-A fictional sample writing task for trying the task pipeline on substantive work: an
-instruction file with stages and checks, two sources, a style sample, a deterministic lint, and a
-read-only reviewer plus a writer. Copy the folder outside this repository first, then make the
-specialists available, because LocalHarness loads project agents from `.localharness/agents/`:
-
-```bash
-cp -r examples/workflows/sample ~/sample && cd ~/sample
-mkdir -p .localharness/agents && cp agents/*.yaml .localharness/agents/
-localharness start
-```
-
-See [the example workflow](../docs/metaharness.md#the-example-workflow) for what to ask and what
-the task's docs should show.

@@ -1325,8 +1325,7 @@ from a documented test-environment coupling in `test_start_cmd.py`. See
 - The record persists in `task.json` (private, atomic, at most 64 KiB) and resumes on the next
   start in the same folder. `/task` shows it and `/task clear` deletes it. An unreadable file is
   moved to `task.json.corrupt`.
-- A synthetic sample [example workflow](examples/workflows/sample/) in the
-  repository (not in the PyPI package).
+- An example workflow in the repository (not in the PyPI package; since removed).
 
 ### Changed
 - Checks bind to a call whose arguments include every declared argument with the same value;
