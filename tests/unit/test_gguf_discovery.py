@@ -611,3 +611,33 @@ def test_model_of_describes_an_admitted_model_header_unpaired_and_nothing_else(t
         "Some-Model", 12.5, None, 2, str(path.resolve()))
     assert gguf_header.model_of(path, {**header, "type": "adapter"}, mtime=1.0) is None
     assert gguf_header.model_of(path, {**header, "architecture": "clip"}, mtime=1.0) is None
+
+
+def _with_tensors(path: Path, kv: dict, names: list[str]) -> Path:
+    tensors = [(name, [8], 0, 32 * i) for i, name in enumerate(names)]
+    return write_gguf(path, kv, tensors=tensors, data_bytes=32 * len(names))
+
+
+def test_a_drafter_or_an_mtp_only_file_is_not_a_model(tmp_path):
+    """Shapes read off real files: a dflash drafter (borrows the target's token_embd, so has none) and a
+    Qwen MTP-only file (holds only the nextn block past the trunk, no blk.0). Neither can serve a chat."""
+    drafter = _with_tensors(tmp_path / "drafter-dflash.gguf",
+                            {"general.architecture": "dflash", "dflash.block_count": 3},
+                            ["fc.weight", "blk.0.attn_norm.weight", "blk.1.attn_norm.weight",
+                             "blk.2.attn_norm.weight", "output_norm.weight"])
+    mtp_only = _with_tensors(tmp_path / "Q-MTP-ONLY.gguf",
+                             {"general.architecture": "qwen35", "general.type": "model",
+                              "qwen35.block_count": 65, "qwen35.nextn_predict_layers": 1},
+                             ["output.weight", "output_norm.weight", "token_embd.weight",
+                              "blk.64.attn_norm.weight", "blk.64.nextn.eh_proj.weight"])
+    full = _with_tensors(tmp_path / "Q-Q4.gguf",
+                         {"general.architecture": "qwen35", "general.type": "model",
+                          "qwen35.block_count": 2, "qwen35.nextn_predict_layers": 1},
+                         ["output.weight", "token_embd.weight", "blk.0.attn_norm.weight",
+                          "blk.1.nextn.eh_proj.weight"])
+
+    found = discover([drafter, mtp_only, full])
+
+    assert [m.path for m in found.models] == [full]
+    assert found.kinds[str(drafter)] is gguf_header.FileKind.OTHER
+    assert found.kinds[str(mtp_only)] is gguf_header.FileKind.OTHER
