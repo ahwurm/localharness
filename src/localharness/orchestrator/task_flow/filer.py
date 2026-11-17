@@ -343,6 +343,10 @@ def _remove_and_close(name: str, fd: int) -> None:
         os.close(fd)
 
 
+def task_doc(state_dir: Path, agent: str, task: int | str, name: str) -> Path:
+    return state_dir / "agents" / agent / "tasks" / f"t{task}" / name
+
+
 @dataclass
 class Docs:
     state_dir: Path
@@ -483,7 +487,7 @@ class Docs:
             self.write_session(name, "")
 
     def path(self, task: int, name: str) -> Path:
-        return self.state_dir / "agents" / self.agent / "tasks" / f"t{task}" / name
+        return task_doc(self.state_dir, self.agent, task, name)
 
     def scratch(self, task: int) -> Path | None:
         """Where a task's own output files go: the agent may write here, never in the task folder."""

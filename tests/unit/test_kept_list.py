@@ -8,9 +8,10 @@ from types import SimpleNamespace
 import pytest
 
 from localharness.agent.gate_types import GateSettings
-from localharness.agent.loop import AgentLoop, arm_lines, end_kept_turn, goes, kept_line
+from localharness.agent.loop import AgentLoop
 from localharness.agent.verdict import GateContext
-from localharness.core.run_folder import begin, end, note_written
+from localharness.channels.terminal import arm_lines
+from localharness.core.run_folder import Written, begin, end, end_kept_turn, goes, kept_line, note_written
 from localharness.orchestrator.task_flow.panel import compose_request
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="descriptor-relative run folders")
@@ -62,7 +63,7 @@ def test_the_first_write_of_a_path_fixes_its_turn(world):
     note_written(world.run, [world.ws / "a"], shown=True)
     world.run.turn = 2
     note_written(world.run, [world.ws / "a"], shown=False)
-    assert world.run.written[str(world.ws / "a")] == [1, False, True]
+    assert world.run.written[str(world.ws / "a")] == Written(1, False, True)
 
 
 async def test_a_tool_row_file_is_counted_but_not_named_and_a_shell_file_is_named(world):

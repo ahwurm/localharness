@@ -3457,7 +3457,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 channel.first_prompt_hint = _hint_with_instructions(
                     channel.first_prompt_hint, instructions_handle.start_line)
         if private and isinstance(channel, TerminalChannel):
-            from localharness.agent.loop import arm_lines
+            from localharness.channels.terminal import arm_lines
             channel.chip = lambda: _private_chip(llm)
             channel.arm_lines = lambda: arm_lines(run, gate.boundary or gate.workspace)
         if hasattr(channel, "tps_source"):

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from localharness.agent.gate_types import PermissionRequest
-from localharness.agent.loop import AgentLoop, kept_names
+from localharness.agent.loop import AgentLoop
 from localharness.channels.mobile import push
 from localharness.channels.mobile.channel import (
     PRIVATE_TAINTED_CONFIRM,
@@ -17,7 +17,7 @@ from localharness.channels.mobile.channel import (
 )
 from localharness.core.bus import EventBus
 from localharness.core.events import TaskComplete, TurnCompleted, TurnStarted
-from localharness.core.run_folder import begin, end, note_written
+from localharness.core.run_folder import begin, end, kept_names, note_written
 from tests.unit.channels.test_mobile_artifacts import PNG, _put, _two_roots
 from tests.unit.channels.test_mobile_private import _private_stack
 from tests.unit.channels.test_mobile_push import _pushable

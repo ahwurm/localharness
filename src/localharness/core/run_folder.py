@@ -20,6 +20,7 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from localharness.core.caps import Caps
 from localharness.core.private_files import (
     _DIR_FLAGS, OPEN_TO_OTHERS, PRIVATE_DIR_MODE, PRIVATE_FILE_MODE, atomic_write_text,
     empty_dir, in_background, open_private_dir, read_private_text, remove_dir,
@@ -45,6 +46,14 @@ _TOLD_VISIT_CAP = 2000
 _ID = re.compile(r"[0-9a-f]{12}")
 _DELETING = re.compile(r"\.deleting-[0-9a-f]{12}")
 _MARKER = re.compile(r"[0-9a-f]{32}")
+KEPT_NAMES = 6
+
+
+@dataclass
+class Written:
+    turn: int
+    announced: bool = False
+    shown: bool = False
 
 
 @dataclass
@@ -102,7 +111,70 @@ def hold(store: str, key: object, value: object, scratch: bool = False) -> bool:
 def note_written(run: RunFolder, paths, shown: bool) -> None:
     """Record the paths a call wrote, each with the turn that first wrote it; the first write wins."""
     for path in paths:
-        run.written.setdefault(str(path), [run.turn, False, shown])
+        run.written.setdefault(str(path), Written(run.turn, shown=shown))
+
+
+def _stays(run: RunFolder) -> list[tuple[str, Written]]:
+    """The written files still on disk outside the run folder."""
+    own = (str(run.path), str(run.path.resolve()))
+    return [(p, w) for p, w in list(run.written.items()) if not p.startswith(own) and os.path.lexists(p)]
+
+
+def _inside(path: str, root) -> str | None:
+    for base in (Path(root), Path(root).resolve()) if root else ():
+        with contextlib.suppress(ValueError):
+            return str(Path(path).relative_to(base))
+    return None
+
+
+def _listed(names: list[str]) -> str:
+    from localharness.channels.base import one_line
+    shown = ", ".join(one_line(n)[:Caps.FINDING] for n in names[:KEPT_NAMES])
+    return shown + (f" and {len(names) - KEPT_NAMES} more" if len(names) > KEPT_NAMES else "")
+
+
+def kept_line(run: RunFolder, root) -> str:
+    """What this turn's new files say about what stays: shell-made project files and files outside the project, none already shown by a tool row."""
+    made, outside = [], []
+    for path, w in _stays(run):
+        if w.turn != run.turn or w.announced:
+            continue
+        if (rel := _inside(path, root)) is None:
+            outside.append(path)
+        elif not w.shown:
+            made.append(rel)
+    if not (made or outside):
+        return ""
+    rows = [_listed(made)] * bool(made) + [f"also wrote outside the project: {_listed(outside)}"] * bool(outside)
+    return "\n".join(rows + ["at least these; commands may leave more"] * (not run.stated))
+
+
+def kept_names(run: RunFolder, root) -> tuple[str, ...]:
+    """Every written file still on disk outside the run folder, project-relative where it can be, capped."""
+    from localharness.channels.base import one_line
+    names = [_inside(p, root) or p for p, _ in _stays(run)]
+    more = [f"and {len(names) - KEPT_NAMES} more"] * (len(names) > KEPT_NAMES)
+    return tuple([one_line(n)[:Caps.FINDING] for n in names[:KEPT_NAMES]] + more)
+
+
+def end_kept_turn(run: RunFolder, root) -> None:
+    run.stated = run.stated or bool(kept_line(run, root))
+    for w in run.written.values():
+        if w.turn == run.turn:
+            w.announced = True
+
+
+def goes(run: RunFolder) -> tuple[tuple[str, str], ...]:
+    """Files that go with the session: scratch files a reply named, pictures, saved pages, task docs."""
+    from localharness.agent.taint import DOWNLOADS
+    from localharness.core.artifacts import ARTIFACTS_DIR_NAME
+    from localharness.orchestrator.task_flow.filer import task_doc
+    found = [("file", n.rsplit("/", 1)[-1]) for n in sorted(run.told) if os.path.lexists(run.scratch / n)]
+    state = run.state
+    for kind, pattern in (("file", f"{ARTIFACTS_DIR_NAME}/*/*"), ("saved page", "/".join((*DOWNLOADS, "*"))),
+                          ("task doc", str(task_doc(Path(), "*", "*", "**/*")))):
+        found += [(kind, p.name) for p in sorted(state.glob(pattern)) if p.is_file() and not p.is_symlink()]
+    return tuple(found)
 
 
 def scratch_of(run: RunFolder | None, workspace_root: str | None) -> Path | None:

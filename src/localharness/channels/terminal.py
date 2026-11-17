@@ -41,6 +41,7 @@ from localharness.channels.base import (
     PERMISSION_DENIED_LINE,
     ChannelAdapter,
     _call_receipt,
+    one_line,
     provider_lost_seconds,
     sanitize_for_display,
 )
@@ -51,7 +52,8 @@ from localharness.config.chords import ChordName
 from localharness.config.models import TerminalKeysConfig
 from localharness.core.bus import EventBus
 from localharness.core.private_files import touch_private
-from localharness.core.run_folder import current
+from localharness.core.caps import Caps
+from localharness.core.run_folder import _inside, _stays, current, goes
 from localharness.channels.input_router import FORCE_PREFIX
 from localharness.core.events import (
     DELEGATION_WORDS,
@@ -598,6 +600,27 @@ def press(armed: bool, armed_at: float, now: float, lines: Any, eof: bool) -> st
     if armed:
         return "ignore" if lines and now - armed_at < ARM_WINDOW_S else "exit"
     return "arm" if lines or not eof else "exit"
+
+
+GOES_NAMES = 3
+
+
+def arm_lines(run, root) -> tuple[str, str] | None:
+    """The arm line and the footer hint for Ctrl+C or Ctrl+D, or None when nothing goes."""
+    if not (items := goes(run)):
+        return None
+    parts = [(one_line(n)[:Caps.LINE], 1) for k, n in items if k == "file"]
+    for kind in ("saved page", "task doc"):
+        if count := sum(k == kind for k, _ in items):
+            parts.append((f"{count} {kind}{'s' * (count != 1)}", count))
+    if len(parts) > GOES_NAMES:
+        parts = [*parts[:GOES_NAMES - 1], (f"{sum(w for _, w in parts[GOES_NAMES - 1:])} more", 0)]
+    names = ", ".join(t for t, _ in parts[:-1]) + (" and " if len(parts) > 1 else "") + parts[-1][0]
+    stay = sum(_inside(p, root) is not None for p, _ in _stays(run))
+    tail = f"; at least {stay} project file{'s' * (stay != 1)} stay{'s' * (stay == 1)}" if stay else ""
+    count = len(items)
+    return (f"Press Ctrl+C or Ctrl+D again to end this private session: {names} go{tail}.",
+            f"Ctrl+C or Ctrl+D again ends this private session ({count} file{'s' * (count != 1)} go{'es' * (count == 1)})")
 
 
 PERMISSION_ANSWER_LINES_SESSION: dict[str, str] = {
