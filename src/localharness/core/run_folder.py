@@ -232,7 +232,7 @@ def begin(config_dir: Path, private: bool = False, home: Path | None = None) -> 
     try:
         run = None
         if native():
-            if home is not None:
+            if home is not None and not (private and any(map(_shared, (Path(home).parent, Path(home))))):
                 try:
                     run = _begin(Path(home), private, legacy=config_dir.resolve())
                 except OSError:
@@ -245,6 +245,27 @@ def begin(config_dir: Path, private: bool = False, home: Path | None = None) -> 
         return None
     _current = run
     return run
+
+
+def _shared(path: Path) -> bool:
+    """Can another account write `path`: o+w, or g+w with a group someone else is in?"""
+    import grp
+    import pwd
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    if st.st_mode & stat.S_IWOTH:
+        return True
+    if not st.st_mode & stat.S_IWGRP:
+        return False
+    try:
+        members = set(grp.getgrgid(st.st_gid).gr_mem)
+    except KeyError:
+        return True
+    users = pwd.getpwall()
+    me = {u.pw_name for u in users if u.pw_uid == os.geteuid()}
+    return bool(members - me) or any(u.pw_gid == st.st_gid and u.pw_uid != os.geteuid() for u in users)
 
 
 def _ours(fd: int) -> bool:

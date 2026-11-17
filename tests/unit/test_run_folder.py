@@ -649,6 +649,47 @@ def test_an_unwritable_project_falls_back_to_the_config_folder(cfg, proj, existi
         (home if existing else proj).chmod(0o755)
 
 
+def _accounts(monkeypatch, members=(), primary=()):
+    import grp
+    import pwd
+    me = os.geteuid()
+    monkeypatch.setattr(grp, "getgrgid", lambda gid: SimpleNamespace(gr_name="team", gr_gid=gid, gr_mem=["me", *members]))
+    monkeypatch.setattr(pwd, "getpwall", lambda: [SimpleNamespace(pw_name="me", pw_uid=me, pw_gid=os.getegid()),
+                                                  *(SimpleNamespace(pw_name=n, pw_uid=me + 1 + i, pw_gid=os.getegid())
+                                                    for i, n in enumerate(primary))])
+
+
+@pytest.mark.parametrize("where, mode, members, primary", [
+    ("root", 0o757, (), ()), ("dot", 0o707, (), ()), ("root", 0o775, ("bob",), ()), ("dot", 0o770, (), ("bob",))])
+def test_a_private_session_in_a_project_another_account_can_write_keeps_its_run_in_the_config_folder(
+        cfg, proj, monkeypatch, where, mode, members, primary):
+    _accounts(monkeypatch, members, primary)
+    home = proj / ".localharness"
+    home.mkdir()
+    (proj if where == "root" else home).chmod(mode)
+    run = begin(cfg, private=True, home=home)
+    try:
+        assert run.path.parent == cfg.resolve() / "run" and list(home.iterdir()) == []
+    finally:
+        end(run)
+    normal = begin(cfg, home=home)
+    try:
+        assert normal.path.parent == home.resolve() / "run"
+    finally:
+        end(normal)
+
+
+def test_a_private_session_in_a_project_writable_only_by_a_user_private_group_keeps_its_run_there(cfg, proj, monkeypatch):
+    _accounts(monkeypatch)
+    proj.chmod(0o775)
+    home = proj / ".localharness"
+    run = begin(cfg, private=True, home=home)
+    try:
+        assert run.path.parent == home.resolve() / "run"
+    finally:
+        end(run)
+
+
 def test_a_project_without_enforced_locks_falls_back_to_the_config_folder(cfg, proj, monkeypatch):
     real = run_folder._enforced
     home = proj / ".localharness"

@@ -1330,7 +1330,9 @@ section lists what it does not.
 **Where things go.** The session's state (event logs, the memory store, history, `MEMORY.md`, `compact.md`,
 `memory.log`, `context.log`, task documents, the input history, pictures, pages saved with `save_to`, and the
 search verifier's ledger) is written under the run folder's `state/`, in the project's `.localharness/run/<id>/`
-(`<config dir>/run/<id>/` for a session with no project), and deleted with the run folder. Saved pages sit in
+(`<config dir>/run/<id>/` for a session with no project, or when another account can write the project folder or its
+`.localharness/`: others may, or a group with another member may), and deleted with the run folder. A normal
+session keeps its run in such a project, since its state is written there anyway. Saved pages sit in
 `state/.localharness/downloads/` there, so the saved-pages rules above apply to them unchanged. A private
 session reads no learned memory, neither the project's nor the machine's, and it reads config, agent files,
 skills and the project's instructions file as any session does. Records that name the project or the session
@@ -1338,7 +1340,7 @@ skills and the project's instructions file as any session does. Records that nam
 record, shown notices and the `/review` level) are read as usual, and a new answer is held in this process only:
 an "always" lasts for the session and is not written to `grants.yaml`, a trust answer is not written to the
 trust record, and `project_records.yaml` is read but never written. Apart from `.localharness/run/`, which
-holds the run folder and stays with only its `.gitignore`, no `.localharness/` content, downloads folder,
+holds a run kept in the project and stays with only its `.gitignore`, no `.localharness/` content, downloads folder,
 `reports/` ledger, audit row or git hook is made in the project, no co-author consent is asked and no
 live session is registered, so a private session is neither warned about nor warns. The `LOCALHARNESS_COMMIT`
 marker reads `private`, so a commit the agent makes carries no co-author trailer.
@@ -1385,8 +1387,8 @@ which files it wrote stay, naming every one the first time and after that the on
 
 **What a private session does not hide.** A crash, a kill or a power cut leaves the run folder in the project's
 `.localharness/run/` (the config folder's `run/` for a session with no project) until the next session started
-there removes it. After a private session in a folder
-that had no `.localharness/`, `.localharness/run/` with its `.gitignore` remains, so the folder shows a session ran
+there removes it. After a private session that kept its run in
+a folder that had no `.localharness/`, `.localharness/run/` with its `.gitignore` remains, so the folder shows a session ran
 there. A project in a synced or backed-up folder copies the run folder while it exists; start a private session
 there with `--config-dir <local folder>`. A plugin that outlives its stop timeout can re-create its folder in the
 run after the end and leave it there until then. That a session ran is visible in the model server's log and
