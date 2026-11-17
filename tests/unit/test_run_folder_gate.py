@@ -25,17 +25,19 @@ def no_grants(workspace: Path, klass: str, key: str) -> Grant | None:
 
 
 class World:
-    def __init__(self, home: Path):
+    def __init__(self, home: Path, placement: str = "config"):
         self.home = home
         self.cfg = home / ".localharness"
         self.ws = home / "proj"
         self.ws.mkdir()
         (self.cfg / "agents").mkdir(parents=True)
         (self.cfg / "config.yaml").write_text("{}\n")
-        self.run = begin(self.cfg)
-        assert self.run is not None and self.run.path.parent == self.cfg.resolve() / "run"
+        kept_in = self.ws / ".localharness" if placement == "project" else self.cfg
+        self.run = begin(self.cfg, home=kept_in if placement == "project" else None)
+        runs = kept_in.resolve() / "run"
+        assert self.run is not None and self.run.path.parent == runs
         self.scratch = self.run.scratch
-        self.other = self.cfg.resolve() / "run" / OTHER / "scratch"
+        self.other = runs / OTHER / "scratch"
         self.other.mkdir(parents=True)
         (self.other / "secret").write_text("s")
 
@@ -54,31 +56,40 @@ class World:
         return evaluate("bash_exec", params, SHELL, self.ctx(**kw), SETTINGS)
 
 
-@pytest.fixture
-def world(tmp_path, monkeypatch):
+def _world(tmp_path, monkeypatch, placement):
     home = (tmp_path / "home").resolve()
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("LOCALHARNESS_DIR", str(home / ".localharness"))
-    w = World(home)
+    w = World(home, placement)
     yield w
     end(w.run)
+
+
+@pytest.fixture
+def world(tmp_path, monkeypatch):
+    yield from _world(tmp_path, monkeypatch, "config")
+
+
+@pytest.fixture(params=("config", "project"))
+def any_world(request, tmp_path, monkeypatch):
+    yield from _world(tmp_path, monkeypatch, request.param)
 
 
 # ------------------------------------------------------------------------------- the deny row
 
 @pytest.mark.parametrize("mode", MODES)
-def test_another_sessions_scratch_is_denied_to_a_write_and_a_shell_write_in_every_mode(world, mode):
-    for result in (world.write(world.other / "x", mode=mode), world.shell(f"echo x > {world.other}/x", mode=mode)):
+def test_another_sessions_scratch_is_denied_to_a_write_and_a_shell_write_in_every_mode(any_world, mode):
+    for result in (any_world.write(any_world.other / "x", mode=mode), any_world.shell(f"echo x > {any_world.other}/x", mode=mode)):
         assert result.verdict is Verdict.DENY
-        assert str(world.scratch) in result.reason
+        assert str(any_world.scratch) in result.reason
 
 
 @pytest.mark.parametrize("mode", MODES)
-def test_removing_run_or_writing_its_gitignore_is_denied_in_every_mode(world, mode):
-    run_dir = world.cfg.resolve() / "run"
-    for result in (world.shell(f"rm -rf {run_dir}", mode=mode), world.write(run_dir / ".gitignore", mode=mode),
-                   world.shell(f"rm -rf {world.other.parent}", mode=mode)):
+def test_removing_run_or_writing_its_gitignore_is_denied_in_every_mode(any_world, mode):
+    run_dir = any_world.other.parent.parent
+    for result in (any_world.shell(f"rm -rf {run_dir}", mode=mode), any_world.write(run_dir / ".gitignore", mode=mode),
+                   any_world.shell(f"rm -rf {any_world.other.parent}", mode=mode)):
         assert result.verdict is Verdict.DENY
 
 
@@ -88,9 +99,9 @@ def test_removing_run_or_writing_its_gitignore_is_denied_in_every_mode(world, mo
     f"ln -s ../../../{OTHER}/scratch/secret t3/link",
     f"ln -s ../../../{OTHER}/scratch/secret -t t3",
 ])
-def test_a_relative_link_source_is_read_from_the_folder_the_link_sits_in(world, mode, command):
-    (world.scratch / "t3").mkdir()
-    assert world.shell(command, working_dir=world.scratch, mode=mode).verdict is Verdict.DENY
+def test_a_relative_link_source_is_read_from_the_folder_the_link_sits_in(any_world, mode, command):
+    (any_world.scratch / "t3").mkdir()
+    assert any_world.shell(command, working_dir=any_world.scratch, mode=mode).verdict is Verdict.DENY
 
 
 def test_a_link_to_a_file_in_the_project_is_not_denied(world):
@@ -103,8 +114,8 @@ def test_a_link_to_a_file_in_the_project_is_not_denied(world):
 @pytest.mark.parametrize("command", [
     "echo x > {o}/s.sh 2>$TMPDIR/err", "cp a {o}/s.sh 2>$ERR", "tee {o}/s.sh $LOG", "echo x >> {o}/s.sh 2> $LOG",
 ])
-def test_a_second_variable_spelled_target_does_not_lift_the_deny(world, mode, command):
-    assert world.shell(command.format(o=world.other), mode=mode).verdict is Verdict.DENY
+def test_a_second_variable_spelled_target_does_not_lift_the_deny(any_world, mode, command):
+    assert any_world.shell(command.format(o=any_world.other), mode=mode).verdict is Verdict.DENY
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -112,12 +123,12 @@ def test_a_second_variable_spelled_target_does_not_lift_the_deny(world, mode, co
     "cp -l {o}/secret {s}/h", "cp -s {o}/secret {s}/h", "cp -a {o}/secret {s}/h", "cp --link {o}/secret {s}/h",
     "rsync --link-dest={o} a/ {s}/b", "rsync -a --link-dest {o} a/ {s}/b",
 ])
-def test_a_linking_copy_from_another_sessions_folder_is_denied(world, mode, command):
-    assert world.shell(command.format(o=world.other, s=world.scratch), mode=mode).verdict is Verdict.DENY
+def test_a_linking_copy_from_another_sessions_folder_is_denied(any_world, mode, command):
+    assert any_world.shell(command.format(o=any_world.other, s=any_world.scratch), mode=mode).verdict is Verdict.DENY
 
 
-def test_a_plain_copy_out_of_another_sessions_folder_is_not_denied(world):
-    assert world.shell(f"cp {world.other}/secret {world.scratch}/h").verdict is not Verdict.DENY
+def test_a_plain_copy_out_of_another_sessions_folder_is_not_denied(any_world):
+    assert any_world.shell(f"cp {any_world.other}/secret {any_world.scratch}/h").verdict is not Verdict.DENY
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -127,6 +138,36 @@ def test_a_home_spelling_of_the_run_folder_is_refused_by_text(world, mode):
                     f'cp a "${{HOME}}/.localharness/run/{OTHER}/scratch/y"'):
         assert world.shell(command, mode=mode).verdict is Verdict.DENY
     assert world.write(f"$HOME/.localharness/run/{OTHER}/scratch/y", mode=mode).verdict is Verdict.DENY
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_another_projects_run_folder_is_denied_in_every_mode(any_world, tmp_path, mode):
+    elsewhere = tmp_path / "elsewhere" / ".localharness" / "run" / OTHER / "scratch" / "x"
+    shouted = Path(str(elsewhere).replace("/.localharness/run/", "/.LocalHarness/RUN/"))
+    for path in (elsewhere, shouted):
+        assert any_world.write(path, mode=mode).verdict is Verdict.DENY
+        assert any_world.shell(f"echo x > {path}", mode=mode).verdict is Verdict.DENY
+        assert any_world.shell(f"rm -rf {path.parent}", mode=mode).verdict is Verdict.DENY
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_pwd_spelling_of_a_project_run_is_refused_by_text(world, mode):
+    for command in (f'echo x > "$PWD/.localharness/run/{OTHER}/scratch/y"', f"rm -rf $PWD/.localharness/run/{OTHER}",
+                    f'cp a "${{PWD}}/.LocalHarness/run/{OTHER}/scratch/y"'):
+        assert world.shell(command, mode=mode).verdict is Verdict.DENY
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_project_scratch_write_is_judged_as_a_project_write(tmp_path, monkeypatch, mode):
+    w = next(_world(tmp_path, monkeypatch, "project"))
+    try:
+        for via in ("write", "shell"):
+            ask = (lambda p: w.write(p, mode=mode)) if via == "write" else (lambda p: w.shell(f"echo x > {p}", mode=mode))
+            mine, project = ask(w.scratch / "a"), ask(w.ws / "a")
+            assert (mine.verdict, mine.reason) == (project.verdict, project.reason)
+            assert mine.request is None or (mine.request.options_legend is None and ("edit-outside", str(w.scratch)) not in mine.request.grant_keys)
+    finally:
+        end(w.run)
 
 
 def test_a_read_of_a_home_spelling_is_not_refused(world):
@@ -146,11 +187,11 @@ def test_a_session_without_scratch_is_told_so(world):
     assert result.verdict is Verdict.DENY and "has no scratch" in result.reason
 
 
-def test_writes_inside_this_sessions_scratch_are_not_denied(world):
-    for path in (world.scratch / "a", world.scratch / "t3" / "b"):
-        assert world.write(path).verdict is not Verdict.DENY
-    assert world.shell(f"echo x > {world.scratch}/t3/b").verdict is not Verdict.DENY
-    assert world.shell(f"rm -rf {world.scratch}/t3").verdict is not Verdict.DENY
+def test_writes_inside_this_sessions_scratch_are_not_denied(any_world):
+    for path in (any_world.scratch / "a", any_world.scratch / "t3" / "b"):
+        assert any_world.write(path).verdict is not Verdict.DENY
+    assert any_world.shell(f"echo x > {any_world.scratch}/t3/b").verdict is not Verdict.DENY
+    assert any_world.shell(f"rm -rf {any_world.scratch}/t3").verdict is not Verdict.DENY
 
 
 # ------------------------------------------------------------------- scratch judged as an outside write
@@ -303,14 +344,14 @@ MOVES = [
 
 @pytest.mark.parametrize("command", ['mv "$TMPDIR/a" "$TMPDIR/b"', "mv $LOCALHARNESS_SCRATCH/a $TMPDIR/b",
                                      "mv ${{TMPDIR}}/a {s}/b"])
-def test_a_move_within_the_run_spelled_by_its_variables_does_not_ask(world, command):
-    assert world.shell(command.format(s=world.scratch), mode="auto").verdict is Verdict.ALLOW
+def test_a_move_within_the_run_spelled_by_its_variables_does_not_ask(any_world, command):
+    assert any_world.shell(command.format(s=any_world.scratch), mode="auto").verdict is Verdict.ALLOW
 
 
 @pytest.mark.parametrize("mode", ["auto", "guarded"])
 @pytest.mark.parametrize("command,source", MOVES)
-def test_a_move_into_scratch_asks_ungrantably_and_names_the_source(world, mode, command, source):
-    result = world.shell(command.format(s=world.scratch), mode=mode)
+def test_a_move_into_scratch_asks_ungrantably_and_names_the_source(any_world, mode, command, source):
+    result = any_world.shell(command.format(s=any_world.scratch), mode=mode)
     assert result.verdict is Verdict.ASK
     assert not result.request.grantable
     assert f"moves {source} {MOVES_INTO}" in result.request.reason
@@ -325,8 +366,8 @@ def test_a_move_into_a_fallback_run_asks_too(world, tmp_path, mode):
 
 @pytest.mark.parametrize("mode", ["auto", "guarded"])
 @pytest.mark.parametrize("command", ["mv {s}/a {s}/b", "cp ~/x {s}/y", "mv ~/x ~/y", "cd /tmp && mv ~/x ~/y"])
-def test_a_move_inside_scratch_a_copy_in_or_a_move_elsewhere_does_not_raise_the_move_ask(world, mode, command):
-    result = world.shell(command.format(s=world.scratch), mode=mode)
+def test_a_move_inside_scratch_a_copy_in_or_a_move_elsewhere_does_not_raise_the_move_ask(any_world, mode, command):
+    result = any_world.shell(command.format(s=any_world.scratch), mode=mode)
     assert MOVES_INTO not in (result.request.reason if result.request else "")
 
 

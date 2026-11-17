@@ -18,6 +18,7 @@ from typing import Optional, Union
 # The ONE directory name both layers use. The global default and the workspace walk-up derive
 # from this anchor so they can never drift apart.
 WORKSPACE_DIR_NAME = ".localharness"
+RUN_DIR_NAME = "run"
 _DEFAULT_CONFIG_DIR = f"~/{WORKSPACE_DIR_NAME}"
 
 # The repository marker. `.git` is a DIRECTORY in an ordinary clone and a FILE in a git worktree
@@ -105,6 +106,14 @@ def _is_dir(path: Path) -> bool:
         return False
 
 
+def run_only(path: PathLike) -> bool:
+    """A ``.localharness/`` that holds nothing but the run folder, which makes it no workspace."""
+    try:
+        return set(os.listdir(path)) == {RUN_DIR_NAME}
+    except OSError:
+        return False
+
+
 def discover_workspace_dir(start: Optional[PathLike] = None) -> Optional[Path]:
     """The nearest ``.localharness/`` at or above ``start`` (default: CWD), or None.
 
@@ -119,7 +128,7 @@ def discover_workspace_dir(start: Optional[PathLike] = None) -> Optional[Path]:
     Says nothing about whether the result may be LOADED — that is
     ``workspace_is_within_repo`` plus ``cli/workspace.resolve_workspace_layer``.
 
-    Pure: ``Path.is_dir()`` only. No env reading, no trust check, no prompting — those belong to
+    Pure: ``Path.is_dir()`` and one listing of a candidate. No env reading, no trust check, no prompting — those belong to
     ``cli/workspace.resolve_workspace_layer()``. Must be called inside a function body at the
     moment a command runs, NEVER bound to a module-level name (the workspace root varies per
     CWD; ``config/overlay.py:32-35``'s frozen ``USER_OVERLAY_PATH`` is the trap to avoid).
@@ -141,7 +150,7 @@ def discover_workspace_dir(start: Optional[PathLike] = None) -> Optional[Path]:
         candidate = ancestor / WORKSPACE_DIR_NAME
         if global_dir is not None and candidate == global_dir:
             return None
-        if _is_dir(candidate):
+        if _is_dir(candidate) and not run_only(candidate):
             return candidate
     return None
 

@@ -4,6 +4,8 @@ import errno
 import fcntl
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -30,6 +32,13 @@ def cfg(tmp_path):
 
 
 @pytest.fixture
+def proj(tmp_path):
+    d = tmp_path / "proj"
+    d.mkdir()
+    return d
+
+
+@pytest.fixture
 def temp(tmp_path, monkeypatch):
     d = tmp_path / "tmp"
     d.mkdir()
@@ -44,7 +53,8 @@ def _ids(cfg):
 def test_begin_makes_the_folder_and_end_removes_it(cfg):
     run = begin(cfg)
     assert HEX.fullmatch(run.path.name) and run.path.parent == (cfg / "run").resolve()
-    assert sorted(p.name for p in run.path.iterdir()) == [".marker", "scratch", "t"]
+    assert sorted(p.name for p in run.path.iterdir()) == [".gitignore", ".marker", "scratch", "t"]
+    assert (run.path / ".gitignore").read_text() == "*\n"
     assert (run.path / ".marker").read_text() == marker()
     assert (cfg / "run" / ".gitignore").read_text().strip() == "*"
     assert oct(run.path.stat().st_mode & 0o777) == "0o700"
@@ -115,16 +125,22 @@ def test_gitignore_survives_two_begins(cfg):
     end(b)
 
 
-def test_scratch_of_and_command_env(cfg):
-    run = begin(cfg)
+def test_scratch_of_and_command_env(cfg, proj):
+    run, kept = begin(cfg), begin(cfg, home=proj / ".localharness")
     try:
         assert scratch_of(run, None) == run.scratch
         assert scratch_of(run, "x") is None and scratch_of(None, None) is None
+        assert scratch_of(kept, str(proj)) == scratch_of(kept, f"{proj}/../proj") == kept.scratch
+        assert scratch_of(kept, str(proj / "sub")) is None and scratch_of(run, str(proj)) is None
+        assert command_env(kept, str(proj)) == {"LOCALHARNESS_COMMIT": "1", "LOCALHARNESS_SCRATCH": str(kept.scratch),
+                                                "TMPDIR": str(kept.path / "t")}
+        assert command_env(run, str(proj)) == {"LOCALHARNESS_COMMIT": "1"}
         assert command_env(run) == {"LOCALHARNESS_COMMIT": "1", "LOCALHARNESS_SCRATCH": str(run.path / "scratch"),
                                     "TMPDIR": str(run.path / "t")}
         assert command_env(run, "x") == command_env(None) == {"LOCALHARNESS_COMMIT": "1"}
     finally:
         end(run)
+        end(kept)
 
 
 def _make(cfg, name, *, mark=None, scratch=False, deleting=False):
@@ -244,7 +260,7 @@ def test_a_linked_run_dir_uses_the_temp_folder(cfg, temp, tmp_path):
 def test_a_run_dir_of_another_account_uses_the_temp_folder(cfg, temp, monkeypatch):
     (cfg / "run").mkdir()
     real = os.geteuid()
-    calls = iter([real + 1])
+    calls = iter([real, real + 1])
     monkeypatch.setattr(os, "geteuid", lambda: next(calls, real))
     run = begin(cfg)
     assert run.path.name.startswith("localharness-run-")
@@ -409,7 +425,7 @@ def test_start_app_makes_a_run_the_bash_tool_sees_and_removes_it(cfg, monkeypatc
     monkeypatch.setattr(start_cmd, "_models_that_arrived", lambda *a: None)
     start_cmd.start_app(config_dir=str(cfg))
     run = seen["run"]
-    assert seen["listing"] == [".marker", "scratch", "t"]
+    assert seen["listing"] == [".gitignore", ".marker", "scratch", "t"]
     assert seen["env"] == f"{run.path}/scratch {run.path}/t"
     assert not run.path.exists()
 
@@ -542,3 +558,165 @@ def test_mobile_sweeps_when_the_server_starts(cfg, monkeypatch):
         assert not dead.exists()
 
     _mobile(monkeypatch, cfg, [], script)
+
+
+def _listing(root):
+    return sorted(p.relative_to(root).as_posix() for p in root.rglob("*"))
+
+
+def test_a_project_run_lives_in_its_dot_folder_made_on_demand(cfg, proj):
+    home = proj / ".localharness"
+    run = begin(cfg, home=home)
+    try:
+        assert run.path.parent == home.resolve() / "run" and HEX.fullmatch(run.path.name)
+        assert oct(home.stat().st_mode & 0o777) == "0o700" and (home / "run" / ".gitignore").read_text() == "*\n"
+        assert sorted(p.name for p in run.path.iterdir()) == [".gitignore", ".marker", "scratch", "t"]
+        assert (run.path / ".gitignore").read_text() == "*\n"
+        assert not (cfg / "run").exists()
+    finally:
+        end(run)
+    assert _listing(home) == ["run", "run/.gitignore"]
+
+
+def _plant(proj, shape, outside):
+    home = proj / ".localharness"
+    kind, what = shape.split("-")
+    place = home if kind == "dot" else home / "run"
+    if kind == "run":
+        home.mkdir()
+    {"link": lambda: place.symlink_to(outside), "file": lambda: place.write_text("not a folder")}.get(what, lambda: None)()
+    return home, place
+
+
+@pytest.mark.parametrize("shape", ["dot-link", "dot-file", "run-link", "run-file", "dot-foreign", "run-foreign"])
+def test_a_planted_project_dot_folder_or_run_falls_back_to_the_config_folder(cfg, proj, tmp_path, monkeypatch, shape):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep").write_text("k")
+    home, place = _plant(proj, shape, outside)
+    if shape.endswith("foreign"):
+        real, first = os.geteuid(), 0 if shape.startswith("dot") else 1
+        calls = iter(range(2))
+        monkeypatch.setattr(os, "geteuid", lambda: real + 1 if next(calls, 9) == first else real)
+        home.mkdir(exist_ok=True)
+        if shape == "run-foreign":
+            place.mkdir()
+    run = begin(cfg, home=home)
+    try:
+        assert run.path.parent == cfg.resolve() / "run"
+        assert _listing(outside) == ["keep"] and (outside / "keep").read_text() == "k"
+        if shape.endswith("file"):
+            assert place.read_text() == "not a folder"
+    finally:
+        end(run)
+    assert _listing(outside) == ["keep"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes anywhere")
+@pytest.mark.parametrize("existing", [False, True])
+def test_an_unwritable_project_falls_back_to_the_config_folder(cfg, proj, existing):
+    home = proj / ".localharness"
+    if existing:
+        home.mkdir()
+    (home if existing else proj).chmod(0o555)
+    try:
+        run = begin(cfg, home=home)
+        assert run.path.parent == cfg.resolve() / "run"
+        end(run)
+        assert _listing(home) == [] if existing else not home.exists()
+    finally:
+        (home if existing else proj).chmod(0o755)
+
+
+def test_a_project_without_enforced_locks_falls_back_to_the_config_folder(cfg, proj, monkeypatch):
+    real = run_folder._enforced
+    home = proj / ".localharness"
+    monkeypatch.setattr(run_folder, "_enforced", lambda name, parent: real(name, parent)
+                        and os.fstat(parent).st_ino != (home / "run").stat().st_ino)
+    run = begin(cfg, home=home)
+    try:
+        assert run.path.parent == cfg.resolve() / "run"
+        assert _ids(home) == []
+    finally:
+        end(run)
+
+
+def test_a_project_sweep_follows_the_table_and_never_a_link(cfg, proj, tmp_path):
+    home = proj / ".localharness"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep").write_text("k")
+    (outside / "dir").mkdir()
+    (outside / "dir" / "inner").write_text("i")
+    dying = _make(home, "aaaaaaaaaaaa", deleting=True, scratch=True)
+    (dying / "evil").symlink_to(outside / "keep")
+    (dying / "evil-dir").symlink_to(outside / "dir")
+    empty = _make(home, "bbbbbbbbbbbb")
+    foreign = _make(home, "cccccccccccc", mark=OTHER, scratch=True)
+    linked_marker = _make(home, "dddddddddddd", scratch=True)
+    (linked_marker / ".marker").symlink_to(outside / "keep")
+    linked_name = home / "run" / "eeeeeeeeeeee"
+    linked_name.symlink_to(outside / "dir")
+    (home / "run" / ".gitignore").write_text("!*\n")
+    run = begin(cfg, home=home)
+    try:
+        assert not dying.exists() and not empty.exists() and not linked_name.exists() and not linked_name.is_symlink()
+        assert foreign.exists() and linked_marker.exists() and foreign_count(home) == 2
+        assert _listing(outside) == ["dir", "dir/inner", "keep"] and (outside / "keep").read_text() == "k"
+        assert (home / "run" / ".gitignore").read_text() == "!*\n"
+    finally:
+        end(run)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git on PATH")
+def test_a_run_folder_is_ignored_by_git_whatever_run_gitignore_says(cfg, proj):
+    subprocess.run(["git", "init", "-q"], cwd=proj, check=True)
+    home = proj / ".localharness"
+    (home / "run").mkdir(parents=True)
+    (home / "run" / ".gitignore").write_text("!*\n")
+    run = begin(cfg, home=home)
+    try:
+        (run.scratch / "out.txt").write_text("x")
+        (run.path / "t" / "tmp").write_text("x")
+        for path in (run.scratch / "out.txt", run.path / "t" / "tmp", run.path / ".marker"):
+            assert subprocess.run(["git", "check-ignore", "-q", str(path)], cwd=proj).returncode == 0
+    finally:
+        end(run)
+
+
+def test_a_project_begin_also_sweeps_the_config_folders_run(cfg, proj):
+    dead = _make(cfg, "0123456789ab", mark=marker(), scratch=True)
+    mine = _make(proj / ".localharness", "ba9876543210", mark=marker(), scratch=True)
+    run = begin(cfg, home=proj / ".localharness")
+    try:
+        assert not dead.exists() and not mine.exists()
+    finally:
+        end(run)
+
+
+def test_a_config_folder_that_is_a_link_still_holds_its_run(cfg, tmp_path):
+    link = tmp_path / "link"
+    link.symlink_to(cfg)
+    run = begin(link)
+    try:
+        assert run.parent is not None and run.path.parent == cfg.resolve() / "run"
+        assert run_folder.private_run_problem(run, link) is None
+        assert foreign_count(link.resolve()) == 0
+    finally:
+        end(run)
+
+
+def test_the_end_line_names_a_project_leftover_from_where_you_stand(cfg, proj, monkeypatch):
+    run = begin(cfg, private=True, home=proj / ".localharness")
+    _slow_finish(monkeypatch, 0)
+    real = run_folder.empty_dir
+    monkeypatch.setattr(run_folder, "empty_dir", lambda fd, label: time.sleep(0.4) or real(fd, label))
+    monkeypatch.chdir(proj)
+    said = []
+    line = end(run, said.append)
+    assert ".localharness/run/.deleting-" in line and str(proj) not in line
+    assert str(proj) not in said[-1]
+    time.sleep(0.5)
+    assert run_folder._shown(proj / ".localharness" / "run" / "x") == ".localharness/run/x"
+    monkeypatch.chdir(cfg)
+    assert run_folder._shown(proj / ".localharness" / "run" / "x") == str(proj / ".localharness" / "run" / "x")

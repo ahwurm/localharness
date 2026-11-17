@@ -29,12 +29,12 @@ def no_grants(workspace: Path, klass: str, key: str) -> Grant | None:
 
 
 class World:
-    def __init__(self, home: Path):
+    def __init__(self, home: Path, in_project: bool = False):
         self.cfg = home / ".localharness"
         self.ws = home / "proj"
-        self.scratch = self.cfg / "run" / "aaaaaaaaaaaa" / "scratch"
+        self.scratch = (self.ws / ".localharness" if in_project else self.cfg) / "run" / "aaaaaaaaaaaa" / "scratch"
         self.scratch.mkdir(parents=True)
-        self.ws.mkdir()
+        self.ws.mkdir(exist_ok=True)
         (self.ws / "CLAUDE.md").write_text("rules")
         (self.ws / "a.txt").write_text("a")
         (self.ws / "x").write_text("x")
@@ -48,7 +48,8 @@ class World:
         kw.setdefault("leaves_no_trace", True)
         return GateContext(
             boundary=self.ws, workspace=self.ws, grants=no_grants, has_review_surface=True,
-            config_dir=self.cfg, run=self.scratch.parent, scratch=self.scratch, **kw)
+            config_dir=self.cfg, run=self.scratch.parent, scratch=self.scratch,
+            state_dirs=(self.scratch.parent / "state",), **kw)
 
     def write(self, path: Path | str, tool: str = "write", **kw):
         params = ({"path": str(path), "content": "x"} if tool == "write"
@@ -59,13 +60,22 @@ class World:
         return evaluate("bash_exec", {"command": command, "working_dir": str(self.ws)}, SHELL, self.ctx(**kw), SETTINGS)
 
 
-@pytest.fixture
-def world(tmp_path, monkeypatch):
+def _home(tmp_path, monkeypatch):
     home = (tmp_path / "home").resolve()
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("LOCALHARNESS_DIR", str(home / ".localharness"))
-    return World(home)
+    return home
+
+
+@pytest.fixture
+def world(tmp_path, monkeypatch):
+    return World(_home(tmp_path, monkeypatch))
+
+
+@pytest.fixture
+def project_world(tmp_path, monkeypatch):
+    return World(_home(tmp_path, monkeypatch), in_project=True)
 
 
 WRITES = ["CLAUDE.md", "AGENTS.md", "NEWDIR/../CLAUDE.md", "claude.md", "HARD.md", "VIA.md", "real.md"]
@@ -150,6 +160,20 @@ PASSES = [
 def test_a_copy_a_read_and_scratch_pass_the_row(world, command):
     result = world.shell(command.format(s=world.scratch))
     assert result.verdict is not Verdict.DENY, result.reason
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_private_project_run_writes_its_scratch_and_not_its_state(project_world, mode):
+    w = project_world
+    run = w.scratch.parent
+    assert w.write(w.scratch / "o", mode=mode).verdict is not Verdict.DENY
+    assert w.shell("echo x > .localharness/run/aaaaaaaaaaaa/scratch/o", mode=mode).verdict is not Verdict.DENY
+    assert w.shell(f"echo x > {w.scratch}/o", mode=mode).verdict is not Verdict.DENY
+    for path in (run / "state" / "memory.db", run.parent / "bbbbbbbbbbbb" / "scratch" / "o"):
+        assert w.write(path, mode=mode).verdict is Verdict.DENY
+        assert w.shell(f"echo x > {path}", mode=mode).verdict is Verdict.DENY
+    denied = w.write(w.ws / ".localharness" / "agents" / "a.yaml", mode=mode)
+    assert denied.verdict is Verdict.DENY and denied.reason.startswith("A private session does not write ")
 
 
 def test_a_read_and_a_scratch_write_pass_the_row(world):

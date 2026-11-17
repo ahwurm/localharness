@@ -11,7 +11,7 @@ from localharness.agent.gate_types import GateSettings
 from localharness.agent.loop import AgentLoop
 from localharness.agent.verdict import GateContext
 from localharness.channels.terminal import arm_lines
-from localharness.core.run_folder import Written, begin, end, end_kept_turn, goes, kept_line, note_written
+from localharness.core.run_folder import Written, begin, end, end_kept_turn, goes, kept_line, kept_names, note_written
 from localharness.orchestrator.task_flow.panel import compose_request
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="descriptor-relative run folders")
@@ -116,6 +116,16 @@ def test_a_shell_file_is_named_once_and_not_again_next_turn(world):
 def test_a_file_that_is_gone_or_in_the_run_folder_is_not_named(world):
     note_written(world.run, [world.ws / "gone.txt", make(world.run.scratch / "s.txt")], shown=False)
     assert kept_line(world.run, world.ws) == ""
+
+
+def test_a_project_runs_scratch_files_are_never_named_as_staying(world):
+    run = begin(world.cfg, private=True, home=world.ws / ".localharness")
+    try:
+        assert run.path.is_relative_to(world.ws.resolve())
+        note_written(run, [make(run.scratch / "s.txt"), make(run.scratch / "v.txt")], shown=False)
+        assert kept_line(run, world.ws) == "" and kept_names(run, world.ws) == ()
+    finally:
+        end(run)
 
 
 def test_a_name_with_escape_or_newline_comes_out_one_clean_line(world):

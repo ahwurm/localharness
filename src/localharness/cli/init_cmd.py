@@ -36,7 +36,7 @@ from localharness.config.defaults import CURRENT_DEFAULTS_REVISION, CURRENT_INIT
 from localharness.config.loader import ConfigLoader, ConfigValidationError
 from localharness.config.migrate import BACKUP_STAMP_FORMAT
 from localharness.config.overlay import atomic_write_overlay, load_overlay
-from localharness.config.paths import WORKSPACE_DIR_NAME, global_config_dir, resolve_config_dir
+from localharness.config.paths import WORKSPACE_DIR_NAME, global_config_dir, resolve_config_dir, run_only
 from localharness.config.redact import reveal, secret_values, validation_text
 from localharness.core.private_files import ensure_private_dir, touch_private, write_private_bytes
 from localharness.core.which import which_outside_cwd
@@ -298,17 +298,24 @@ def _refuse_existing(target: Path) -> None:
     raise typer.Exit(1)
 
 
-def _remove_partial_workspace(target: Path) -> None:
+def _remove_partial_workspace(target: Path, whole: bool = True) -> None:
     """Undo a scaffold that failed halfway, best effort.
 
-    Only ever called on the failure path, and only on a tree THIS invocation just made — the
-    refusal above guarantees nothing was there a moment ago. Failures here are ignored on purpose:
-    the user is already being told the real error, and a second one about the cleanup helps nobody.
+    Only ever called on the failure path, and only on what THIS invocation just made — the
+    refusal above guarantees nothing was there a moment ago. `whole` is False when `target` was
+    already there holding only a live run folder: only the scaffold's own entries go, never `run/`.
+    Failures here are ignored on purpose: the user is already being told the real error, and a
+    second one about the cleanup helps nobody.
     """
-    try:
-        shutil.rmtree(target)
-    except OSError:
-        pass
+    if whole:
+        shutil.rmtree(target, ignore_errors=True)
+        return
+    for name in ("agents", "plugins", "config.yaml", ".gitignore"):
+        entry = target / name
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry, ignore_errors=True)
+        else:
+            entry.unlink(missing_ok=True)
 
 
 def _scaffold_workspace(
@@ -376,7 +383,7 @@ def _scaffold_workspace(
     # FileExistsError. A link that is there is there, whatever it points at.
     #
     # This is the friendly answer, not the guarantee — see the claim below.
-    if target.is_symlink() or target.exists():
+    if target.is_symlink() or (target.exists() and not run_only(target)):
         _refuse_existing(target)
 
     # THE CLAIM, and the one operation this command's correctness rests on. A bare `mkdir()` is
@@ -387,30 +394,42 @@ def _scaffold_workspace(
     #
     # `parents=False` on purpose: the parent is the current directory, which exists by definition
     # unless it was deleted underneath us — and that is a different message, not a silent mkdir -p.
+    made = True
     try:
         target.mkdir()
     except FileExistsError:
         # Lost the race, or the directory appeared between the check above and here. Same answer
-        # either way, and the same answer the check gives: somebody else's workspace is there.
-        _refuse_existing(target)
+        # either way, and the same answer the check gives: somebody else's workspace is there,
+        # unless all it holds is a live run folder, which the scaffold goes in beside.
+        if target.is_symlink() or not run_only(target):
+            _refuse_existing(target)
+        made = False
     except _HANDLED as exc:
         # Nothing was created, so nothing is cleaned up.
         report_filesystem_error(
             exc, f"create a workspace in {Path.cwd()}", console=err_console, paths=[target]
         )
 
-    # Past the claim this process OWNS `target`, which is what makes the cleanup below safe: a
+    # Past the claim this process OWNS what it makes, which is what makes the cleanup below safe: a
     # failure here removes a tree we just made, never one a concurrent winner is filling in. A
     # half-made workspace left behind an error message is the worst outcome available — the next
-    # run would refuse to touch it.
+    # run would refuse to touch it. `agents/` is the second claim, taken before anything is written.
     try:
         (target / "agents").mkdir()
+    except FileExistsError:
+        _refuse_existing(target)
+    except _HANDLED as exc:
+        _remove_partial_workspace(target, made)
+        report_filesystem_error(
+            exc, f"create a workspace in {Path.cwd()}", console=err_console, paths=[target]
+        )
+    try:
         (target / "config.yaml").write_text(_WORKSPACE_CONFIG_TEMPLATE, encoding="utf-8")
         (target / "plugins").mkdir()
         (target / "plugins" / "README.md").write_text(WORKSPACE_PLUGINS_README, encoding="utf-8")
         (target / ".gitignore").write_text(WORKSPACE_GITIGNORE, encoding="utf-8")
     except _HANDLED as exc:
-        _remove_partial_workspace(target)
+        _remove_partial_workspace(target, made)
         report_filesystem_error(
             exc, f"create a workspace in {Path.cwd()}", console=err_console, paths=[target]
         )

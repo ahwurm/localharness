@@ -176,6 +176,60 @@ def test_a_failed_plugins_readme_write_leaves_no_partial_workspace(project, monk
     assert not (project / WORKSPACE_DIR_NAME).exists(), "a failed scaffold left a partial workspace"
 
 
+def _live_run(project: Path) -> Path:
+    run = project / WORKSPACE_DIR_NAME / "run"
+    (run / "0123456789ab" / "scratch").mkdir(parents=True)
+    (run / "0123456789ab" / "scratch" / "f").write_text("live")
+    (run / ".gitignore").write_text("*\n")
+    return run
+
+
+def test_run_only_localharness_is_scaffolded_beside_the_live_run(project):
+    run = _live_run(project)
+    before = _listing(run)
+    result = runner.invoke(app, ["init", "--workspace"])
+    assert result.exit_code == 0, result.output
+    workspace = project / WORKSPACE_DIR_NAME
+    assert sorted(p.name for p in workspace.iterdir()) == [".gitignore", "agents", "config.yaml", "plugins", "run"]
+    assert _listing(run) == before and (run / "0123456789ab" / "scratch" / "f").read_text() == "live"
+
+
+@pytest.mark.parametrize("fail", ["config.yaml", "README.md", ".gitignore"])
+def test_run_only_a_failed_write_removes_only_what_the_scaffold_made(project, monkeypatch, fail):
+    run = _live_run(project)
+    before = _listing(run)
+    real_write_text = Path.write_text
+
+    def _fail(self, *args, **kwargs):
+        if self.name == fail:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", _fail)
+    result = runner.invoke(app, ["init", "--workspace"])
+    _no_traceback(result)
+    assert result.exit_code != 0 and "already exists" not in result.output
+    assert sorted(p.name for p in (project / WORKSPACE_DIR_NAME).iterdir()) == ["run"]
+    assert _listing(run) == before
+
+
+def test_run_only_a_localharness_holding_anything_besides_run_is_still_refused(project):
+    run = _live_run(project)
+    (project / WORKSPACE_DIR_NAME / "notes").write_text("mine")
+    result = runner.invoke(app, ["init", "--workspace"])
+    assert result.exit_code == 1 and str(project / WORKSPACE_DIR_NAME) in result.output
+    assert sorted(p.name for p in (project / WORKSPACE_DIR_NAME).iterdir()) == ["notes", "run"]
+    assert (run / ".gitignore").exists()
+
+
+def test_run_only_a_linked_localharness_is_refused(project, tmp_path):
+    target = tmp_path / "elsewhere"
+    (target / "run").mkdir(parents=True)
+    (project / WORKSPACE_DIR_NAME).symlink_to(target)
+    result = runner.invoke(app, ["init", "--workspace"])
+    assert result.exit_code == 1 and _listing(target) == ["run"]
+
+
 # --------------------------------------------------------------------------- .gitignore
 
 _STATE = [

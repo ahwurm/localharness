@@ -20,6 +20,7 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from localharness.config.paths import RUN_DIR_NAME
 from localharness.core.caps import Caps, capped
 from localharness.core.private_files import (
     _DIR_FLAGS, OPEN_TO_OTHERS, PRIVATE_DIR_MODE, PRIVATE_FILE_MODE, atomic_write_text,
@@ -181,7 +182,8 @@ def goes(run: RunFolder) -> tuple[tuple[str, str], ...]:
 
 
 def scratch_of(run: RunFolder | None, workspace_root: str | None) -> Path | None:
-    return run.scratch if run and not workspace_root else None
+    inside = run and (not workspace_root or run.scratch.is_relative_to(Path(workspace_root).expanduser().resolve()))
+    return run.scratch if inside else None
 
 
 def command_env(run: RunFolder | None, workspace_root: str | None = None) -> dict[str, str]:
@@ -221,45 +223,74 @@ def _lock(fd: int) -> None:
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
-def begin(config_dir: Path, private: bool = False) -> RunFolder | None:
-    """Make this session's run folder, or None when there is no config yet or it cannot be made."""
+def begin(config_dir: Path, private: bool = False, home: Path | None = None) -> RunFolder | None:
+    """Make this session's run folder in `home` (a project's `.localharness/`) when it can hold it, else in the config folder, else in the temp folder; None with no config yet or when none can be made."""
     global _current
     config_dir = Path(config_dir)
     if not (config_dir / "config.yaml").exists():
         return None
     try:
-        run = _begin(config_dir, private) if native() else _fallback(private)
+        run = None
+        if native():
+            if home is not None:
+                try:
+                    run = _begin(Path(home), private, legacy=config_dir.resolve())
+                except OSError:
+                    log.debug("project run folder", exc_info=True)
+            run = run or _begin(config_dir.resolve(), private)
+        run = run or _fallback(private)
     except OSError as e:
-        where = config_dir / "run" if e.errno == errno.ENOSPC else "the run folder"
+        where = config_dir / RUN_DIR_NAME if e.errno == errno.ENOSPC else "the run folder"
         log.warning("no scratch this session: %s: %s", where, e.strerror or e)
         return None
     _current = run
     return run
 
 
-def _begin(config_dir: Path, private: bool) -> RunFolder:
+def _ours(fd: int) -> bool:
+    st = os.fstat(fd)
+    return stat.S_ISDIR(st.st_mode) and st.st_uid == os.geteuid()
+
+
+def _open_run(home: Path, create: bool = True) -> int | None:
+    """An open `run/` inside `home`, or None when `home` or `run/` is not a folder of this account; no link is followed. The config folder is passed resolved, since a person may have linked it; a project's `.localharness/` as found, since a link there is refused."""
+    top = open_private_dir(home, create=create)
     try:
-        parent = open_private_dir(config_dir / "run")
+        if not _ours(top):
+            return None
+        if create:
+            with contextlib.suppress(FileExistsError):
+                os.mkdir(RUN_DIR_NAME, PRIVATE_DIR_MODE, dir_fd=top)
+        fd = os.open(RUN_DIR_NAME, _DIR_FLAGS, dir_fd=top)
+    finally:
+        os.close(top)
+    if _ours(fd):
+        return fd
+    os.close(fd)
+    return None
+
+
+def _begin(home: Path, private: bool, legacy: Path | None = None) -> RunFolder | None:
+    try:
+        parent = _open_run(home)
     except OSError as e:
         if e.errno in (errno.ELOOP, errno.ENOTDIR):
-            return _fallback(private)
+            return None
         raise
+    if parent is None:
+        return None
     try:
-        st = os.fstat(parent)
-        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid():
-            run = _fallback(private)
-        else:
-            if st.st_mode & OPEN_TO_OTHERS:
-                os.fchmod(parent, PRIVATE_DIR_MODE)
-            _gitignore(parent)
-            _sweep_briefly(parent)
-            run = _make(parent, config_dir.resolve() / "run", private)
-        if run.parent is None:
-            os.close(parent)
-        return run
+        if os.fstat(parent).st_mode & OPEN_TO_OTHERS:
+            os.fchmod(parent, PRIVATE_DIR_MODE)
+        _gitignore(parent)
+        _sweep_briefly(parent, legacy)
+        run = _make(parent, home.resolve() / RUN_DIR_NAME, private)
     except BaseException:
         os.close(parent)
         raise
+    if run is None:
+        os.close(parent)
+    return run
 
 
 def _gitignore(parent: int) -> None:
@@ -272,12 +303,14 @@ def _gitignore(parent: int) -> None:
         fh.write("*\n")
 
 
-def _sweep_briefly(parent: int) -> None:
+def _sweep_briefly(parent: int, legacy: Path | None = None) -> None:
     dup = os.dup(parent)
 
     def run() -> None:
         try:
             sweep(dup)
+            if legacy is not None:
+                sweep(legacy)
         finally:
             os.close(dup)
 
@@ -287,7 +320,7 @@ def _sweep_briefly(parent: int) -> None:
         log.debug("run folder sweep", exc_info=True)
 
 
-def _make(parent: int, run_dir: Path, private: bool) -> RunFolder:
+def _make(parent: int, run_dir: Path, private: bool) -> RunFolder | None:
     for _ in range(8):
         name = secrets.token_hex(6)
         try:
@@ -306,13 +339,14 @@ def _make(parent: int, run_dir: Path, private: bool) -> RunFolder:
             enforced = False
         if enforced:
             atomic_write_text(".marker", marker(), dir_fd=fd)
+            atomic_write_text(".gitignore", "*\n", dir_fd=fd)
             _lay_out(fd, private)
             return RunFolder(run_dir / name, fd, parent, private=private)
     except BaseException:
         _discard(name, parent, fd)
         raise
     _discard(name, parent, fd)
-    return _fallback(private)
+    return None
 
 
 def _lay_out(where: int | Path, private: bool) -> None:
@@ -381,10 +415,18 @@ def end(run: RunFolder | None, say: Callable[[str], None] = lambda line: None) -
         return ""
     if not left:
         return ""
-    line = one_line(f"Private session not fully removed: {left[0]} stays until localharness next starts" if run.private
-                    else f"Scratch not fully removed: {left[0]} stays until the next start")
+    shown = _shown(run.path.parent / left[0])
+    line = one_line(f"Private session not fully removed: {shown} stays until localharness next starts" if run.private
+                    else f"Scratch not fully removed: {shown} stays until the next start")
     say(line)
     return line
+
+
+def _shown(path: Path) -> str:
+    try:
+        return _inside(str(path), Path.cwd()) or str(path)
+    except OSError:
+        return str(path)
 
 
 def _finish(run: RunFolder) -> tuple[str, ...]:
@@ -399,7 +441,7 @@ def _finish(run: RunFolder) -> tuple[str, ...]:
             gone = f".deleting-{name}"
             os.rename(name, gone, src_dir_fd=run.parent, dst_dir_fd=run.parent)
             name = gone
-        left = remove_dir("state", run.fd) + empty_dir(run.fd, name)
+        left = tuple(f"{name}/{p}" for p in remove_dir(STATE_DIR, run.fd)) + empty_dir(run.fd, name)
         if not left:
             if run.parent is not None:
                 os.rmdir(name, dir_fd=run.parent)
@@ -413,17 +455,18 @@ def _finish(run: RunFolder) -> tuple[str, ...]:
 
 
 def sweep(where: "int | Path") -> None:
-    """Remove the run folders nobody holds that are this machine's or half made; leave the rest. `where` is an open `run/` or the config folder."""
+    """Remove the run folders nobody holds that are this machine's or half made; leave the rest. `where` is an open `run/` or a folder holding one (a project's `.localharness/`, or the resolved config folder)."""
     if not isinstance(where, int):
         if not native():
             return
         try:
-            fd = open_private_dir(Path(where) / "run", create=False)
+            fd = _open_run(Path(where), create=False)
         except OSError:
             return
+        if fd is None:
+            return
         try:
-            if os.fstat(fd).st_uid == os.geteuid():
-                sweep(fd)
+            sweep(fd)
         finally:
             os.close(fd)
         return
@@ -471,19 +514,20 @@ def _has(fd: int, name: str) -> bool:
         return False
 
 
-def fallback_cause(config_dir: Path) -> str | None:
-    """Why sessions cannot use `<config dir>/run`, for doctor; None when they can."""
+def fallback_cause(home: Path) -> str | None:
+    """Why a session cannot keep its run folder in `home`, for doctor; None when it can."""
     if not native():
         return None
-    run = Path(config_dir) / "run"
-    try:
-        st = os.lstat(run)
-    except OSError:
-        return None
-    if stat.S_ISLNK(st.st_mode):
-        return LINKED
-    if st.st_uid != os.geteuid():
-        return FOREIGN
+    run = Path(home) / RUN_DIR_NAME
+    for place in (Path(home), run):
+        try:
+            st = os.lstat(place)
+        except OSError:
+            return None
+        if stat.S_ISLNK(st.st_mode):
+            return LINKED
+        if st.st_uid != os.geteuid():
+            return FOREIGN
     try:
         first, second = os.open(run, _DIR_FLAGS), os.open(run, _DIR_FLAGS)
     except OSError:
@@ -508,15 +552,17 @@ def private_run_problem(run: RunFolder | None, cfg: Path) -> str | None:
         return PRIVATE_NO_RUN_LINE
     if run.parent is not None:
         return None
-    return (PRIVATE_LINKED_RUN_LINE if fallback_cause(cfg) in (LINKED, FOREIGN)
-            else PRIVATE_UNLOCKED_LINE if native() else PRIVATE_NEEDS_POSIX_LINE).format(path=cfg / "run")
+    return (PRIVATE_LINKED_RUN_LINE if fallback_cause(Path(cfg).resolve()) in (LINKED, FOREIGN)
+            else PRIVATE_UNLOCKED_LINE if native() else PRIVATE_NEEDS_POSIX_LINE).format(path=Path(cfg) / RUN_DIR_NAME)
 
 
-def foreign_count(config_dir: Path) -> int:
+def foreign_count(home: Path) -> int:
     """How many run folders another machine's marker, or none beside a scratch, leave alone."""
     try:
-        parent = open_private_dir(Path(config_dir) / "run", create=False)
+        parent = _open_run(Path(home), create=False)
     except OSError:
+        return 0
+    if parent is None:
         return 0
     found = 0
     try:

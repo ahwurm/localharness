@@ -47,6 +47,39 @@ def test_walks_up_to_an_ancestor_workspace(tmp_path):
     assert discover_workspace_dir(deep) == ws
 
 
+def test_run_only_localharness_is_passed_over_for_one_above_it(tmp_path):
+    from localharness.config.paths import discover_workspace_dir
+
+    outer = tmp_path / ".localharness"
+    outer.mkdir()
+    (tmp_path / "proj" / ".localharness" / "run").mkdir(parents=True)
+    assert discover_workspace_dir(tmp_path / "proj") == outer
+
+
+def test_run_only_localharness_is_no_workspace_and_an_empty_or_fuller_one_is(tmp_path):
+    from localharness.config.paths import discover_workspace_dir, run_only
+
+    ws = tmp_path / ".localharness"
+    (ws / "run").mkdir(parents=True)
+    assert run_only(ws) and discover_workspace_dir(tmp_path) is None
+    (ws / "config.yaml").write_text("{}")
+    assert not run_only(ws) and discover_workspace_dir(tmp_path) == ws
+    empty = tmp_path / "e" / ".localharness"
+    empty.mkdir(parents=True)
+    assert not run_only(empty) and discover_workspace_dir(tmp_path / "e") == empty
+    assert not run_only(tmp_path / "missing")
+
+
+def test_run_only_localharness_gives_no_project_skill_origin(tmp_path):
+    from localharness.config.skills import _origin_dirs
+
+    root = tmp_path / "proj"
+    (root / ".localharness" / "run").mkdir(parents=True)
+    assert "project" not in {label for label, _, _ in _origin_dirs(tmp_path / "cfg", root)}
+    (root / ".localharness" / "agents").mkdir()
+    assert "project" in {label for label, _, _ in _origin_dirs(tmp_path / "cfg", root)}
+
+
 def test_nearest_workspace_wins(tmp_path):
     """LAYR-04: exactly one workspace layer, and it is the closest one up-tree."""
     from localharness.config.paths import discover_workspace_dir

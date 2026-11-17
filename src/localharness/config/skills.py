@@ -11,6 +11,7 @@ from pathlib import Path
 
 import yaml
 
+from localharness.config.paths import WORKSPACE_DIR_NAME, run_only
 from localharness.core.content import MAX_REFERENCE_BYTES
 
 ORIGINS = (
@@ -93,7 +94,7 @@ def _skip(pair: tuple[str, str], at: Path, /, **fields: object) -> Skipped:
 
 
 def _origin_dirs(config_dir, project_root) -> tuple[tuple[str, Path, Path], ...]:
-    has_project = project_root is not None and (Path(project_root) / ".localharness").is_dir()
+    has_project = project_root is not None and (found := Path(project_root) / WORKSPACE_DIR_NAME).is_dir() and not run_only(found)
     bases = {"project": project_root if has_project else None, "machine": config_dir, "bundled": PACKAGE_DIR}
     found = []
     for label, rel in ORIGINS:

@@ -60,7 +60,7 @@ from localharness.agent.gate_types import (
 from localharness.agent.permissions import PermissionResult
 from localharness.agent.shell_classify import copy_operands, moved_into
 from localharness.agent.taint import DOWNLOADS, TAINTED_ASK_CLASSES, content_key, under_downloads
-from localharness.config.paths import CANDIDATE_NAMES, WORKSPACE_DIR_NAME, global_config_dir
+from localharness.config.paths import CANDIDATE_NAMES, RUN_DIR_NAME, WORKSPACE_DIR_NAME, global_config_dir
 from localharness.core.run_folder import SCRATCH_VAR, TMP_DIR, TMP_VAR
 from localharness.core.sanitize import one_line
 from localharness.tools.base import GateFamily
@@ -1231,13 +1231,14 @@ def _private_reason(path: Path, ctx: GateContext, removal: bool) -> Optional[str
 
 
 def _in_run_folder(path: Path, ctx: GateContext) -> bool:
-    """Is ``path`` under ``<config dir>/run`` and not inside this session's scratch?"""
-    shown = str(path).casefold()
+    """Is ``path`` in any project's ``.localharness/run`` or a config folder's ``run``, and not inside this session's scratch?"""
     if ctx.scratch is not None and _within(ctx.scratch, path):
         return False
-    return any(
+    shown = str(path).casefold()
+    parts = [part.casefold() for part in path.parts]
+    return (WORKSPACE_DIR_NAME.casefold(), RUN_DIR_NAME) in zip(parts, parts[1:]) or any(
         shown == base or shown.startswith(base + os.sep)
-        for base in (str(folder / "run").casefold() for folder in _config_dirs(ctx))
+        for base in (str(folder / RUN_DIR_NAME).casefold() for folder in _config_dirs(ctx))
     )
 
 
