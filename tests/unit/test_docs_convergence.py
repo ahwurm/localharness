@@ -1144,6 +1144,34 @@ def test_the_0_28_0_changelog_entry_bites():
     assert check_0_28_0_entry(_swap(good, RELEASE_0_28_0_HEADER, "## [0.28.0] — 2026-11-17")) == missing
 
 
+RELEASE_0_28_1_HEADER = "## [0.28.1] — 2026-11-17"
+RELEASE_0_28_1_NEEDLES = (
+    "### Added", "### Changed", "### Fixed", "### Security",
+    "localharness start --private", ".localharness/run/", "Private chat", "mobile protocol 13", "LineDropped",
+    "no-store", "trusts saved pages", "a follow-up is answered in its reply",
+)
+
+
+def check_0_28_1_entry(text: str) -> list[str]:
+    """CHANGELOG's 0.28.1 entry exists, names the run folder, the private session and chat, protocol 13, the gate rows and the two fixes."""
+    found = re.search(rf"^{re.escape(RELEASE_0_28_1_HEADER)}\n.*?(?=^## \[|\Z)", text, re.M | re.S)
+    if not found:
+        return [f"CHANGELOG has no {RELEASE_0_28_1_HEADER} entry"]
+    flat = " ".join(found.group(0).split())
+    return [f"CHANGELOG's 0.28.1 entry does not say {n}" for n in RELEASE_0_28_1_NEEDLES if n not in flat]
+
+
+def test_the_0_28_1_changelog_entry_live():
+    assert check_0_28_1_entry(_read("CHANGELOG.md")) == []
+
+
+def test_the_0_28_1_changelog_entry_bites():
+    good = _read("CHANGELOG.md")
+    for needle in RELEASE_0_28_1_NEEDLES:
+        assert check_0_28_1_entry(_swap(good, needle, "x")) == [f"CHANGELOG's 0.28.1 entry does not say {needle}"], needle
+    missing = [f"CHANGELOG has no {RELEASE_0_28_1_HEADER} entry"]
+    assert check_0_28_1_entry(_swap(good, RELEASE_0_28_1_HEADER, "## [0.28.1] — 2026-11-16")) == missing
+
 
 def _good_changelog() -> str:
     return (
