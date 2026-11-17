@@ -1723,21 +1723,24 @@ CHANNEL_DOC_NEEDLES = (
     ("docs/mobile.md", "An open task does not come back"),
     ("docs/mobile.md", "only what the deny class does not cover can still reach it"),
     ("docs/mobile.md", "the phone has no stop between units"),
+    ("docs/mobile.md", "This private chat is not listed. It stays on this machine until you tap End or the server stops."),
+    ("README.md", "stays on the machine, asleep, until you end it or `localharness mobile` stops"),
+    ("SECURITY.md", "keeps its kind's title with a constant body"),
 )
 
 
 def check_channel_docs(texts: dict[str, str]) -> list[str]:
-    """The phone and Zed docs say what `/task` and each channel's stop do to a task."""
+    """The phone and Zed docs say what `/task` and each channel's stop do to a task; the README and SECURITY.md say what a private chat keeps."""
     flat = {rel: " ".join(text.split()) for rel, text in texts.items()}
     return [f"{rel} does not say {n}" for rel, n in CHANNEL_DOC_NEEDLES if n not in flat.get(rel, "")]
 
 
 def test_channel_docs_live():
-    assert check_channel_docs({rel: _read(rel) for rel in ("docs/zed.md", "docs/mobile.md")}) == []
+    assert check_channel_docs({rel: _read(rel) for rel in ("docs/zed.md", "docs/mobile.md", "README.md", "SECURITY.md")}) == []
 
 
 def test_channel_docs_bites():
-    texts = {rel: _read(rel) for rel in ("docs/zed.md", "docs/mobile.md")}
+    texts = {rel: _read(rel) for rel in ("docs/zed.md", "docs/mobile.md", "README.md", "SECURITY.md")}
     for rel, needle in CHANNEL_DOC_NEEDLES:
         assert check_channel_docs({**texts, rel: _swap(texts[rel], needle, "x")}) == [f"{rel} does not say {needle}"]
     assert len(check_channel_docs({rel: "" for rel in texts})) == len(CHANNEL_DOC_NEEDLES)

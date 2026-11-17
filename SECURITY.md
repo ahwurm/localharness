@@ -2328,16 +2328,31 @@ Added with the mobile plugin:
   type and size, never a path or a prompt. The one new fact a viewer learns is WHEN pictures were
   made, because the id embeds a UTC timestamp. With no folder bound, or in incognito, it
   answers 404.
-- **Incognito (`--incognito`) keeps pictures out of the phone's cache, and nothing more today.**
+- **Incognito (`--incognito`) keeps pictures out of the phone's cache, and nothing more.**
   Pictures are then served `Cache-Control: no-store` and the gallery is off. Pictures the phone
   already cached stay until the browser evicts them or its site data is cleared. Nothing on the
-  machine is
-  removed: memory, sessions and files on this box still persist. It is not yet a private mode.
+  machine is removed: memory, sessions and files on this box still persist. A chat that keeps
+  nothing is a private chat (next bullet).
   The drawer's Incognito switch (`POST /api/incognito`) flips the same setting for this server
   process only; the flag sets the starting value, and memory, sessions and files on this box
   still persist either way. Turning it on sends one authenticated response carrying
   `Clear-Site-Data: "cache"`, which Safari/iOS 17+ and Chrome honor by dropping this origin's
   cached pictures; a browser that ignores the header keeps what it had.
+- **A private chat keeps nothing of itself on the machine once it ends, and the phone has limits the
+  machine does not.** The `Private chat` button starts a session of the kind
+  [Private sessions](#private-sessions) describes, in its own run folder, and what that section says
+  it does not hide holds here too. The chat's state stays on this machine, asleep, until you tap End
+  or `localharness mobile` stops; a crash leaves the folder for the next start to remove. Each chat
+  carries its own privacy, so a normal message never lands in a private chat or the reverse: a line
+  queued for another chat is dropped, and the page puts it back in the composer. While a private chat
+  is open every `/api` reply and every picture is `no-store`. A notification for it keeps its kind's
+  title with a constant body (`Open the app to see it.`) and carries no chat id and no command; the
+  push service still sees that one was sent, when, its size and the device endpoint, and the
+  phone's notification history keeps the title. The phone's keyboard, its learning and dictation see what
+  you type, outside the harness. The page keeps one `localStorage` boolean (`lh.private`) and no event
+  cursor for a private chat; the pairing token and normal chats' cursors stay as before. An answer
+  to a permission question is held for the chat and takes one tap, except the saved-page answer for an
+  agent marked as having read untrusted pages, which keeps its second tap.
 - **The phone reaches memory only through the memory slot's browse API.** The four
   `/api/memory` routes call the slot's occupant; with memory off the slot is empty and they
   answer 404. A test pins that the mobile channel's server, channel, push, replay and protocol

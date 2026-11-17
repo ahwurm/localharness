@@ -280,6 +280,18 @@ forget anything — memory, sessions and files on the box still persist.
 **Stop has an undo window.** Cancel sits next to the composer where a distracted thumb lands, and
 the GPU is the scarce resource here.
 
+## Private chats
+
+A private chat keeps nothing of itself on this machine once it ends: no conversation, memory, logs, pictures or saved pages. Files you have the agent write into your project stay. [SECURITY.md](../SECURITY.md#private-sessions) lists what a private session does not hide.
+
+- **Start one** with `Private chat` on the empty greeting or at the top of the drawer. The greeting then says `Private: no saved memory; nothing is kept when you end it; files written into your project stay.` The header shows a `Private` marker, and `stays: <names>` lists files the last answer made that stay, such as ones a shell command wrote into your project or anything outside it. A normal chat with turns goes to history when you tap it; an empty one is replaced.
+- **End one** with `End private chat` in the drawer (it replaces the Private chat button while one is open) or the `Private` marker. The tap starts a 3 second undo in the header, the same shape as Stop's; tap `undo` and nothing ends. Mid-turn it stops the turn first and reads `stopping, then ending this private chat in 3s…`, and one undo cancels both. `+` and `New normal chat` on a private chat with turns take the same undo, and an empty private chat ends at once. If the removal does not finish, one line names what is left and that the next start removes it.
+- **The drawer** lists your normal chats and says under them: `This private chat is not listed. It stays on this machine until you tap End or the server stops.`
+- **It sleeps like any chat**, on this machine and in its own run folder, and your next message or a notification tap wakes it. It does not come back after `localharness mobile` stops: the page then says `Your private chat ended when the server stopped. Your next message starts a new private chat; tap + for a normal one.`
+- **A notification** for a private chat keeps its title (`reply ready`, `permission needed` and the like) with the body `Open the app to see it.`, and names neither the chat nor the command. The push service still sees that one was sent, when, its size and the device endpoint, and your phone's notification history keeps the title.
+- **A message lands in the chat on screen.** If the chat changed while a line was waiting, the line is not sent: it returns to the composer under `not sent: the chat changed`.
+- **While one is open** every `/api` reply and picture is `no-store`, the page keeps no event cursor for it, and a permission answer is held for the chat and takes one tap (the trust question reads `Trust for this run` and `Not now`). The page keeps one `localStorage` boolean, `lh.private`, so it can say the chat ended; it holds nothing of the chat. Your phone's keyboard, its learning and dictation see what you type, outside the harness.
+
 ## Building your own UI
 
 The page is served **from a directory, live**. Edit the file, pull to refresh. No build step, no
@@ -338,6 +350,8 @@ the same round trip a real one does.
    your own cursor the reopened app jumps silently to the end and misses the answer.
 
 `GET /api/protocol` ships all of these as data.
+
+A private chat adds a few names to the wire. `POST /api/sessions/new` takes `private`, the message and command routes under `/api/sessions/{id}/` take it too, and the stream takes `?private=1`. The server compares it with the open chat's privacy and answers 409 `the chat changed` when they differ, except that a normal chat with no turns is replaced when the request is private. `POST /api/sessions/end` ends the open private chat and returns what was left (409 mid-turn: stop it first). `Hello` carries `private`, `asleep_session_id` (a sleeping chat's id, apart from the live one) and `kept`; `TaskComplete` carries `kept`; and the SSE-only frame `LineDropped` carries the id of a queued line the server would not send, for the client to restore from its own copy.
 
 ## Not yet
 

@@ -35,11 +35,12 @@ localharness update                  # the latest release from PyPI
 
 `plugins enable` and `plugins disable` write `overrides.yaml` and leave your `config.yaml` alone; `--workspace` changes a bundled plugin for one project only. Inside a session, `/plugins enable <name>` asks what the plugin needs, checks it, and restarts with your conversation kept. Keyboard shortcuts and multi-line input: [docs/terminal-keys.md](docs/terminal-keys.md).
 
-`localharness start --private` keeps nothing of the session when it ends: no conversation, memory, logs, task documents, pictures or saved pages, and no answer to a permission question. Files you have the agent write into your project are yours and stay, the way a private browser window keeps your downloads. The session's own state lives in a folder that is deleted when it ends, and the agent cannot write the files a later session would load, such as `CLAUDE.md`. Three things to know:
+`localharness start --private` keeps nothing of the session when it ends: no conversation, memory, logs, task documents, pictures or saved pages, and no answer to a permission question. Files you have the agent write into your project are yours and stay, the way a private browser window keeps your downloads. The session's own state lives in a folder that is deleted when it ends, and the agent cannot write the files a later session would load, such as `CLAUDE.md`. Four things to know:
 
 - a crash leaves that folder until the next start on this machine;
 - settings you change stay;
-- `/model` pointed at a remote endpoint sends the chat there.
+- `/model` pointed at a remote endpoint sends the chat there;
+- a private chat on the phone (the `Private chat` button in `localharness mobile`) stays on the machine, asleep, until you end it or `localharness mobile` stops.
 
 What it does not hide is listed in [SECURITY.md](SECURITY.md#private-sessions).
 

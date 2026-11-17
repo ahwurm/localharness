@@ -11,17 +11,19 @@ All notable changes to LocalHarness are documented here. The format follows
 - **a line after a reply that names a scratch file** — says where the file is and when it goes, and asks for a copy in the project to keep it.
 - **`localharness doctor` rows** — name why sessions fall back to the system temp folder when `run/` is a link, another account's or on a folder without enforced locks, and count run folders of other machines.
 - **`localharness start --private`** — a session that works like any other and keeps nothing of itself when it ends: its state, memory, logs, task documents, pictures and saved pages live in its run folder, answers to its questions are held in memory, and the project's memory is not read. Files the agent writes into the project stay. TERM and HUP end it cleanly, Ctrl-C and Ctrl-D ask again when something would go, and the screen marks it with a `private` chip and a tinted input frame (`private · remote` when the model is not on this machine). Mobile, ACP and chat platforms refuse the flag with a sentence naming the fix.
+- **a private chat on the phone** — a `Private chat` button on the greeting and in the drawer starts a chat that keeps nothing of itself once it ends. `End private chat` (the drawer button or the `Private` marker in the header) ends it after a 3 second undo, and mid-turn it stops the turn first; the header lists what stays. A private chat sleeps like any chat, on this machine, and a notification tap wakes it to its answer. `localharness mobile --private` still refuses, and now says to run `localharness mobile` and tap `Private chat`.
 
 ### Changed
 - **task scratch moves** from `<state_dir>/scratchpad/` into the run folder. Folders already under `scratchpad/` are left alone and nothing new is written there.
 - **`/task clear` and the next task remove a task's scratch**, and each line says how many files. A done task's scratch stays until then.
-- **mobile protocol 13** — `TaskComplete` gains an additive `scratch_files`; the page does not show it yet.
+- **mobile protocol 13** — `TaskComplete` gains additive `scratch_files` and `kept`, `Hello` gains `private`, `asleep_session_id` and `kept`, and a new SSE frame `LineDropped` names a queued line the server would not send.
 
 ### Security
 - **`run/` is refused** — writes, removals and link sources under another session's run folder or `run/` itself are denied in every mode, `$HOME` spellings included.
 - **a move into scratch always asks** — `mv`, `rsync --remove-source-files`, `tar --remove-files` and `zip -m` into the run ask in every mode, since the folder is deleted at the end. Interpreters and scripts are not seen.
 - **scratch writes** are asked in `guarded`, with an "always" that holds for the session and is never written to `grants.yaml`.
 - **a private session cannot write what a later session would load** — instructions files, `.agents/`, a project's `.localharness/` and the config folder are refused in every mode, with hard links, `git mv`, `git rm`, `git restore` and `patch` covered. The gate cannot name what a script, `tar -x`, `unzip`, `rsync DIR/ .`, `cp -r DIR/. .` or `make` writes, and SECURITY.md lists what a private session does not hide.
+- **a private chat on the phone leaves little behind it** — every `/api` reply and picture is `no-store` while it is open, its notifications keep the title and carry a constant body with no chat id, and a line queued for one chat is never sent into another: the page puts it back in the composer. The phone's keyboard and dictation, the push service and the notification history are outside the harness and are named in SECURITY.md.
 
 ## [0.28.0] — 2026-11-16
 
