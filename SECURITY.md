@@ -1321,15 +1321,18 @@ marker reads `private`, so a commit the agent makes carries no co-author trailer
 
 **What stays.** These are written in a private session as in any, because they belong to the machine and not to
 the session; a test runs a private session through its main paths and fails on a write to the config folder or
-the project that is neither the agent's nor one of these:
+the project that is neither the agent's nor one of these paths in the config folder (a `*` reaches into subfolders):
 
-- config migration and backups, the config folder's mode, and the seeded script
-- the model server with its state and logs, and the model library
-- the window floor, the speed ledger, the skill-cue calibration and the inference lock
-- the machine trust record, and declined offers keyed by binary, digest, posture or host
-- the `grants.yaml.lock` and `project_records.yaml.lock` sidecars
-- the embedding model and tiktoken caches, and phone pairing
-- `/model`, `/effort`, `/plugins` and `/mcp`, with their audit rows
+- config migration and backups, the config folder's mode, and the seeded script (`config.yaml`, `config.yaml.bak-*`,
+  `tools/design-screenshot.js`, `tools`)
+- the model server with its state and logs, and the model library (`server`, `server/*`, `models/*`, `launch/*`)
+- the window floor, the speed ledger, the skill-cue calibration and the inference lock (`server-floor.json`,
+  `speed_stats.json`, `skill_cues.json`, `inference.lock`)
+- the machine trust record, and declined offers keyed by binary, digest, posture or host (`trusted_workspaces.yaml`,
+  `declined_workspace_offers.yaml`)
+- the `grants.yaml.lock` and `project_records.yaml.lock` sidecars (`grants.yaml.lock`, `project_records.yaml.lock`)
+- the embedding model and tiktoken caches, and phone pairing (`embeddings/*`, `tiktoken/*`, `mobile/*`)
+- `/model`, `/effort`, `/plugins` and `/mcp`, with their audit rows (`audit.jsonl`, `plugins/*`, `mcp/*`)
 
 **The gate's row.** A private session adds one deny, in every mode and before any ask, for a write, edit,
 removal, move or link aimed at what a later session would load: an instructions file (`CLAUDE.md`, `AGENTS.md`,
