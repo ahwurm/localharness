@@ -58,8 +58,8 @@ One recorded exception to "a moved schema bumps the version": additive OPTIONAL 
 existing event that the page does not read re-record the snapshot without a bump (the page renders
 the same frames either way; an old client ignores a key it never reads). Taken for
 `Action.finish_reason="reasoning_cut"` (cb96515), for `Action.model`/`prompt_tokens`/
-`completion_tokens`/`latency_ms` (499c6df) and for `Observation.delegation_status`. A field the page
-DOES read, or a changed meaning, is a bump.
+`completion_tokens`/`latency_ms` (499c6df), for `Observation.delegation_status` and for
+`PermissionRequest.trusts_pages`. A field the page DOES read, or a changed meaning, is a bump.
 
 Enforced rather than remembered: `tests/unit/channels/test_mobile_protocol.py` snapshots every
 event and frame schema into a checked-in fixture and fails if a schema moves without this

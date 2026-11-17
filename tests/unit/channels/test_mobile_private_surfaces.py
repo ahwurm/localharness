@@ -9,10 +9,11 @@ from types import SimpleNamespace
 import pytest
 
 from localharness.agent.gate_types import PermissionRequest
+from localharness.agent.verdict import SCRATCH_OPTIONS_LEGEND
 from localharness.agent.loop import AgentLoop
 from localharness.channels.mobile import push
 from localharness.channels.mobile.channel import (
-    PRIVATE_TAINTED_CONFIRM,
+    TAINTED_CONFIRM,
     MobileChannel,
 )
 from localharness.core.bus import EventBus
@@ -141,10 +142,9 @@ def _ask(**over):
     return PermissionRequest(**base | over)
 
 
-async def _asking(tmp_path, request, *, private, marked=False):
+async def _asking(tmp_path, request, *, private):
     channel = await _channel(tmp_path, private=private)
     channel.run = SimpleNamespace(private=private)
-    channel._gate = SimpleNamespace(taint=SimpleNamespace(source=lambda agent: "a saved page" if marked else None))
     client = channel.attach_client()
     task = asyncio.ensure_future(channel.ask_permission(request))
     await asyncio.sleep(0)
@@ -163,28 +163,33 @@ async def test_the_trust_buttons_name_what_a_private_chat_does(tmp_path):
 async def test_a_private_always_is_one_tap_with_nothing_permanent_said(tmp_path):
     channel, task, frame = await _asking(tmp_path, _ask(), private=True)
     assert not any(o["confirm_required"] for o in frame["options"])
+    assert [o["name"] for o in frame["options"]] == ["Allow once", "Always allow (this chat)", "Deny once", "Never (this chat)"]
     assert channel.answer_ask(frame["request_id"], "allow_always") == {"status": "recorded", "decision": "allow_always"}
     assert (await task).kind == "allow_always"
 
 
-async def test_a_private_always_in_a_tainted_class_from_a_marked_agent_keeps_the_second_tap(tmp_path):
-    channel, task, frame = await _asking(tmp_path, _ask(), private=True, marked=True)
+@pytest.mark.parametrize("private, legend", [(True, None), (False, SCRATCH_OPTIONS_LEGEND)])
+async def test_an_always_that_would_trust_saved_pages_keeps_the_second_tap(tmp_path, private, legend):
+    channel, task, frame = await _asking(tmp_path, _ask(trusts_pages=True, options_legend=legend), private=private)
     assert [o["kind"] for o in frame["options"] if o["confirm_required"]] == ["allow_always", "reject_always"]
     first = channel.answer_ask(frame["request_id"], "allow_always")
-    assert first["status"] == "confirm_required" and first["detail"] == PRIVATE_TAINTED_CONFIRM
+    assert first["status"] == "confirm_required" and first["detail"] == TAINTED_CONFIRM
     assert channel.answer_ask(frame["request_id"], "allow_always", first["confirm_token"])["status"] == "recorded"
     await task
 
 
-@pytest.mark.parametrize("klass, marked", [("shell-new", True), ("shell-destructive", False)])
-async def test_a_private_always_needs_both_a_tainted_class_and_a_marked_agent_for_the_second_tap(tmp_path, klass, marked):
-    channel, task, frame = await _asking(tmp_path, _ask(klass=klass), private=True, marked=marked)
-    assert channel.answer_ask(frame["request_id"], "allow_always")["status"] == "recorded"
-    await task
+async def test_a_normal_chats_guarded_scratch_ask_is_one_tap_for_this_chat(tmp_path):
+    request = _ask(klass="edit-outside", key="/run/scratch", options_legend=SCRATCH_OPTIONS_LEGEND)
+    channel, task, frame = await _asking(tmp_path, request, private=False)
+    assert [o["name"] for o in frame["options"]] == ["Allow once", "Always allow (this chat)", "Deny once", "Never (this chat)"]
+    assert not any(o["confirm_required"] for o in frame["options"])
+    assert channel.answer_ask(frame["request_id"], "allow_always") == {"status": "recorded", "decision": "allow_always"}
+    assert (await task).kind == "allow_always"
 
 
 async def test_a_normal_chat_keeps_two_taps_and_the_permanent_text(tmp_path):
     channel, task, frame = await _asking(tmp_path, _ask(), private=False)
+    assert [o["name"] for o in frame["options"]] == ["Allow once", "Always allow here", "Deny once", "Never here"]
     first = channel.answer_ask(frame["request_id"], "allow_always")
     assert first["status"] == "confirm_required" and "permanent" in first["detail"]
     task.cancel()

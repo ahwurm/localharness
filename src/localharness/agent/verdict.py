@@ -1062,7 +1062,8 @@ def _decide(
     reason = "; ".join(text for _, text in groups)
     body = "; ".join(f"{klass} — {text}" for klass, text in groups)
     display = f"{tool_name}: {_truncate(salient)}  ({body})" if salient else f"{tool_name}  ({body})"
-    if ctx.tainted_by is not None and any(a.klass in TAINTED_ASK_CLASSES for a in ordered):
+    trusts_pages = ctx.tainted_by is not None and any(a.klass in TAINTED_ASK_CLASSES for a in ordered)
+    if trusts_pages:
         note = SAVED_PAGES_NOTE.format(source=ctx.tainted_by) + (SAVED_PAGES_ALWAYS if grantable else "")
         reason, display = reason + note, display + note
     return VerdictResult(
@@ -1078,6 +1079,7 @@ def _decide(
             display=display,
             grant_keys=keys,
             auto_entry=next((a.auto_entry for a in ordered if a.auto_entry), None),
+            trusts_pages=trusts_pages,
             options_legend=SCRATCH_OPTIONS_LEGEND if scratch_only or (grantable and ctx.leaves_no_trace) else None,
         ),
     )

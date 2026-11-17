@@ -34,7 +34,6 @@ from typing import Any, Awaitable, Callable, Optional
 
 import structlog
 
-from localharness.agent.taint import TAINTED_ASK_CLASSES
 from localharness.channels.base import ChannelAdapter, _call_receipt, reply_line, sanitize_for_display, told_line
 from localharness.channels.errors import NotInteractiveError
 from localharness.core.bus import EventBus
@@ -182,8 +181,8 @@ PRIVATE_TRUST_OPTION_NAMES: dict[str, str] = {
     "reject_once": "Not now",
 }
 
-PRIVATE_TAINTED_CONFIRM = (
-    "this trusts saved pages for the rest of this private chat; repeat the request with confirm_token to record it"
+TAINTED_CONFIRM = (
+    "this trusts saved pages for the rest of this chat; repeat the request with confirm_token to record it"
 )
 
 GRANTABLE_OPTION_NAMES: dict[str, str] = {
@@ -191,6 +190,12 @@ GRANTABLE_OPTION_NAMES: dict[str, str] = {
     "allow_always": "Always allow here",
     "reject_once": "Deny once",
     "reject_always": "Never here",
+}
+
+CHAT_OPTION_NAMES: dict[str, str] = {
+    **GRANTABLE_OPTION_NAMES,
+    "allow_always": "Always allow (this chat)",
+    "reject_always": "Never (this chat)",
 }
 
 UNGRANTABLE_KINDS: tuple[str, ...] = ("allow_once", "reject_once")
@@ -236,10 +241,10 @@ class _OpenAsk:
     flaky phone connection must not be able to allow something twice.
     """
 
-    __slots__ = ("request_id", "request", "future", "frame", "asked_at", "outcome", "confirm", "private")
+    __slots__ = ("request_id", "request", "future", "frame", "asked_at", "outcome", "confirm", "one_tap")
 
-    def __init__(self, request_id: str, request: Any, frame: BlockingAsk, private: bool = False) -> None:
-        self.private = private
+    def __init__(self, request_id: str, request: Any, frame: BlockingAsk, one_tap: bool = False) -> None:
+        self.one_tap = one_tap
         self.request_id = request_id
         self.request = request
         self.frame = frame
@@ -1186,7 +1191,7 @@ class MobileChannel(ChannelAdapter):
         from localharness.agent.gate_types import Decision
 
         request_id = uuid.uuid4().hex
-        ask = _OpenAsk(request_id, request, self._ask_frame(request_id, request), private=self.private_chat)
+        ask = _OpenAsk(request_id, request, self._ask_frame(request_id, request), one_tap=self._one_tap(request))
         self._open_asks[request_id] = ask
         self.push(ask.frame)
         policy = self._push_policy()
@@ -1293,8 +1298,15 @@ class MobileChannel(ChannelAdapter):
         finally:
             self._open_asks.pop(request_id, None)
 
+    def _one_tap(self, request: Any) -> bool:
+        """A private chat's answer, or one held for the session, writes nothing that outlives the chat."""
+        from localharness.agent.verdict import SCRATCH_OPTIONS_LEGEND
+
+        return self.private_chat or getattr(request, "options_legend", None) == SCRATCH_OPTIONS_LEGEND
+
     @staticmethod
-    def ask_options(klass: str, grantable: bool, private: bool = False, marked: bool = False) -> list[AskOption]:
+    def ask_options(klass: str, grantable: bool, private: bool = False, one_tap: bool = False,
+                    trusts_pages: bool = False) -> list[AskOption]:
         """The buttons a question of this class and grantability gets.
 
         One derivation, used by the live ask AND by `--fixtures`, so a scripted dialog cannot
@@ -1306,7 +1318,7 @@ class MobileChannel(ChannelAdapter):
             names = PRIVATE_TRUST_OPTION_NAMES if private else TRUST_OPTION_NAMES
         elif grantable:
             kinds = ("allow_once", "allow_always", "reject_once", "reject_always")
-            names = GRANTABLE_OPTION_NAMES
+            names = CHAT_OPTION_NAMES if one_tap else GRANTABLE_OPTION_NAMES
         else:
             kinds = UNGRANTABLE_KINDS
             names = GRANTABLE_OPTION_NAMES
@@ -1319,7 +1331,7 @@ class MobileChannel(ChannelAdapter):
                 # a two-button dialog that has already explained itself is friction with no
                 # guardrail attached.
                 confirm_required=(k in ALWAYS_KINDS and klass != TRUST_KLASS
-                                  and (not private or (marked and klass in TAINTED_ASK_CLASSES))),
+                                  and (not one_tap or trusts_pages)),
             )
             for k in kinds
         ]
@@ -1332,8 +1344,6 @@ class MobileChannel(ChannelAdapter):
         grantable = bool(getattr(request, "grantable", False))
         tool_name = getattr(request, "tool_name", "") or ""
         schema = self._tool_registry.schema_of(tool_name) if self._tool_registry is not None else None
-        taint = getattr(self._gate, "taint", None)
-        marked = taint is not None and taint.source(getattr(request, "agent_id", None)) is not None
         return BlockingAsk(
             session_id=self.session_id,
             request_id=request_id,
@@ -1347,7 +1357,8 @@ class MobileChannel(ChannelAdapter):
             agent_id=getattr(request, "agent_id", None),
             call_id=getattr(request, "call_id", None),
             options_legend=getattr(request, "options_legend", None),
-            options=self.ask_options(klass, grantable, self.private_chat, marked),
+            options=self.ask_options(klass, grantable, self.private_chat, self._one_tap(request),
+                                     bool(getattr(request, "trusts_pages", False))),
             untrusted_ingest=ingests_untrusted(schema) if schema is not None else tool_name in WEB_INGEST_TOOLS,
         )
 
@@ -1381,7 +1392,7 @@ class MobileChannel(ChannelAdapter):
             return {"status": "invalid", "detail": f"{kind!r} is not offered for this question"}
 
         option = next(o for o in ask.frame.options if o.kind == kind)
-        if (kind in ALWAYS_KINDS and ask.frame.klass != TRUST_KLASS and not ask.private) or option.confirm_required:
+        if (kind in ALWAYS_KINDS and ask.frame.klass != TRUST_KLASS and not ask.one_tap) or option.confirm_required:
             now = time.monotonic()
             held = ask.confirm
             live = held if (held and held[1] == kind and held[2] > now) else None
@@ -1404,7 +1415,7 @@ class MobileChannel(ChannelAdapter):
                     "confirm_token": live[0],
                     "expires_in": round(live[2] - now, 3),
                     "detail": (
-                        PRIVATE_TAINTED_CONFIRM if ask.private and kind in ALWAYS_KINDS else
+                        TAINTED_CONFIRM if ask.one_tap and kind in ALWAYS_KINDS else
                         "this answer is permanent, global and has no revoke command; "
                         "repeat the request with confirm_token to record it"
                         if kind in ALWAYS_KINDS else ask.frame.reason

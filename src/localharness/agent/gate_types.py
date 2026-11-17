@@ -165,6 +165,9 @@ class PermissionRequest:
     precisely the one that IS remembered. None everywhere else, and a channel that does not read
     it simply draws its own two options — the same question with plainer buttons."""
 
+    trusts_pages: bool = False
+    """An "always" here would trust saved pages for the session rather than write a grant."""
+
     auto_entry: str | None = None
     """Which :class:`AutoBlacklist` entry raised this, when ``auto`` is the mode.
 

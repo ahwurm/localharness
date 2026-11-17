@@ -353,3 +353,11 @@ def test_moved_into_reads_the_four_commands():
     assert moved_into(("tar", "--remove-files", "-czf", "t.tgz", "a")) == (("a",), "t.tgz")
     assert moved_into(("zip", "-mr", "z.zip", "a")) == (("a",), "z.zip")
     assert moved_into(("rsync", "a", "d")) is None and moved_into(("cp", "a", "d")) is None
+
+
+@pytest.mark.parametrize("command, tainted_by, trusts", [
+    ("python -c 'print(1)'", "a.md", True), ("python -c 'print(1)'", None, False), ("frobnicate x", "a.md", False)])
+def test_an_ask_says_an_always_would_trust_saved_pages_only_for_a_tainted_class_from_a_marked_agent(
+        world, command, tainted_by, trusts):
+    request = world.shell(command, tainted_by=tainted_by).request
+    assert request is not None and request.trusts_pages is trusts

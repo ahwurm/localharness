@@ -258,7 +258,9 @@ documented consequence, not a defect — `auto` exists so this is not the daily 
 
 **"Always allow here" takes two taps, and the second one is checked by the server.** A permanent
 grant is global, keyed by your project's real path, never expires, and has no revoke command, so a
-single request can never write one. `GET /api/grants` lists what you have allowed forever.
+single request can never write one. `GET /api/grants` lists what you have allowed forever. An answer held only for
+the chat (any answer in a private chat, and a scratch answer in `guarded`) reads `Always allow (this chat)` or
+`Never (this chat)` and takes one tap, unless it would trust saved pages.
 
 **A paired phone can do what you can do at the terminal** — including switching the session to
 `unattended`, answering "always" and launching a model. To keep those three to the terminal and

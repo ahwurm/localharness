@@ -1,5 +1,5 @@
 {
-  "_note": "Regenerate ONLY together with a PROTOCOL_VERSION bump, or for a prose-only correction to a description — which moves a digest without moving the wire, and is said so in the commit. One more exception: additive OPTIONAL fields the phone page does not read re-record without a bump (cb96515 reasoning_cut; 499c6df Action gained model, prompt_tokens, completion_tokens, latency_ms). See test_mobile_protocol.py and the PROTOCOL_VERSION log in channels/mobile/protocol.py.",
+  "_note": "Regenerate ONLY together with a PROTOCOL_VERSION bump, or for a prose-only correction to a description — which moves a digest without moving the wire, and is said so in the commit. One more exception: additive OPTIONAL fields the phone page does not read re-record without a bump (cb96515 reasoning_cut; 499c6df Action gained model, prompt_tokens, completion_tokens, latency_ms; PermissionRequest gained trusts_pages). See test_mobile_protocol.py and the PROTOCOL_VERSION log in channels/mobile/protocol.py.",
   "protocol_version": 13,
   "types": {
     "Action": "e048a7657afae88e",
@@ -36,7 +36,7 @@
     "ParseFailed": "c94d10c0a2e52906",
     "PermissionAsked": "8ec757a04efbd20b",
     "PermissionResolved": "b65c6401891de172",
-    "PermissionStaged": "c4218665d8c0a65b",
+    "PermissionStaged": "e2d21ae80442763a",
     "ProviderLost": "56b1d8e84b209bca",
     "ReasoningDelta": "0fd07a09fbe03bb2",
     "ScenarioCompleted": "bf3d5704625bc117",
