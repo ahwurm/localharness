@@ -27,7 +27,6 @@ import signal
 import sys
 import time
 import traceback
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, Optional, TextIO
 
@@ -426,12 +425,6 @@ def print_enrolment(token: str, *, public_url: Optional[str], host: str, port: i
         out.print(escape(ENROLMENT_GUESSED_NOTE.format(port=port)), style="dim", soft_wrap=True)
 
 
-@dataclass
-class _Chat:
-    """The tasks removing the run folders the chat has finished with."""
-    ending: list = field(default_factory=list)
-
-
 async def _serve(
     *,
     config_dir: Optional[str],
@@ -505,15 +498,17 @@ async def _serve(
         from localharness.core.run_folder import end, sweep
 
         channel = MobileChannel(bus=EventBus(), config={})
-        chat = _Chat()
+        ending: list[asyncio.Future] = []
         await asyncio.to_thread(sweep, resolve_config_dir(config_dir))
 
         def _end_run() -> None:
             run = channel.run
             channel.forget_chat()
             if run is not None:
-                chat.ending.append(asyncio.ensure_future(asyncio.to_thread(
-                    end, run, lambda line: console.print(escape(line), style="dim", soft_wrap=True))))
+                task = asyncio.ensure_future(asyncio.to_thread(
+                    end, run, lambda line: console.print(escape(line), style="dim", soft_wrap=True)))
+                ending.append(task)
+                task.add_done_callback(ending.remove)
 
         def _begin_session(*, fresh_thread: bool = False, private: Optional[bool] = None) -> None:
             """Start one session bring-up at a time in the background; `fresh_thread` discards a sleeping thread, `private` None keeps the chat's privacy."""
@@ -524,7 +519,7 @@ async def _serve(
             woke = channel.private and channel.run is not None  # a sleeping private chat, or one whose wake failed
             session_task = asyncio.ensure_future(_bring_up(
                 channel, config_dir=config_dir, verbose=verbose, agent=agent, fresh_thread=fresh_thread,
-                private=channel.private, chat=chat))
+                begin_run=True))
             session_task.add_done_callback(lambda task: _after_session(task, woke))
             channel.set_bringup_abort(session_task.cancel)
 
@@ -560,7 +555,7 @@ async def _serve(
 
         async def _new_session(*, private: bool = False) -> str:
             """End the live session and begin a fresh one (the + button); returns what a private chat's removal left."""
-            if channel.asleep and channel.private is not True and channel.session_dir is not None:
+            if channel.asleep and not channel.bringup_private and channel.session_dir is not None:
                 from localharness.cli.session_resume import asleep_path
 
                 asleep_path(channel.session_dir).unlink(missing_ok=True)
@@ -654,7 +649,7 @@ async def _serve(
             await _sleep_or_cancel(channel, session_task)
         if replay is None:
             _end_run()
-            await asyncio.gather(*chat.ending)
+            await asyncio.gather(*ending)
         await channel.stop()
         for sig, handler in previous.items():
             signal.signal(sig, handler)
@@ -698,7 +693,7 @@ async def _sleep_or_cancel(channel: Any, session_task: asyncio.Task) -> None:
 
 async def _bring_up(
     channel: Any, *, config_dir: Optional[str], verbose: bool, agent: Optional[str],
-    fresh_thread: bool = False, private: bool = False, chat: Optional[_Chat] = None,
+    fresh_thread: bool = False, begin_run: bool = False,
 ) -> None:
     """Build the session and hand the channel to the REPL, reporting the build to the client.
 
@@ -720,12 +715,13 @@ async def _bring_up(
     started = time.monotonic()
     channel.set_bringup("starting the session", elapsed=0.0)
     try:
-        if chat is not None and channel.run is None:
+        if begin_run and channel.run is None:
             from localharness.cli.start_cmd import private_run_problem
             from localharness.config.paths import resolve_config_dir
             from localharness.core.run_folder import begin
 
             cfg = resolve_config_dir(config_dir)
+            private = channel.bringup_private
             channel.run = await asyncio.to_thread(begin, cfg, private)
             if private and (problem := await asyncio.to_thread(private_run_problem, channel.run, cfg)):
                 channel.run = None
@@ -734,7 +730,7 @@ async def _bring_up(
         restart = await _start_async(
             agent, verbose, False, config_dir,
             channel_mode="mobile", mobile_channel=channel, fresh_thread=fresh_thread,
-            run=channel.run if chat is not None else None,
+            run=channel.run if begin_run else None,
         )
     except asyncio.CancelledError:
         # Two very different cancels share this except: a bound session means the NEW-CHAT verb

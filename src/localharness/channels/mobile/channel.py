@@ -457,6 +457,21 @@ class MobileChannel(ChannelAdapter):
         self._sleep_now = self._sleeping = False
         self.set_bringup("ready", elapsed=self._bringup.elapsed if self._bringup else 0.0)
 
+    @property
+    def bringup_private(self) -> bool:
+        """The chat being brought up was asked for private."""
+        return self.private is True
+
+    @property
+    def private_chat(self) -> bool:
+        """Strict: a one-tap "always" on a chat that is not known private would write a lasting grant."""
+        return self.run is not None and self.run.private
+
+    @property
+    def redacts(self) -> bool:
+        """A push or line about this chat hides its text: fails private while no run is known."""
+        return self.run is None or self.run.private
+
     def forget_chat(self) -> None:
         """The chat is over: its run, privacy and turn count go, so the next one starts clean."""
         self.run = self.private = self._private_dir = None
@@ -469,7 +484,7 @@ class MobileChannel(ChannelAdapter):
 
     def _waiting(self) -> int:
         """Lines queued by the open chat; a line typed into another chat is never counted."""
-        return sum(item[3] == (self.private is True) for item in self._inbound._queue)
+        return sum(item[3] == self.bringup_private for item in self._inbound._queue)
 
     def reset_session(self) -> None:
         """Forget the bound session so the next bring-up binds fresh — the new-chat verb's half.
@@ -764,7 +779,7 @@ class MobileChannel(ChannelAdapter):
         root = getattr(event, "parent_id", None) is None
         policy = self._push_policy()
         sid = getattr(event, "session_id", None)
-        private = self.run is None or self.run.private or sid != self.session_id
+        private = self.redacts or sid != self.session_id
         if isinstance(event, TurnStarted):
             if root:
                 self._turn_running = True
@@ -960,7 +975,7 @@ class MobileChannel(ChannelAdapter):
         """Name the bring-up stage now running, and remember it for a client that connects late."""
         self._bringup = BringUpStage(
             session_id=self.session_id, stage=stage, detail=detail, failed=failed,
-            elapsed=elapsed, abortable=self._bringup_abort is not None, private=self.private is True,
+            elapsed=elapsed, abortable=self._bringup_abort is not None, private=self.bringup_private,
         )
         self.push(self._bringup)
 
@@ -1012,7 +1027,7 @@ class MobileChannel(ChannelAdapter):
             if getter not in done or self._sleep_now:
                 break
             text, images, line_id, private = getter.result()
-            if private != (self.private is True):
+            if private != self.bringup_private:
                 if line_id:
                     self.push(LineDropped(line_id=line_id))
                 continue
@@ -1039,7 +1054,7 @@ class MobileChannel(ChannelAdapter):
         Nothing is dropped and nothing interleaves.
         """
         self._sleep_event.clear()  # a person spoke: whatever idle watch was about to sleep, this comes first
-        self._inbound.put_nowait((text, list(parts or []), line_id, self.private is True if private is None else private))
+        self._inbound.put_nowait((text, list(parts or []), line_id, self.bringup_private if private is None else private))
         if self._turn_running and self._queued_resolver is not None:
             self._queued_resolver(text)
 
@@ -1171,7 +1186,7 @@ class MobileChannel(ChannelAdapter):
         from localharness.agent.gate_types import Decision
 
         request_id = uuid.uuid4().hex
-        ask = _OpenAsk(request_id, request, self._ask_frame(request_id, request), private=self._private_chat())
+        ask = _OpenAsk(request_id, request, self._ask_frame(request_id, request), private=self.private_chat)
         self._open_asks[request_id] = ask
         self.push(ask.frame)
         policy = self._push_policy()
@@ -1183,7 +1198,7 @@ class MobileChannel(ChannelAdapter):
                 self.session_id, kind="blocking", request_id=request_id,
                 detail=(getattr(ask.frame, "text", "") or getattr(request, "display", "")
                         or "")[:PUSH_SUMMARY_CHARS],
-                private=self.run is None or self.run.private,
+                private=self.redacts,
             ))
         try:
             kind = await ask.future
@@ -1278,10 +1293,6 @@ class MobileChannel(ChannelAdapter):
         finally:
             self._open_asks.pop(request_id, None)
 
-    def _private_chat(self) -> bool:
-        """Strict: a one-tap "always" on a chat that is not known private would write a lasting grant."""
-        return self.run is not None and self.run.private
-
     @staticmethod
     def ask_options(klass: str, grantable: bool, private: bool = False, marked: bool = False) -> list[AskOption]:
         """The buttons a question of this class and grantability gets.
@@ -1336,7 +1347,7 @@ class MobileChannel(ChannelAdapter):
             agent_id=getattr(request, "agent_id", None),
             call_id=getattr(request, "call_id", None),
             options_legend=getattr(request, "options_legend", None),
-            options=self.ask_options(klass, grantable, self._private_chat(), marked),
+            options=self.ask_options(klass, grantable, self.private_chat, marked),
             untrusted_ingest=ingests_untrusted(schema) if schema is not None else tool_name in WEB_INGEST_TOOLS,
         )
 
@@ -1602,7 +1613,7 @@ class MobileChannel(ChannelAdapter):
             model_state=self.model_state(),
             session_live=self.session_id is not None,
             model=self.model_label(),
-            private=self.private is True,
+            private=self.bringup_private,
             asleep_session_id=self.asleep_session_id,
             kept=self.kept,
         )

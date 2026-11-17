@@ -439,7 +439,7 @@ class MobileServer:
             Route("/api/sessions/{session_id}/command", self.command, methods=["POST"]),
             Route("/{path:path}", self.static, methods=["GET"]),
         ]
-        return Starlette(routes=routes, middleware=[Middleware(_SecurityHeaders, private=lambda: self.channel.private is True)])
+        return Starlette(routes=routes, middleware=[Middleware(_SecurityHeaders, private=lambda: self.channel.bringup_private)])
 
     # ------------------------------------------------------------------ static
 
@@ -741,7 +741,7 @@ class MobileServer:
             "session_id": self.channel.session_id,
             "agent_id": self.channel.agent_id,
             "session_live": self.channel.session_id is not None,
-            "private": self.channel.private is True,
+            "private": self.channel.bringup_private,
             "asleep_session_id": self.channel.asleep_session_id,
             "turn_in_progress": self.channel._turn_running,
             "mode": getattr(self.channel._gate, "mode", None),
@@ -916,7 +916,7 @@ class MobileServer:
 
     def _artifact_policy(self) -> tuple[dict[str, Path], str, bool]:
         """The roots served (only those bound this session), the artifact route's Cache-Control, and whether the gallery listing exists; incognito or a private chat turns the last two off."""
-        roots, private = self.channel.artifact_roots(), self.incognito or self.channel.private is True
+        roots, private = self.channel.artifact_roots(), self.incognito or self.channel.bringup_private
         return (roots, ARTIFACT_NO_STORE if private else ARTIFACT_CACHE_CONTROL,
                 bool(roots) and not private)
 
@@ -1405,7 +1405,7 @@ class MobileServer:
             return refusal
         if self.on_end is None or self.replay is not None:
             return _json({"error": NO_RESTART_HANDLE}, status=409)
-        if self.channel.private is not True:
+        if not self.channel.bringup_private:
             return _json({"error": "no private chat is open"}, status=409)
         if self.channel._turn_running:
             return _json({"error": "a turn is running — stop it first, then end the chat"}, status=409)
