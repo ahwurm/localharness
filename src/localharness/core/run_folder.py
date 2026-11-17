@@ -47,6 +47,7 @@ SCRATCH_VAR, TMP_VAR = "LOCALHARNESS_SCRATCH", "TMPDIR"
 COMMIT_MARKER = "LOCALHARNESS_COMMIT"
 END_WAIT_S = 2.0
 LINKED, FOREIGN, UNLOCKED = "a link", "another account's", "on a folder without enforced locks"
+NOT_A_FOLDER, NOT_WRITABLE = "not a folder", "not writable"
 PRIVATE_LINKED_RUN_LINE = "{path} is a link or another account's; remove it, or use --config-dir <local folder>."
 PRIVATE_UNLOCKED_LINE = "{path} does not enforce file locks; use --config-dir <local folder>."
 PRIVATE_NEEDS_POSIX_LINE = "private sessions need POSIX file locks; use WSL on Windows."
@@ -233,10 +234,13 @@ def begin(config_dir: Path, private: bool = False, home: Path | None = None) -> 
         run = None
         if native():
             if home is not None and not (private and any(map(_shared, (Path(home).parent, Path(home))))):
+                made = [p for p in (Path(home) / RUN_DIR_NAME, Path(home)) if not os.path.lexists(p)]
                 try:
                     run = _begin(Path(home), private, legacy=config_dir.resolve())
                 except OSError:
                     log.debug("project run folder", exc_info=True)
+                if run is None:
+                    _unmake(Path(home), made)
             run = run or _begin(config_dir.resolve(), private)
         run = run or _fallback(private)
     except OSError as e:
@@ -245,6 +249,19 @@ def begin(config_dir: Path, private: bool = False, home: Path | None = None) -> 
         return None
     _current = run
     return run
+
+
+def _unmake(home: Path, made: list[Path]) -> None:
+    """Remove the empty `run/` and `.localharness/` a failed project begin made; `run/` through a descriptor, so a swapped link is not followed."""
+    with contextlib.suppress(OSError):
+        if home / RUN_DIR_NAME in made:
+            top = open_private_dir(home, create=False)
+            try:
+                os.rmdir(RUN_DIR_NAME, dir_fd=top)
+            finally:
+                os.close(top)
+        if home in made:
+            os.rmdir(home)
 
 
 def _shared(path: Path) -> bool:
@@ -303,9 +320,14 @@ def _begin(home: Path, private: bool, legacy: Path | None = None) -> RunFolder |
     try:
         if os.fstat(parent).st_mode & OPEN_TO_OTHERS:
             os.fchmod(parent, PRIVATE_DIR_MODE)
-        _gitignore(parent)
-        _sweep_briefly(parent, legacy)
         run = _make(parent, home.resolve() / RUN_DIR_NAME, private)
+        if run is not None:
+            try:
+                _gitignore(parent)
+            except BaseException:
+                _discard(run.path.name, parent, run.fd)
+                raise
+            _sweep_briefly(parent, legacy)
     except BaseException:
         os.close(parent)
         raise
@@ -539,18 +561,25 @@ def fallback_cause(home: Path) -> str | None:
     """Why a session cannot keep its run folder in `home`, for doctor; None when it can."""
     if not native():
         return None
-    run = Path(home) / RUN_DIR_NAME
-    for place in (Path(home), run):
+    deepest = Path(home).parent
+    for place in (Path(home), Path(home) / RUN_DIR_NAME):
         try:
             st = os.lstat(place)
+        except FileNotFoundError:
+            break
         except OSError:
             return None
         if stat.S_ISLNK(st.st_mode):
             return LINKED
+        if not stat.S_ISDIR(st.st_mode):
+            return NOT_A_FOLDER
         if st.st_uid != os.geteuid():
             return FOREIGN
+        deepest = place
+    if not os.access(deepest, os.W_OK | os.X_OK):
+        return NOT_WRITABLE
     try:
-        first, second = os.open(run, _DIR_FLAGS), os.open(run, _DIR_FLAGS)
+        first, second = os.open(deepest, _DIR_FLAGS), os.open(deepest, _DIR_FLAGS)
     except OSError:
         return None
     try:

@@ -1220,7 +1220,7 @@ in-session creation workflow, autoresearch's archive, run journals and budget fi
 `sessions/reply-review.md` (each written through that no-follow walk and replaced atomically, never
 through a link), the run folders `<project>/.localharness/run/<id>/`, or `<config dir>/run/<id>/` for a session with no
 project (each owner-only, 0700, with its own `.gitignore` of `*`, made at a start and deleted at its end; `run/` is
-owner-only, with a `.gitignore` of `*`; a project's `.localharness/` is made 0700 when missing and stays), and `plugins/README.md`. Task scratch is no longer written under
+owner-only, with a `.gitignore` of `*`; a project's `.localharness/` is made 0700 when missing and stays once it holds a run), and `plugins/README.md`. Task scratch is no longer written under
 `<state_dir>/scratchpad/`; folders already there are left alone. `/task show` prints a task doc only after its digest
 matches what was filed; an edited doc is headed by the line saying so instead. A folder this session
 did not make is shown read-only, headed `not adopted · not made by this session`. The header
@@ -1305,7 +1305,8 @@ is followed by one dim line giving its lifetime.
   scratch…` (`Removing this private session…` in a private session), and leaves the rest as
   `run/.deleting-<id>` for the next start.
 - **The fallback.** A project that cannot hold the run (its `.localharness` or `run` is a link, a file or another
-  account's, it cannot be written, or its folder does not enforce file locks) hands it to `<config dir>/run/`;
+  account's, it cannot be written, or its folder does not enforce file locks) hands it to `<config dir>/run/`, and the
+  start removes the `run/` and `.localharness/` it made there and sweeps a project only once it holds the run;
   when that is a link, another account's, or on a folder whose locks are not enforced, the run goes to a new
   folder under the system temp folder and is removed at the end. `localharness doctor` names each cause. Where
   the run cannot be made at all, the session starts without scratch.

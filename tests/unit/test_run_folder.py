@@ -690,17 +690,52 @@ def test_a_private_session_in_a_project_writable_only_by_a_user_private_group_ke
         end(run)
 
 
-def test_a_project_without_enforced_locks_falls_back_to_the_config_folder(cfg, proj, monkeypatch):
-    real = run_folder._enforced
+@pytest.mark.parametrize("private", [False, True])
+@pytest.mark.parametrize("before", ["nothing", "dot-folder", "run-with-leftovers"])
+def test_a_project_without_enforced_locks_falls_back_to_the_config_folder_and_is_left_as_it_was(
+        cfg, proj, monkeypatch, before, private):
     home = proj / ".localharness"
-    monkeypatch.setattr(run_folder, "_enforced", lambda name, parent: real(name, parent)
-                        and os.fstat(parent).st_ino != (home / "run").stat().st_ino)
-    run = begin(cfg, home=home)
+    if before != "nothing":
+        home.mkdir()
+        (home / "config.yaml").write_text("{}")
+    if before == "run-with-leftovers":
+        _make(home, "aaaaaaaaaaaa", deleting=True, scratch=True)
+        _make(home, "bbbbbbbbbbbb")
+        (home / "run").chmod(0o700)
+    was = [(p, (proj / p).stat().st_mode) for p in _listing(proj)]
+    real, first = run_folder._enforced, iter([True])
+    monkeypatch.setattr(run_folder, "_enforced", lambda name, parent: next(first, False) is False and real(name, parent))
+    run = begin(cfg, private, home=home)
     try:
         assert run.path.parent == cfg.resolve() / "run"
-        assert _ids(home) == []
+        assert [(p, (proj / p).stat().st_mode) for p in _listing(proj)] == was
     finally:
         end(run)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes anywhere")
+@pytest.mark.parametrize("shape, cause", [
+    ("dot-file", "not a folder"), ("run-file", "not a folder"),
+    ("unwritable-root", "not writable"), ("unwritable-dot", "not writable"),
+    ("no-locks", run_folder.UNLOCKED)])
+def test_doctor_names_a_file_an_unwritable_project_and_no_locks_after_the_fallback(
+        cfg, proj, monkeypatch, capsys, shape, cause):
+    from localharness.cli import doctor_cmd
+
+    home = proj / ".localharness"
+    {"dot-file": lambda: home.write_text("x"), "run-file": lambda: (home.mkdir(), (home / "run").write_text("x")),
+     "unwritable-root": lambda: proj.chmod(0o555), "unwritable-dot": lambda: (home.mkdir(), home.chmod(0o555)),
+     "no-locks": lambda: monkeypatch.setattr(fcntl, "flock", lambda fd, op: None)}[shape]()
+    try:
+        if shape != "no-locks":
+            end(begin(cfg, home=home))
+        assert fallback_cause(home) == cause
+        doctor_cmd._print_run_folder(cfg, home)
+        assert f"{home}/run is {cause}: sessions here keep their run folder in" in " ".join(capsys.readouterr().out.split())
+    finally:
+        proj.chmod(0o755)
+        if home.is_dir():
+            home.chmod(0o755)
 
 
 def test_a_project_sweep_follows_the_table_and_never_a_link(cfg, proj, tmp_path):
