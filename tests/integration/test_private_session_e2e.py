@@ -50,6 +50,8 @@ KEPT = (
      ("embeddings/*", "tiktoken/*", "mobile/*")),
     ("/model, /effort, /plugins and /mcp, with their audit rows",
      ("audit.jsonl", "plugins/*", "mcp/*")),
+    ("an agent you ask the session to create, saved in the config folder",
+     ("agents/*.yaml",)),
 )
 
 PROJECT_RUN = (".localharness/", ".localharness/run/", ".localharness/run/.gitignore")

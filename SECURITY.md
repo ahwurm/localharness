@@ -1360,6 +1360,7 @@ the project that is neither the agent's nor one of these paths in the config fol
 - the `grants.yaml.lock` and `project_records.yaml.lock` sidecars (`grants.yaml.lock`, `project_records.yaml.lock`)
 - the embedding model and tiktoken caches, and phone pairing (`embeddings/*`, `tiktoken/*`, `mobile/*`)
 - `/model`, `/effort`, `/plugins` and `/mcp`, with their audit rows (`audit.jsonl`, `plugins/*`, `mcp/*`)
+- an agent you ask the session to create, saved in the config folder (`agents/*.yaml`)
 
 **The gate's row.** A private session adds one deny, in every mode and before any ask, for a write, edit,
 removal, move or link aimed at what a later session would load: an instructions file (`CLAUDE.md`, `AGENTS.md`,
@@ -1393,8 +1394,10 @@ a folder that had no `.localharness/`, `.localharness/run/` with its `.gitignore
 there. A project in a synced or backed-up folder copies the run folder while it exists; start a private session
 there with `--config-dir <local folder>`. A plugin that outlives its stop timeout can re-create its folder in the
 run after the end and leave it there until then. That a session ran is visible in the model server's log and
-cache, in the speed ledger and in file access times. Settings you change stay, and so do their audit rows. What
-reaches past the harness is outside it: a command's own leftovers, an MCP server's and a plugin's own storage,
+cache, in the speed ledger and in file access times. Settings you change stay, and so do their audit rows. An
+agent you ask the session to create stays too, as a file in the project's `.localharness/agents/` or the config
+folder's `agents/`. What reaches past the harness is outside it:
+a command's own leftovers, an MCP server's and a plugin's own storage,
 the sites a fetch contacted, ComfyUI's copy of a picture, the browser plugin's temporary profile and the
 terminal's scrollback. Writes the gate cannot name are above. Readers running as you, another process or an
 agent in another session, can read the run folder while it exists, and so can tools that search the project
