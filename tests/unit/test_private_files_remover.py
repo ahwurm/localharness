@@ -95,33 +95,18 @@ def test_another_device_is_reported_and_left(tmp_path, monkeypatch):
     assert (tmp_path / "t" / "mount" / "f").exists()
 
 
-def test_a_fifty_deep_tree_goes(tmp_path):
+def test_a_tree_past_the_descriptor_cap_goes(tmp_path):
     deep = tmp_path / "t"
-    for _ in range(50):
+    for _ in range(70):
         deep = deep / "d"
     deep.mkdir(parents=True)
     (deep / "f").write_text("f")
     fd = _open(tmp_path)
     try:
-        assert remove_dir("t", fd) == ()
+        left = remove_dir("t", fd)
     finally:
         os.close(fd)
-    assert not (tmp_path / "t").exists()
-
-
-def test_a_tree_past_the_descriptor_cap_is_reported_and_left(tmp_path, monkeypatch):
-    monkeypatch.setattr(private_files, "_MAX_HELD", 3)
-    deep = tmp_path / "t"
-    for _ in range(6):
-        deep = deep / "d"
-    deep.mkdir(parents=True)
-    fd = _open(tmp_path)
-    try:
-        got = remove_dir("t", fd)
-    finally:
-        os.close(fd)
-    assert got
-    assert (tmp_path / "t").exists()
+    assert list(tmp_path.iterdir()) == [] and left == ()
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores modes")

@@ -312,12 +312,15 @@ def test_end_returns_and_says_the_line_naming_what_is_left(cfg, monkeypatch):
     assert line == "Scratch not fully removed: /x/y stays until the next start" and said == [line]
 
 
-def test_a_private_end_that_hits_its_bound_names_the_run_folder(cfg, monkeypatch):
+def test_a_private_end_that_hits_its_bound_names_the_folder_left_behind(cfg, monkeypatch):
     run = begin(cfg, private=True)
-    _slow_finish(monkeypatch, 0.4)
+    _slow_finish(monkeypatch, 0)
+    real = run_folder.empty_dir
+    monkeypatch.setattr(run_folder, "empty_dir", lambda fd, label: time.sleep(0.4) or real(fd, label))
     said = []
     line = end(run, said.append)
-    assert line == f"Scratch not fully removed: {run.path} stays until the next start"
+    gone = run.path.with_name(f".deleting-{run.path.name}")
+    assert line == f"Scratch not fully removed: {gone} stays until the next start" and gone.is_dir()
     assert said == [run_folder.REMOVING_LINE, line]
     time.sleep(0.5)
 

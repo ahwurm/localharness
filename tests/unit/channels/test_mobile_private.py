@@ -161,6 +161,10 @@ def test_end_removes_the_private_chat_from_any_state(cfg, monkeypatch, state):
     assert seen["cancelled"] == (state == "block") and len(seen["runs"]) == 1
 
 
+def _gone(run):
+    return run.path.with_name(f".deleting-{run.path.name}")
+
+
 def test_a_removal_that_hits_its_bound_is_named_by_end_and_by_a_new_chat(cfg, monkeypatch):
     real = run_folder._finish
 
@@ -178,10 +182,10 @@ def test_a_removal_that_hits_its_bound_is_named_by_end_and_by_a_new_chat(cfg, mo
         await _until(lambda: ch.session_id == "c1")
         old = runs[0]
         line = await cb["on_end"]()
-        assert line == f"Scratch not fully removed: {old.path} stays until the next start"
+        assert line == f"Scratch not fully removed: {_gone(old)} stays until the next start"
         cb["on_first_message"](private=True)
         await _until(lambda: ch.session_id == "c2")
-        assert await cb["on_new_session"](private=False) == f"Scratch not fully removed: {runs[1].path} stays until the next start"
+        assert await cb["on_new_session"](private=False) == f"Scratch not fully removed: {_gone(runs[1])} stays until the next start"
 
     _owner(monkeypatch, cfg, ["block", "block", "block"], script)
 

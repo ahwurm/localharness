@@ -295,7 +295,8 @@ def end(run: RunFolder | None, say: Callable[[str], None] = lambda line: None) -
             say(REMOVING_LINE)
             left = ender.result(timeout=(PRIVATE_END_WAIT_S if run.private else END_WAIT_S) - _SLOW_AFTER_S)
     except TimeoutError:
-        left = (str(run.path),) if run.private else ()
+        gone = run.path.with_name(f".deleting-{run.path.name}") if run.parent is not None else run.path
+        left = (str(gone),) if run.private else ()
     except Exception:  # noqa: BLE001 - a folder that would not go is left for the next start
         log.warning("run folder not removed", exc_info=True)
         return ""

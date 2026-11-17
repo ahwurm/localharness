@@ -409,8 +409,12 @@ def empty_dir(fd: int, label: str = ".") -> tuple[str, ...]:
                 except OSError:
                     skip(frame, here)
                 continue
-            if len(stack) >= _MAX_HELD:
-                skip(frame, here)
+            if len(stack) >= _MAX_HELD:  # no descriptor left for this depth: empty it from the root
+                try:
+                    os.rename(name, moved := f".deleting-{secrets.token_hex(6)}", src_dir_fd=frame.fd, dst_dir_fd=fd)
+                    stack[0].names.append(moved)
+                except OSError:
+                    skip(frame, here)
                 continue
             try:
                 child = _open_dir(name, frame.fd)
