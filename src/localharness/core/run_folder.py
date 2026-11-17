@@ -41,6 +41,9 @@ SCRATCH_SENTENCE = (
 )
 REMOVING_LINE = "Removing scratch… (Ctrl+C leaves it for the next start)"
 PRIVATE_REMOVING_LINE = "Removing this private session… (Ctrl+C leaves it for the next start)"
+LAYOUT = SCRATCH_DIR, TMP_DIR, STATE_DIR = "scratch", "t", "state"
+SCRATCH_VAR, TMP_VAR = "LOCALHARNESS_SCRATCH", "TMPDIR"
+COMMIT_MARKER = "LOCALHARNESS_COMMIT"
 END_WAIT_S = 2.0
 LINKED, FOREIGN, UNLOCKED = "a link", "another account's", "on a folder without enforced locks"
 PRIVATE_LINKED_RUN_LINE = "{path} is a link or another account's; remove it, or use --config-dir <local folder>."
@@ -80,17 +83,11 @@ class RunFolder:
 
     @property
     def scratch(self) -> Path:
-        return self.path / "scratch"
+        return self.path / SCRATCH_DIR
 
     @property
     def state(self) -> Path:
-        return self.path / "state"
-
-    def command_env(self, workspace_root: str | None = None) -> dict[str, str]:
-        marker = {"LOCALHARNESS_COMMIT": "private"} if self.private else {}
-        if scratch_of(self, workspace_root) is None:
-            return marker
-        return {**marker, "LOCALHARNESS_SCRATCH": str(self.scratch), "TMPDIR": str(self.path / "t")}
+        return self.path / STATE_DIR
 
 
 _current: RunFolder | None = None
@@ -185,6 +182,14 @@ def goes(run: RunFolder) -> tuple[tuple[str, str], ...]:
 
 def scratch_of(run: RunFolder | None, workspace_root: str | None) -> Path | None:
     return run.scratch if run and not workspace_root else None
+
+
+def command_env(run: RunFolder | None, workspace_root: str | None = None) -> dict[str, str]:
+    """What every command the agent runs carries: the commit marker, and the run's folders when it has scratch."""
+    env = {COMMIT_MARKER: "private" if run and run.private else "1"}
+    if (scratch := scratch_of(run, workspace_root)) is None:
+        return env
+    return {**env, SCRATCH_VAR: str(scratch), TMP_VAR: str(run.path / TMP_DIR)}
 
 
 @functools.cache
@@ -301,16 +306,21 @@ def _make(parent: int, run_dir: Path, private: bool) -> RunFolder:
             enforced = False
         if enforced:
             atomic_write_text(".marker", marker(), dir_fd=fd)
-            os.mkdir("scratch", PRIVATE_DIR_MODE, dir_fd=fd)
-            os.mkdir("t", PRIVATE_DIR_MODE, dir_fd=fd)
-            if private:
-                os.mkdir("state", PRIVATE_DIR_MODE, dir_fd=fd)
+            _lay_out(fd, private)
             return RunFolder(run_dir / name, fd, parent, private=private)
     except BaseException:
         _discard(name, parent, fd)
         raise
     _discard(name, parent, fd)
     return _fallback(private)
+
+
+def _lay_out(where: int | Path, private: bool) -> None:
+    for name in LAYOUT if private else LAYOUT[:2]:
+        if isinstance(where, int):
+            os.mkdir(name, PRIVATE_DIR_MODE, dir_fd=where)
+        else:
+            (where / name).mkdir()
 
 
 def _enforced(name: str, parent: int) -> bool:
@@ -342,15 +352,7 @@ def _fallback(private: bool = False) -> RunFolder:
         if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid():
             os.close(fd)
             raise PermissionError(errno.EACCES, "temp folder is not ours", str(path))
-        os.mkdir("scratch", PRIVATE_DIR_MODE, dir_fd=fd)
-        os.mkdir("t", PRIVATE_DIR_MODE, dir_fd=fd)
-        if private:
-            os.mkdir("state", PRIVATE_DIR_MODE, dir_fd=fd)
-    else:
-        (path / "scratch").mkdir()
-        (path / "t").mkdir()
-        if private:
-            (path / "state").mkdir()
+    _lay_out(path if fd is None else fd, private)
     return RunFolder(path, fd, None, ident=os.lstat(path), private=private)
 
 
@@ -456,7 +458,7 @@ def _classify(fd: int) -> str:
     mark = read_private_text(".marker", dir_fd=fd, cap=64, pattern=_MARKER)
     if mark == marker():
         return "ours"
-    if mark is None and not _has(fd, "scratch"):
+    if mark is None and not _has(fd, SCRATCH_DIR):
         return "empty"
     return "foreign"
 

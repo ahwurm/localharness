@@ -61,6 +61,7 @@ from localharness.agent.permissions import PermissionResult
 from localharness.agent.shell_classify import copy_operands, moved_into
 from localharness.agent.taint import DOWNLOADS, TAINTED_ASK_CLASSES, content_key, under_downloads
 from localharness.config.paths import CANDIDATE_NAMES, WORKSPACE_DIR_NAME, global_config_dir
+from localharness.core.run_folder import SCRATCH_VAR, TMP_DIR, TMP_VAR
 from localharness.core.sanitize import one_line
 from localharness.tools.base import GateFamily
 
@@ -236,13 +237,14 @@ DOWNLOAD_EXEC_DETAIL = "runs a file saved from the web"
 MOVE_INTO_RUN_REASON = "moves {source} into this session's scratch, which is deleted when the session ends"
 SCRATCH_ASK_REASON = "writes this session's scratch (deleted when it ends): {path}"
 SCRATCH_OPTIONS_LEGEND = "[y]es once   [a]lways (this session)   [n]o   [N]ever (this session)"
-_RUN_VARIABLE = re.compile(r"\$\{?(?:LOCALHARNESS_SCRATCH|TMPDIR)\b")
-_RUN_SPELLING = re.compile(r"\$(?:\{(LOCALHARNESS_SCRATCH|TMPDIR)\}|(LOCALHARNESS_SCRATCH|TMPDIR)\b)(?=/|$)")
-_RUN_NAME = re.compile(r"LOCALHARNESS_SCRATCH|TMPDIR")
-_RUN_READ = re.compile(r"(?<!\\)\$(?:\{(?:LOCALHARNESS_SCRATCH|TMPDIR)\}|(?:LOCALHARNESS_SCRATCH|TMPDIR)\b)")
+_RUN_NAMES = f"{SCRATCH_VAR}|{TMP_VAR}"
+_RUN_VARIABLE = re.compile(rf"\$\{{?(?:{_RUN_NAMES})\b")
+_RUN_SPELLING = re.compile(rf"\$(?:\{{({_RUN_NAMES})\}}|({_RUN_NAMES})\b)(?=/|$)")
+_RUN_NAME = re.compile(_RUN_NAMES)
+_RUN_READ = re.compile(rf"(?<!\\)\$(?:\{{(?:{_RUN_NAMES})\}}|(?:{_RUN_NAMES})\b)")
 _RUN_REBINDERS = frozenset({"eval", "source", ".", "trap", "alias", "enable", "declare", "typeset", "local", "export",
                             "readonly", "read", "printf", "mapfile", "readarray", "getopts", "let", "unset"})
-_CD_INTO_RUN_VARIABLE = re.compile(r"(?:^|[;&|(\s])(?:cd|pushd)\s+[\"']?\$\{?(?:LOCALHARNESS_SCRATCH|TMPDIR)\b")
+_CD_INTO_RUN_VARIABLE = re.compile(rf"(?:^|[;&|(\s])(?:cd|pushd)\s+[\"']?\$\{{?(?:{_RUN_NAMES})\b")
 SAVED_PAGES_NOTE = " — the agent has read pages saved from the web ({source})."
 SAVED_PAGES_ALWAYS = ' "Always" trusts saved pages for the rest of this session.'
 WRITTEN_FILE_REASON = "runs a file the agent wrote after reading pages saved from the web ({path})"
@@ -1164,7 +1166,7 @@ def _target_asks(
         if resolved is not None and _within(ctx.boundary, resolved):
             continue
         if resolved is not None and ctx.scratch is not None and (
-                _within(ctx.scratch, resolved) or (ctx.run is not None and _within(Path(ctx.run) / "t", resolved))):
+                _within(ctx.scratch, resolved) or (ctx.run is not None and _within(Path(ctx.run) / TMP_DIR, resolved))):
             key = str(ctx.scratch)
             if not (_granted(ctx, "edit-outside", key) and _refused(ctx, "edit-outside", key) is None):
                 asks.append(_ask_record("edit-outside", key, SCRATCH_ASK_REASON.format(path=resolved)))
@@ -1196,7 +1198,7 @@ def _run_spelled(target: str, ctx: GateContext) -> Optional[Path]:
     match = _RUN_SPELLING.match(target)
     if match is None or ctx.scratch is None or ctx.run is None:
         return None
-    base = ctx.scratch if "LOCALHARNESS_SCRATCH" in (match[1], match[2]) else Path(ctx.run) / "t"
+    base = ctx.scratch if SCRATCH_VAR in (match[1], match[2]) else Path(ctx.run) / TMP_DIR
     return _resolve(str(base) + target[match.end():], None)
 
 

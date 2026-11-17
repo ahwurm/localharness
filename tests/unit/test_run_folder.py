@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from localharness.core import run_folder
-from localharness.core.run_folder import begin, end, fallback_cause, foreign_count, marker, scratch_of, sweep
+from localharness.core.run_folder import begin, command_env, end, fallback_cause, foreign_count, marker, scratch_of, sweep
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="descriptor-relative run folders")
 
@@ -120,8 +120,9 @@ def test_scratch_of_and_command_env(cfg):
     try:
         assert scratch_of(run, None) == run.scratch
         assert scratch_of(run, "x") is None and scratch_of(None, None) is None
-        assert run.command_env() == {"LOCALHARNESS_SCRATCH": str(run.path / "scratch"), "TMPDIR": str(run.path / "t")}
-        assert run.command_env("x") == {}
+        assert command_env(run) == {"LOCALHARNESS_COMMIT": "1", "LOCALHARNESS_SCRATCH": str(run.path / "scratch"),
+                                    "TMPDIR": str(run.path / "t")}
+        assert command_env(run, "x") == command_env(None) == {"LOCALHARNESS_COMMIT": "1"}
     finally:
         end(run)
 

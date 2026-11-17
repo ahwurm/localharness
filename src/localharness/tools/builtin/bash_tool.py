@@ -7,6 +7,7 @@ import signal
 from pathlib import Path
 from typing import Any
 
+from localharness.core.run_folder import command_env
 from localharness.core.which import which_outside_cwd
 from localharness.tools.builtin.paths import resolve_user_path
 
@@ -353,8 +354,7 @@ class BashExecTool(Tool):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
-                env={**os.environ, "LOCALHARNESS_COMMIT": "1",
-                     **(self.run_folder.command_env(self.workspace_root) if self.run_folder else {})},
+                env={**os.environ, **command_env(self.run_folder, self.workspace_root)},
                 **({} if os.name == "nt" else {"start_new_session": True}),
             )
             job = _WindowsJob() if os.name == "nt" else None

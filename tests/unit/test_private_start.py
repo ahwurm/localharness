@@ -136,16 +136,16 @@ def test_a_private_start_hands_its_run_folder_to_the_session(cfg, started):
 
 @pytest.mark.parametrize("scratch_free", [False, True])
 def test_a_private_run_marks_every_command_private(private_run, scratch_free):
-    env = private_run.command_env("/proj" if scratch_free else None)
+    env = run_folder.command_env(private_run, "/proj" if scratch_free else None)
     assert env["LOCALHARNESS_COMMIT"] == "private"
     assert ("LOCALHARNESS_SCRATCH" in env) is not scratch_free
 
 
-def test_a_normal_run_marks_nothing(cfg):
+def test_a_normal_run_marks_every_command_with_one(cfg):
     run = begin(cfg)
     try:
-        assert "LOCALHARNESS_COMMIT" not in run.command_env()
-        assert run.command_env("/proj") == {}
+        assert run_folder.command_env(run)["LOCALHARNESS_COMMIT"] == "1"
+        assert run_folder.command_env(run, "/proj") == {"LOCALHARNESS_COMMIT": "1"}
     finally:
         end(run)
 

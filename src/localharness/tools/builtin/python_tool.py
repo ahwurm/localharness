@@ -17,12 +17,8 @@ import threading
 import traceback
 from typing import Any
 
-from localharness.core.run_folder import is_private
+from localharness.core.run_folder import COMMIT_MARKER, command_env, current
 from localharness.tools.base import Tool, ToolResult, ToolSchema
-
-AGENT_COMMAND_MARKER = "LOCALHARNESS_COMMIT"
-"""The environment variable every command the harness runs for the agent carries (`bash_exec` sets it
-on each child). `localharness model` reads it: with it set, a switch is never a local operator's."""
 
 _marker_lock = threading.Lock()
 _marker_depth = 0
@@ -40,8 +36,8 @@ def _agent_command_marker():
     global _marker_depth, _marker_set_by_us
     with _marker_lock:
         if _marker_depth == 0:
-            _marker_set_by_us = AGENT_COMMAND_MARKER not in os.environ
-            os.environ[AGENT_COMMAND_MARKER] = os.environ.get(AGENT_COMMAND_MARKER, "private" if is_private() else "1")
+            _marker_set_by_us = COMMIT_MARKER not in os.environ
+            os.environ[COMMIT_MARKER] = os.environ.get(COMMIT_MARKER, command_env(current())[COMMIT_MARKER])
         _marker_depth += 1
     try:
         yield
@@ -49,7 +45,7 @@ def _agent_command_marker():
         with _marker_lock:
             _marker_depth -= 1
             if _marker_depth == 0 and _marker_set_by_us:
-                os.environ.pop(AGENT_COMMAND_MARKER, None)
+                os.environ.pop(COMMIT_MARKER, None)
 
 
 class PythonExecTool(Tool):
