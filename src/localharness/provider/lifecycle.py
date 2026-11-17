@@ -1998,11 +1998,17 @@ def own_launch(config_dir: Path, specs: "Iterable[ManagedServerConfig | None]") 
 def memory_after_launch(
     autosense: "AutosenseConfig", launch: procfs.Launch | None, *, stopping: bool = False,
 ) -> "_auto.FreeMemory | None":
-    """Free memory once `launch` is stopped; with none, the probe itself, or the card less 1 GiB when `stopping` an incumbent anyway."""
+    """Free memory once `launch` is stopped; with none, the probe itself, or `memory_after_stop`'s unknown-share answer when `stopping` an incumbent anyway."""
     free = _auto.free_memory(autosense)
     if launch is None and not stopping:
         return free
-    return _auto.memory_after_stop(free, None if launch is None else _auto.held_by(launch.pid))
+    if launch is None:
+        return _auto.memory_after_stop(free, None)
+    # A docker launch's pidfile names the `docker run` client, which holds no GPU memory: ask for the container's.
+    rec = procfs.read_process(launch.pid)
+    docker = isinstance(rec, procfs.ProcRecord) and os.path.basename(rec.exe or "") in procfs.DOCKER_EXES
+    held = _auto.held_by(launch.pid, container=server.DOCKER_CONTAINER_NAME) if docker else _auto.held_by(launch.pid)
+    return _auto.memory_after_stop(free, held)
 
 
 def swap_refusal(

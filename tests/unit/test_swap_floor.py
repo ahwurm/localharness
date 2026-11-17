@@ -270,3 +270,45 @@ async def test_a_served_report_with_no_window_is_a_success(tmp_path, served, mon
     monkeypatch.setattr(lifecycle, "strategy_for", lambda spec, *, unit: NoWindow(spec, served.log, None, False))
     reporter = Reporter()
     assert (await _swap(tmp_path, _incumbent(), _target(tmp_path), reporter)).stage is None
+
+
+# A docker launch's pidfile names the `docker run` client, which holds no GPU memory: the engine runs
+# under the container's own pid (a child of containerd-shim, not of the client).
+DOCKER_SMI = "3651389, 12278\n969098, 11382\n1125067, 60312\n"
+
+
+def _container(monkeypatch, root=1124272, ppids=None):
+    monkeypatch.setattr(autosense, "_container_pid", lambda name: root if name == server.DOCKER_CONTAINER_NAME else None)
+    monkeypatch.setattr(autosense, "_ppids", lambda: ppids if ppids is not None else {
+        1124272: 1124250, 1125066: 1124272, 1125067: 1124272, 3651389: 1, 969098: 968820})
+
+
+def test_held_by_a_container_sums_the_rows_of_its_process_tree_only(monkeypatch):
+    _smi(monkeypatch, DOCKER_SMI)
+    _container(monkeypatch)
+    assert autosense.held_by(1124227) is None
+    assert autosense.held_by(1124227, container=server.DOCKER_CONTAINER_NAME) == 60_312 * 2**20
+
+
+def test_held_by_a_container_that_cannot_be_inspected_is_unknown(monkeypatch):
+    _smi(monkeypatch, DOCKER_SMI)
+    _container(monkeypatch, root=None)
+    assert autosense.held_by(1124227, container="other") is None
+
+
+def test_unknown_share_on_unified_memory_lends_nothing():
+    mem = FreeMemory(2 * GIB, 121 * GIB, "meminfo")
+    assert autosense.memory_after_stop(mem, None) == mem
+
+
+def test_a_verified_docker_launch_lends_its_containers_memory_not_the_whole_box(monkeypatch):
+    from localharness.provider import procfs
+    mem = FreeMemory(2 * GIB, 121 * GIB, "meminfo")
+    monkeypatch.setattr(autosense, "free_memory", lambda ratios: mem)
+    _smi(monkeypatch, DOCKER_SMI)
+    _container(monkeypatch)
+    rec = procfs.ProcRecord(1124227, 0, ("docker", "run"), "/usr/bin/docker", None, 1, None, None, ())
+    monkeypatch.setattr(procfs, "read_process", lambda pid: rec)
+    launch = procfs.Launch(1124227, None, 8100, "spawned", True)
+    got = lifecycle.memory_after_launch(AUTO, launch)
+    assert got.free_bytes == 2 * GIB + 60_312 * 2**20

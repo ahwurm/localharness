@@ -81,8 +81,56 @@ def _run_nvidia_smi() -> str | None:
     return _smi("--query-gpu=memory.free,memory.total")
 
 
-def held_by(pid: int) -> int | None:
-    """Bytes of GPU memory nvidia-smi lists for `pid`, summed over its rows; None when it lists none."""
+def _container_pid(name: str) -> int | None:
+    """The host pid of container `name`'s main process (`docker inspect`), or None when docker is absent, fails or hangs."""
+    exe = which_outside_cwd("docker")
+    if exe is None:
+        return None
+    try:
+        done = subprocess.run([exe, "inspect", "-f", "{{.State.Pid}}", name],
+                              capture_output=True, text=True, timeout=_SMI_TIMEOUT, check=False)
+        pid = int(done.stdout.strip()) if done.returncode == 0 else 0
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
+def _ppids() -> dict[int, int]:
+    """pid → parent pid for every process `/proc` lets us read."""
+    found: dict[int, int] = {}
+    try:
+        entries = [e for e in Path("/proc").iterdir() if e.name.isdecimal()]
+    except OSError:
+        return found
+    for entry in entries:
+        try:  # comm may hold spaces and ')': the fields after its last ')' are fixed (state, ppid, ...)
+            found[int(entry.name)] = int((entry / "stat").read_bytes().rpartition(b")")[2].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+    return found
+
+
+def _tree(root: int) -> set[int]:
+    """`root` and every process descended from it."""
+    children: dict[int, list[int]] = {}
+    for pid, ppid in _ppids().items():
+        children.setdefault(ppid, []).append(pid)
+    seen, todo = {root}, [root]
+    while todo:
+        for child in children.get(todo.pop(), ()):
+            if child not in seen:
+                seen.add(child)
+                todo.append(child)
+    return seen
+
+
+def held_by(pid: int, *, container: str | None = None) -> int | None:
+    """Bytes of GPU memory nvidia-smi lists for `pid`, summed over its rows; None when it lists none.
+    With `container`, the rows of that container's process tree count too: a docker launch's pid is the
+    `docker run` client, which holds nothing; the engine runs under containerd, not under the client."""
+    pids = {pid}
+    if container is not None and (root := _container_pid(container)) is not None:
+        pids |= _tree(root)
     out = _smi("--query-compute-apps=pid,used_memory")
     mib: list[int] = []
     for line in (out or "").splitlines()[:256]:
@@ -90,15 +138,19 @@ def held_by(pid: int) -> int | None:
             row_pid, used = (int(field) for field in line.split(","))
         except ValueError:
             continue
-        if row_pid == pid:
+        if row_pid in pids:
             mib.append(used)
     return sum(mib) * _MIB if mib else None
 
 
 def memory_after_stop(mem: "FreeMemory | None", held: int | None) -> "FreeMemory | None":
-    """`mem` once the incumbent holding `held` bytes is gone; with `held` unknown, the card less 1 GiB."""
+    """`mem` once the incumbent holding `held` bytes is gone. With `held` unknown: on a GPU card, the card
+    less 1 GiB; on unified memory (`meminfo`), `mem` as probed — its total is the whole machine's RAM,
+    which every other process shares, so "all but 1 GiB" would plan beside memory they hold."""
     if mem is None:
         return None
+    if held is None and mem.source == "meminfo":
+        return mem
     free = mem.free_bytes + held if held is not None else mem.total_bytes - 2**30
     return replace(mem, free_bytes=max(0, min(free, mem.total_bytes)))
 
