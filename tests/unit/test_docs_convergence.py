@@ -250,6 +250,14 @@ def test_private_kept_bites():
     assert check_private_kept("## Something else\n", kept)
 
 
+def test_the_docs_name_the_projects_run_folder():
+    """SECURITY.md's Scratch and Private sessions sections and the README name the project's `.localharness/run/`."""
+    security = _read("SECURITY.md")
+    for heading in ("## Scratch", PRIVATE_HEADING):
+        assert ".localharness/run/" in (section(security, heading) or ""), heading
+    assert ".localharness/run/" in _read("README.md")
+
+
 # ---------------------------------------------------------------- check: the launch keys the record holds
 
 LLAMA_CONFIG_INI = "/etc/llama.cpp/config.ini"

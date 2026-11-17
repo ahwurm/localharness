@@ -560,7 +560,7 @@ read and argue with. Each step below says what it does in `auto`.
      replaces that list; for `.agents/skills/` it takes away only the removal ask, and a write there
      still asks. Everything else under one (agents,
      divisions, tools, session state, memory, history, the audit log, the kill file) is the harness
-     being *used* and is not protected, except each agent's `tasks/` and `sessions/` folders and the `run/` folder
+     being *used* and is not protected, except each agent's `tasks/` and `sessions/` folders and any `run/` folder
      (this session's own scratch excepted), which the deny class below refuses; naming what is protected rather than what is exempt also
      means a new kind of runtime state added there is allowed by default rather than becoming a
      prompt nobody wanted. Two of those entries, `config.yaml` and `overrides.yaml`, never reach
@@ -585,15 +585,16 @@ read and argue with. Each step below says what it does in `auto`.
      holds a `tasks` or `sessions` entry into `agents/<name>`, `tar -x -C`, `rsync`, `git checkout`
      aimed at `agents/<name>` or a folder above the two, and a non-recursive `chmod` at any target.
 
-     The same class refuses a write, delete, move or link whose target, or a link's source, lands under `run/`
-     of either config directory (the session's and the default one, compared without regard to case), except
-     inside this session's own `scratch/`. Each session's run folder holds its scratch (see
-     [Scratch](#scratch)), so another session's folder and `run/` itself are refused. Each target is judged on
+     The same class refuses a write, delete, move or link whose target, or a link's source, lands under any
+     `.localharness/run/` (a project's, or the default config folder's) or under the `run/` of the session's
+     config directory (compared without regard to case), except inside this session's own `scratch/`. Each
+     session's run folder holds its scratch (see [Scratch](#scratch)), so another session's folder and `run/`
+     itself are refused. Each target is judged on
      its own, so a second one held in a variable (`2>$TMPDIR/err`) does not hide the first. The sources of `cp
      -l`, `cp -s`, `cp -a` and `rsync --link-dest`, and that option's folder, count as a link's source does,
      because a later write to the copy reaches the source. A relative `ln -s`
      source is read against the folder the link sits in, and a word that holds a variable and names
-     `.localharness/run` (`$HOME/.localharness/run/…`) is refused by its text. A move into scratch is a
+     `.localharness/run` (`$HOME/.localharness/run/…`, `$PWD/.localharness/run/…`) is refused by its text. A move into scratch is a
      separate ask, never granted by an "always" and put to you in `auto` too: `mv`, `rsync
      --remove-source-files` or `--remove-sent-files`, `tar --remove-files` and `zip -m` whose destination is in
      this run, spelled by path, through `$LOCALHARNESS_SCRATCH` or `$TMPDIR`, after a `cd` to either,
@@ -1154,9 +1155,9 @@ folder on first run, owner-only and executable (0700). It is idempotent — pres
 it is a warning rather than a blocked start. It is the only file `start` installs from the
 package, and it is never listed as one of your tool scripts.
 
-**A start makes the session's run folder and sweeps `run/`.** See [Scratch](#scratch). The sweep removes
-only the folders no live session holds that this machine made or that were left half made, on a short
-background thread, and says nothing.
+**A start makes the session's run folder and sweeps `run/`.** See [Scratch](#scratch). The sweep covers the
+project's `.localharness/run/` and the config folder's `run/`, removes only the folders no live session holds
+that this machine made or that were left half made, on a short background thread, and says nothing.
 
 ## What `localharness start` contacts
 
@@ -1216,8 +1217,9 @@ owner-only `strata/` folder), agent files written by `agent create`, by a start 
 in-session creation workflow, autoresearch's archive, run journals and budget file, the task folders
 `agents/<name>/tasks/t<n>/` with their docs and the session docs `sessions/jtbd.md` and
 `sessions/reply-review.md` (each written through that no-follow walk and replaced atomically, never
-through a link), the run folders `run/<id>/` (owner-only, 0700, made at a start and deleted at its end; `run/` is
-owner-only, with a `.gitignore` of `*`), and `plugins/README.md`. Task scratch is no longer written under
+through a link), the run folders `<project>/.localharness/run/<id>/`, or `<config dir>/run/<id>/` for a session with no
+project (each owner-only, 0700, with its own `.gitignore` of `*`, made at a start and deleted at its end; `run/` is
+owner-only, with a `.gitignore` of `*`; a project's `.localharness/` is made 0700 when missing and stays), and `plugins/README.md`. Task scratch is no longer written under
 `<state_dir>/scratchpad/`; folders already there are left alone. `/task show` prints a task doc only after its digest
 matches what was filed; an edited doc is headed by the line saying so instead. A folder this session
 did not make is shown read-only, headed `not adopted · not made by this session`. The header
@@ -1262,39 +1264,57 @@ its old mode.
 
 ## Scratch
 
-Each session gets a run folder, `<config dir>/run/<12 hex>/`, made at a start and deleted when the session ends.
-It holds `scratch/`, the agent's own files, and `t/`, which the bash tool's `TMPDIR` names. A task's scratch is
+Each session gets a run folder, made at a start and deleted when the session ends: `.localharness/run/<12 hex>/`
+in the project (the folder the gate's boundary is rooted at, which is the project's `.localharness/` folder, else
+the git root, else where you started), or `<config dir>/run/<12 hex>/` for a session with no project (`--config-dir`,
+`LOCALHARNESS_DIR` or `LOCALHARNESS_HOME`, a session started in your home folder or above, or a project inside the
+config folder). The project's `.localharness/` is made when it is missing. The folder holds `scratch/`, the agent's
+own files, and `t/`, which the bash tool's `TMPDIR` names. A task's scratch is
 `scratch/t<N>/`; it is removed when you `/task clear`, when the next task opens and with the session, and every
 line that says so carries the count of files. A mobile chat and an ACP session each make and end their own run.
 The agent is told the scratch path and that it is deleted, and a reply that names a scratch file the turn made
 is followed by one dim line giving its lifetime.
 
-- **Writes to scratch are judged as any write outside the project.** Silent in `auto`, asked in `guarded` with
-  an "always" that holds for this session only and is never written to `grants.yaml` (it also survives a
-  `/plugins` restart), and a severe ask once the agent has read saved pages. This holds for a write spelled by
-  path or through `$LOCALHARNESS_SCRATCH` or `$TMPDIR`; a command that could set either (an assignment, `eval`,
-  `declare`, `read`, a quoted or escaped spelling) is judged as a write to a place the gate cannot name. Another session's folder and
-  `run/` itself are refused outright (the deny class above), and a move into scratch asks.
+- **Writes to scratch in a project are judged as project writes.** Scratch there is a project folder, so a write gets
+  the verdict a write of any project file gets, with no scratch ask in any mode, and after saved pages are read it
+  asks no more than that write does. A run kept in the config folder or the system temp folder is outside the project: a write there is silent in
+  `auto`, asked in `guarded` with an "always" that holds for this session only and is never written to
+  `grants.yaml` (it also survives a `/plugins` restart), and a severe ask once the agent has read saved pages. This
+  holds for a write spelled by path or through `$LOCALHARNESS_SCRATCH` or `$TMPDIR`; a command that could set either
+  (an assignment, `eval`, `declare`, `read`, a quoted or escaped spelling) is judged as a write to a place the gate
+  cannot name. Another session's folder and `run/` itself are refused outright (the deny class above), and a move
+  into scratch asks.
 - **Only the bash tool's environment carries `LOCALHARNESS_SCRATCH` and `TMPDIR`.** MCP servers do not.
-- **The sweep acts on a lock and a marker.** A start removes folders in `run/` that no live session holds
-  (each holds an exclusive lock on its folder for its life) and that carry this machine's marker or were left
-  half made. The marker is an HMAC of the machine id, never the id. A folder of another machine, as a synced
-  config folder carries, and a folder with scratch but no marker are left, and `localharness doctor` counts
-  them. A lock that cannot be read leaves the folder.
+- **The sweep acts on a lock and a marker.** A start removes folders in its project's `.localharness/run/` and in
+  the config folder's `run/` that no live session holds (each holds an exclusive lock on its folder for its life)
+  and that carry this machine's marker or were left half made. The marker is an HMAC of the machine id, never the
+  id. A folder of another machine, as a synced folder carries, and a folder with scratch but no marker are left,
+  and `localharness doctor` counts them. A lock that cannot be read leaves the folder. A project's leftovers go at
+  the next start in that project; the harness keeps no list of projects. The sweep looks only at names of the form
+  `<12 hex>` and `.deleting-<12 hex>` and leaves anything else; a repository can plant such a name. A `<12 hex>`
+  folder with scratch but no marker of this machine is left; a planted link, file or empty folder of that form, and
+  anything named `.deleting-<12 hex>`, is removed, and a link is never entered.
+- **A project's `.localharness` and `run` are never followed through a link.** Both are opened without following a
+  link and must be folders of this account. Each run folder carries its own `.gitignore` of `*`, so a repository's
+  own `run/.gitignore` cannot expose a run to git. A `.localharness/` that holds only `run/` is not a workspace:
+  it loads no config layer, keeps no session state and offers no project skills.
 - **The remover never follows a link.** It opens every folder without following links, unlinks a link rather than
   entering it, and leaves a folder on another device or owned by another account, reporting it.
 - **A slow removal does not hold the exit.** A session waits about two seconds for it, says `Removing
   scratch…` (`Removing this private session…` in a private session), and leaves the rest as
   `run/.deleting-<id>` for the next start.
-- **The fallback.** When `run/` is a link, another account's, or on a folder whose locks are not enforced, the
-  run goes to a new folder under the system temp folder and is removed at the end; `localharness doctor` names
-  the cause. Where the run cannot be made at all, the session starts without scratch.
+- **The fallback.** A project that cannot hold the run (its `.localharness` or `run` is a link, a file or another
+  account's, it cannot be written, or its folder does not enforce file locks) hands it to `<config dir>/run/`;
+  when that is a link, another account's, or on a folder whose locks are not enforced, the run goes to a new
+  folder under the system temp folder and is removed at the end. `localharness doctor` names each cause. Where
+  the run cannot be made at all, the session starts without scratch.
 
-**What this does NOT cover.** A session confined to a workspace (`permissions.workspace_root`) has no scratch.
-A config folder inside the project makes scratch an in-project path, so writes there are ordinary project
-writes. A config folder synced between machines should exclude `run/` from the sync: another machine's
-folders are left alone, never removed. An interpreter or script can still move a file into scratch, and the
-session's end deletes it.
+**What this does NOT cover.** A session confined by `permissions.workspace_root` has scratch only when that
+root holds the project's `.localharness/`. A project or config folder that is synced or backed up copies the
+run folder while it exists, so exclude `.localharness/run/` and `run/`. Tools that walk the project without
+reading `.gitignore` (`grep -r`, `tar`, `zip -r`, `rsync`, an editor's search) see the run folder. `TMPDIR` is the
+run's `t/` inside the project, so file watchers see temporary files there and a Unix socket made under it has a
+longer path. An interpreter or script can still move a file into scratch, and the session's end deletes it.
 
 ## Private sessions
 
@@ -1308,15 +1328,17 @@ section lists what it does not.
 
 **Where things go.** The session's state (event logs, the memory store, history, `MEMORY.md`, `compact.md`,
 `memory.log`, `context.log`, task documents, the input history, pictures, pages saved with `save_to`, and the
-search verifier's ledger) is written under `<run>/state/` and deleted with the run folder. Saved pages sit in
-`<run>/state/.localharness/downloads/`, so the saved-pages rules above apply to them unchanged. A private
+search verifier's ledger) is written under the run folder's `state/`, in the project's `.localharness/run/<id>/`
+(`<config dir>/run/<id>/` for a session with no project), and deleted with the run folder. Saved pages sit in
+`state/.localharness/downloads/` there, so the saved-pages rules above apply to them unchanged. A private
 session reads no learned memory, neither the project's nor the machine's, and it reads config, agent files,
 skills and the project's instructions file as any session does. Records that name the project or the session
 (permission answers, workspace trust, declined offers for a path, the project's server list, the instructions
 record, shown notices and the `/review` level) are read as usual, and a new answer is held in this process only:
 an "always" lasts for the session and is not written to `grants.yaml`, a trust answer is not written to the
-trust record, and `project_records.yaml` is read but never written. No `.localharness/` folder, downloads
-folder, `reports/` ledger, audit row or git hook is made in the project, no co-author consent is asked and no
+trust record, and `project_records.yaml` is read but never written. Apart from `.localharness/run/`, which
+holds the run folder and stays with only its `.gitignore`, no `.localharness/` content, downloads folder,
+`reports/` ledger, audit row or git hook is made in the project, no co-author consent is asked and no
 live session is registered, so a private session is neither warned about nor warns. The `LOCALHARNESS_COMMIT`
 marker reads `private`, so a commit the agent makes carries no co-author trailer.
 
@@ -1339,7 +1361,7 @@ the project that is neither the agent's nor one of these paths in the config fol
 removal, move or link aimed at what a later session would load: an instructions file (`CLAUDE.md`, `AGENTS.md`,
 `.localharness/INSTRUCTIONS.md`, matched without regard to case and including the resolved name of a candidate
 that is a link), anything under a `.agents/` or `.localharness/` folder, and the config folder, apart from the
-session's own scratch. The row reads every target the shell parser yields, each on its own, and the sources of
+session's own scratch, inside the project's `.localharness/run/`, which is the one exception. The row reads every target the shell parser yields, each on its own, and the sources of
 `ln`, `cp -l`, `cp -s`, `cp -a` and `rsync --link-dest`, because a later write to the copy reaches the source. A
 redirect, and any word of a command that is not a read, naming one of these is refused by its text even when a
 variable spells the folder (`echo x >> $PWD/CLAUDE.md`), unless the name is only a copy source, so `git mv`, `git rm`, `git
@@ -1360,14 +1382,19 @@ a picture, a saved page or a task document would go, the first Ctrl-C or Ctrl-D 
 and the files the session wrote that are still there. Nothing is printed at the end; the model is asked to say
 which files it wrote stay, naming every one the first time and after that the ones no tool row has shown.
 
-**What a private session does not hide.** A crash, a kill or a power cut leaves the run folder until the next
-start on this machine removes it, and a plugin that outlives its stop timeout can re-create its folder in the
+**What a private session does not hide.** A crash, a kill or a power cut leaves the run folder in the project's
+`.localharness/run/` (the config folder's `run/` for a session with no project) until the next session started
+there removes it. After a private session in a folder
+that had no `.localharness/`, `.localharness/run/` with its `.gitignore` remains, so the folder shows a session ran
+there. A project in a synced or backed-up folder copies the run folder while it exists; start a private session
+there with `--config-dir <local folder>`. A plugin that outlives its stop timeout can re-create its folder in the
 run after the end and leave it there until then. That a session ran is visible in the model server's log and
 cache, in the speed ledger and in file access times. Settings you change stay, and so do their audit rows. What
 reaches past the harness is outside it: a command's own leftovers, an MCP server's and a plugin's own storage,
 the sites a fetch contacted, ComfyUI's copy of a picture, the browser plugin's temporary profile and the
 terminal's scrollback. Writes the gate cannot name are above. Readers running as you, another process or an
-agent in another session, can read the run folder while it exists. What the agent writes into the project stays
+agent in another session, can read the run folder while it exists, and so can tools that search the project
+without reading `.gitignore`. What the agent writes into the project stays
 and is yours to remove. A commit made in a private session carries no co-author trailer. No record of what the
 session ran is kept, so there is nothing to audit afterwards but the settings rows. Deleted is not wiped: the
 run folder is unlinked, not overwritten, and a snapshot, a backup, a journal or the storage's own remapping can
@@ -2353,7 +2380,7 @@ Added with the mobile plugin:
   machine does not.** The `Private chat` button starts a session of the kind
   [Private sessions](#private-sessions) describes, in its own run folder, and what that section says
   it does not hide holds here too. The chat's state stays on this machine, asleep, until you tap End
-  or `localharness mobile` stops; a crash leaves the folder for the next start to remove. Each chat
+  or `localharness mobile` stops; a crash leaves the folder for the next start in that project to remove. Each chat
   carries its own privacy, so a normal message never lands in a private chat or the reverse: a line
   queued for another chat is dropped, and the page puts it back in the composer. While a private chat
   is open every `/api` reply and every picture is `no-store`. A notification for it keeps its kind's
