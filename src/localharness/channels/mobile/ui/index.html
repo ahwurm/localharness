@@ -417,7 +417,7 @@ const FAILED_HINT = " \u00b7 stuck? + starts a fresh chat";  // the failure row 
 const escalationText = (d) => d.reason === "stuck_detected"
   ? "stopped — " + (d.detail || "")
   : "escalated — " + d.reason + ": " + (d.detail || "");
-const FAILED_HINT_PRIVATE = " \u00b7 stuck? + ends this private chat and starts a fresh one";
+const FAILED_HINT_PRIVATE = " \u00b7 stuck? + ends this private chat and starts a normal one";
 const PRIVATE_GREETING = "Private: no saved memory; nothing is kept when you end it; files written into your project stay.";
 const PRIVATE_RESTART = "Your private chat ended when the server stopped. Your next message starts a new private chat; tap + for a normal one.";
 const PRIVATE_CAPTION = "This private chat is not listed. It stays on this machine until you tap End or the server stops.";

@@ -1976,7 +1976,7 @@ out.memoryNormal = $("memnote").textContent;
 console.log(JSON.stringify(out));
 """)
     assert got["caption"] == [False, "This private chat is not listed. It stays on this machine until you tap End or the server stops."]
-    assert got["failed"].endswith(" · stuck? + ends this private chat and starts a fresh one")
+    assert got["failed"].endswith(" · stuck? + ends this private chat and starts a normal one")
     assert got["history"] == ("an ended chat is read-only. This private chat has no saved memory, "
                               "so ask about it in a normal chat.")
     assert got["memory"] == ("Private chat: it starts with no saved memory, and what it remembers "
