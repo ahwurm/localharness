@@ -4,6 +4,16 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.28.2] — 2026-11-17
+
+**The package ships only its own files.**
+
+### Changed
+- **the sdist's include list is anchored to the repository root** — the sdist holds the package source, the root `README.md`, `LICENSE` and `CHANGELOG.md` and the build's own files, and no longer the nested `README.md` files under `docs/`, `examples/` and `tests/fixtures/`.
+
+### Fixed
+- **the private-session end-to-end test** draws without color, so its terminal no longer leaves a downgraded color in Rich's shared styles for the tests that run after it. Tests only; the program is unchanged.
+
 ## [0.28.1] — 2026-11-17
 
 **A session's scratch goes with it, and a private session keeps nothing of itself.** Each session keeps its scratch in a run folder, in the project's `.localharness/run/` when it has a project, and the folder is deleted when the session ends. `localharness start --private` and a Private chat on the phone put what a session would save in that folder too, and the agent in one cannot write what a later session would load. "Always" on a saved-page ask now holds for the rest of the session, and a finished task tells the agent a follow-up needs no task call.
