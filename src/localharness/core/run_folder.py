@@ -70,10 +70,6 @@ class RunFolder:
     def state(self) -> Path:
         return self.path / "state"
 
-    @property
-    def ending(self) -> bool:
-        return self._ender is not None
-
     def command_env(self, workspace_root: str | None = None) -> dict[str, str]:
         marker = {"LOCALHARNESS_COMMIT": "private"} if self.private else {}
         if scratch_of(self, workspace_root) is None:

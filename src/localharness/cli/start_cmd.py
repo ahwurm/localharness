@@ -3896,7 +3896,7 @@ def start_app(
     guard = None
     if private and run is not None:
         from localharness.core.interrupt import install
-        guard = install(("SIGTERM", "SIGHUP"), lambda: run.ending or end(run, say=say))
+        guard = install(("SIGTERM", "SIGHUP"), lambda: end(run, say=say))
     try:
         while True:
             try:

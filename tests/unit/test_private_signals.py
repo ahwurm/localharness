@@ -31,7 +31,7 @@ CHILD = textwrap.dedent('''
     if mode == "hup-ignored":
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
     run = begin(cfg, private=True)
-    guard = interrupt.install(("SIGTERM", "SIGHUP"), lambda: run.ending or end(run))
+    guard = interrupt.install(("SIGTERM", "SIGHUP"), lambda: end(run))
     ready = lambda: print("ready", flush=True)
 
     async def main():
@@ -210,6 +210,41 @@ def test_start_app_installs_the_guard_only_for_a_private_run(installs):
     calls.clear()
     assert _invoke("--config-dir", str(cfg)).exit_code == 0
     assert calls == [("guard", None)]
+
+
+def test_a_second_end_of_a_private_run_waits_for_the_first(installs, monkeypatch):
+    import threading
+    from types import SimpleNamespace
+
+    from localharness.cli import start_cmd
+    from localharness.core import run_folder
+
+    _, cfg = installs
+    started, release, idle = threading.Event(), threading.Event(), []
+    real = run_folder._finish
+
+    def slow(run):
+        started.set()
+        release.wait(5)
+        return real(run)
+
+    async def fake(*args, run=None, **kw):
+        threading.Thread(target=run_folder.end, args=(run,), daemon=True).start()
+        assert started.wait(5)
+        second = threading.Thread(target=idle[0], daemon=True)
+        second.start()
+        second.join(0.3)
+        assert second.is_alive()
+        release.set()
+        second.join(interrupt.JOIN_S)
+        assert not second.is_alive() and not run.path.exists()
+
+    monkeypatch.setattr(run_folder, "_finish", slow)
+    monkeypatch.setattr(start_cmd, "_start_async", fake)
+    monkeypatch.setattr(interrupt, "install", lambda signals, on_idle: idle.append(on_idle) or SimpleNamespace(
+        idle=lambda: None, restore=lambda: None))
+    result = _invoke("--private", "--config-dir", str(cfg))
+    assert result.exit_code == 0, result.output
 
 
 async def test_a_private_run_that_ends_stops_persisting_and_swaps_its_log_handlers(tmp_path, monkeypatch):
