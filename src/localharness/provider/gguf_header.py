@@ -445,10 +445,12 @@ def _int(value: Any) -> int | None:
 
 def discover(paths: Iterable[str | os.PathLike[str]],
              read: Callable[..., Mapping[str, Any]] = read_header) -> Discovery:
-    """Type every candidate with one read each, admit the models and pair them with projectors.
+    """Type every candidate with one header read each (and a model's tensor table), admit the models and
+    pair them with projectors.
 
     A projector is `general.type == "mmproj"` or architecture `clip`; a model has `general.type`
-    absent or `model`; any other type (`adapter`, `imatrix`, …) is `other`, a later shard or an
+    absent or `model` and tensors that run alone (`_standalone`); any other type (`adapter`, `imatrix`,
+    …), a drafter or an MTP-only file is `other`, a later shard or an
     incomplete split is `shard`, and a header the reader refuses (GgufHeaderError, NotRegularFile,
     any OSError) is `unreadable`; only models and projectors are returned."""
     from localharness.provider.autosense import FIT_KEYS
@@ -465,6 +467,8 @@ def discover(paths: Iterable[str | os.PathLike[str]],
             kinds[raw] = FileKind.UNREADABLE
             continue
         kinds[raw] = kind = _kind(raw, header)
+        if kind is FileKind.MODEL and not _standalone(raw):
+            kinds[raw] = kind = FileKind.OTHER
         if kind is FileKind.PROJECTOR:
             projectors.append(_item(raw, header, mtime))
         elif kind is FileKind.MODEL:
@@ -490,6 +494,20 @@ def _kind(raw: str, header: Mapping[str, Any]) -> FileKind:
         admitted = _admitted(raw, _int(header.get("split.no")), _int(header.get("split.count")))
         return FileKind.MODEL if admitted else FileKind.SHARD
     return FileKind.OTHER
+
+
+def _standalone(raw: str) -> bool:
+    """Whether a model-typed file's tensors can run a chat alone. A speculative drafter (dflash, ...)
+    borrows its target's embeddings, so holds no `token_embd`; an MTP-only file holds only the nextn
+    block(s) past the trunk, so no `blk.0`. Both type as `model` in the header, and llama.cpp names
+    every standalone model's input table `token_embd` and numbers its blocks from 0. A table that
+    cannot be read or holds no tensors is no evidence: the header's verdict stands."""
+    try:
+        entries = read_tensor_table(raw).entries
+    except (GgufHeaderError, OSError):
+        return True
+    blocks = _blocks(entries)
+    return not entries or (any(e.name.startswith("token_embd.") for e in entries) and (not blocks or 0 in blocks))
 
 
 def _item(raw: str, header: Mapping[str, Any], mtime: float) -> dict[str, Any]:
