@@ -1200,6 +1200,34 @@ def test_the_0_28_2_changelog_entry_bites():
     assert check_0_28_2_entry(_swap(good, RELEASE_0_28_2_HEADER, "## [0.28.2] — 2026-11-16")) == missing
 
 
+RELEASE_0_28_3_HEADER = "## [0.28.3] — 2026-11-18"
+RELEASE_0_28_3_NEEDLES = (
+    "### Changed", "### Removed", "### Known limitations", "`jtbd` alone", "`recency` and `quality` critics",
+    "is no longer fact-checked", "`task_flow.panels.reply: [factual]`",
+)
+
+
+def check_0_28_3_entry(text: str) -> list[str]:
+    """CHANGELOG's 0.28.3 entry exists, names the one-critic reply panel, the removed critics and the fact-check limitation."""
+    found = re.search(rf"^{re.escape(RELEASE_0_28_3_HEADER)}\n.*?(?=^## \[|\Z)", text, re.M | re.S)
+    if not found:
+        return [f"CHANGELOG has no {RELEASE_0_28_3_HEADER} entry"]
+    flat = " ".join(found.group(0).split())
+    return [f"CHANGELOG's 0.28.3 entry does not say {n}" for n in RELEASE_0_28_3_NEEDLES if n not in flat]
+
+
+def test_the_0_28_3_changelog_entry_live():
+    assert check_0_28_3_entry(_read("CHANGELOG.md")) == []
+
+
+def test_the_0_28_3_changelog_entry_bites():
+    good = _read("CHANGELOG.md")
+    for needle in RELEASE_0_28_3_NEEDLES:
+        assert check_0_28_3_entry(_swap(good, needle, "x")) == [f"CHANGELOG's 0.28.3 entry does not say {needle}"], needle
+    missing = [f"CHANGELOG has no {RELEASE_0_28_3_HEADER} entry"]
+    assert check_0_28_3_entry(_swap(good, RELEASE_0_28_3_HEADER, "## [0.28.3] — 2026-11-17")) == missing
+
+
 def _good_changelog() -> str:
     return (
         "# Changelog\n\n## [Unreleased]\n\nThis release adds plugins.\n\n### Added\n"

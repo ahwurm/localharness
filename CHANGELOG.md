@@ -4,6 +4,21 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.28.3] — 2026-11-18
+
+**A reviewed reply draws one critic by default.** The fact check joins only when the turn fetched from outside the machine, and `jtbd` checks each "I did X" against what the turn did.
+
+### Changed
+- **a reviewed reply is read by `jtbd` alone** — `factual` joins it only after the turn fetched from outside the machine: a web or browser tool, an MCP tool, a tool that declares it ingests outside content, or a shell or Python command that names a URL or runs `curl` or `wget`, made by the root or by an agent it delegated to. Reading a file saved earlier does not count. A skill's `review:` block with `critics: [factual]`, or `task_flow.panels.reply: [factual]` in the machine config, still puts `factual` on every reviewed reply. `spec-compliance` is no longer drawn by a reply; it stays the `/task` step critic. `checking reply · N critics` and the status row's `i/N` read 1 or 2.
+- **`jtbd` reads what the turn did** — on a reply it gets the turn's steps, files and result handles, and checks each "I did X" in the draft against them, and checks that what the work measured or found is the thing asked for, not a stand-in passed off as the answer.
+- **`factual` also checks the named things the work relies on** — it holds the web tools on a reply, as `recency` did.
+
+### Removed
+- **the `recency` and `quality` critics** — six critics ship. `recency` is now part of `factual`. A skill whose `review.critics` names either is skipped with a message listing the valid names, and a `task_flow.panels` or `task_flow.critics` entry that names either is dropped with a startup warning. Replace `recency` with `factual`; put the question `quality` asked in the skill's `checks` text.
+
+### Known limitations
+- A reply to a turn that used only local tools (files, the shell) is no longer fact-checked, so a claim that misreads a command's output can pass. In the live check a shell-only question passed with the number of neighbor-table entries reported as the number of devices, which the 0.28.2 fact critic had caught. `task_flow.panels.reply: [factual]` in the machine config puts the fact check back on every reviewed reply. The `jtbd` check for a stand-in passed off as the answer was added after the live check and aims at that case.
+
 ## [0.28.2] — 2026-11-17
 
 **The package ships only its own files.**
