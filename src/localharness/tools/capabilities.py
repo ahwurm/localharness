@@ -46,6 +46,17 @@ def is_exec(schema: ToolSchema) -> bool:
     return is_host_dangerous(schema) and schema.gate_family in ("shell", "code", None)
 
 
+_FETCH = re.compile(r"://|\b(?:curl|wget)\b")
+
+
+def fetches(schema: ToolSchema | None, arguments: Any) -> bool:
+    """Whether a call reached outside the machine, read off the declarations; a declaration never changes to change this answer."""
+    if schema is None or ingests_untrusted(schema):
+        return True
+    return is_exec(schema) and isinstance(arguments, dict) and any(
+        isinstance(arguments.get(k), str) and _FETCH.search(arguments[k]) for k in ("command", "code"))
+
+
 # Module-level mirror of config's enforce_capability_floor (default-on). Synced at startup from
 # HarnessConfig.org by set_floor_enabled() — registry chokepoints have no config handle, so they
 # read this. The spec sanctions a module-level default when threading the flag is invasive.

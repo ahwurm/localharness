@@ -1105,7 +1105,7 @@ def _flow_scen(task_flow=True, **kw):
     )
 
 
-GLOB_PANEL = ("jtbd", "factual")
+GLOB_PANEL = ("jtbd",)
 
 
 def _glob_call(mock_llm_client):

@@ -23,10 +23,8 @@ from localharness.orchestrator.task_flow.record import (
     LIMITS,
     LINES,
     Limit,
-    REPLY_RESERVE_MINUTES,
     PREDICATES,
     REVIEW_LEVELS,
-    SENSED,
     STAGES,
     TOOL_STAGES,
     DOC_NAME,
@@ -139,7 +137,7 @@ def test_bound_of_every_unit_at_the_defaults_is_computed_from_the_table():
     assert minutes("step", "execute", 1) == minutes("step", "revise", 1) == executor
     assert minutes("step", "panel", 1) == len(STAGES["step"].floor) * critic
     assert minutes("task", "panel") == len(STAGES["task"].floor) * critic
-    assert minutes("reply", "panel", sensed=("factual", "recency")) == (len(STAGES["reply"].floor) + 2) * STAGES["reply"].revisions * critic
+    assert minutes("reply", "panel", sensed=("factual",)) == (len(STAGES["reply"].floor) + 1) * STAGES["reply"].revisions * critic
 
 
 def test_reply_minutes_are_the_level_times_one_panel_and_nothing_at_off():
@@ -172,12 +170,6 @@ def test_printed_bound_rounds_down_and_never_promises_more_than_the_remainder():
     assert printed_bound(25) == 25
     assert printed_bound(1.5) == 1
     assert isinstance(printed_bound(25, 600), int)
-
-
-def test_reserve_holds_the_widest_reply_panel_through_its_revision():
-    widest = len(STAGES["reply"].floor) + len(SENSED) + LIMITS["additions"].ceiling
-    assert REPLY_RESERVE_MINUTES == widest * LIMITS["revisions.reply"].ceiling * LIMITS["critic"].ceiling.minutes
-    assert SENSED == ("factual", "recency", "spec-compliance")
 
 
 def test_limited_without_a_config_or_with_every_field_unset_gives_the_defaults():
@@ -216,9 +208,9 @@ def test_limited_revisions_one_past_the_ceiling_and_one_below_the_floor_clamp():
 
 
 def test_limited_keeps_three_panel_additions_and_names_the_fourth():
-    limits, notes = limited(SimpleNamespace(panels={"plan": ["security", "quality", "factual", "recency"]}))
-    assert limits.additions["plan"] == ("security", "quality", "factual")
-    assert len(notes) == 1 and "recency" in notes[0]
+    limits, notes = limited(SimpleNamespace(panels={"reply": ["security", "spec-compliance", "factual", "parsimony"]}))
+    assert limits.additions["reply"] == ("security", "spec-compliance", "factual")
+    assert len(notes) == 1 and "parsimony" in notes[0]
 
 
 def test_limited_drops_an_addition_in_the_floor_or_with_a_bad_name_and_notes_each():

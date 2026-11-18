@@ -7,4 +7,6 @@ role: |
   Score how much of each ask the work delivers now:
     10 done and shown in the work · 8 done with small gaps · 5 half done, or done a different way than asked · 2 promised for later, or claimed but not shown · 0 dropped
   An ask the person agreed to defer scores 8.
+  Check that what the work measured or found is the thing they asked for, not a stand-in for it: a stand-in the work names as one scores 5, one it passes off as the answer (entries counted, devices reported) scores 2.
+  When your brief lists the steps a turn took, check each "I did X" in the work against them: a claim of work the steps do not show scores its ask 2, and when no ask covers that claim, it is its own A item at 0. Only a claim of work earns an item of its own this way.
   After the SCORE line put a line --- then the new jtbd.md: one line per ask with its id, the quote and your reading. Write UNCHANGED instead when the asks have not changed.

@@ -22,7 +22,7 @@ from localharness.core.caps import Caps
 from localharness.core.content import text_of
 from localharness.core.events import DELEGATION_WORDS, DelegationStatus
 from localharness.orchestrator.task_flow.filer import FENCE_RUN, Refused, flat, render_section
-from localharness.orchestrator.task_flow.record import (LIMITS, SENSED, Limits, Unit, limited, panel_critics,
+from localharness.orchestrator.task_flow.record import (LIMITS, Limits, Unit, limited, panel_critics,
                                                         panel_minutes, printed_bound, review_label)
 
 if TYPE_CHECKING:
@@ -32,7 +32,7 @@ log = logging.getLogger(__name__)
 
 CRITIC_TOOLS = ("read", "glob", "grep", "git_read", "tool_result_get")
 WEB_CRITIC_TOOLS = ("web_search", "web_fetch", "web_page_query")
-WEB_CRITICS = frozenset({"factual", "recency"})
+WEB_CRITICS = frozenset({"factual"})
 PASS_SCORE = 8
 BLOCK_SCORE = 5
 FENCE = "```"
@@ -339,24 +339,11 @@ def turns_block(turns: list[tuple[int, str]]) -> str:
     return "\n".join(shown)
 
 
-_FETCH = re.compile(r"://|\b(?:curl|wget)\b")
-
-
-def sense(calls: Iterable[tuple], jtbd_stood: bool = False, limits: Limits | None = None) -> tuple[str, ...]:
-    """The reply panel's critics from the turn's (name, origin, command) calls; a shell adds the web only when its command fetches, an unknown or untrusted name adds both."""
+def sense(calls: Iterable[tuple], fetched: bool, jtbd_stood: bool = False, limits: Limits | None = None) -> tuple[str, ...]:
+    """The reply panel's critics: jtbd, plus factual when the turn fetched from outside the machine; jtbd stands down on a turn of only `task` calls it already read."""
     calls = tuple(calls)
-    wanted: set[str] = set()
-    for name, origin, *rest in calls:
-        if name in CLASSLESS_TOOLS:
-            continue
-        if name == "bash_exec" and origin != "untrusted":
-            wanted |= {"factual", *(("recency",) if _FETCH.search(str(rest[0] if rest else "")) else ())}
-        elif name == "agent" or name not in READ_TOOLS | WEB_TOOLS | WRITE_TOOLS or (origin == "untrusted" and name not in WEB_TOOLS):
-            wanted |= {"factual", "recency"}
-        else:
-            wanted.add("recency" if name in WEB_TOOLS else "spec-compliance" if name in WRITE_TOOLS else "factual")
     skip = jtbd_stood and bool(calls) and all(name == "task" for name, *_ in calls)
-    names = panel_critics("reply", limits or limited()[0], tuple(c for c in SENSED if c in wanted))
+    names = panel_critics("reply", limits or limited()[0], ("factual",) if fetched else ())
     return tuple(n for n in names if not (skip and n == "jtbd"))
 
 
@@ -524,8 +511,7 @@ def reply_brief(request: str, paths: Iterable[str] = (), handles: Iterable[str] 
     for label, items in (("the files this turn read, saved or wrote", paths), ("the result handles granted to you", handles)):
         if names := ", ".join(one_line(i)[:Caps.FINDING] for i in items):
             blocks.append(_data(label, names))
-    if paths:
-        blocks.append("Read those files first; use the web or redo the work only for what they cannot answer.")
+    blocks.append("Confirm what the reply says from the steps, files and handles above; open anything else only when they cannot answer it.")
     if provenance:
         blocks.append(f"Measured by the harness: {provenance}")
     return "\n".join(blocks)
@@ -615,15 +601,16 @@ class Panel:
         return "\n\n".join((inputs.brief, self._draft(inputs, "the reply under review"), *claims))
 
     async def _ask(self, name: str, inputs: PanelInputs, budget: ChildBudget) -> tuple[Parsed, str]:
+        brief = self._brief(inputs)
         if name != "jtbd":
             web = self.web_tools if self._reply and name in WEB_CRITICS else ()
-            return await run_critic(name, self._brief(inputs), self._child, budget, inputs.handles, web), ""
+            return await run_critic(name, brief, self._child, budget, inputs.handles, web), ""
         block = turns_block(list(inputs.turns)) or "none: no typed turn this session"
         shown = {n for n, _ in inputs.turns if re.search(rf"(?m)^turn {n}:", block)}
         job = self.docs.read_session("jtbd.md").strip() if self.docs else ""
         brief = "\n\n".join((_data("the person's typed turns this session", block),
                               _data("the current jtbd.md", job or "none yet"),
-                              self._draft(inputs, "the draft or doc under review")))
+                              brief if self._reply else self._draft(inputs, "the draft or doc under review")))
         result = await _ask(name, brief, self._child, budget, inputs.handles)
         head, tail = (_JOB_RULE.split(_HARNESS_NOTE.sub("", result.raw), maxsplit=1) + [""])[:2]
         parsed, job = apply_jtbd(parse(name, head, result.terminated_reason), tail, shown, self.docs if inputs.turns else None)

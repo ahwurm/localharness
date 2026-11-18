@@ -661,6 +661,7 @@ class DelegationResult:
     handoff: dict | None = None
     tools: list[str] | None = None
     raw: str = ""
+    fetched: bool = False
 
     def __str__(self) -> str:
         return self.text
@@ -1536,7 +1537,8 @@ def _delegation_result(text: str, child_loop: Any, bus: Any, summary: str,
     return DelegationResult(
         text, status=status, terminated_reason=reason,
         tool_calls=tool_calls, artifacts=_session_written_paths(bus, sid),
-        child_session_id=sid, handoff=parse_handoff(summary), raw=summary)
+        child_session_id=sid, handoff=parse_handoff(summary), raw=summary,
+        fetched=getattr(child_loop, "fetched", False))
 
 
 def build_cruncher_config(

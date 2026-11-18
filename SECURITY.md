@@ -1460,7 +1460,7 @@ never from its name or from the plugin it came from. Every tool declares four th
 ingests (`ingest`), whether it can change the host (`host`), whether its results are trusted
 (`result_origin`), and which family the approval gate files it under (`gate_family`). A tool that
 declares nothing gets the most restrictive value of each: `ingest: untrusted`,
-`host: dangerous`, `result_origin: untrusted` and `gate_family: none` (asked about). Three places
+`host: dangerous`, `result_origin: untrusted` and `gate_family: none` (asked about). Three safety readers
 read these declarations, all under `src/localharness/`: the separation check in
 `tools/capabilities.py` reads `ingest` and `host`; the approval gate in `agent/gate.py` reads
 `gate_family`; and the context store in `agent/context.py` reads `result_origin` when it marks a
@@ -1479,10 +1479,10 @@ written by the model and by child agents from repository files.
 A delegating model may narrow a specialist to a subset of its own tools for one call; narrowing only removes tools, and the grant gate and the floors judge the narrowed set.
 
 A critic is a child agent that holds `read`, `glob`, `grep`, `git_read` and `tool_result_get`, a
-read-only set fixed in code, plus `web_search`, `web_fetch` and `web_page_query` for the `factual` and `recency`
-critics on a reply only, with the browser's tools when its plugin is on, and nothing else; its role is read from the package's own critic files,
+read-only set fixed in code, plus `web_search`, `web_fetch` and `web_page_query` for the `factual`
+critic on a reply only, with the browser's tools when its plugin is on, and nothing else; its role is read from the package's own critic files,
 never from your config, a project or an overlay; your machine-level `task_flow` may add a packaged critic to a
-stage's panel or set its budget within limits fixed in code, and nothing more. A critic's brief
+stage's panel or set its budget within limits fixed in code, and nothing more. The fact critic follows a fetch flag the harness computes from the tools' declarations; it is a quality check, not a safety control. A critic's brief
 carries the person's typed turns, the draft or document under review and the files it reads with its
 read-only tools, and nothing else of the conversation: no earlier assistant message, no reasoning, no
 tool transcript.

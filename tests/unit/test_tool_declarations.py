@@ -26,6 +26,7 @@ from localharness.agent.gate import tool_meta_from_schema
 from localharness.agent.gate_types import ToolMeta
 from localharness.agent.verdict import UNFAMILIAR_TOOL_KIND, _kind
 from localharness.tools.base import GATE_FAMILIES, ToolSchema
+from localharness.tools.capabilities import fetches, is_exec
 
 # Today's name sets (tools/capabilities.py:23-24, agent/context.py:141 on main @ 75ad038), kept
 # ONLY here as the oracle that no builtin changed class — SAFE-02.
@@ -165,6 +166,17 @@ async def test_no_builtin_changed_class_against_the_old_name_sets():
     assert declaring("ingest", "untrusted") == OLD_UNTRUSTED_INGEST
     assert declaring("host", "dangerous") == OLD_HOST_DANGEROUS
     assert declaring("result_origin", "untrusted") == OLD_MEMORY_TOOLS | OLD_UNTRUSTED_INGEST
+
+
+async def test_fetches_follows_every_builtins_declaration_and_an_exec_surface_only_by_what_it_runs():
+    for name, schema in (await _builtin_schemas()).items():
+        if is_exec(schema):
+            assert not fetches(schema, {"command": "ls", "code": "print(1)"}), name
+            assert fetches(schema, {"command": "curl -s x"}) and fetches(schema, {"code": "get('https://x')"}), name
+            assert not fetches(schema, "curl x") and not fetches(schema, None), name
+        else:
+            assert fetches(schema, {"command": "curl x"}) == (schema.ingest == "untrusted"), name
+    assert fetches(None, {}) and fetches(ToolSchema(name="x", description="d", parameters={}), {})
 
 
 def test_an_mcp_tool_keeps_todays_posture_in_wrapper_code():

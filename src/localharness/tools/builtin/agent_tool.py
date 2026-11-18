@@ -222,13 +222,13 @@ class AgentTool(Tool):
             if isinstance(result, str):
                 return self.ok(result, delegated_to=agent_id, status="completed",
                                terminated_reason=None, tool_calls=0, artifacts=[],
-                               child_session_id=None, handoff=None)
+                               child_session_id=None, handoff=None, fetched=False)
             # A DelegationResult (duck-typed: importing subagent here would be a cycle).
             held = getattr(result, "tools", None)
             return self.ok(result.text, delegated_to=agent_id, status=result.status,
                            terminated_reason=result.terminated_reason,
                            tool_calls=result.tool_calls, artifacts=list(result.artifacts),
-                           child_session_id=result.child_session_id, handoff=result.handoff,
+                           child_session_id=result.child_session_id, handoff=result.handoff, fetched=result.fetched,
                            **({"tools": held} if held is not None else {}))
         except DelegationArgError as exc:
             return self.err(str(exc), error_type="validation_error")

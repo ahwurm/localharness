@@ -70,9 +70,10 @@ class ToolSchema(BaseModel):
     # `guarded`). Never provenance: which plugin contributed a tool is not a safety input (CORE-04).
     # Readers: the permission gate (`gate_family`, agent/verdict.py `_kind`; the stuck rule's repeat
     # fold reads it too, via ToolRegistry.gate_family), the capability floor
-    # (`ingest`, `host`, tools/capabilities.py) and the context store (`result_origin`, via
-    # ToolRegistry.result_origin); the oracle in tests/unit/test_tool_declarations.py pins every
-    # builtin's declaration to today's classes.
+    # (`ingest`, `host`, tools/capabilities.py; `fetches` there picks the reply panel's critics,
+    # no safety input) and the context store (`result_origin`, via ToolRegistry.result_origin);
+    # the oracle in tests/unit/test_tool_declarations.py pins every builtin's declaration to
+    # today's classes.
     # `exclude=True` keeps all five out of `model_dump()`, which is what
     # `provider/client._tools_to_api_format` puts on the wire and the chat template renders into
     # the prompt (measured on the served model: +32 tokens per tool) — harness metadata, not

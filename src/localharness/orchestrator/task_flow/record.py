@@ -44,7 +44,6 @@ class Limit(NamedTuple):
     ceiling: Any
 
 
-SENSED = ("factual", "recency", "spec-compliance")
 CRITICS_AT_FLOOR: frozenset[str] = frozenset()
 _CRITIC = ChildBudget(actions=24, minutes=10)
 _FLOOR = ChildBudget(actions=3, minutes=1)
@@ -59,8 +58,6 @@ LIMITS: dict[str, Limit] = {
        for b, row in STAGES.items() if row.revisions and b != "reply"},
     "revisions.reply": Limit(0, STAGES["reply"].revisions, 10),
 }
-REPLY_RESERVE_MINUTES = ((len(STAGES["reply"].floor) + len(SENSED) + LIMITS["additions"].ceiling)
-                         * LIMITS["revisions.reply"].ceiling * LIMITS["critic"].ceiling.minutes)
 REVIEW_LEVELS = ("off", "1", "2", "3", "max")
 
 

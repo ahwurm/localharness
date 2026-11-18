@@ -1580,7 +1580,7 @@ TASK_RUN_NEEDLES = (
     ("## Threat model: prompt injection", "so an executor's ordinary repository writes and commands run unasked"),
     ("## Threat model: prompt injection", "The root already held the same tools, so no capability is new"),
     ("## Threat model: prompt injection", f"holds {_CRITIC_TOOLS}, a read-only set fixed in code"),
-    ("## Threat model: prompt injection", f"plus {_WEB_PAIR} for the {_FACT_CRITICS} critics on a reply only"),
+    ("## Threat model: prompt injection", f"plus {_WEB_PAIR} for the {_FACT_CRITICS} critic on a reply only"),
     ("## Threat model: prompt injection",
      "its role is read from the package's own critic files, never from your config, a project or an overlay"),
     ("## Threat model: prompt injection",
@@ -1705,7 +1705,7 @@ CRITIC_NAMES = tuple(sorted(p.stem for p in (SRC / "assets" / "critics").glob("*
 METAHARNESS_NEEDLES = (
     "a quality signal, never a security one", "not a barrier", "global files only", "begins with no task",
     "A reply the model wrote without using a tool goes to you as written", "Each critic's findings print as they land",
-    "A reply panel prints no bound", f"{_FACT_CRITICS} also hold {_WEB_PAIR}")
+    "A reply panel prints no bound", f"{_FACT_CRITICS} also holds {_WEB_PAIR}")
 _REVISIONS = {b: LIMITS[f"revisions.{b}"] for b in STAGES if f"revisions.{b}" in LIMITS}
 _REVISION_ORDER = [*(b for b in _REVISIONS if b != "reply"), "reply"]
 
@@ -1757,8 +1757,8 @@ def check_metaharness_doc(page: str) -> list[str]:
             ("## The task pipeline", (f"a plan panel is up to {plan_bound} minutes and an executor up to {default.minutes:g}",
                                       f"default {flow.default:g} minutes, ceiling {flow.ceiling:g}",
                                       f"at most {_ONE_TO_TEN[Caps.QUESTIONS]} questions")),
-            ("## In a normal session", (f"({_budget(LIMITS['critic'].default)})", "`checking 3/4 · factual`",
-                                        "`checking reply · 4 critics · Ctrl+C delivers it unchecked`"))):
+            ("## In a normal session", (f"({_budget(LIMITS['critic'].default)})", "`checking 2/2 · factual`",
+                                        "`checking reply · 2 critics · Ctrl+C delivers it unchecked`"))):
         body = " ".join((section(page, heading) or "").split())
         out += [f"docs/metaharness.md {heading} does not say {w}" for w in want if w not in body]
     return out
@@ -1773,7 +1773,7 @@ def test_metaharness_doc_bites():
     for needle in METAHARNESS_NEEDLES:
         assert check_metaharness_doc(_swap(page, needle, "x")) == [f"docs/metaharness.md does not say {needle}"]
     assert len(check_metaharness_doc("")) > len(METAHARNESS_NEEDLES) + len(TASK_VERBS) + len(CRITIC_NAMES)
-    assert len(TASK_VERBS) == 8 and len(CRITIC_NAMES) == 8
+    assert len(TASK_VERBS) == 8 and len(CRITIC_NAMES) == 6
     assert set(_metaharness_settings()) == {f"`{f}`" for f in TaskFlowConfig.model_fields}
     assert check_metaharness_doc(_swap(page, "## The eight verbs", "## Verbs")) == [
         f"docs/metaharness.md ## The eight verbs has no row for {v}" for v in TASK_VERBS]
@@ -1788,7 +1788,7 @@ def test_metaharness_doc_bites():
                      ("| the default plus 2, `reply` 10 |", "| the default plus 3, `reply` 10 |"),
                      ("`reply` 1 |", "`reply` 2 |"), ("| the default plus 2, `reply` 10 |", "| the default plus 2, `reply` 9 |"),
                      ("| 1 check→fix cycle per turn (`/review`) |", "| 2 check→fix cycle per turn (`/review`) |"),
-                     ("`checking reply · 4 critics", "`checking reply · 5 critics"), ("`checking 3/4 · factual`", "`checking 3/4 · recency`")):
+                     ("`checking reply · 2 critics", "`checking reply · 3 critics"), ("`checking 2/2 · factual`", "`checking 2/2 · jtbd`")):
         assert len(check_metaharness_doc(_swap(page, old, new))) == 1, old
 
 

@@ -177,7 +177,7 @@ async def test_str_runner_result_gets_neutral_metadata():
     assert result.success and result.output == "found it"
     assert result.metadata == {
         "delegated_to": "coder", "status": "completed", "terminated_reason": None,
-        "tool_calls": 0, "artifacts": [], "child_session_id": None, "handoff": None,
+        "tool_calls": 0, "artifacts": [], "child_session_id": None, "handoff": None, "fetched": False,
     }
 
 
@@ -193,7 +193,7 @@ async def test_delegation_result_fields_are_forwarded():
     assert result.success and result.output == "SUBAGENT RUN COMPLETE ..."
     assert result.metadata == {
         "delegated_to": "coder", "status": "budget_exhausted", "terminated_reason": "budget_actions",
-        "tool_calls": 3, "artifacts": ["/w/review.md"], "child_session_id": "s-1", "handoff": handoff,
+        "tool_calls": 3, "artifacts": ["/w/review.md"], "child_session_id": "s-1", "handoff": handoff, "fetched": False,
     }
 
 

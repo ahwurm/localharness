@@ -47,6 +47,7 @@ def gate_for(world, owner="root"):
 def loop_for(gate, name="root", note=None):
     loop = object.__new__(AgentLoop)
     loop._gate, loop._config, loop._request_note = gate, SimpleNamespace(name=name, division="", tools=()), note
+    loop.fetched = False
 
     async def dispatch(*_a):
         return SimpleNamespace(metadata={})

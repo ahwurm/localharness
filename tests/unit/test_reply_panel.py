@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -15,9 +16,10 @@ from localharness.agent.permissions import PermissionEvaluator
 from localharness.agent.subagent import DelegationResult
 from localharness.channels.base import REVIEW_OFF, ChannelAdapter, reply_line
 from localharness.config.models import AgentConfig
+from localharness.tools.base import ToolResult, ToolSchema
 from localharness.core.caps import Caps
 from localharness.core.events import Action, TaskComplete
-from localharness.orchestrator.task_flow.panel import CLAIMS_LABEL, FENCE_CLOSE, FENCE_LABEL, Panel, PanelInputs
+from localharness.orchestrator.task_flow.panel import CLAIMS_LABEL, FENCE_CLOSE, FENCE_LABEL, Panel, PanelInputs, reply_brief
 from localharness.cli.repl import OrchestratorREPL
 from localharness.orchestrator.task_flow.record import LIMITS as ROWS, Limits, Unit, limited
 from tests.unit.test_subagent_children import FakeLoop, config_child, make_runner
@@ -92,13 +94,14 @@ async def glob_registry():
 USED_A_TOOL = ([("glob", None)], [], [])
 
 
-def loop_of(llm, bus, panel=None, registry=None, evidence=USED_A_TOOL, context=None, tools=None) -> AgentLoop:
+def loop_of(llm, bus, panel=None, registry=None, evidence=USED_A_TOOL, context=None, tools=None, fetched=False) -> AgentLoop:
     """The loop under test; the turn reports `evidence` (a read call by default) unless it is None, which reads the session."""
     loop = AgentLoop(
         config=AgentConfig.model_validate({"name": "reply-agent", "role": "Test agent.", **({"tools": tools} if tools else {})}),
         llm=llm, bus=bus, context_manager=context or ContextManager(), tool_registry=registry,
         permission_evaluator=PermissionEvaluator(), reply_panel=panel,
     )
+    loop.fetched = fetched
     if evidence is not None:
         loop._turn_evidence = lambda session: evidence
     return loop
@@ -128,19 +131,19 @@ class Chan(ChannelAdapter):
     async def stop(self): pass
 
 
-async def sentinel_turn(bus, panel):
+async def sentinel_turn(bus, panel, fetched=False):
     llm = Llm(["The answer is 42.", "CONFIRMED"])
-    loop = loop_of(llm, bus, panel, await glob_registry())
+    loop = loop_of(llm, bus, panel, await glob_registry(), fetched=fetched)
     session, summary = await turn(loop)
     return llm, session, summary
 
 
 async def test_a_turn_that_used_a_tool_passes_the_panel_and_the_verdict_rides_task_complete(bus):
-    panel = panel_of(delay=0.02)
+    panel = panel_of(delay=0.04)
     loop = loop_of(Llm(["Hello there."]), bus, panel)
     session, summary = await turn(loop)
     assert summary == "Hello there."
-    assert panel.calls == ["jtbd", "factual"]
+    assert panel.calls == ["jtbd"]
     (done,) = events(bus, TaskComplete)
     assert (done.verdict, done.finding, done.stage, done.step) == ("pass", "", None, None)
     assert done.summary == "Hello there." and done.success
@@ -165,7 +168,7 @@ async def test_a_turn_that_called_a_tool_runs_the_panel_with_the_critics_its_cal
     panel = panel_of()
     llm = Streaming([gen("Looking.", call=True), gen("Done.")])
     session, summary = await turn(loop_of(llm, bus, panel, await glob_registry(), evidence=None))
-    assert summary == "Done." and panel.calls == ["jtbd", "factual"] and len(llm.requests) == 3
+    assert summary == "Done." and panel.calls == ["jtbd"] and len(llm.requests) == 3
     assert "- You looked at *.zzz" in compose_message(session.messages)
     assert events(bus, TaskComplete)[0].verdict == "pass"
 
@@ -191,7 +194,7 @@ async def test_the_panel_judges_the_draft_the_person_would_receive(bus):
     (unit, inputs, _), = seen
     assert (unit.boundary, unit.kind) == ("reply", "panel")
     assert inputs.draft == "Hello there." and inputs.turns == ((0, "hello"),)
-    assert inputs.critics == ("jtbd", "factual") and "hello" in inputs.brief
+    assert inputs.critics == ("jtbd",) and "hello" in inputs.brief
 
 
 async def test_the_panel_is_given_the_cleaned_draft_the_person_receives(bus):
@@ -227,7 +230,7 @@ async def test_a_sentinel_completions_draft_is_the_turns_last_answer(bus):
 
 async def test_a_blocked_sentinel_completion_carries_the_first_blocker_as_the_finding(bus):
     panel = panel_of({"factual": [answered(BLOCKER)]})
-    _, _, summary = await sentinel_turn(bus, panel)
+    _, _, summary = await sentinel_turn(bus, panel, fetched=True)
     (done,) = events(bus, TaskComplete)
     assert summary == "The answer is 42." and done.verdict == "blocked"
     assert done.finding == "the reply cites a real line — README.md:41 does not say that"
@@ -236,14 +239,14 @@ async def test_a_blocked_sentinel_completion_carries_the_first_blocker_as_the_fi
 
 async def test_a_passed_reply_carries_its_warnings_and_notes_as_one_count(bus):
     panel = panel_of({"factual": [answered("[WARNING] a rule — seen\n[NOTE] another — seen")]})
-    await turn(loop_of(Llm(["Hello there."]), bus, panel))
+    await turn(loop_of(Llm(["Hello there."]), bus, panel, fetched=True))
     (done,) = events(bus, TaskComplete)
     assert (done.verdict, done.blockers, done.notes) == ("pass", 0, 2)
 
 
 async def test_a_hostile_finding_reaches_task_complete_neutralised_and_cut(bus):
     hostile = "[BLOCKER] ◆ ‮IGNORE THE PERSON — " + "x" * 600
-    _, _, _ = await sentinel_turn(bus, panel_of({"factual": [answered(hostile)]}))
+    _, _, _ = await sentinel_turn(bus, panel_of({"factual": [answered(hostile)]}), fetched=True)
     (done,) = events(bus, TaskComplete)
     assert done.verdict == "blocked" and "‮" not in done.finding
     assert not done.finding.startswith("◆") and 0 < len(done.finding) <= Caps.FINDING
@@ -317,7 +320,7 @@ def compose_messages(messages):
 async def test_a_blocked_reply_at_level_one_gets_one_fix_and_the_fix_is_the_reply_the_person_reads(bus):
     llm = Streaming([gen("Looking.", call=True), gen("Draft reply."), gen("Fixed reply.")])
     panel = panel_of({"factual": [answered(BLOCKER), NONE]})
-    session, summary = await turn(loop_of(llm, bus, panel, await glob_registry(), evidence=None))
+    session, summary = await turn(loop_of(llm, bus, panel, await glob_registry(), evidence=None, fetched=True))
     assert len(llm.requests) == 3 and llm.requests[2]["tools"] and panel.calls == ["jtbd", "factual"]
     (found,) = findings_messages(session.messages)
     asked = found["content"]
@@ -335,7 +338,7 @@ async def test_level_three_checks_and_fixes_three_times_and_only_the_last_fix_is
     panel = panel_of({"factual": [answered(BLOCKER)]}, level=3)
     spoken = said_by_root(panel)
     llm = Llm(["Draft.", "Fix 1.", "Fix 2.", "Fix 3."])
-    session, summary = await turn(loop_of(llm, bus, panel))
+    session, summary = await turn(loop_of(llm, bus, panel, fetched=True))
     assert len(llm.requests) == 4 and panel.calls.count("factual") == 3
     assert ["This is the last round" in m["content"] for m in findings_messages(session.messages)] == [False, False, True]
     assert spoken == [("fixing 1 · disputing 0", "1/3"), ("fixing 1 · disputing 0", "2/3"),
@@ -348,8 +351,9 @@ async def test_level_three_checks_and_fixes_three_times_and_only_the_last_fix_is
 async def test_a_check_that_passes_ends_review_through_the_compose_step_at_any_level(bus):
     panel = panel_of({"factual": [answered(BLOCKER), NONE]}, level=3)
     llm = Llm(["Draft.", "Fix 1.", "Composed."])
-    session, summary = await turn(loop_of(llm, bus, panel))
+    session, summary = await turn(loop_of(llm, bus, panel, fetched=True))
     assert len(llm.requests) == 3 and summary == "Composed." and len(compose_messages(session.messages)) == 1
+    assert panel.calls == ["jtbd", "factual", "jtbd", "factual"]
     (done,) = events(bus, TaskComplete)
     assert (done.verdict, done.ending) == ("pass", None)
 
@@ -358,7 +362,7 @@ async def test_max_runs_ten_checks_and_nine_fixes_with_no_stall_exit_then_delive
     panel = panel_of({"factual": [A1]}, level=LIMITS_ROW.ceiling)
     spoken = said_by_root(panel)
     llm = Llm([*(f"Reply {n}." for n in range(1, 11)), "Composed."])
-    session, summary = await turn(loop_of(llm, bus, panel))
+    session, summary = await turn(loop_of(llm, bus, panel, fetched=True))
     assert panel.calls.count("factual") == 10 and len(llm.requests) == 11 and len(findings_messages(session.messages)) == 9
     assert all("This is the last round" not in m["content"] for m in findings_messages(session.messages))
     assert spoken[0] == ("fixing 1 · disputing 0", "1/max") and spoken[-1] == ("fixing 1 · disputing 0", "9/max")
@@ -390,7 +394,7 @@ async def test_a_dispute_of_an_open_item_reaches_the_next_check_fenced_and_never
     panel = Panel(run_child, at_level(2))
     spoken = said_by_root(panel)
     fix = "Fixed reply.\nDisputed A1: which nmap printed nothing\nDisputed Z9: not open\n"
-    session, summary = await turn(loop_of(Llm(["Draft reply.", fix, "Composed."]), bus, panel))
+    session, summary = await turn(loop_of(Llm(["Draft reply.", fix, "Composed."]), bus, panel, fetched=True))
     second = [t for n, t in briefs if n == "factual"][1]
     assert CLAIMS_LABEL in second and "A1 factual: use nmap" in second and "which nmap printed nothing" in second
     assert "Z9" not in second and "Disputed" not in second and "Fixed reply." in second
@@ -408,7 +412,7 @@ async def test_a_fix_turn_that_is_only_dispute_lines_checks_the_draft_it_answers
         return await real(unit, inputs)
 
     panel.run = spy
-    _, summary = await turn(loop_of(Llm(["Draft reply.", "Disputed A1: it is installed"]), bus, panel))
+    _, summary = await turn(loop_of(Llm(["Draft reply.", "Disputed A1: it is installed"]), bus, panel, fetched=True))
     assert seen == ["Draft reply."] and summary == "Draft reply."
 
 
@@ -416,7 +420,7 @@ async def test_a_question_in_a_fix_turn_ends_review_and_the_same_text_in_a_first
     ask = "Question for you: may I install nmap?"
     panel = panel_of({"factual": [A1]})
     llm = Llm(["Draft reply.", ask])
-    session, summary = await turn(loop_of(llm, bus, panel))
+    session, summary = await turn(loop_of(llm, bus, panel, fetched=True))
     assert summary == ask and len(llm.requests) == 2 and panel.calls == ["jtbd", "factual"]
     (done,) = events(bus, TaskComplete)
     assert (done.verdict, done.ending, done.blockers) == ("blocked", "asked", 1)
@@ -424,14 +428,14 @@ async def test_a_question_in_a_fix_turn_ends_review_and_the_same_text_in_a_first
 
     other = type(bus)()
     panel = panel_of()
-    _, summary = await turn(loop_of(Llm([ask, "Composed."]), other, panel))
+    _, summary = await turn(loop_of(Llm([ask, "Composed."]), other, panel, fetched=True))
     assert panel.calls == ["jtbd", "factual"] and events(other, TaskComplete)[0].verdict == "pass"
 
 
 @pytest.mark.parametrize("answers, verdict, calls", [({}, "pass", 2), ({"factual": [answered("")]}, "unreviewed", 1)])
 async def test_a_pass_is_retold_once_and_an_unreviewed_reply_goes_at_once_with_no_round(bus, answers, verdict, calls):
     llm = Llm(["Hello there."])
-    session, summary = await turn(loop_of(llm, bus, panel_of(answers)))
+    session, summary = await turn(loop_of(llm, bus, panel_of(answers), fetched=True))
     assert summary == "Hello there." and len(llm.requests) == calls and session.review_rounds == 0
     assert findings_messages(session.messages) == []
     assert events(bus, TaskComplete)[0].verdict == verdict
@@ -466,7 +470,7 @@ async def test_action_a_draft_rejected_by_the_baton_gate_is_published_at_its_exi
 
 async def test_action_a_blocked_draft_is_dropped_and_the_delivered_reply_is_published_once_after_the_verdict(bus):
     panel, llm = blocked_then(NONE, llm_replies=(("Draft reply.", (100, 10)), ("Fixed reply.", (40, 5))))
-    loop = loop_of(llm, bus, panel)
+    loop = loop_of(llm, bus, panel, fetched=True)
     session, _ = await turn(loop)
     (action,) = tool_less(bus)
     assert (action.content, action.prompt_tokens, action.completion_tokens) == ("Fixed reply.", 40, 5)
@@ -581,7 +585,7 @@ async def test_cancel_during_a_critic_prints_no_turn_cancelled_and_acp_answers_e
 
 
 async def test_cancel_during_the_review_of_the_second_answer_delivers_it_unreviewed(bus):
-    gate = Gate(blocks_on=4, first=answered(BLOCKER))
+    gate = Gate(blocks_on=2, first=answered(BLOCKER))
     task, loop, llm = await cancelled_during_a_critic(bus, gate, ("Draft reply.", "Fixed reply."), level=2)
     session, summary = await task
     assert summary == "Fixed reply." and session.messages[-1]["content"] == "Fixed reply."
@@ -647,7 +651,7 @@ async def test_an_exception_before_the_panel_starts_still_publishes_the_held_act
 
 async def test_the_panel_that_cannot_finish_says_why_with_the_first_note(bus):
     panel = panel_of({"factual": [answered("")]})
-    await turn(loop_of(Llm(["Hello there."]), bus, panel))
+    await turn(loop_of(Llm(["Hello there."]), bus, panel, fetched=True))
     (done,) = events(bus, TaskComplete)
     assert done.verdict == "unreviewed" and done.finding == "critic factual returned nothing readable"
 
@@ -720,9 +724,9 @@ def recorder():
     return log, on_reasoning, on_token
 
 
-async def streamed_turn(bus, gens, panel=None, on_reasoning=None, on_token=None, tools=True):
+async def streamed_turn(bus, gens, panel=None, on_reasoning=None, on_token=None, tools=True, fetched=False):
     llm = Streaming(gens, on_reasoning)
-    loop = loop_of(llm, bus, panel, await glob_registry() if tools else None)
+    loop = loop_of(llm, bus, panel, await glob_registry() if tools else None, fetched=fetched)
     return llm, loop, await loop.run_turn("hello", on_token=on_token)
 
 
@@ -784,7 +788,7 @@ async def test_on_reasoning_is_dropped_during_a_critic_and_during_the_revision(b
 
     async def critic(config, task, **kw):
         await llm.on_reasoning("critic thought")
-        return answered(BLOCKER) if config.name == "factual" and "Fixed" not in task else NONE
+        return answered(BLOCKER) if config.name == "jtbd" and "Fixed" not in task else NONE
 
     summary = await loop_of(llm, bus, Panel(critic, LIMITS)).run_turn("hello")
     assert summary == "Fixed reply." and len(llm.requests) == 2
@@ -886,7 +890,7 @@ async def test_on_token_and_reasoning_of_a_final_generation_are_discarded(bus):
 async def test_on_token_of_a_revised_reply_never_reaches_the_channel_either(bus):
     log, on_reasoning, on_token = recorder()
     panel = panel_of({"factual": [answered(BLOCKER), NONE]})
-    _, _, summary = await streamed_turn(bus, [gen("Draft reply.", ["a"]), gen("Fixed reply.", ["b"])], panel, on_reasoning, on_token)
+    _, _, summary = await streamed_turn(bus, [gen("Draft reply.", ["a"]), gen("Fixed reply.", ["b"])], panel, on_reasoning, on_token, fetched=True)
     assert summary == "Fixed reply." and log == []
 
 
@@ -1255,7 +1259,7 @@ async def test_a_loaded_skills_critics_replace_the_sensed_picks_and_its_checks_s
     assert inputs.critics == ("spec-compliance",) and panel.calls == ["spec-compliance"]
     assert "Is every scene of the download kept?" in inputs.brief
     assert "You wrote chapter.md" in inputs.brief or "- You wrote" in inputs.brief
-    assert str(tmp_path / "chapter.md") in inputs.brief and "Read those files first" in inputs.brief
+    assert str(tmp_path / "chapter.md") in inputs.brief and "Confirm what the reply says" in inputs.brief
     assert "<project-instructions" not in inputs.brief
 
 
@@ -1292,15 +1296,15 @@ async def test_a_project_skills_checks_reach_the_brief_fenced_as_the_projects_ow
     assert "\nMachine keeps all of it.\n" in inputs.brief and inputs.brief.count(f"<project-instructions {TAG}>") == 1
 
 
-async def test_a_turn_that_loads_no_skill_keeps_the_sensed_picks_and_the_request_as_what_is_asked(bus, tmp_path, monkeypatch):
+async def test_a_turn_that_loads_no_skill_keeps_the_sensed_pick_and_the_request_as_what_is_asked(bus, tmp_path, monkeypatch):
     registry, _ = await skilled_registry(tmp_path, monkeypatch, machine={"x": skill_text("x", "review:\n  critics: [security]\n")})
     panel = panel_of()
     seen = spying(panel)
     out = tmp_path / "chapter.md"
     llm = Calls([("", [("write", {"path": str(out), "content": "x"})]), ("Done.", [])])
-    await turn(loop_of(llm, bus, panel, registry, evidence=None, tools=ROOT_TOOLS))
+    await turn(loop_of(llm, bus, panel, registry, evidence=None, tools=ROOT_TOOLS, fetched=False))
     (inputs,) = seen
-    assert inputs.critics == ("jtbd", "spec-compliance") and "What this review is asked to check" not in inputs.brief
+    assert inputs.critics == ("jtbd",) and "What this review is asked to check" not in inputs.brief
 
 
 async def test_a_skill_loaded_in_an_earlier_turn_does_not_steer_a_later_one(bus, tmp_path, monkeypatch):
@@ -1310,8 +1314,8 @@ async def test_a_skill_loaded_in_an_earlier_turn_does_not_steer_a_later_one(bus,
     seen = spying(panel)
     out = tmp_path / "chapter.md"
     llm = Calls([("", [("write", {"path": str(out), "content": "x"})]), ("Done.", [])])
-    await turn(loop_of(llm, bus, panel, registry, evidence=None, tools=ROOT_TOOLS))
-    assert seen[0].critics == ("jtbd", "spec-compliance")
+    await turn(loop_of(llm, bus, panel, registry, evidence=None, tools=ROOT_TOOLS, fetched=False))
+    assert seen[0].critics == ("jtbd",)
 
 
 async def test_a_page_saved_during_the_turn_by_a_helper_and_the_file_the_root_wrote_are_both_named(bus, tmp_path, monkeypatch):
@@ -1337,3 +1341,149 @@ async def test_a_page_saved_during_the_turn_by_a_helper_and_the_file_the_root_wr
     await turn(loop)
     (inputs,) = seen
     assert str(page) in inputs.brief and str(tmp_path / "chapter.md") in inputs.brief and "old.md" not in inputs.brief
+
+
+# --- the fetched flag: what the turn reached outside the machine for -----------------------------
+
+class Stub:
+    """A registered tool with a real declaration that answers without running."""
+
+    def __init__(self, schema): self._schema = schema
+    def info(self): return self._schema
+    async def run(self, **kw): return ToolResult(output="ok")
+
+
+async def flag_loop(bus, *extra):
+    from localharness.tools.registry import ToolRegistry
+
+    real = await _builtin_registry()
+    registry = ToolRegistry()
+    for name in ("read", "memory_search", "python_exec", "bash_exec", "web_fetch"):
+        await registry.register(Stub(real.schema_of(name)), scope="global")
+    task = ToolSchema(name="task", description="d", parameters={}, ingest="none", host="safe", gate_family="allow")
+    for tool in (Stub(task), *extra):
+        await registry.register(tool, scope="global")
+    return loop_of(Llm(["x"]), bus, registry=registry, evidence=None, fetched=False,
+                   tools={"inherit": ["global"]})
+
+
+async def dispatch(loop, name, **arguments):
+    await loop._dispatch_tool(Session(agent_id="reply-agent", session_id="s", messages=[]), SimpleNamespace(name=name, arguments=arguments))
+    return loop.fetched
+
+
+@pytest.mark.parametrize("name, arguments", [
+    ("task", {"stage": "plan"}), ("read", {"path": "a"}), ("memory_search", {"query": "q"}),
+    ("python_exec", {"code": "print(1)"}), ("bash_exec", {"command": "ls"}),
+])
+async def test_a_local_call_leaves_the_roots_fetched_flag_down(bus, name, arguments):
+    assert await dispatch(await flag_loop(bus), name, **arguments) is False
+
+
+@pytest.mark.parametrize("name, arguments", [
+    ("bash_exec", {"command": "curl -s example.com"}), ("python_exec", {"code": "get('https://x')"}),
+    ("web_fetch", {"url": "https://x"}),
+])
+async def test_a_call_that_reaches_outside_raises_the_flag_even_when_it_fails(bus, name, arguments):
+    assert await dispatch(await flag_loop(bus), name, **arguments) is True
+
+
+async def test_an_mcp_tool_and_a_tool_declaring_nothing_raise_the_flag(bus):
+    from localharness.tools.mcp import MCPToolWrapper
+
+    mcp = MCPToolWrapper("t", "d", {"type": "object", "properties": {}}, None, "x")
+    assert await dispatch(await flag_loop(bus, mcp), "x__t") is True
+    assert await dispatch(await flag_loop(bus, Stub(ToolSchema(name="plain", description="d", parameters={}))), "plain") is True
+
+
+async def test_a_name_the_registry_does_not_know_raises_the_flag(bus):
+    loop = await flag_loop(bus)
+    with contextlib.suppress(Exception):
+        await dispatch(loop, "no_such_tool")
+    assert loop.fetched is True
+
+
+async def test_a_call_that_raises_mid_fetch_still_counts(bus):
+    loop = await flag_loop(bus)
+
+    async def boom(*_a, **_k): raise RuntimeError("down")
+
+    loop._tools.dispatch = boom
+    with pytest.raises(RuntimeError):
+        await dispatch(loop, "web_fetch", url="https://x")
+    assert loop.fetched is True
+
+
+async def test_run_turn_starts_each_turn_with_the_flag_down(bus):
+    loop = await flag_loop(bus)
+    loop.fetched = True
+    await loop.run_turn("hello")
+    assert loop.fetched is False
+
+
+async def test_a_children_fetch_reaches_the_root_through_the_agent_tool_and_draws_the_fact_critic(bus):
+    from localharness.agent.subagent import _delegation_result
+    from localharness.orchestrator.task_flow.panel import sense
+    from localharness.tools.builtin.agent_tool import AgentTool
+
+    child = await flag_loop(bus)
+    assert await dispatch(child, "web_fetch", url="https://x") is True
+
+    async def runner(*_a, **_k):
+        return _delegation_result("found it", child, bus, "found it", 1)
+
+    assert (await runner()).fetched is True
+    root = await flag_loop(bus, AgentTool(agent_runner=runner, available_agents=["web"]))
+    result = await root._tools.dispatch("agent", {"agent_id": "web", "task": "look"}, "reply-agent", "", root._config.tools)
+    assert result.metadata["fetched"] is True and root.fetched is False
+    assert await dispatch(root, "agent", agent_id="web", task="look") is True
+    assert sense([("agent", "trusted")], root.fetched) == ("jtbd", "factual")
+
+
+async def test_a_local_childs_delegation_leaves_the_roots_flag_down(bus):
+    from localharness.tools.builtin.agent_tool import AgentTool
+
+    async def runner(*_a, **_k):
+        return "found it"
+
+    root = await flag_loop(bus, AgentTool(agent_runner=runner, available_agents=["local"]))
+    assert await dispatch(root, "agent", agent_id="local", task="look") is False
+
+
+async def test_a_turn_that_did_not_fetch_draws_jtbd_alone(bus):
+    panel = panel_of()
+    loop = loop_of(Llm(["Hello there."]), bus, panel, fetched=False)
+    await turn(loop)
+    assert panel.calls == ["jtbd"] and loop.fetched is False
+
+
+async def test_a_fetching_turn_draws_jtbd_and_factual(bus):
+    panel = panel_of()
+    await turn(loop_of(Llm(["Hello there."]), bus, panel, fetched=True))
+    assert panel.calls == ["jtbd", "factual"]
+
+
+def test_the_reply_brief_closes_with_the_confirm_line_with_or_without_files():
+    from localharness.orchestrator.task_flow.panel import reply_brief
+
+    for brief in (reply_brief("ask"), reply_brief("ask", ["/a.md"])):
+        assert brief.splitlines()[-1].startswith("Confirm what the reply says from the steps, files and handles above;")
+
+
+async def test_jtbd_reads_the_turns_steps_checks_and_disputes_on_a_reply_and_the_draft_alone_on_a_stage_panel():
+    seen = {}
+
+    async def child(config, task, **kw):
+        seen.setdefault(config.name, []).append(task)
+        return NONE
+
+    brief = reply_brief("ask", ["/w/a.md"], ["h1"], "", "Keep every scene.", "- You wrote a.md")
+    inputs = PanelInputs(brief, draft="the draft", turns=((1, "ask"),), disputes=("A1 x — disputed: y",), critics=("jtbd",))
+    await Panel(child, LIMITS).run(Unit("reply", "panel"), inputs)
+    text = seen["jtbd"][0]
+    for needle in ("You wrote a.md", "Keep every scene.", "/w/a.md", "h1", "A1 x — disputed: y", "the reply under review"):
+        assert needle in text
+    assert text.index("the person's typed turns") < text.index("the current jtbd.md") < text.index("Today is")
+    await Panel(child, LIMITS).run(Unit("plan", "panel"), PanelInputs("PLANBRIEF", draft="the plan", turns=((1, "ask"),), critics=("jtbd",)))
+    stage = seen["jtbd"][1]
+    assert "the draft or doc under review" in stage and "PLANBRIEF" not in stage and "You wrote a.md" not in stage

@@ -49,7 +49,7 @@ from localharness.agent.context import (
     BUDGET_NOTE_PREFIX, ActiveReferenceError, ActiveReferenceOverflow, repeats,
 )
 from localharness.plugins.api import ContextBudget
-from localharness.tools.capabilities import CoResidenceError
+from localharness.tools.capabilities import CoResidenceError, fetches
 
 if TYPE_CHECKING:
     from localharness.agent.affordance import Affordances
@@ -1150,6 +1150,7 @@ class AgentLoop:
         # How the last run_turn ended ("complete", "error", "stuck", "budget_*", ...): a
         # delegating parent reads it to report the child's runtime-truth status.
         self.last_terminated_reason: str | None = None
+        self.fetched = False
         # Tools whose schema could not be read; one warning each per session (_tool_facts).
         self._unknown_tool_meta_warned: set[str] = set()
         # Dynamic per-call output cap. None = the client's configured max_tokens — which is
@@ -1695,6 +1696,8 @@ class AgentLoop:
 
     async def _dispatch_tool(self, session: Session, tool_call: Any) -> Any:
         """Dispatch one allowed call, then record the saved pages it read and the files it wrote."""
+        if schema_of := getattr(self._tools, "schema_of", None):  # test fakes may lack it
+            self.fetched |= fetches(schema_of(tool_call.name), tool_call.arguments)
         token = DISPATCHING.set(session.agent_id)
         try:
             result = await self._tools.dispatch(
@@ -1706,6 +1709,7 @@ class AgentLoop:
             )
         finally:
             DISPATCHING.reset(token)
+        self.fetched |= bool(result.metadata.get("fetched"))
         taint, run = getattr(self._gate, "taint", None), self._private_run()
         if taint is not None or run is not None:
             read, written = call_paths(tool_call.name, tool_call.arguments, result.metadata,
@@ -1754,6 +1758,7 @@ class AgentLoop:
         from localharness.core.events import TurnStarted, TurnCompleted, TurnFailed, BudgetSpec
 
         self.turn += 1
+        self.fetched = False
         if (run := self._own_private_run()) is not None:
             run.turn = self.turn
         # Session continuity: reuse prior conversation if available
@@ -3280,7 +3285,7 @@ class AgentLoop:
                     brief=reply_brief(task, paths, handles, provenance_note(summary, sources), "\n".join(checks), steps), draft=summary,
                     turns=tuple(typed_turns(session.messages)), draft_handle=draft_handle,
                     handles=(*handles, *([draft_handle] if draft_handle else ())),
-                    critics=critics or sense(calls, panel.jtbd_stood, panel.limits), disputes=session.disputes,
+                    critics=critics or sense(calls, self.fetched, panel.jtbd_stood, panel.limits), disputes=session.disputes,
                 )
                 result = await panel.run(Unit("reply", "panel"), inputs)
                 verdict, finding, findings = result.verdict, result.finding, result.findings
